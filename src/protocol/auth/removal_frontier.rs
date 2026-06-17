@@ -9,7 +9,7 @@ pub mod encode;
 pub mod fact;
 pub mod project;
 
-use crate::core::store::TableName;
+use crate::core::db::TableName;
 
 pub const TYPE_REMOVAL_FRONTIER: u8 = encode::TYPE_REMOVAL_FRONTIER;
 

@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 
 use crate::core::cli::{CliArgs, CliOutput};
 use crate::core::command::{AuthoredFacts, CommandClock};
-use crate::core::store::Store;
+use crate::core::db::Db;
 
 use super::api;
 
@@ -21,7 +21,7 @@ pub const LINK_USAGE: &str = "link WORKSPACE_ID_HEX --public-addr ADDR";
 pub const ACCEPT_LINK_USAGE: &str = "accept-link INVITE_LINK --devicename DEVICE";
 
 pub fn invite(
-    store: &Store,
+    store: &Db,
     clock: &dyn CommandClock,
     args: CliArgs<'_>,
 ) -> Result<AuthoredFacts<api::CreateInviteReceipt>, String> {
@@ -37,7 +37,7 @@ pub fn invite(
 }
 
 pub fn accept(
-    store: &Store,
+    store: &Db,
     clock: &dyn CommandClock,
     args: CliArgs<'_>,
     from_listen_addr: Option<SocketAddr>,
@@ -56,7 +56,7 @@ pub fn accept(
 }
 
 pub fn invite_server(
-    store: &Store,
+    store: &Db,
     clock: &dyn CommandClock,
     args: CliArgs<'_>,
 ) -> Result<AuthoredFacts<api::CreateInviteReceipt>, String> {
@@ -72,7 +72,7 @@ pub fn invite_server(
 }
 
 pub fn accept_invite_server(
-    store: &Store,
+    store: &Db,
     clock: &dyn CommandClock,
     args: CliArgs<'_>,
     from_listen_addr: Option<SocketAddr>,
@@ -90,7 +90,7 @@ pub fn accept_invite_server(
 }
 
 pub fn link(
-    store: &Store,
+    store: &Db,
     clock: &dyn CommandClock,
     args: CliArgs<'_>,
 ) -> Result<AuthoredFacts<api::CreateInviteReceipt>, String> {
@@ -106,7 +106,7 @@ pub fn link(
 }
 
 pub fn accept_link(
-    store: &Store,
+    store: &Db,
     clock: &dyn CommandClock,
     args: CliArgs<'_>,
     from_listen_addr: Option<SocketAddr>,

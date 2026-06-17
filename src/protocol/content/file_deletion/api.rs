@@ -5,8 +5,8 @@
 //! and purge effects happen after runtime drain.
 
 use crate::core::command::{AuthoredFacts, CommandClock};
+use crate::core::db::Db;
 use crate::core::facts::FactId;
-use crate::core::store::Store;
 use crate::protocol::auth;
 
 use super::author;
@@ -22,7 +22,7 @@ pub struct DeleteFileReceipt {
 }
 
 pub fn delete_file(
-    store: &Store,
+    store: &Db,
     clock: &dyn CommandClock,
     workspace_id: WorkspaceId,
     target_file_id: FactId,

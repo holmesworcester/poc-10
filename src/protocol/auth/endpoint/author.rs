@@ -7,8 +7,8 @@
 //! projected public state. Reactive paths share these constructors.
 
 use crate::core::crypto;
+use crate::core::db::Db;
 use crate::core::facts::{Fact, FactScope};
-use crate::core::store::Store;
 use rusqlite::{params, OptionalExtension};
 
 use super::encode;
@@ -40,7 +40,7 @@ pub fn endpoint_fact(created_at_ms: u64, endpoint: EndpointFact) -> Result<Fact,
 // boundaries that are already authorized to use it.
 // ---------------------------------------------------------------------------
 
-pub fn local_endpoint(store: &Store) -> Result<Option<EndpointFact>, String> {
+pub fn local_endpoint(store: &Db) -> Result<Option<EndpointFact>, String> {
     let endpoint = store
         .conn()
         .query_row(

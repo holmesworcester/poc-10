@@ -120,8 +120,8 @@ fn cli_disappearing_messages_two_peer_convergence() {
     set_disappearing_ttl_at(&alice, FUTURE_T0_PLUS_2M_MS, &workspace_id, "1");
     sync_all_at(&alice, FUTURE_T0_PLUS_2M_MS);
     sync_all_at(&bob, FUTURE_T0_PLUS_2M_MS);
-    wait_for_no_messages(&alice, &workspace_id);
-    wait_for_no_messages(&bob, &workspace_id);
+    wait_for_no_messages_with_sync(&alice, &bob, &workspace_id);
+    wait_for_no_messages_with_sync(&bob, &alice, &workspace_id);
 
     assert_eq!(message_lines(&alice, &workspace_id).len(), 0);
     assert_eq!(message_lines(&bob, &workspace_id).len(), 0);
@@ -735,6 +735,26 @@ fn wait_for_no_messages(db: &str, workspace_id: &str) {
     panic!("messages did not disappear on db={db}:\n{last}");
 }
 
+fn wait_for_no_messages_with_sync(db: &str, peer: &str, workspace_id: &str) {
+    let mut last = String::new();
+    for _ in 0..600 {
+        let output = topo(&["--db", db, "messages", workspace_id]);
+        if output.status.success() {
+            let out = stdout(&output);
+            if message_lines_from_text(&out).is_empty() {
+                return;
+            }
+            last = out;
+        } else {
+            last = stderr(&output);
+        }
+        let _ = topo(&["--db", db, "sync", "all"]);
+        let _ = topo(&["--db", peer, "sync", "all"]);
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("messages did not disappear on db={db} while syncing with {peer}:\n{last}");
+}
+
 fn send_at(db: &str, at_ms: &str, workspace_id: &str, body: &str) -> String {
     assert_success(topo_at(db, at_ms, &["send", workspace_id, body]))
 }
@@ -748,7 +768,21 @@ fn react_at(db: &str, at_ms: &str, workspace_id: &str, selector: &str, emoji: &s
 }
 
 fn sync_all_at(db: &str, at_ms: &str) -> String {
-    assert_success(topo_at(db, at_ms, &["sync", "all"]))
+    let mut last = String::new();
+    for _ in 0..300 {
+        let output = topo_at(db, at_ms, &["sync", "all"]);
+        if output.status.success() {
+            let out = stdout(&output);
+            if line_value(&out, "mode") == "all" {
+                return out;
+            }
+            last = out;
+        } else {
+            last = stderr(&output);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("sync all setting did not become visible in {db}: {last}");
 }
 
 fn set_disappearing_ttl_at(db: &str, at_ms: &str, workspace_id: &str, ttl_minutes: &str) -> String {

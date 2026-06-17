@@ -8,13 +8,13 @@
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
 
+use crate::core::db::Db;
 use crate::core::effects::RuntimeEffects;
 use crate::core::intents::{
     HandlerContext, HandlerError, HandlerResult, Intent, IntentHandler, IntentKind, RowMutation,
 };
 use crate::core::network::{self, NetworkTarget, OutgoingFrame};
 use crate::core::runtime::RecurringIntentContext;
-use crate::core::store::Store;
 use crate::core::wire::{
     Reader as PayloadReader, WireError as PayloadError, Writer as PayloadWriter,
 };
@@ -39,7 +39,7 @@ struct MaintainConnections {
 
 /// Build one maintenance tick, or `None` when there is nothing to maintain.
 pub fn build_maintain_connections_intent(
-    store: &Store,
+    store: &Db,
     context: RecurringIntentContext,
 ) -> Result<Option<Intent>, String> {
     if !pending_connection_requests(store)?.is_empty()
@@ -129,7 +129,7 @@ impl IntentHandler for MaintainConnectionsHandler {
         if context.is_replay() {
             return Ok(RuntimeEffects::new());
         }
-        let store = context.store()?;
+        let store = context.db()?;
         let mut effects = RuntimeEffects::new();
 
         for pending in pending_connection_requests(store)? {
@@ -185,7 +185,7 @@ impl IntentHandler for MaintainConnectionsHandler {
 }
 
 fn bootstrap_peers_needing_attempt(
-    store: &Store,
+    store: &Db,
 ) -> Result<Vec<invite_accepted::queries::InviteAcceptedRow>, String> {
     let Some(local) = endpoint::author::local_endpoint(store)? else {
         return Ok(Vec::new());
@@ -209,7 +209,7 @@ fn bootstrap_peers_needing_attempt(
 }
 
 fn attempt_is_active_or_answered(
-    store: &Store,
+    store: &Db,
     answered: &BTreeSet<[u8; 32]>,
     attempts: &[BootstrapConnectionAttemptRow],
     invite_accepted_fact_id: [u8; 32],
@@ -234,10 +234,10 @@ fn payload_error(err: PayloadError) -> String {
 mod tests {
     use super::*;
     use crate::core::crypto;
+    use crate::core::db::Db;
     use crate::core::intents::IntentHandler;
     use crate::core::network::{self, NetworkTarget};
     use crate::core::schema::CORE_SCHEMA_SOURCE;
-    use crate::core::store::Store;
     use crate::protocol::auth::endpoint::fact::EndpointFact;
     use crate::protocol::auth::endpoint_shared::fact::EndpointRole;
     use crate::protocol::auth::invite_secret::fact::bootstrap_secret_hash;
@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn pending_request_rows_are_queued_directly_to_outgoing_network() {
-        let store = Store::open_memory_with_schema_sources(&[
+        let store = Db::open_memory_with_schema_sources(&[
             CORE_SCHEMA_SOURCE,
             network::SCHEMA_SOURCE,
             FACTS_SCHEMA_SOURCE,
@@ -272,7 +272,7 @@ mod tests {
         .expect("build")
         .expect("maintenance intent");
         let effects = MaintainConnectionsHandler::new()
-            .handle(&intent, &HandlerContext::new().with_store(&store))
+            .handle(&intent, &HandlerContext::new().with_db(&store))
             .expect("handle");
 
         assert!(effects.local_intents.is_empty());
@@ -288,9 +288,8 @@ mod tests {
 
     #[test]
     fn accepted_invite_row_replays_enough_state_to_create_bootstrap_attempt() {
-        let store =
-            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
-                .expect("store");
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+            .expect("store");
         let local = EndpointFact {
             secret: [2; 32],
             signing_secret: [4; 32],
@@ -329,7 +328,7 @@ mod tests {
         .expect("build")
         .expect("maintenance intent");
         let effects = MaintainConnectionsHandler::new()
-            .handle(&intent, &HandlerContext::new().with_store(&store))
+            .handle(&intent, &HandlerContext::new().with_db(&store))
             .expect("handle");
 
         assert_eq!(effects.facts.len(), 2);

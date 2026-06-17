@@ -77,12 +77,11 @@ impl IntentHandler for SendRequestedFactHandler {
         }
         let need_fact = context.require_fact(&input.need_fact_id)?;
         let need = need_id::project::decode::decode_fact(&need_fact.bytes)?;
-        let Some(fact) = crate::core::store::persisted_fact(context.store()?, &need.fact_id)?
-        else {
+        let Some(fact) = crate::core::fact_db::persisted_fact(context.db()?, &need.fact_id)? else {
             return Ok(RuntimeEffects::new());
         };
         if crate::protocol::sync::shared_fact::shareable_fact_for_connection(
-            context.store()?,
+            context.db()?,
             need.connection_id,
             need.fact_id,
         )?

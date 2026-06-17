@@ -13,8 +13,8 @@ pub mod fact;
 pub mod project;
 pub mod queries;
 
+use crate::core::db::{TableInsert, TableName, TypedTableSchema, Value};
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::store::{TableInsert, TableName, TypedTableSchema, Value};
 use crate::protocol::auth::invite_secret::fact::InviteSecretFact;
 use crate::protocol::connection::request::encode::encode_optional_addr;
 

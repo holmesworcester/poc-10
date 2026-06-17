@@ -5,16 +5,16 @@
 //! compare per connection. User commands influence this through projected local
 //! state, not by queueing sync work directly.
 
+use crate::core::db::Db;
 use crate::core::effects::RuntimeEffects;
 use crate::core::intents::{HandlerContext, HandlerResult, Intent, IntentHandler, IntentKind};
 use crate::core::runtime::RecurringIntentContext;
-use crate::core::store::Store;
 use crate::protocol::{connection, sync};
 
 pub const MAINTAIN_SYNC: &str = "maintain_sync";
 
 pub fn build_maintain_sync_intent(
-    store: &Store,
+    store: &Db,
     _context: RecurringIntentContext,
 ) -> Result<Option<Intent>, String> {
     if connection::connection::queries::connection_rows(store)?.is_empty() {
@@ -64,7 +64,7 @@ impl IntentHandler for MaintainSyncHandler {
         if context.is_replay() {
             return Ok(RuntimeEffects::new());
         }
-        let store = context.store()?;
+        let store = context.db()?;
         let mut output = RuntimeEffects::new();
         for row in connection::connection::queries::connection_rows(store)? {
             output = sync::seed_connection::append_connection_shareable_facts(
@@ -80,15 +80,14 @@ impl IntentHandler for MaintainSyncHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::db::Db;
     use crate::core::schema::CORE_SCHEMA_SOURCE;
-    use crate::core::store::Store;
     use crate::protocol::registry::FACTS_SCHEMA_SOURCE;
 
     #[test]
     fn recurring_builder_skips_when_no_connections_exist() {
-        let store =
-            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
-                .expect("store");
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+            .expect("store");
 
         assert_eq!(
             build_maintain_sync_intent(&store, RecurringIntentContext::default()).expect("build"),

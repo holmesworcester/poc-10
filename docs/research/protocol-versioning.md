@@ -213,7 +213,7 @@ runtime.
 
   A build embeds every entry it knows at build time (always including older
   releases it must wait for). Later entries and `expires_at` extensions arrive
-  as signed registry facts; clients persist the **monotonic union**. Store these
+  as signed registry facts; clients persist the **monotonic union**. Db these
   as durable local facts.
 - **Trusted time.** Persist the greatest time learned from embedded metadata,
   signed registry facts, or signed canaries (monotonic max; a lower bound on
@@ -1060,7 +1060,7 @@ additions (two rounds); §20 is the coverage matrix over the cross-product.
 ---
 
 ### TIME-01 — logical clock is a lower bound, never overrides a larger observed authored max  `projector-unit`
-- **Setup:** fresh in-memory `Store` opened with `CORE_SCHEMA_SOURCE` (mirrors `clock.rs` unit-test harness). No clock row set.
+- **Setup:** fresh in-memory `Db` opened with `CORE_SCHEMA_SOURCE` (mirrors `clock.rs` unit-test harness). No clock row set.
 - **Action:** call `core::clock::next_timestamp(&store, 7)`; then `set_logical_time(&store, 100)`; then `next_timestamp(&store, 7)` and `next_timestamp(&store, 125)`.
 - **Expect:** returns `8`, then `100`, then `126`. The logical clock raises the floor (when 100 > 7+1) but a larger observed authored max (125) still wins via `from_observed.max(...)`.
 - **Defends:** trusted/local time is a LOWER BOUND on the next authored time, never a source of truth that rewinds past observed facts (model: "TRUSTED TIME = ... a lower bound on real time").
@@ -1483,14 +1483,14 @@ per scope where the scope changes the answer.
 - **Refs:** trusted_time monotonic max; ceiling recompute; gossip catch-up.
 
 ### MAN-21 — Historical facts from a security-deprecated release stay valid (fact version still safe)  `replay-cli`
-- **Setup:** Store contains a retained `auth::user` (tag 14) fact and `content::message` (tag 50, version 1) facts that were originally written by release relX. A signed `must_update` canary later security-deprecates relX. The message:1 and user fact VERSIONS are NOT flagged unsafe.
+- **Setup:** Db contains a retained `auth::user` (tag 14) fact and `content::message` (tag 50, version 1) facts that were originally written by release relX. A signed `must_update` canary later security-deprecates relX. The message:1 and user fact VERSIONS are NOT flagged unsafe.
 - **Action:** Run a wipe+replay pass.
 - **Expect:** The historical user/message facts REPLAY and re-materialize their read-model rows normally via their own tag-keyed adapters; they are NOT invalidated, pending, or dropped just because relX was deprecated. Deprecating a release deprecates the BINARY, not the facts it wrote.
 - **Defends:** Mechanism: "Historical facts from a security-deprecated release stay valid unless their fact version is unsafe"; doc "Security Changes / Unsafe release"; (5) READERS FOREVER; (4).
 - **Refs:** `auth::user` tag 14, `content::message` tag 50; wipe+replay via FACT_ROUTES adapters; `RouterProjector::project` (`src/core/projectors.rs:448`).
 
 ### MAN-22 — Historical facts whose FACT VERSION is unsafe are suppressed even though the release wrote them legitimately  `replay-cli`
-- **Setup:** Store contains retained `content::file` (tag 54) facts written by relX. A fact-version-safety action marks `file:vK` (the version those facts use) as UNSAFE (e.g. an unsafe BAO proof format), independent of any release deprecation.
+- **Setup:** Db contains retained `content::file` (tag 54) facts written by relX. A fact-version-safety action marks `file:vK` (the version those facts use) as UNSAFE (e.g. an unsafe BAO proof format), independent of any release deprecation.
 - **Action:** Run a wipe+replay pass.
 - **Expect:** The affected `file:vK` facts are withheld/handled by the tightened `file:vK` adapter (retained as historical evidence, not materialized into display rows) — but facts from OTHER, safe file versions still replay. The trigger is the FACT VERSION being unsafe, NOT the release. Contrast MAN-21: there the release was deprecated but the fact version was safe -> facts stayed valid.
 - **Defends:** Mechanism: fact-version safety is orthogonal to release safety; doc "Security Changes / Unsafe fact version"; (6) SAFETY FLOOR; (5).
@@ -2750,7 +2750,7 @@ Verified grounding from `/home/holmes/poc-10/src`:
   593-637).
 - `ProjectionContext` (projectors.rs:52) is "a snapshot of matched rows for this
   run, not a live storage handle" — `payload_for`/`matched_payloads_for`/
-  `time_reached` only read pre-matched context; there is no clock, no `Store`,
+  `time_reached` only read pre-matched context; there is no clock, no `Db`,
   no IO handle in the projector signature
   `fn(&Fact, &ProjectionContext) -> Result<ProjectionOutput, String>`
   (`ProjectorFn`, projectors.rs:396). `time_reached` is "a context check, not a
@@ -2860,7 +2860,7 @@ Verified grounding from `/home/holmes/poc-10/src`:
 
 ### PROJ-13 — projector performs no store query / overlap query (context is a snapshot) `guardrail`
 - **Setup:** Current binary, source-level guardrail over `src/protocol/**/project.rs`.
-- **Action:** Grep/AST-check that no `project.rs` file imports or calls `Store`, `rusqlite`, `write_transaction`, `read_*` storage handles, `SystemTime`/`Instant::now`, or filesystem/network IO; context access is limited to `ProjectionContext` accessors (`payload_for`, `matched_payloads_for`, `time_reached`, `offers`).
+- **Action:** Grep/AST-check that no `project.rs` file imports or calls `Db`, `rusqlite`, `write_transaction`, `read_*` storage handles, `SystemTime`/`Instant::now`, or filesystem/network IO; context access is limited to `ProjectionContext` accessors (`payload_for`, `matched_payloads_for`, `time_reached`, `offers`).
 - **Expect:** Zero matches for store/IO/clock primitives in any projector module. (Doc at projectors.rs:107-109: "Projectors receive the resulting snapshot but do not query storage or run overlap queries themselves.")
 - **Defends:** "no store query/IO/fresh time" purity for ALL projectors, including future `_vN` modules added under the same lint.
 - **Refs:** all `src/protocol/*/*/project.rs`, `ProjectionContext` doc (projectors.rs:105-110).
@@ -3072,7 +3072,7 @@ connection, sync) is enumerated as separate tests where it changes the assertion
 - **Refs:** pending ingress tradeoff; `con replay`/`content-count`/`messages`; FACT_ROUTES new v2 entry.
 
 ### REPLAY-09 — Replay separates pending ingress from projector-pending facts `guardrail`
-- **Setup:** Store was exposed to above-ceiling input before the replay, and admission retained it as pending ingress.
+- **Setup:** Db was exposed to above-ceiling input before the replay, and admission retained it as pending ingress.
 - **Action:** Drive the replay projection drain (`drain_pending_projection` over the retained set, the path `con replay` invokes).
 - **Expect:** The replay completes without routing the pending-ingress tag while it remains above ceiling. It is not inserted into the ordinary projector-pending queue until it authenticates and becomes an active fact.
 - **Defends:** ADMISSION pending + Invariant (4) — replay operates over active retained facts and keeps pending ingress separate until admission succeeds.
@@ -3975,21 +3975,21 @@ Reference files:
 - **Refs:** `sync/shared_fact/project.rs` `require_fact_scope`.
 
 ### SYNC-03 — ShareFactWithSync upsert records a shareable row from current-ceiling content fact  `handler-unit`
-- **Setup:** Store seeded as in the existing `share_fact_with_sync_suppresses_live_tail_to_origin_connection` test (endpoint, endpoint_shared, a connection_response row). Owner fact = a `content::message` (tag 50) workspace-scoped to `W`, timestamp `T`. This message tag is CEILING-ACTIVE (intro_version <= ceiling). Provide it via `HandlerContext::with_facts([owner]).with_store`.
+- **Setup:** Db seeded as in the existing `share_fact_with_sync_suppresses_live_tail_to_origin_connection` test (endpoint, endpoint_shared, a connection_response row). Owner fact = a `content::message` (tag 50) workspace-scoped to `W`, timestamp `T`. This message tag is CEILING-ACTIVE (intro_version <= ceiling). Provide it via `HandlerContext::with_facts([owner]).with_store`.
 - **Action:** Submit `share_fact_with_sync_intent_for_fact(W, owner.id, T, vec![])` to `ShareFactWithSyncHandler::handle`.
 - **Expect:** `record_sync_contribution` upserts: a `ShareableFactRow{ workspace_id:W, fact_id:owner.id, timestamp_ms:T }` and a `NegentropyLeafRow` keyed by `(W, owner.id)` with `timestamp_ms=T`. `changed == true`. Handler then queues a `send_facts_on_connection` live-tail intent (since no origin connection excludes it). The row stores only `(workspace_id, fact_id, timestamp_ms)` — no content version byte.
 - **Defends:** Invariant 1 (a ceiling-active fact is transportable). Mechanism: a v1 sync envelope carries current-ceiling facts.
 - **Refs:** `share_fact_with_sync.rs` `ShareFactWithSyncHandler::handle` upsert branch; `shared_fact/rows.rs` `record_sync_contribution`/`upsert_sync_contribution`, `ShareableFactRow`, `NegentropyLeafRow`.
 
 ### SYNC-04 — ShareFactWithSync upsert refuses a local-only owner fact (not transportable)  `handler-unit`
-- **Setup:** Store as above but owner fact has `FactScope::Local` (e.g. an `auth::endpoint` / `local_*` secret).
+- **Setup:** Db as above but owner fact has `FactScope::Local` (e.g. an `auth::endpoint` / `local_*` secret).
 - **Action:** Submit `share_fact_with_sync_intent_for_fact(W, owner.id, T, vec![])`.
 - **Expect:** `context.require_non_local_fact_bytes(&owner_fact_id)` returns `HandlerError` ("...local fact..."); handler returns `Err`. No `ShareableFactRow` written. Local facts never enter the sync surface regardless of version.
 - **Defends:** Invariant 5 / privacy floor: only non-local facts are shareable.
 - **Refs:** `share_fact_with_sync.rs` `context.require_non_local_fact_bytes`; `core/intents.rs:362` `require_non_local_fact_bytes` (`FactScope::Local` check).
 
 ### SYNC-05 — dependency closure: a {new version} v2 content fact ships with its {old version} v1 anchor as context_have  `handler-unit`
-- **Setup:** Store seeded with a connection. Owner = a hypothetical NEW `content::message:2` fact (tag still 50, new wire shape) workspace-scoped `W` at `T2`; anchor = an `content::message:1` v1 fact at `T1 < T2`, both retained. The owner's projector advertised the v1 anchor as a validated `context_have`.
+- **Setup:** Db seeded with a connection. Owner = a hypothetical NEW `content::message:2` fact (tag still 50, new wire shape) workspace-scoped `W` at `T2`; anchor = an `content::message:1` v1 fact at `T1 < T2`, both retained. The owner's projector advertised the v1 anchor as a validated `context_have`.
 - **Action:** Submit `share_fact_with_sync_intent_for_fact(W, owner_v2.id, T2, vec![anchor_v1.id])`.
 - **Expect:** `upsert_sync_contribution` writes `NegentropyContextHaveRow{ workspace_id:W, owner_fact_id:owner_v2.id, context_fact_id:anchor_v1.id }`. The contribution fingerprint mixes the anchor id. Later `negentropy_context_have_for_leaf(store,W,owner_v2.id)` returns `[anchor_v1.id]`. Cross-version anchor recorded with no version interpretation — both ids are opaque.
 - **Defends:** Mechanism: dependency closure includes cross-version context.
@@ -4003,7 +4003,7 @@ Reference files:
 - **Refs:** `shared_fact/rows.rs` `upsert_sync_contribution`, `contribution_fingerprint`.
 
 ### SYNC-07 — compare response expands send list to the cross-version dependency closure  `handler-unit`
-- **Setup:** Store with a connection `C`. Shareable index holds owner `O` (v2 content, `T2`) whose `negentropy_context_have` = anchor `A` (v1 content, `T1`), and both `O` and `A` are shareable on `C`. Build an incoming `sync::compare` fact whose summary mismatches so the plan selects `O` via `send_fact_ids`.
+- **Setup:** Db with a connection `C`. Shareable index holds owner `O` (v2 content, `T2`) whose `negentropy_context_have` = anchor `A` (v1 content, `T1`), and both `O` and `A` are shareable on `C`. Build an incoming `sync::compare` fact whose summary mismatches so the plan selects `O` via `send_fact_ids`.
 - **Action:** Submit the compare to `SendSyncCompareResponseHandler::handle` (store path, so it calls `shareable_facts_for_connection` + `response_plan_with_summaries` + `expand_fact_ids_with_context_for_connection`).
 - **Expect:** The emitted `send_facts_on_connection` intent's `fact_ids` contains BOTH `O` and `A` (closure expanded by `expand_fact_ids_with_context_for_connection` over the `[T1,T2]` window with `include_deps=true`). The v1 anchor ships in the same response as the v2 owner.
 - **Defends:** Mechanism: a v2 fact ships with its v1 anchor when the envelope can carry it.
@@ -4066,35 +4066,35 @@ Reference files:
 - **Refs:** `compare/create.rs` `local_range_facts`, `is_sync_control_fact` matching `TYPE_SYNC_COMPARE`/`TYPE_SYNC_HAVE_ID`/`TYPE_SYNC_NEED_ID`.
 
 ### SYNC-16 — send_needed_fact_id requests a peer's advertised fact id without inspecting its version  `handler-unit`
-- **Setup:** Store (`CORE_SCHEMA_SOURCE`). A `sync::have_id` fact advertising `connection_id=C`, `fact_id=X` (where `X` is a v2 fact the local store lacks). Local store does NOT hold `X`.
+- **Setup:** Db (`CORE_SCHEMA_SOURCE`). A `sync::have_id` fact advertising `connection_id=C`, `fact_id=X` (where `X` is a v2 fact the local store lacks). Local store does NOT hold `X`.
 - **Action:** Submit `send_needed_fact_id_intent(SendNeededFactId{ have_fact_id })` to `SendNeededFactIdHandler::handle`.
 - **Expect:** Handler creates a `sync::need_id` (167) fact `{connection_id:C, fact_id:X}` and queues `send_facts_on_connection{ connection_id:C, fact_ids:[need.id] }`. The decision is purely "do I have id X?" via `persisted_fact` — the requested fact's version is never examined.
 - **Defends:** Mechanism: have/need rounds operate on ids, not content versions.
 - **Refs:** `send_needed_fact_id.rs` `SendNeededFactIdHandler::handle`; `need_id::create::fact`; `core/fact_store::persisted_fact`.
 
 ### SYNC-17 — send_needed_fact_id is a no-op when the advertised id is already retained (any version)  `handler-unit`
-- **Setup:** Store already holds fact `X` (retained and ceiling-active when admitted). A `sync::have_id` advertising `X` arrives.
+- **Setup:** Db already holds fact `X` (retained and ceiling-active when admitted). A `sync::have_id` advertising `X` arrives.
 - **Action:** Submit to `SendNeededFactIdHandler::handle`.
 - **Expect:** `persisted_fact(store, &have.fact_id)?.is_some()` is true -> returns empty `RuntimeEffects::new()`; no `need_id` emitted. Retention suppresses re-request because we already hold the bytes.
 - **Defends:** ADMISSION/idempotence: retained facts are not re-fetched.
 - **Refs:** `send_needed_fact_id.rs` early-return on `persisted_fact(...).is_some()`.
 
 ### SYNC-18 — send_requested_fact ships a need-id's target as opaque bytes only if shareable+sendable  `handler-unit`
-- **Setup:** Store with connection `C`, shareable index holds fact `X` (a v2 content fact) for `C`. A `sync::need_id` naming `{C, X}`.
+- **Setup:** Db with connection `C`, shareable index holds fact `X` (a v2 content fact) for `C`. A `sync::need_id` naming `{C, X}`.
 - **Action:** Submit `send_requested_fact_intent(SendRequestedFact{ need_fact_id })` to `SendRequestedFactHandler::handle`.
 - **Expect:** Handler loads `X` via `persisted_fact`, confirms `shareable_fact_for_connection(store,C,X).is_some()`, calls `require_sendable_fact(&fact)` (passes; non-local, non-private tag — version irrelevant), and queues `send_facts_on_connection{C,[X]}`. The fact body is forwarded verbatim; no re-encode.
 - **Defends:** Mechanism: send_requested_fact ships opaque bytes; authorization is in the shareable index, not the content version.
 - **Refs:** `send_requested_fact.rs` `SendRequestedFactHandler::handle`; `shared_fact::shareable_fact_for_connection`; `connection_frame::require_sendable_fact`.
 
 ### SYNC-19 — send_requested_fact refuses a private/local tag even when requested by id  `handler-unit`
-- **Setup:** Store with connection `C`. A `sync::need_id` naming `{C, S}` where `S` is a retained private/local fact (e.g. tag `TYPE_CONNECTION_CLOSE=45` or a `local_*` secret), AND (contrived) an entry exists making it appear shareable.
+- **Setup:** Db with connection `C`. A `sync::need_id` naming `{C, S}` where `S` is a retained private/local fact (e.g. tag `TYPE_CONNECTION_CLOSE=45` or a `local_*` secret), AND (contrived) an entry exists making it appear shareable.
 - **Action:** Submit to `SendRequestedFactHandler::handle`.
 - **Expect:** If `shareable_fact_for_connection` returns None -> empty effects (no send). If it returns Some, `require_sendable_fact` returns `Err("...refused private/local fact tag {tag}...")` -> handler `Err`, no send. Private/local tags are never sent regardless of an explicit id request.
 - **Defends:** Invariant 5/6 + privacy floor: private/local facts excluded from transport.
 - **Refs:** `send_requested_fact.rs`; `connection_frame.rs` `require_sendable_fact`/`is_private_local_fact_tag`.
 
 ### SYNC-20 — send_requested_fact is a no-op when the requested id is not retained locally  `handler-unit`
-- **Setup:** Store with connection `C`. `sync::need_id{C, Z}` where local store does NOT hold `Z`.
+- **Setup:** Db with connection `C`. `sync::need_id{C, Z}` where local store does NOT hold `Z`.
 - **Action:** Submit to `SendRequestedFactHandler::handle`.
 - **Expect:** `persisted_fact(store,&Z)?` is None -> `Ok(RuntimeEffects::new())` (empty). No error, no send. Missing-id is silently skipped (it may be a fact a peer needs from a third node).
 - **Defends:** Invariant 4/5: graceful absence; no responder for facts we lack.
@@ -4108,7 +4108,7 @@ Reference files:
 - **Refs:** `shared_fact/rows.rs` `record_sync_contribution`/`upsert_sync_contribution`/`contribution_fingerprint`; `cli.rs` `sync_status_output`; `share_fact_with_sync.rs`.
 
 ### SYNC-22 — share_fact_with_sync SUPPRESSES live-tail sends during replay (only rebuilds, no network)  `replay-cli`
-- **Setup:** Store with an active connection row `C` and a retained shareable content fact `O`. Run the rebuild pass under replay (a context with no live connection processing — the COMMAND/replay path excludes `send_facts_on_connection` per `COMMAND_EXCLUDED_HANDLER_ROUTES`).
+- **Setup:** Db with an active connection row `C` and a retained shareable content fact `O`. Run the rebuild pass under replay (a context with no live connection processing — the COMMAND/replay path excludes `send_facts_on_connection` per `COMMAND_EXCLUDED_HANDLER_ROUTES`).
 - **Action:** Replay re-applies the `share_fact_with_sync` upsert for `O`.
 - **Expect:** Rows are rebuilt, but NO `send_facts_on_connection` live-tail intent reaches the network: the live-tail send is gated behind `changed` AND, in replay/command processing, `send_facts_on_connection` / `send_network_frame` / `receive_network_frame` are in `COMMAND_EXCLUDED_HANDLER_ROUTES` so the queued send produces no socket traffic. (Also: on a no-change re-apply `changed=false`, the handler returns empty effects with no live-tail at all.)
 - **Defends:** Invariant 4: replay rebuilds derived state without re-emitting historical network effects. Mechanism: suppress live-tail sends during replay.
@@ -4122,7 +4122,7 @@ Reference files:
 - **Refs:** `share_fact_with_sync.rs` `origin_connection_ids_for_fact` + `advertise_indexed_fact_to_connections_except`.
 
 ### SYNC-24 — seed_connection compare uses range_summary_for_connection over the shareable index across versions  `handler-unit`
-- **Setup:** Store with connection `C` and a shareable index containing both v1 and v2 facts.
+- **Setup:** Db with connection `C` and a shareable index containing both v1 and v2 facts.
 - **Action:** Run `seed_connection::advertise_connection_shareable_facts(store, C)` (the `SeedConnectionSyncHandler` path).
 - **Expect:** Emits exactly one root `sync::compare` fact (`TimestampRange::ROOT`, `response_requested=true`) whose summary = `range_summary_for_connection(store, C, ROOT)` computed over ALL shareable ids (mixed versions) plus one `send_facts_on_connection{C,[compare.id]}`. The summary is over the id index, not over content versions.
 - **Defends:** Invariant 2: seed summary is version-uniform. Mechanism: negentropy over ids across mixed versions.
@@ -4157,7 +4157,7 @@ Reference files:
 - **Refs:** `registry.rs` `fact_route_tags_are_globally_unique`, `FACT_ROUTES`.
 
 ### SYNC-29 — shared_fact INDEX (162) can name an owner id whose bytes are pending or absent locally  `handler-unit`
-- **Setup:** Store where the referenced owner `U` is above-ceiling and either pending locally or absent because it never made it through the wire/opening boundary. An incoming `sync::shared_fact` (tag 162, a ceiling-active envelope) names `U`.
+- **Setup:** Db where the referenced owner `U` is above-ceiling and either pending locally or absent because it never made it through the wire/opening boundary. An incoming `sync::shared_fact` (tag 162, a ceiling-active envelope) names `U`.
 - **Action:** Project the `sync::shared_fact` via `SyncSharedFactProjector`.
 - **Expect:** The shared_fact index fact projects fine (its own tag 162 is ceiling-active) and emits a `sync_exact_fact` range offer for `U`'s id — because the projector never decodes `U`'s body. The envelope/index layer is decoupled from whether the owner bytes are currently active, pending, or absent. If `U` is already pending locally, a later `need_id` for the same id is a no-op; if it is absent, normal sync can still request it.
 - **Defends:** SUBSTANCE/ADMISSION: the sync envelope is a current-ceiling fact even while it references a content id whose bytes are not active locally.
@@ -4228,7 +4228,7 @@ Reference anchors used throughout: `RouterProjector::project` unknown-tag
 - **Refs:** projectors.rs:456 unknown-tag Err, RouterProjector@423, runtime.rs submit_facts:274, connection_frame_wire.rs inner-bundle decode.
 
 ### CONTENT-04 — pending message v2 ACTIVATES on wipe+replay once ceiling rises  `replay-cli`
-- **Setup:** Store from CONTENT-03 holding the pending message_v2 fact. Fleet manifest updated so the oldest still-usable release supports protocol N+1; trusted_time advances past blocker.expires_at + M so ceiling rises to >= message_v2.intro_version.
+- **Setup:** Db from CONTENT-03 holding the pending message_v2 fact. Fleet manifest updated so the oldest still-usable release supports protocol N+1; trusted_time advances past blocker.expires_at + M so ceiling rises to >= message_v2.intro_version.
 - **Action:** Wipe derived state and replay.
 - **Expect:** The previously-pending tag-56 fact now routes to `ContentMessageV2Projector` (the new kept-forever projector) and materializes a `CONTENT_MESSAGES`/`OPENED_MESSAGES` row with the richer body. v1 tag-50 facts still route to the v1 projector. Both render at the (now higher) ceiling.
 - **Defends:** Admission "pending facts activate on next wipe+replay once ceiling covers tag"; invariant 4 (ceiling-independent replay by own tag); invariant 2.
@@ -4242,7 +4242,7 @@ Reference anchors used throughout: `RouterProjector::project` unknown-tag
 - **Refs:** sync::share_fact_with_sync handler, `content/message/queries.rs`, registry.rs read_models CONTENT_MESSAGES/OPENED_MESSAGES.
 
 ### CONTENT-06 — message edit (proposed v2 edit fact) preserves original v1 meaning under v1-only replay  `replay-cli`
-- **Setup:** Store with a v1 tag-50 message and a proposed `content::message_edit` v2 fact (new tag) that supersedes the body. Replay performed on a still-usable release whose ceiling does NOT cover the edit tag.
+- **Setup:** Db with a v1 tag-50 message and a proposed `content::message_edit` v2 fact (new tag) that supersedes the body. Replay performed on a still-usable release whose ceiling does NOT cover the edit tag.
 - **Action:** Wipe+replay.
 - **Expect:** The original message renders with its ORIGINAL v1 body (the edit fact is pending/inert below ceiling); the v1 projector's meaning is unchanged. No mass-conversion of the original message into an edited form.
 - **Defends:** Invariant 5 (old fact readers kept forever; old meaning preserved); "dormant handled by pending, unsafe handled by suppression, not mass conversion."
@@ -4263,7 +4263,7 @@ Reference anchors used throughout: `RouterProjector::project` unknown-tag
 - **Refs:** registry.rs MATCH_COMMANDS `cli_command!("send", SEND_USAGE, send)` line 452, CliCommand version-tagged list.
 
 ### CONTENT-09 — reaction v1 (tag 52) replays into CONTENT_REACTIONS under its own adapter  `replay-cli`
-- **Setup:** Store with `content::reaction` facts created via `con react WORKSPACE_ID_HEX MESSAGE_SELECTOR EMOJI` (tag 52, fixed-width `CONTENT_REACTION_BYTES`; emoji sealed in `REACTION_CIPHERTEXT_BYTES = 80` slot = 64 emoji bytes + 16 poly1305 tag). Ceiling = head.
+- **Setup:** Db with `content::reaction` facts created via `con react WORKSPACE_ID_HEX MESSAGE_SELECTOR EMOJI` (tag 52, fixed-width `CONTENT_REACTION_BYTES`; emoji sealed in `REACTION_CIPHERTEXT_BYTES = 80` slot = 64 emoji bytes + 16 poly1305 tag). Ceiling = head.
 - **Action:** Wipe+replay.
 - **Expect:** Each tag-52 fact routes to `content::reaction::project::ContentReactionProjector` and rebuilds identical `CONTENT_REACTIONS` rows; emoji opens to the same string on display. No projector error.
 - **Defends:** Invariant 4; invariant 2.
@@ -4284,21 +4284,21 @@ Reference anchors used throughout: `RouterProjector::project` unknown-tag
 - **Refs:** projectors.rs:456, FACT_ROUTES sibling reaction_v2, CONTENT_REACTIONS.
 
 ### CONTENT-12 — reaction deletion (v1 there is no delete; proposed v2 reaction-retraction) preserves prior reaction under v1 replay  `projector-unit`
-- **Setup:** v1 has no reaction-deletion fact family. Proposed v2 adds a reaction-retraction fact (new tag). Store holds a v1 reaction and a v2 retraction; replay on a still-usable release with ceiling below the retraction tag.
+- **Setup:** v1 has no reaction-deletion fact family. Proposed v2 adds a reaction-retraction fact (new tag). Db holds a v1 reaction and a v2 retraction; replay on a still-usable release with ceiling below the retraction tag.
 - **Action:** Wipe+replay below ceiling.
 - **Expect:** v1 reaction row stays present (retraction inert/pending below ceiling); the v1 ContentReactionProjector meaning is unchanged. No mass-conversion of the reaction into a deleted state.
 - **Defends:** Invariant 5 (old meaning preserved); pending-not-convert.
 - **Refs:** `content/reaction/project.rs`, CONTENT_REACTIONS, FACT_ROUTES.
 
 ### CONTENT-13 — file v1 (tag 54) replays: descriptor + sealed_metadata + root_hash rebuild CONTENT_FILES  `replay-cli`
-- **Setup:** Store with `content::file` facts (`con send-file ...`; tag 54, fields message_id/file_id/blob_bytes/total_slices/slice_bytes/root_hash(32)/sealed_metadata(`SEALED_METADATA_BYTES` padded slot — filename+mime sealed)). Ceiling = head.
+- **Setup:** Db with `content::file` facts (`con send-file ...`; tag 54, fields message_id/file_id/blob_bytes/total_slices/slice_bytes/root_hash(32)/sealed_metadata(`SEALED_METADATA_BYTES` padded slot — filename+mime sealed)). Ceiling = head.
 - **Action:** Wipe+replay.
 - **Expect:** Each tag-54 fact routes to `content::file::project::ContentFileProjector`, rebuilds identical `CONTENT_FILES` rows; `con files WORKSPACE_ID_HEX` lists identical descriptors; sealed_metadata opens to same filename/mime. No projector error.
 - **Defends:** Invariant 4; invariant 2.
 - **Refs:** `content/file/layout.rs` TYPE_CONTENT_FILE=54, ContentFileProjector registry.rs:601, read_models CONTENT_FILES, `content/file/queries.rs`.
 
 ### CONTENT-14 — file_slice v1 (tag 55) replays: BAO proof verified against parent root, FILE_SLICES rebuilt  `replay-cli`
-- **Setup:** Store with `content::file_slice` facts (tag 55, fields file_id/slice_index/proof(`FILE_SLICE_BAO_PROOF_BYTES` padded BAO slot of encrypted slice); `FILE_SLICE_PLAINTEXT_BYTES = 256 KiB`). Parent tag-54 file fact present. Ceiling = head.
+- **Setup:** Db with `content::file_slice` facts (tag 55, fields file_id/slice_index/proof(`FILE_SLICE_BAO_PROOF_BYTES` padded BAO slot of encrypted slice); `FILE_SLICE_PLAINTEXT_BYTES = 256 KiB`). Parent tag-54 file fact present. Ceiling = head.
 - **Action:** Wipe+replay (slice projector verifies BAO proof against parent file root_hash before counting).
 - **Expect:** Each tag-55 fact routes to `content::file_slice::project::ContentFileSliceProjector`; BAO verification reproduces the same encrypted slice bytes; `FILE_SLICES` rows identical; `con save-file` reconstructs identical blob. No projector error.
 - **Defends:** Invariant 4 (deterministic, own-tag adapter); carrier-capacity precedent (file_slice is the chunk-don't-grow exemplar).
@@ -4312,7 +4312,7 @@ Reference anchors used throughout: `RouterProjector::project` unknown-tag
 - **Refs:** `content/file_slice/fact.rs` FILE_SLICE_PLAINTEXT_BYTES, connection_frame_wire.rs CONNECTION_FRAME_FILE_SLICE_PLAINTEXT_BYTES, ROUTES intro_version.
 
 ### CONTENT-16 — file_slice v2 received below ceiling pending; v1 slices keep BAO meaning  `handler-unit`
-- **Setup:** Peer delivers file_slice_v2 facts (new tag) while ceiling = N. Store also holds v1 tag-55 slices for the same file.
+- **Setup:** Peer delivers file_slice_v2 facts (new tag) while ceiling = N. Db also holds v1 tag-55 slices for the same file.
 - **Action:** Receive v2 slices (pending), then wipe+replay below ceiling.
 - **Expect:** v2 slices pending opaque/uncounted (not in `FILE_SLICES`, no BAO verification attempted, no error surfaced); v1 slices still verify and count. File reconstruction uses only v1 slices. After ceiling rises and replay, v2 slices route to ContentFileSliceV2Projector.
 - **Defends:** Admission pending; invariant 4; invariant 5.
@@ -4326,7 +4326,7 @@ Reference anchors used throughout: `RouterProjector::project` unknown-tag
 - **Refs:** `content/file/layout.rs` SEALED_METADATA_BYTES, ContentFileProjector / proposed ContentFileV2Projector, CONTENT_FILES.
 
 ### CONTENT-18 — file_deletion v1 (tag 53) replays into FILE_DELETIONS; old tombstone meaning preserved  `replay-cli`
-- **Setup:** Store with `content::file_deletion` facts (`con delete-file ...`; tag 53, fields target_file_id/author_user_id/signer). Ceiling = head.
+- **Setup:** Db with `content::file_deletion` facts (`con delete-file ...`; tag 53, fields target_file_id/author_user_id/signer). Ceiling = head.
 - **Action:** Wipe+replay.
 - **Expect:** Each tag-53 fact routes to `content::file_deletion::project::ContentFileDeletionProjector`; `FILE_DELETIONS` rows rebuilt; deleted files stay tombstoned in `con files`. No projector error.
 - **Defends:** Invariant 4; invariant 2.
@@ -4340,7 +4340,7 @@ Reference anchors used throughout: `RouterProjector::project` unknown-tag
 - **Refs:** projectors.rs:456, FILE_DELETIONS, FACT_ROUTES.
 
 ### CONTENT-20 — message_deletion v1 (tag 51) replays into MESSAGE_DELETIONS/MESSAGE_TOMBSTONES  `replay-cli`
-- **Setup:** Store with `content::message_deletion` facts (`con delete-message ...`; tag 51, fields target_message_id/target_frontier_id/target_minute/author_user_id/signer). Ceiling = head.
+- **Setup:** Db with `content::message_deletion` facts (`con delete-message ...`; tag 51, fields target_message_id/target_frontier_id/target_minute/author_user_id/signer). Ceiling = head.
 - **Action:** Wipe+replay.
 - **Expect:** Each tag-51 fact routes to `content::message_deletion::project::ContentMessageDeletionProjector`; `MESSAGE_DELETIONS` and `MESSAGE_TOMBSTONES` rebuilt identically; deleted messages stay hidden in `con messages`/`con view`. No projector error.
 - **Defends:** Invariant 4; invariant 2.
@@ -4354,14 +4354,14 @@ Reference anchors used throughout: `RouterProjector::project` unknown-tag
 - **Refs:** `content/message_deletion/`, MESSAGE_TOMBSTONES, FACT_ROUTES.
 
 ### CONTENT-22 — retention_policy v1 (tag 147) disappearing-set replays; floor/TTL meaning preserved  `replay-cli`
-- **Setup:** Store with `content::retention_policy` facts via `con disappearing-set WORKSPACE_ID_HEX TTL_MINUTES [--floor MINUTE]` (tag 147, fields scope_kind(workspace/channel/thread)/scope_id/ttl_minutes/retire_minute/supersedes_policy_id chain). Ceiling = head.
+- **Setup:** Db with `content::retention_policy` facts via `con disappearing-set WORKSPACE_ID_HEX TTL_MINUTES [--floor MINUTE]` (tag 147, fields scope_kind(workspace/channel/thread)/scope_id/ttl_minutes/retire_minute/supersedes_policy_id chain). Ceiling = head.
 - **Action:** Wipe+replay.
 - **Expect:** Each tag-147 fact routes to `content::retention_policy::project::RetentionPolicyProjector`; the supersedes chain re-derives the same active policy per `(workspace_id, scope_kind, scope_id)`; `con disappearing-status WORKSPACE_ID_HEX` reproduces identical effective_floor/current_ttl_minutes/horizon_floor. No projector error.
 - **Defends:** Invariant 4 (chain re-derivation deterministic); invariant 2.
 - **Refs:** `content/retention_policy/layout.rs` TYPE_RETENTION_POLICY=147, RetentionPolicyProjector registry.rs:624, `content/retention_policy/cli.rs` DISAPPEARING_SET/STATUS_USAGE, `content/retention_policy/fact.rs` SCOPE_KIND_*.
 
 ### CONTENT-23 — disappearing-tighten v1 monotonic-floor meaning replays unchanged under v1 adapter  `replay-cli`
-- **Setup:** Store with a chain of tag-147 policies where `con disappearing-tighten WORKSPACE_ID_HEX TTL_MINUTES --yes` lowered the TTL (advanced retire_minute) on top of a prior `disappearing-set`. Ceiling = head.
+- **Setup:** Db with a chain of tag-147 policies where `con disappearing-tighten WORKSPACE_ID_HEX TTL_MINUTES --yes` lowered the TTL (advanced retire_minute) on top of a prior `disappearing-set`. Ceiling = head.
 - **Action:** Wipe+replay.
 - **Expect:** Replay re-applies the supersedes chain monotonically; the tightened (later) policy wins; `disappearing-status` shows the tightened TTL/floor; no message retired by the tightened policy reappears. The v1 projector's monotonic-floor rule is preserved exactly.
 - **Defends:** Invariant 4; invariant 5 (old meaning preserved); monotonic-floor invariant in RetentionPolicyProjector.
@@ -4389,7 +4389,7 @@ Reference anchors used throughout: `RouterProjector::project` unknown-tag
 - **Refs:** `content/purge/project.rs` content_purged_role/target_purge_key, registry.rs FACT_ROUTES + fact_route_tags_are_globally_unique, DISAPPEARING_COMPACT_USAGE.
 
 ### CONTENT-27 — disappearing-status read-model is shared at head; v1 and v2 policies render at the ceiling  `multinode-network`
-- **Setup:** Two still-usable releases connected; ceiling = N where retention_policy_v2 is NOT ceiling-active. Store holds v1 policies plus a pending v2.
+- **Setup:** Two still-usable releases connected; ceiling = N where retention_policy_v2 is NOT ceiling-active. Db holds v1 policies plus a pending v2.
 - **Action:** On each node run `con disappearing-status WORKSPACE_ID_HEX`.
 - **Expect:** Both nodes report identical effective_floor/current_ttl/horizon_floor computed from v1 policies at the ceiling; the pending v2 contributes nothing on either. Same protocol version => same status row content.
 - **Defends:** Invariant 2 (rendering uniformity); invariant 3; "withhold a new DERIVATION of existing facts until ceiling-active."
@@ -4410,14 +4410,14 @@ Reference anchors used throughout: `RouterProjector::project` unknown-tag
 - **Refs:** projectors.rs:456, proposed unfurl projector, view path, no-egress assertion.
 
 ### CONTENT-30 — unfurl replay NEVER refetches the URL (deterministic from snapshot)  `replay-cli`
-- **Setup:** Store with ceiling-active unfurl snapshot facts (from CONTENT-28). A replay harness with network egress observable (e.g. a fail-closed network shim).
+- **Setup:** Db with ceiling-active unfurl snapshot facts (from CONTENT-28). A replay harness with network egress observable (e.g. a fail-closed network shim).
 - **Action:** Wipe+replay the full fact log.
 - **Expect:** Replay rebuilds the unfurl preview rows purely from the retained snapshot facts; zero outbound HTTP/URL fetches occur during replay; the rebuilt preview is byte-identical to pre-wipe. Replay is order-independent and ceiling-independent (each unfurl keyed by its own tag).
 - **Defends:** Invariant 4 (replay determinism, no non-deterministic recreation); charter "replay never refetches."
 - **Refs:** proposed unfurl projector, replay path, FACT_ROUTES.
 
 ### CONTENT-31 — unsafe message-body encoding handled by suppress/tighten + reissue, NOT mass conversion  `guardrail`
-- **Setup:** A message v_bad transport/encoding flagged unsafe (e.g. an unbounded body length that breaks fixed-width admission). Store holds existing v1 tag-50 messages encoded safely; the unsafe encoding is being retired below natural expiry under the safety floor.
+- **Setup:** A message v_bad transport/encoding flagged unsafe (e.g. an unbounded body length that breaks fixed-width admission). Db holds existing v1 tag-50 messages encoded safely; the unsafe encoding is being retired below natural expiry under the safety floor.
 - **Action:** Apply the safety-floor retirement (drop the unsafe transport format) and trigger reissue/tighten.
 - **Expect:** Only the unsafe transport format is removed (invariant 6 — removed before expiry ONLY when unsafe); existing safe v1 messages are NOT rewritten/converted — they keep their tag-50 reader forever; new safe messages are reissued under a safe tag. No bulk conversion pass over the message log.
 - **Defends:** Invariant 6 (safety floor); invariant 5 (readers forever); charter "unsafe encoding handled by suppress/tighten/reissue not mass conversion."
@@ -4431,7 +4431,7 @@ Reference anchors used throughout: `RouterProjector::project` unknown-tag
 - **Refs:** registry.rs 717-729 fact_route_tags_are_globally_unique, projector_routes! 593-624, FactRoute@402.
 
 ### CONTENT-33 — content count is computed at the ceiling (v2 facts uncounted below ceiling)  `blackbox-cli`
-- **Setup:** Store with v1 content facts plus pending v2 content facts (message_v2, reaction_v2). Ceiling = N (below v2 intros).
+- **Setup:** Db with v1 content facts plus pending v2 content facts (message_v2, reaction_v2). Ceiling = N (below v2 intros).
 - **Action:** Run `con content-count` and `con count`.
 - **Expect:** Counts include only ceiling-active (v1) content facts; pending v2 facts are uncounted. After ceiling rises to cover v2 and a wipe+replay, the counts increase to include the now-active v2 facts.
 - **Defends:** Admission "pending ... uncounted"; invariant 2 (count is a derivation surfaced at the ceiling).
@@ -5622,7 +5622,7 @@ Scopes are the four real ones: `auth`, `content`, `connection`, `sync`.
 ### GUARD-17 — sibling _vN/ project.rs emits only needs/offers/self-purge/intents  `guardrail`
 - **Setup:** the new `_vN/project.rs` kept-forever projector.
 - **Action:** run the projector-output boundary scan over the new `project.rs`.
-- **Expect:** the new version projector uses the same `ProjectionOutput` helpers (no `pub rows:`, `.deletes`, `.labels`, no direct `crate::core::store`/`rusqlite`/`.execute(`) — identical contract to existing projectors.
+- **Expect:** the new version projector uses the same `ProjectionOutput` helpers (no `pub rows:`, `.deletes`, `.labels`, no direct `crate::core::db`/`rusqlite`/`.execute(`) — identical contract to existing projectors.
 - **Defends:** Mechanism "_vN/ follows the role-file convention" extended to projector-output contract; supports invariant (4) REPLAY DETERMINISM (rows via RowMutation only).
 - **Refs:** `tests/poc10_architecture_boundary_test.rs::poc10_target_projectors_emit_only_needs_offers_self_purge_and_intents` (623-655) and `::poc10_target_projectors_do_not_write_store_rows_directly` (734-762).
 
@@ -5957,7 +5957,7 @@ Concrete tests closing intersection gaps the completeness pass found across clus
 - **Defends:** TIME-25 retirement exemption is gated by the same local-scope + `connection_response`-context authority check as in NORMAL mode (no blocked-mode widening of the close authority surface); INVARIANT (6) SAFETY FLOOR (retirement authority is local + context-gated); secret hygiene not weaponizable.
 - **Refs:** `connection/close/project.rs:47-53` (structural local-scope check), `:55-65` (context need, no-offer-without-context), `:76-86` (offers only on the proven path); `connection/close.rs:41-61` (`exact_local_need`/`exact_local_offer` use `FactScope::Local`); CONN-22, TIME-25, CONN-21.
 ### SYNC-GAP20a — `sync_status` root_fingerprint folds `context_have`, so it diverges across two converged peers that recorded different anchor sets for the same owner (while the on-wire compare summary stays equal)  `projector-unit`
-- **Setup:** One in-memory `Store` per simulated node, both seeded with `CORE_SCHEMA_SOURCE + FACTS_SCHEMA_SOURCE` (the `store()` helper in `shared_fact/rows.rs` tests). On BOTH nodes record the SAME single owner fact `U` via `record_sync_contribution(store, &ShareFactWithSync{ workspace_id: W, owner_fact_id: U.id, timestamp_ms: U.timestamp, state: SyncShareState::Upsert, context_have }, Some(&U))`. Node A passes `context_have: vec![anchor_v1.id]` (a capable node that decoded a v2 owner and advertised its v1 dependency anchor — the SYNC-05 projector path). Node B passes `context_have: vec![]` (same owner learned without its dependency closure: anchor pending / purged / received deps-less). `U.id` and `U.timestamp` are byte-identical on both; the ONLY difference is the advertised `context_have`.
+- **Setup:** One in-memory `Db` per simulated node, both seeded with `CORE_SCHEMA_SOURCE + FACTS_SCHEMA_SOURCE` (the `store()` helper in `shared_fact/rows.rs` tests). On BOTH nodes record the SAME single owner fact `U` via `record_sync_contribution(store, &ShareFactWithSync{ workspace_id: W, owner_fact_id: U.id, timestamp_ms: U.timestamp, state: SyncShareState::Upsert, context_have }, Some(&U))`. Node A passes `context_have: vec![anchor_v1.id]` (a capable node that decoded a v2 owner and advertised its v1 dependency anchor — the SYNC-05 projector path). Node B passes `context_have: vec![]` (same owner learned without its dependency closure: anchor pending / purged / received deps-less). `U.id` and `U.timestamp` are byte-identical on both; the ONLY difference is the advertised `context_have`.
 - **Action:** (1) Call `sync_status(&store_a)` and `sync_status(&store_b)` and compare `root_count` and `root_fingerprint`. (2) Separately, build the on-wire summary over the SAME single fact on each node: `sync::compare::create::summarize_range(&[&U])` (the path SYNC-13 exercises) and compare those two `RangeSummary` values.
 - **Expect:** (1) `root_count` is EQUAL (both = 1) but `root_fingerprint` DIFFERS between A and B: each level-64 leaf's `summary.fingerprint` equals its `contribution_fingerprint`, which folds `blake3("topo:sync-contribution:v1:" || workspace_id || owner_fact_id || timestamp_be || len_be || context_have...)` (rows.rs:509-525) — A's leaf folds `[anchor_v1.id]`, B's folds the empty list, so the XORed roots in `sync_status` (rows.rs:821-835) are unequal. This proves `con sync-status root_fingerprint` is NOT closure-independent. (2) In contrast `summarize_range(&[&U])` is IDENTICAL on both: it folds ONLY `blake3("topo:sync-range-summary:v1:" || timestamp_be || fact.id)` (compare/create.rs:245-261) — no `context_have`, no version. The single test thus crosses the two fingerprint algorithms the suite conflates: the persisted root is closure-sensitive; the on-wire summary is closure-/version-independent.
 - **Defends:** Distinguishes the two fingerprint algorithms (persisted `contribution_fingerprint`-folds-`context_have` vs on-wire `(timestamp,id)` summary); corrects the over-broad reading of Invariant 2 that SYNC-26 attaches to `sync-status`; mechanism: `sync_status` root XORs leaf `contribution_fingerprint`s, so closure divergence under versioning (SYNC-05) flows into the root.

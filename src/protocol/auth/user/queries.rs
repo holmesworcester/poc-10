@@ -6,8 +6,8 @@
 //! They should not infer authority from raw facts.
 
 use crate::core::crypto::Ed25519PublicKey;
+use crate::core::db::{Db, DEFAULT_QUERY_LIMIT};
 use crate::core::facts::FactId;
-use crate::core::store::{Store, DEFAULT_QUERY_LIMIT};
 use crate::core::wire::FixedText;
 use rusqlite::{params, OptionalExtension, Row};
 
@@ -40,7 +40,7 @@ pub fn decode_user_row(row: &Row<'_>) -> rusqlite::Result<UserRow> {
     })
 }
 
-pub fn users_in_workspace(store: &Store, workspace_id: FactId) -> Result<Vec<UserRow>, String> {
+pub fn users_in_workspace(store: &Db, workspace_id: FactId) -> Result<Vec<UserRow>, String> {
     let mut stmt = store
         .conn()
         .prepare(
@@ -74,7 +74,7 @@ pub fn users_in_workspace(store: &Store, workspace_id: FactId) -> Result<Vec<Use
 }
 
 pub fn user_by_id(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
     user_id: FactId,
 ) -> Result<Option<UserRow>, String> {

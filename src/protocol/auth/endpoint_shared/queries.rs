@@ -7,8 +7,8 @@
 //! by these lookups.
 
 use crate::core::crypto::Ed25519PublicKey;
+use crate::core::db::{Db, DEFAULT_QUERY_LIMIT};
 use crate::core::facts::FactId;
-use crate::core::store::{Store, DEFAULT_QUERY_LIMIT};
 use crate::core::wire::FixedText;
 use rusqlite::{params, Row};
 
@@ -63,7 +63,7 @@ pub(crate) struct EndpointMembership {
 /// Every projected endpoint membership across all workspaces, in deterministic
 /// order. Other scopes use this to decide mutual membership without importing
 /// `endpoint_shared` rows.
-pub(crate) fn all_memberships(store: &Store) -> Result<Vec<EndpointMembership>, String> {
+pub(crate) fn all_memberships(store: &Db) -> Result<Vec<EndpointMembership>, String> {
     let mut stmt = store
         .conn()
         .prepare(
@@ -101,7 +101,7 @@ pub(crate) fn all_memberships(store: &Store) -> Result<Vec<EndpointMembership>, 
 }
 
 pub fn peers_in_workspace(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
 ) -> Result<Vec<EndpointSharedRow>, String> {
     let mut stmt = store

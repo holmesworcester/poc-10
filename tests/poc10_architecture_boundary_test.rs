@@ -314,7 +314,7 @@ fn poc10_core_contract_files_are_present() {
         "src/core/intents.rs",
         "src/core/project_fact.rs",
         "src/core/handle_intent.rs",
-        "src/core/store.rs",
+        "src/core/db.rs",
     ];
 
     let missing = required
@@ -960,9 +960,9 @@ fn poc10_target_projectors_do_not_write_store_rows_directly() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let projector_paths = target_projector_files(root);
     let forbidden = [
-        "crate::core::store",
-        "core::store",
-        "Store",
+        "crate::core::db",
+        "core::db",
+        "Db",
         "rusqlite",
         ".write_transaction(",
         ".insert_table_rows(",

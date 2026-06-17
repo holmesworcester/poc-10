@@ -6,8 +6,9 @@
 
 use crate::core::command::AuthoredFacts;
 use crate::core::crypto;
+use crate::core::db::Db;
+use crate::core::fact_db::persisted_fact;
 use crate::core::facts::{Fact, FactId};
-use crate::core::store::{persisted_fact, Store};
 use crate::protocol::auth;
 use crate::protocol::auth::local_history_node_secret::fact::TIME_TREE_BIT_DEPTH;
 use rusqlite::{params, OptionalExtension};
@@ -66,7 +67,7 @@ pub struct CreateHistoryNodeReceipt {
 }
 
 pub fn create_recipient_key(
-    store: &Store,
+    store: &Db,
     input: CreateRecipientKey,
 ) -> Result<AuthoredFacts<CreateRecipientKeyReceipt>, String> {
     let membership = auth::workspace::queries::local_membership(store, input.workspace_id)?
@@ -113,7 +114,7 @@ pub fn create_recipient_key(
 }
 
 pub fn create_key_frontier(
-    store: &Store,
+    store: &Db,
     input: CreateKeyFrontier,
 ) -> Result<AuthoredFacts<CreateKeyFrontierReceipt>, String> {
     let endpoint = auth::endpoint::author::local_endpoint(store)?
@@ -163,7 +164,7 @@ pub fn create_key_frontier(
 }
 
 pub fn create_history_node(
-    store: &Store,
+    store: &Db,
     input: CreateHistoryNode,
 ) -> Result<AuthoredFacts<CreateHistoryNodeReceipt>, String> {
     if history_source_is_tombstoned(store, input.source_secret_id)? {
@@ -231,7 +232,7 @@ fn history_source_material(
     Ok((node.owner_endpoint_id, node.node_secret))
 }
 
-fn history_source_is_tombstoned(store: &Store, source_secret_id: FactId) -> Result<bool, String> {
+fn history_source_is_tombstoned(store: &Db, source_secret_id: FactId) -> Result<bool, String> {
     store
         .conn()
         .query_row(

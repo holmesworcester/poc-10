@@ -1,7 +1,7 @@
 # Core
 
 Core is the protocol-neutral runtime substrate. A different protocol should be
-able to reuse it unchanged: core stores immutable facts, matches context ranges,
+able to reuse it unchanged: core persists immutable facts, matches context ranges,
 runs projectors, dispatches queued intents, commits effect batches, hosts CLI
 and daemon loops, and moves opaque network bytes. It must not know what a
 workspace, message, invite, key wrap, sync range, or connection fact means.
@@ -9,16 +9,16 @@ workspace, message, invite, key wrap, sync range, or connection fact means.
 ## How Core Works
 
 Core is the reusable runtime loop around a protocol declaration. At startup the
-app hands core a `ProtocolDescription`; core opens the selected SQLite store,
+app hands core a `ProtocolDescription`; core opens the selected SQLite database,
 applies core, network, and protocol schemas, builds the command registry, and
 constructs a `Runtime` from the declared projector, handler registry, row
 allowlist, schema sources, and daemon hooks. From that point on, core does not
 ask what a protocol fact means. It only moves facts, context, rows, intents,
 time wakes, and opaque network bytes through the declared runtime workers.
 
-A normal command is a serialized store turn. Core opens the store, passes the
+A normal command is a serialized database turn. Core opens the database, passes the
 current projected state and command clock to protocol command code, and commits
-the command's authored facts. Core stores their immutable bytes, records local
+the command's authored facts. Core persists their immutable bytes, records local
 admission metadata, and marks them pending for projection. The command can
 return human-readable `CliOutput`, but command-authored durable protocol state
 must enter through facts; rows, purges, and intents come from later projection
@@ -57,7 +57,7 @@ intake hook convert recognized bytes into `RuntimeEffects`, admits due
 time-wake ranges as pending projection, drains one high-volume projection batch,
 drains one intent batch, and leaves any handler-emitted facts queued for later
 projection work. The runtime lock ensures this daemon work cannot race with a
-CLI command that is admitting new facts into the same store.
+CLI command that is admitting new facts into the same database.
 
 Core's job is therefore coordination, persistence, and mechanical validation.
 It owns the serialized turn shape, SQLite transaction boundaries, queue
@@ -81,18 +81,18 @@ Protocol code enters core through declarations and effect values:
   `HandlerContext` containing only declared input facts and returns
   `RuntimeEffects`.
 - `command` defines the protocol-neutral command clock, local capability value
-  types, and authored fact bundles. User-facing commands receive `Store` and
+  types, and authored fact bundles. User-facing commands receive `Db` and
   `CommandClock` directly when they need current projected state before
   authoring facts.
 - `effects::RuntimeEffects` is the shared language for projector and handler
   facts to admit durably, incoming facts to stage for projection, purges, row
   mutations, durable intents, and local intents.
-- `store::SchemaSource` lets core, network IO, and protocol registry code
+- `db::SchemaSource` lets core, network IO, and protocol registry code
   declare SQL DDL, opaque row-table allowlists, and replay lifecycle for
   retained fact storage, resettable runtime state, and state-summary tables.
 
 Data leaves core through the same narrow surfaces: commands receive
-`CliOutput`, protocol queries read schema-owned rows through `Store`, daemon
+`CliOutput`, protocol queries read schema-owned rows through `Db`, daemon
 inbound intake receives length-prefixed frame bytes, and network sends consume
 opaque outgoing rows from `network`.
 
@@ -145,7 +145,7 @@ the owning projector decide whether that time proves anything.
   offers append as durable evidence until the owner fact is purged.
 - Context matching is protocol-blind range overlap over `(role, scope,
   start_key, end_key)`. Projectors must decode and validate matched payloads.
-- Projectors do not query the store, perform IO, call handlers, or mutate
+- Projectors do not query the database, perform IO, call handlers, or mutate
   process-local state.
 - Intent queue identity is `(kind, idempotence_key)`. Re-emitting the same
   payload is idempotent; conflicting payloads for the same identity reject.
@@ -169,14 +169,14 @@ the owning projector decide whether that time proves anything.
   `DeleteWhere` followed by `InsertValues`.
 - Row mutations are accepted only for tables declared by the selected runtime.
   The module that builds a row owns its columns, key bytes, and semantics.
-- Store is below policy. It applies schemas, transactions, and row helpers; it
+- Db is below policy. It applies schemas, transactions, and row helpers; it
   does not interpret protocol rows, facts, context roles, or sync ranges.
 
 ## Responsibility Boundary
 
 Change core when the reusable runtime mechanics change: queue ordering,
 projection scheduling, context overlap matching, transaction boundaries,
-effect validation, wire primitives, store behavior, network byte pumping,
+effect validation, wire primitives, database behavior, network byte pumping,
 daemon scheduling, or CLI hosting.
 
 Change protocol when the meaning of a fact, row, context role, command, sync
@@ -198,7 +198,7 @@ use core syntax and contracts, but core must not import their semantic rules.
   protocol-specific options beyond handing arguments to the registered command.
 - `command.rs`: command authoring primitives. It defines the command clock,
   local signing/encryption capability value types, workspace id alias, and
-  authored receipt-plus-facts output. Commands query `Store` directly and do
+  authored receipt-plus-facts output. Commands query `Db` directly and do
   not get a runtime handle, handler dispatcher, network socket, or write
   transaction.
 - `context.rs`: public vocabulary for standing context relationships. It
@@ -211,7 +211,7 @@ use core syntax and contracts, but core must not import their semantic rules.
   library calls. Protocol modules still own signing domains, associated data,
   key lifetimes, authority checks, and semantic validation.
 - `daemon.rs`: long-running process lifecycle and tick ordering. It owns the
-  store lock, listener setup, readiness/stop/reset handling, inbound frame
+  database lock, listener setup, readiness/stop/reset handling, inbound frame
   intake, due time-wake admission, and the bounded projection batch / intent
   batch loop. The protocol declaration decides how inbound bytes become runtime
   effects and which time-wake timelines are active.
@@ -220,6 +220,9 @@ use core syntax and contracts, but core must not import their semantic rules.
   mutations, durable intents, and local intents. The shared commit helper writes
   this mechanical description atomically inside the caller's transaction;
   commands use `AuthoredFacts` facts plus a receipt instead.
+- `fact_db.rs`: SQL storage for protocol-neutral fact bytes. It owns retained
+  facts, local admissions, incoming facts, fact purge cleanup, and
+  pending-projection admission rows.
 - `facts.rs`: protocol-neutral fact identity and visibility scope. It defines
   fact ids as BLAKE3 hashes of immutable bytes, the `Fact` container, and the
   `Global`, `Local`, and protocol-defined `Scoped` visibility model. It does
@@ -247,12 +250,13 @@ use core syntax and contracts, but core must not import their semantic rules.
   context and due time ranges, runs the routed projector, applies
   durable/incoming source rules, replaces the owner's needs/time wakes,
   appends offers, wakes matched owners, and commits emitted effects.
-- `replay.rs`: replay and replay-check entry point. It resets
-  schema-declared derived state, reprojects retained facts in canonical,
-  reverse, or deterministic scrambled order, computes state summaries, and
-  enforces replay constraints such as no network rows.
+- `replay.rs`: replay entry point. It resets schema-declared derived state,
+  reprojects retained facts in canonical, reverse, or deterministic scrambled
+  order, and enforces replay constraints such as no network rows.
+- `replay_check.rs`: replay diagnostics. It computes state summaries and
+  compares canonical, idempotent, reverse, and scrambled replay passes.
 - `runtime.rs`: executable engine for one selected protocol description. It
-  opens stores, applies declared schemas, submits authored facts, exposes
+  opens databases, applies declared schemas, submits authored facts, exposes
   bounded projection and intent queue drains, admits due time wakes, and
   composes `project_fact.rs` and `handle_intent.rs` into bounded runtime turns.
 - `schema.rs`: core-owned SQL table inventory. It declares facts, local
@@ -260,9 +264,9 @@ use core syntax and contracts, but core must not import their semantic rules.
   pending projection matches, the `pending_time_ranges` work table, intent
   queues, local network
   tables, and replay reset groups. Protocol rows live in protocol schema sources.
-- `store.rs`: SQLite substrate below runtime policy. It applies schema batches,
-  opens transactions, quotes identifiers, applies typed row mutations, and
-  provides immutable fact storage primitives. It does not know what a fact tag,
+- `db.rs`: SQLite substrate below runtime policy. It applies schema batches,
+  opens transactions, quotes identifiers, and applies typed row mutations. It
+  does not know what a fact tag,
   context role, network frame, or protocol row means.
 - `versioning.rs`: protocol-neutral version ceiling and release-profile policy.
   It computes read/admit ceilings, maps protocol bundles to family versions,
@@ -296,7 +300,7 @@ mode.
   `RuntimeEffects`. It validates duplicate or conflicting effects, purges exact
   facts, admits durable facts, incoming facts, row mutations, and queues
   follow-up intents inside the caller's transaction.
-- `project_fact.rs::context_store`: SQL implementation of standing context. It
+- `project_fact.rs::context_db`: SQL implementation of standing context. It
   stores need/offer edges, assembles projection context from queued
   `pending_projection_matches`, computes replacement-need and append-only-offer
   deltas by owner, and fans out pending projection rows when new needs and
@@ -378,7 +382,7 @@ the incoming fact row, and applies `RuntimeEffects` through `commit_effects`.
 Before that boundary, projector runs are calculation. Durable pending items
 start with the matched context already attached to their queue row. Newly
 declared needs are matched during commit and wake a later queue item; the
-projector does not search the store for more context during the same run.
+projector does not search the database for more context during the same run.
 
 ### Handler Commit Boundary
 
@@ -407,7 +411,7 @@ advances that timeline, core marks matching fact owners in
 exposes that range without allowing projectors to read the clock.
 
 Replay uses the same projection and handler paths with a different runtime
-mode. It preserves only the retained fact store (`facts` plus
+mode. It preserves only the retained fact storage (`facts` plus
 `local_fact_admissions`), clears schema-declared resettable runtime state,
 queues retained facts and replayable scheduled wake-ups into
 `pending_projection` with mode `replay`, exposes that mode through

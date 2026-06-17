@@ -46,7 +46,7 @@ fn runtime_submits_authored_facts_and_projects_workspace_rows() {
     let mut runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
     let clock = FixedClock(Cell::new(123_000));
     let output = create_workspace_with_identity(
-        runtime.store(),
+        runtime.db(),
         &clock,
         "Runtime",
         BootstrapIdentity {
@@ -70,11 +70,11 @@ fn runtime_submits_authored_facts_and_projects_workspace_rows() {
     );
 
     assert_eq!(
-        workspace_queries::count_workspaces(runtime.store()).expect("workspace row count"),
+        workspace_queries::count_workspaces(runtime.db()).expect("workspace row count"),
         1
     );
-    let workspace = workspace_queries::workspace_by_id(runtime.store(), receipt.workspace_fact_id)
-        .expect("row");
+    let workspace =
+        workspace_queries::workspace_by_id(runtime.db(), receipt.workspace_fact_id).expect("row");
     assert_eq!(workspace.name, "Runtime");
 }
 
@@ -110,13 +110,13 @@ fn runtime_routes_signature_evidenced_content_message_to_projector() {
 
     assert!(projected);
     assert!(
-        content_message::queries::content_message_rows(runtime.store(), workspace_id)
+        content_message::queries::content_message_rows(runtime.db(), workspace_id)
             .expect("content message rows")
             .is_empty(),
         "content rows wait until author context is available"
     );
     assert!(
-        content_message::queries::opened_messages(runtime.store(), workspace_id)
+        content_message::queries::opened_messages(runtime.db(), workspace_id)
             .expect("opened message rows")
             .is_empty(),
         "opened rows wait until author context is available"

@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use cli_harness::*;
 use topo::core::cli::decode_hex_32;
+use topo::core::db::Db;
 use topo::core::schema::CORE_SCHEMA_SOURCE;
-use topo::core::store::Store;
 use topo::protocol::auth::{admin, workspace as auth_workspace};
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 
@@ -869,9 +869,8 @@ fn poll_for_local_admin(db: &str, workspace_id_hex: &str, timeout_ms: u64) {
 }
 
 fn local_admin_visible(db: &str, workspace_id: [u8; 32]) -> Result<bool, String> {
-    let store =
-        Store::open_disk_with_schema_sources(db, &[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
-            .map_err(|err| format!("open store: {err}"))?;
+    let store = Db::open_disk_with_schema_sources(db, &[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+        .map_err(|err| format!("open store: {err}"))?;
     let membership = auth_workspace::queries::local_membership(&store, workspace_id)?
         .ok_or_else(|| "local endpoint has not joined workspace".to_string())?;
     for row in admin::queries::admin_rows_in_workspace(&store, workspace_id)? {

@@ -6,7 +6,7 @@
 
 use std::net::SocketAddr;
 
-use crate::core::store::{Store, DEFAULT_QUERY_LIMIT};
+use crate::core::db::{Db, DEFAULT_QUERY_LIMIT};
 use crate::protocol::auth::endpoint_shared::fact::EndpointRole;
 use crate::protocol::connection::request::{
     encode::ADDR_BLOCK_BYTES, project::decode::decode_optional_addr,
@@ -71,7 +71,7 @@ pub fn decode_invite_accepted_row(row: &Row<'_>) -> rusqlite::Result<InviteAccep
     })
 }
 
-pub fn accepted_bootstrap_peers(store: &Store) -> Result<Vec<InviteAcceptedRow>, String> {
+pub fn accepted_bootstrap_peers(store: &Db) -> Result<Vec<InviteAcceptedRow>, String> {
     let mut stmt = store
         .conn()
         .prepare(
@@ -102,7 +102,7 @@ pub fn accepted_bootstrap_peers(store: &Store) -> Result<Vec<InviteAcceptedRow>,
 }
 
 pub fn accepted_endpoint_in_workspace(
-    store: &Store,
+    store: &Db,
     endpoint_id: EndpointId,
     workspace_id: WorkspaceId,
 ) -> Result<bool, String> {

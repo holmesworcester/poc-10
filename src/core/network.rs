@@ -33,7 +33,7 @@ use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
-use crate::core::store::{ReplayTables, SchemaSource, Store, TableName};
+use crate::core::db::{Db, ReplayTables, SchemaSource, TableName};
 use rusqlite::{params, OptionalExtension};
 
 /// Ephemeral outgoing network frame queue table.
@@ -43,7 +43,7 @@ pub const OUTGOING_TARGETS_TABLE: TableName = TableName::new("network_outgoing_t
 const MAX_FRAME_BYTES: usize = 128 * 1024 * 1024;
 const WRITE_FRAME_BUDGET: Duration = Duration::from_secs(1);
 
-/// Store declaration for the core-owned outgoing byte queue.
+/// Db declaration for the core-owned outgoing byte queue.
 ///
 /// Network rows are core IO state, so their schema source lives next to this
 /// queue code and the concrete runtime includes it like any other declaration.
@@ -135,7 +135,7 @@ impl OutgoingNetworkRow {
 
 /// Queue one outgoing frame for the daemon TCP pump.
 pub fn queue_outgoing(
-    store: &Store,
+    store: &Db,
     target: NetworkTarget,
     frame: OutgoingFrame,
 ) -> Result<(), String> {
@@ -146,11 +146,11 @@ pub fn queue_outgoing(
 
 /// Insert outgoing rows idempotently.
 ///
-/// Frame rows and their active-target index rows become visible in one store
+/// Frame rows and their active-target index rows become visible in one database
 /// transaction. The returned count is the number of new frame rows, not target
 /// index rows. Deletion is a separate, explicit step so callers can commit
 /// their own "sent" bookkeeping at the right boundary.
-pub fn enqueue_outgoing(store: &Store, rows: &[OutgoingNetworkRow]) -> Result<usize, String> {
+pub fn enqueue_outgoing(store: &Db, rows: &[OutgoingNetworkRow]) -> Result<usize, String> {
     store
         .write_transaction(|tx| {
             let inserted_frames = insert_outgoing_rows_in_tx(tx, rows)?;
@@ -166,7 +166,7 @@ pub fn enqueue_outgoing(store: &Store, rows: &[OutgoingNetworkRow]) -> Result<us
 /// a slow route does not require a full-table scan and does not block other
 /// routes from being claimed by their own callers.
 pub fn claim_outgoing_for_target(
-    store: &Store,
+    store: &Db,
     target: NetworkTarget,
     limit: usize,
 ) -> Result<Vec<OutgoingNetworkRow>, String> {
@@ -203,7 +203,7 @@ pub fn claim_outgoing_for_target(
 /// Core keeps this as a separate target index so a blocked peer with many
 /// queued frames does not make the scheduler scan frame rows to find the next
 /// address.
-pub fn queued_outgoing_targets(store: &Store, limit: usize) -> Result<Vec<NetworkTarget>, String> {
+pub fn queued_outgoing_targets(store: &Db, limit: usize) -> Result<Vec<NetworkTarget>, String> {
     if limit == 0 {
         return Ok(Vec::new());
     }
@@ -250,7 +250,7 @@ pub struct OutgoingPumpReport {
 /// reachability signals: they defer that target for a later pass instead of
 /// turning opaque transport state into durable protocol truth.
 pub fn pump_outgoing(
-    store: &Store,
+    store: &Db,
     max_targets: usize,
     max_frames_per_target: usize,
 ) -> Result<OutgoingPumpReport, String> {
@@ -277,7 +277,7 @@ pub fn pump_outgoing(
 }
 
 /// Remove outgoing rows that have been successfully handed off by the caller.
-pub fn delete_outgoing(store: &Store, rows: &[OutgoingNetworkRow]) -> Result<(), String> {
+pub fn delete_outgoing(store: &Db, rows: &[OutgoingNetworkRow]) -> Result<(), String> {
     store
         .write_transaction(|tx| {
             delete_outgoing_rows_in_tx(tx, rows)?;
@@ -288,10 +288,7 @@ pub fn delete_outgoing(store: &Store, rows: &[OutgoingNetworkRow]) -> Result<(),
         .map_err(|err| format!("delete outgoing network rows: {err}"))
 }
 
-fn insert_outgoing_rows_in_tx(
-    store: &Store,
-    rows: &[OutgoingNetworkRow],
-) -> rusqlite::Result<usize> {
+fn insert_outgoing_rows_in_tx(store: &Db, rows: &[OutgoingNetworkRow]) -> rusqlite::Result<usize> {
     let mut inserted = 0usize;
     for row in rows {
         let target_addr = target_addr(row.target);
@@ -316,7 +313,7 @@ fn insert_outgoing_rows_in_tx(
 }
 
 fn outgoing_row_matches(
-    store: &Store,
+    store: &Db,
     row: &OutgoingNetworkRow,
     target_addr: &str,
 ) -> rusqlite::Result<bool> {
@@ -345,10 +342,7 @@ fn outgoing_row_matches(
         })
 }
 
-fn insert_outgoing_targets_in_tx(
-    store: &Store,
-    rows: &[OutgoingNetworkRow],
-) -> rusqlite::Result<()> {
+fn insert_outgoing_targets_in_tx(store: &Db, rows: &[OutgoingNetworkRow]) -> rusqlite::Result<()> {
     for target in unique_targets(rows) {
         store.conn().execute(
             "INSERT OR IGNORE INTO network_outgoing_targets (target_addr)
@@ -359,10 +353,7 @@ fn insert_outgoing_targets_in_tx(
     Ok(())
 }
 
-fn delete_outgoing_rows_in_tx(
-    store: &Store,
-    rows: &[OutgoingNetworkRow],
-) -> rusqlite::Result<usize> {
+fn delete_outgoing_rows_in_tx(store: &Db, rows: &[OutgoingNetworkRow]) -> rusqlite::Result<usize> {
     let mut deleted = 0usize;
     for row in rows {
         deleted += store.conn().execute(
@@ -373,10 +364,7 @@ fn delete_outgoing_rows_in_tx(
     Ok(deleted)
 }
 
-fn prune_outgoing_targets_in_tx(
-    store: &Store,
-    rows: &[OutgoingNetworkRow],
-) -> rusqlite::Result<()> {
+fn prune_outgoing_targets_in_tx(store: &Db, rows: &[OutgoingNetworkRow]) -> rusqlite::Result<()> {
     for target in unique_targets(rows) {
         let target_addr = target_addr(target);
         let has_rows = store
@@ -607,7 +595,7 @@ enum TargetPumpOutcome {
 }
 
 fn pump_outgoing_target(
-    store: &Store,
+    store: &Db,
     target: NetworkTarget,
     limit: usize,
 ) -> Result<TargetPumpOutcome, String> {
@@ -633,7 +621,7 @@ fn pump_outgoing_target(
     Ok(TargetPumpOutcome::Drained { sent_frames })
 }
 
-fn delete_outgoing_target_if_empty(store: &Store, target: NetworkTarget) -> Result<(), String> {
+fn delete_outgoing_target_if_empty(store: &Db, target: NetworkTarget) -> Result<(), String> {
     store
         .write_transaction(|tx| {
             let target_addr = target_addr(target);

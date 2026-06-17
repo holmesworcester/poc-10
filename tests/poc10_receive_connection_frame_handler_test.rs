@@ -7,12 +7,12 @@ use std::time::Duration;
 use topo::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use topo::core::crypto;
 use topo::core::daemon;
+use topo::core::db::TableName;
 use topo::core::effects::RuntimeEffects;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::network;
 use topo::core::project_fact::{MatchedContext, ProjectionContext, Projector};
 use topo::core::runtime::Runtime;
-use topo::core::store::TableName;
 use topo::core::wire::{FixedBytes, FixedSlot};
 use topo::protocol::app::{MATCH_PROTOCOL, MATCH_RUNTIME};
 use topo::protocol::auth::endpoint::encode as endpoint_layout;
@@ -340,7 +340,7 @@ fn daemon_tick_admits_wire_frame_without_inbound_rows_or_receive_intents() {
     let expected_frame =
         frame_small_author::fact_from_wire(&frame, RECEIVED_AT).expect("expected frame fact");
     let received_frame = runtime
-        .store()
+        .db()
         .fact(&expected_frame.id)
         .expect("load received frame fact")
         .expect("wire frame should reach projection through direct incoming intake");
@@ -348,7 +348,7 @@ fn daemon_tick_admits_wire_frame_without_inbound_rows_or_receive_intents() {
         .expect("stored received frame should decode as frame_small");
     assert_eq!(
         runtime
-            .store()
+            .db()
             .table_row_count(TableName::new("local_intents"))
             .expect("local intent count"),
         0,
@@ -356,7 +356,7 @@ fn daemon_tick_admits_wire_frame_without_inbound_rows_or_receive_intents() {
     );
     assert!(
         runtime
-            .store()
+            .db()
             .table_row_count(TableName::new("network_in"))
             .is_err(),
         "core should not create an inbound network row table"

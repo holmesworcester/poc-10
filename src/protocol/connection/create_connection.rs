@@ -165,7 +165,7 @@ impl IntentHandler for CreateConnectionHandler {
         let authority_fact = context.require_fact(&input.initiator_endpoint_shared_id)?;
         let receive_fact = context.require_fact(&input.receive_id)?;
 
-        let endpoint = local_endpoint::local_endpoint(context.store()?)?.ok_or_else(|| {
+        let endpoint = local_endpoint::local_endpoint(context.db()?)?.ok_or_else(|| {
             HandlerError::fatal("create_connection requires local endpoint state")
         })?;
         let request = request_layout::open_fact(request_fact.body(), &endpoint)?;

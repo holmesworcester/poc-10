@@ -16,7 +16,7 @@ pub mod queries;
 
 pub const TYPE_CONTENT_FILE_DELETION: u8 = encode::TYPE_CONTENT_FILE_DELETION;
 
-pub const FILE_DELETION_ROWS: crate::core::store::TableName =
+pub const FILE_DELETION_ROWS: crate::core::db::TableName =
     crate::protocol::registry::read_models::FILE_DELETION_ROWS;
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::ContentFileDeletionFact, String> {

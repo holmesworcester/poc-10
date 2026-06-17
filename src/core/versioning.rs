@@ -26,7 +26,7 @@ pub type ProtocolVersion = u32;
 /// Version number inside one fact family.
 pub type FactFamilyVersion = u32;
 
-/// Store-local trusted time in milliseconds.
+/// Db-local trusted time in milliseconds.
 ///
 /// Versioning uses trusted time as a monotonic lower bound on real time. A stale
 /// observation blocks shared production because a node should not infer that an

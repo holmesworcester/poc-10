@@ -15,7 +15,7 @@ pub mod fact;
 pub mod project;
 pub mod queries;
 
-use crate::core::store::{TableInsert, TableName, TypedTableSchema, Value};
+use crate::core::db::{TableInsert, TableName, TypedTableSchema, Value};
 
 use encode::NO_PREVIOUS_POLICY_ID;
 use fact::{PolicyId, RetentionPolicyFact};

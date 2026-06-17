@@ -1,13 +1,13 @@
 //! Protocol-neutral substrate.
 //!
 //! Core is the part of the program a different protocol should be able to
-//! reuse unchanged. It supplies a small row store, an opaque outgoing byte queue,
-//! and a TCP pump that moves length-prefixed frames. It must
+//! reuse unchanged. It supplies SQLite-backed fact/row persistence, an opaque
+//! outgoing byte queue, and a TCP pump that moves length-prefixed frames. It must
 //! not learn the vocabulary or validity rules of whatever protocol sits above
 //! it.
 //!
 //! The central runtime loop is fact-based. Protocol code admits immutable facts
-//! and idempotent intents; core stores them, runs projection, matches context,
+//! and idempotent intents; core persists them, runs projection, matches context,
 //! dispatches handlers, and commits `RuntimeEffects` through SQLite
 //! transactions. Core owns the queue mechanics and atomicity rules. Protocol
 //! modules own byte layouts, authority checks, user-facing commands, and the
@@ -15,7 +15,8 @@
 //!
 //! Start in `runtime` for the host-facing facade, `project_fact` for projection
 //! contracts and one fact projection transaction, `handle_intent` for one intent
-//! transaction, `schema` for core tables, and `store` for the SQLite substrate.
+//! transaction, `fact_db` for fact persistence, `schema` for core tables, and
+//! `db` for the SQLite substrate.
 //! Use `app`, `daemon`, and `cli` when working on process or command hosting. If
 //! a change requires knowing what a workspace, message, invite, key wrap, or sync
 //! range means, it belongs under `protocol`, not here.
@@ -26,7 +27,9 @@ pub mod command;
 pub mod context;
 pub mod crypto;
 pub mod daemon;
+pub mod db;
 pub mod effects;
+pub(crate) mod fact_db;
 pub mod facts;
 pub(crate) mod handle_intent;
 pub mod intents;
@@ -34,8 +37,8 @@ pub mod network;
 pub mod perf_profile;
 pub mod project_fact;
 pub mod replay;
+pub mod replay_check;
 pub mod runtime;
 pub mod schema;
-pub mod store;
 pub mod versioning;
 pub mod wire;

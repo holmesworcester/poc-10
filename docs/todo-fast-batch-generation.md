@@ -161,7 +161,7 @@ Candidates:
 - Share contribution upserts.
 - Negentropy leaf and node updates.
 
-This should be hidden behind small store helpers or transaction-scoped helper
+This should be hidden behind small table-owner helpers or transaction-scoped helper
 objects, not spread as ad hoc SQL caches through protocol code.
 
 ### 5. Command-Level Chunking

@@ -6,7 +6,7 @@
 
 use crate::core::cli::{decode_hex_32_named as decode_hex_32, encode_hex, CliArgs, CliOutput};
 use crate::core::command::{AuthoredFacts, CommandClock};
-use crate::core::store::Store;
+use crate::core::db::Db;
 use crate::protocol::auth::workspace::{api, queries};
 
 pub const CREATE_WORKSPACE_USAGE: &str =
@@ -15,7 +15,7 @@ pub const WORKSPACES_USAGE: &str = "workspaces";
 pub const COUNT_USAGE: &str = "count";
 
 pub fn create_workspace(
-    store: &Store,
+    store: &Db,
     clock: &dyn CommandClock,
     args: CliArgs<'_>,
 ) -> Result<AuthoredFacts<api::CreateWorkspaceReceipt>, String> {
@@ -128,10 +128,7 @@ pub fn created_workspace_output(receipt: &api::CreateWorkspaceReceipt) -> CliOut
     CliOutput::lines(lines)
 }
 
-pub fn workspaces(
-    store: &Store,
-    args: CliArgs<'_>,
-) -> Result<Vec<queries::WorkspaceSummary>, String> {
+pub fn workspaces(store: &Db, args: CliArgs<'_>) -> Result<Vec<queries::WorkspaceSummary>, String> {
     args.require_len(0, WORKSPACES_USAGE)?;
     queries::list_workspaces(store)
 }
@@ -154,7 +151,7 @@ pub fn workspaces_output(workspaces: &[queries::WorkspaceSummary]) -> CliOutput 
     CliOutput::lines(lines)
 }
 
-pub fn count(store: &Store, args: CliArgs<'_>) -> Result<usize, String> {
+pub fn count(store: &Db, args: CliArgs<'_>) -> Result<usize, String> {
     args.require_len(0, COUNT_USAGE)?;
     queries::count_workspaces(store)
 }

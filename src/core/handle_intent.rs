@@ -26,16 +26,19 @@
 //! duplicate local row with the same identity so ephemeral retries do not
 //! repeat work already accepted durably.
 
+use crate::core::db::{quoted_table_name, Db, TableName};
 use crate::core::effects::RuntimeEffects;
-use crate::core::intents::{HandlerContext, HandlerError, HandlerMode, Intent, IntentHandler};
+use crate::core::fact_db::persisted_fact;
+use crate::core::intents::{
+    HandlerContext, HandlerError, HandlerMode, Intent, IntentHandler, IntentWorkRow,
+};
 use crate::core::schema::{INTENTS, LOCAL_INTENTS};
-use crate::core::store::persisted_fact;
-use crate::core::store::{IntentWorkRowOrder, Store, TableName};
 
 use crate::core::project_fact::commit_effects::{
     commit_runtime_effects_in_tx, validate_runtime_effects_for_admission, RuntimeEffectMode,
 };
 use crate::core::project_fact::route::FactAdmissionFn;
+use rusqlite::{params, params_from_iter, OptionalExtension};
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
 
@@ -46,11 +49,10 @@ pub type HandlerFactory = fn() -> Box<dyn IntentHandler>;
 ///
 /// The daemon calls this while the process is online to mint one tick of live
 /// work. Returning `Ok(None)` means there is nothing to do this tick. The
-/// builder reads the store the same way a handler reads its inputs; it must not
+/// builder reads the database the same way a handler reads its inputs; it must not
 /// depend on persisted scheduler rows, because recurring schedules are
 /// in-memory only and never replayed.
-pub type RecurringIntentBuilder =
-    fn(&Store, RecurringIntentContext) -> Result<Option<Intent>, String>;
+pub type RecurringIntentBuilder = fn(&Db, RecurringIntentContext) -> Result<Option<Intent>, String>;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RecurringIntentContext {
@@ -73,7 +75,7 @@ pub struct RecurringIntentSpec {
     pub interval_ms: u64,
     /// Delay from daemon startup before the first fire.
     pub initial_delay_ms: u64,
-    /// Build this tick's intent from current store state, or `None` to skip.
+    /// Build this tick's intent from current database state, or `None` to skip.
     pub build_intent: RecurringIntentBuilder,
 }
 
@@ -198,8 +200,152 @@ impl IntentQueue {
     }
 }
 
+/// Ordering policy for selecting the next raw intent work row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IntentWorkRowOrder {
+    /// Stable identity order for durable, replayable work.
+    StableIdentity,
+    /// SQLite insertion order for process-local ephemeral work.
+    Insertion,
+}
+
+fn intent_queue_error(message: impl Into<String>) -> rusqlite::Error {
+    rusqlite::Error::InvalidParameterName(message.into())
+}
+
+fn quoted_intent_work_table_name(table: TableName) -> rusqlite::Result<String> {
+    if table == INTENTS || table == LOCAL_INTENTS {
+        quoted_table_name(table)
+    } else {
+        Err(intent_queue_error(format!(
+            "table {} is not an intent work table",
+            table.as_str()
+        )))
+    }
+}
+
+fn verify_idempotent_intent_insert<T>(
+    changed: usize,
+    existing: impl FnOnce() -> rusqlite::Result<Option<T>>,
+    matches_existing: impl FnOnce(&T) -> bool,
+    conflict_message: impl Into<String>,
+) -> rusqlite::Result<bool> {
+    if changed == 0 {
+        let matches = existing()?.as_ref().map(matches_existing).unwrap_or(false);
+        if !matches {
+            return Err(intent_queue_error(conflict_message));
+        }
+    }
+    Ok(changed > 0)
+}
+
+/// Insert one raw intent work row idempotently inside the caller's transaction.
+pub(crate) fn insert_intent_work_row_in_tx(
+    db: &Db,
+    table: TableName,
+    row: &IntentWorkRow,
+) -> rusqlite::Result<bool> {
+    let table_name = quoted_intent_work_table_name(table)?;
+    let changed = db.conn().execute(
+        &format!(
+            "INSERT OR IGNORE INTO {table_name} (kind, idempotence_key, payload)
+             VALUES (?1, ?2, ?3)"
+        ),
+        params![
+            row.kind.as_str(),
+            row.idempotence_key.as_slice(),
+            row.payload.as_slice()
+        ],
+    )?;
+    verify_idempotent_intent_insert(
+        changed,
+        || {
+            db.conn()
+                .query_row(
+                    &format!(
+                        "SELECT payload
+                         FROM {table_name}
+                         WHERE kind = ?1 AND idempotence_key = ?2"
+                    ),
+                    params![row.kind.as_str(), row.idempotence_key.as_slice()],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .optional()
+        },
+        |existing| existing.as_slice() == row.payload.as_slice(),
+        format!("conflicting intent row for {}", row.kind),
+    )
+}
+
+/// Delete one raw intent work row by its idempotent queue identity.
+fn delete_intent_work_row_in_tx(
+    db: &Db,
+    table: TableName,
+    kind: &str,
+    idempotence_key: &[u8],
+) -> rusqlite::Result<usize> {
+    let table_name = quoted_intent_work_table_name(table)?;
+    db.conn().execute(
+        &format!("DELETE FROM {table_name} WHERE kind = ?1 AND idempotence_key = ?2"),
+        params![kind, idempotence_key],
+    )
+}
+
+/// Move a local raw intent row to the end of insertion order.
+fn rotate_intent_work_row_to_tail_in_tx(
+    db: &Db,
+    table: TableName,
+    row: &IntentWorkRow,
+) -> rusqlite::Result<bool> {
+    if delete_intent_work_row_in_tx(db, table, &row.kind, &row.idempotence_key)? == 0 {
+        return Ok(false);
+    }
+    insert_intent_work_row_in_tx(db, table, row)?;
+    Ok(true)
+}
+
+/// Select the next raw intent work row for any allowed handler kind.
+fn next_intent_work_row(
+    db: &Db,
+    table: TableName,
+    allowed_kinds: &[&str],
+    order: IntentWorkRowOrder,
+) -> rusqlite::Result<Option<IntentWorkRow>> {
+    if allowed_kinds.is_empty() {
+        return Ok(None);
+    }
+    let table_name = quoted_intent_work_table_name(table)?;
+    let order = match order {
+        IntentWorkRowOrder::StableIdentity => "kind, idempotence_key",
+        IntentWorkRowOrder::Insertion => "rowid",
+    };
+    let placeholders = (1..=allowed_kinds.len())
+        .map(|idx| format!("?{idx}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    db.conn()
+        .query_row(
+            &format!(
+                "SELECT kind, idempotence_key, payload
+                 FROM {table_name}
+                 WHERE kind IN ({placeholders})
+                 ORDER BY {order}
+                 LIMIT 1"
+            ),
+            params_from_iter(allowed_kinds.iter().copied()),
+            |row| {
+                Ok(IntentWorkRow {
+                    kind: row.get(0)?,
+                    idempotence_key: row.get(1)?,
+                    payload: row.get(2)?,
+                })
+            },
+        )
+        .optional()
+}
+
 /// Queue ephemeral handler work on this SQLite connection.
-pub(crate) fn submit_local_intent_to_store(store: &Store, intent: Intent) -> Result<bool, String> {
+pub(crate) fn submit_local_intent_to_db(store: &Db, intent: Intent) -> Result<bool, String> {
     submit_intent_to_table(store, LOCAL_INTENTS, intent)
 }
 
@@ -209,12 +355,12 @@ pub(crate) fn submit_local_intent_to_store(store: &Store, intent: Intent) -> Res
 /// a no-op; a different payload for the same identity rejects because dispatch
 /// would no longer know which work item the key names.
 pub(crate) fn submit_intent_to_table(
-    store: &Store,
+    store: &Db,
     table: TableName,
     intent: Intent,
 ) -> Result<bool, String> {
     let inserted = store
-        .write_transaction(|tx| tx.insert_intent_work_row_in_tx(table, &intent.work_row()))
+        .write_transaction(|tx| insert_intent_work_row_in_tx(tx, table, &intent.work_row()))
         .map_err(|err| format!("submit intent: {err}"))?;
     Ok(inserted)
 }
@@ -225,7 +371,7 @@ pub(crate) fn submit_intent_to_table(
 /// and replay. Local rows use insertion order so inbound network frames and
 /// other ephemeral work preserve arrival order within one process.
 pub(crate) fn next_queued_intent(
-    store: &Store,
+    store: &Db,
     allowed_kinds: &[&str],
 ) -> Result<Option<QueuedIntent>, String> {
     if allowed_kinds.is_empty() {
@@ -249,7 +395,7 @@ struct IntentWork<'a> {
 /// records that dispatch should stop this bounded pass.
 fn handle_intent_with_policy(
     work: IntentWork<'_>,
-    store: &Store,
+    store: &Db,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
     handler_mode: HandlerMode,
@@ -285,7 +431,7 @@ fn handle_intent_with_policy(
 
 /// Dispatch queued intents with the provided handler set.
 pub(crate) fn dispatch_intents(
-    store: &Store,
+    store: &Db,
     handlers: &HandlerSet,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
@@ -339,7 +485,7 @@ pub(crate) fn dispatch_intents(
 }
 
 fn next_intent_work<'a>(
-    store: &Store,
+    store: &Db,
     handlers: &'a HandlerSet,
     kinds: &[&str],
 ) -> Result<Option<IntentWork<'a>>, String> {
@@ -355,20 +501,19 @@ fn next_intent_work<'a>(
 
 /// Return the first queued intent matching a declared handler route.
 fn next_queued_intent_in_queue(
-    store: &Store,
+    store: &Db,
     queue: IntentQueue,
     allowed_kinds: &[&str],
 ) -> Result<Option<QueuedIntent>, String> {
-    store
-        .next_intent_work_row(queue.table(), allowed_kinds, queue.order())
+    next_intent_work_row(store, queue.table(), allowed_kinds, queue.order())
         .map_err(|err| format!("load queued intent: {err}"))?
         .map(|row| Intent::from_work_row(row).map(|intent| QueuedIntent { queue, intent }))
         .transpose()
 }
 
-/// Build the fact/store view a stored-intent handler requested.
+/// Build the fact/database view a stored-intent handler requested.
 fn load_handler_context<'a>(
-    store: &'a Store,
+    store: &'a Db,
     handler: &(impl IntentHandler + ?Sized),
     intent: &Intent,
     mode: HandlerMode,
@@ -380,7 +525,7 @@ fn load_handler_context<'a>(
         }
     }
     let context = HandlerContext::with_facts(facts).with_mode(mode);
-    Ok(context.with_store(store))
+    Ok(context.with_db(store))
 }
 
 /// Run a handler and convert retry markers into report state.
@@ -415,7 +560,7 @@ fn run_handler(
 /// If the handled row is already gone, nothing commits and the returned value
 /// is `false`.
 fn commit_handler_output(
-    store: &Store,
+    store: &Db,
     queued: &QueuedIntent,
     effects: &RuntimeEffects,
     allowed_tables: &[TableName],
@@ -426,11 +571,11 @@ fn commit_handler_output(
         .write_transaction(|tx| {
             let kind = queued.intent.kind.as_str();
             let idempotence_key = queued.intent.key.as_slice();
-            if tx.delete_intent_work_row_in_tx(queued.queue.table(), kind, idempotence_key)? == 0 {
+            if delete_intent_work_row_in_tx(tx, queued.queue.table(), kind, idempotence_key)? == 0 {
                 return Ok(false);
             }
             if queued.queue == IntentQueue::Durable {
-                tx.delete_intent_work_row_in_tx(LOCAL_INTENTS, kind, idempotence_key)?;
+                delete_intent_work_row_in_tx(tx, LOCAL_INTENTS, kind, idempotence_key)?;
             }
 
             commit_runtime_effects_in_tx(
@@ -445,10 +590,10 @@ fn commit_handler_output(
         .map_err(|err| format!("commit handler output: {err}"))
 }
 
-fn rotate_local_retry_to_tail(store: &Store, intent: &Intent) -> Result<bool, String> {
+fn rotate_local_retry_to_tail(store: &Db, intent: &Intent) -> Result<bool, String> {
     store
         .write_transaction(|tx| {
-            tx.rotate_intent_work_row_to_tail_in_tx(LOCAL_INTENTS, &intent.work_row())
+            rotate_intent_work_row_to_tail_in_tx(tx, LOCAL_INTENTS, &intent.work_row())
         })
         .map_err(|err| format!("rotate local retry intent: {err}"))
 }
@@ -478,8 +623,7 @@ mod tests {
 
     #[test]
     fn durable_success_deletes_shadowed_local_intent() {
-        let store =
-            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open store");
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
         let intent = test_intent("handled", b"same-key");
 
         submit_intent_to_table(&store, LOCAL_INTENTS, intent.clone()).expect("submit local");
@@ -509,8 +653,7 @@ mod tests {
     #[test]
     fn local_retries_rotate_and_do_not_spin_in_one_drain() {
         RETRY_CALLS.store(0, Ordering::SeqCst);
-        let store =
-            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open store");
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
         let first = test_intent("retrying", b"first");
         let second = test_intent("retrying", b"second");
         submit_intent_to_table(&store, LOCAL_INTENTS, first.clone()).expect("submit first local");
@@ -548,8 +691,7 @@ mod tests {
     #[test]
     fn handler_fact_effects_are_retained_queued_and_yield_dispatch() {
         AFTER_FACT_CALLS.store(0, Ordering::SeqCst);
-        let store =
-            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open store");
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
         let emitted = emitted_fact();
         submit_intent_to_table(&store, INTENTS, test_intent("emit_fact", b"first"))
             .expect("submit emitting intent");
@@ -593,6 +735,100 @@ mod tests {
             "intent-created facts should not pass through incoming intake"
         );
         assert_eq!(store.table_row_count(INTENTS).expect("durable count"), 1);
+    }
+
+    #[test]
+    fn intent_work_rows_are_idempotent_but_conflicts_reject() {
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
+        let row = IntentWorkRow::new("send", b"key".to_vec(), b"one".to_vec());
+
+        assert!(store
+            .write_transaction(|tx| insert_intent_work_row_in_tx(tx, INTENTS, &row))
+            .expect("insert intent row"));
+        assert!(!store
+            .write_transaction(|tx| insert_intent_work_row_in_tx(tx, INTENTS, &row))
+            .expect("idempotent insert"));
+
+        let err = store
+            .write_transaction(|tx| {
+                insert_intent_work_row_in_tx(
+                    tx,
+                    INTENTS,
+                    &IntentWorkRow::new("send", b"key".to_vec(), b"two".to_vec()),
+                )
+            })
+            .expect_err("conflicting insert must reject");
+
+        assert!(err.to_string().contains("conflicting intent row for send"));
+    }
+
+    #[test]
+    fn intent_work_rows_select_durable_by_identity_order() {
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
+        for row in [
+            IntentWorkRow::new("z_kind", b"2".to_vec(), b"z".to_vec()),
+            IntentWorkRow::new("a_kind", b"2".to_vec(), b"a2".to_vec()),
+            IntentWorkRow::new("a_kind", b"1".to_vec(), b"a1".to_vec()),
+        ] {
+            store
+                .write_transaction(|tx| insert_intent_work_row_in_tx(tx, INTENTS, &row))
+                .expect("insert durable row");
+        }
+
+        let selected = next_intent_work_row(
+            &store,
+            INTENTS,
+            &["z_kind", "a_kind"],
+            IntentWorkRowOrder::StableIdentity,
+        )
+        .expect("select durable row")
+        .expect("durable row");
+
+        assert_eq!(selected.kind, "a_kind");
+        assert_eq!(selected.idempotence_key, b"1");
+        assert_eq!(selected.payload, b"a1");
+    }
+
+    #[test]
+    fn local_intent_work_rows_select_by_insertion_and_rotate_to_tail() {
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
+        let first = IntentWorkRow::new("work", b"first".to_vec(), b"1".to_vec());
+        let second = IntentWorkRow::new("work", b"second".to_vec(), b"2".to_vec());
+        for row in [&first, &second] {
+            store
+                .write_transaction(|tx| insert_intent_work_row_in_tx(tx, LOCAL_INTENTS, row))
+                .expect("insert local row");
+        }
+
+        assert_eq!(
+            next_intent_work_row(
+                &store,
+                LOCAL_INTENTS,
+                &["work"],
+                IntentWorkRowOrder::Insertion,
+            )
+            .expect("select first local")
+            .expect("first local")
+            .idempotence_key,
+            b"first"
+        );
+
+        store
+            .write_transaction(|tx| rotate_intent_work_row_to_tail_in_tx(tx, LOCAL_INTENTS, &first))
+            .expect("rotate first row");
+
+        assert_eq!(
+            next_intent_work_row(
+                &store,
+                LOCAL_INTENTS,
+                &["work"],
+                IntentWorkRowOrder::Insertion,
+            )
+            .expect("select second local")
+            .expect("second local")
+            .idempotence_key,
+            b"second"
+        );
     }
 
     struct NoopHandler;

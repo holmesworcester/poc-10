@@ -9,8 +9,8 @@ use std::net::SocketAddr;
 use crate::core::cli::encode_hex;
 use crate::core::command::AuthoredFacts;
 use crate::core::crypto;
+use crate::core::db::Db;
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::store::Store;
 use crate::protocol::auth;
 use crate::protocol::auth::endpoint::author::local_endpoint;
 use crate::protocol::auth::endpoint::fact::EndpointFact;
@@ -166,7 +166,7 @@ pub struct Connect {
 
 /// Build a membership connection request to a known endpoint.
 pub fn connect(
-    store: &Store,
+    store: &Db,
     input: Connect,
 ) -> Result<AuthoredFacts<CreateConnectionRequestReceipt>, String> {
     if input.from_listen_addr.is_none() {

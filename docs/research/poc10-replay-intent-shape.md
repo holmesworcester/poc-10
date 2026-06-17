@@ -22,7 +22,7 @@ retained facts, and resume operational work without preserving queued intents.
 - Core owns replay scheduling. During replay, core queues retained facts in
   replay mode and passes replay mode to handlers; projectors and handlers make
   live-only no-op decisions at their own effect edges.
-- Store and schema declarations own table lifecycle. Core and protocol schema
+- Db and schema declarations own table lifecycle. Core and protocol schema
   sources declare retained fact-store tables, resettable runtime tables, and
   state-summary tables; replay does not discover a keep-list from SQLite.
 - All durable wall-clock `TimeWake` behavior must be replayable. If a
@@ -109,7 +109,7 @@ wakes and not in projectors.
 pub struct RecurringIntentSpec {
     pub interval_ms: u64,
     pub initial_delay_ms: u64,
-    pub build_intent: fn(&Store) -> Result<Option<Intent>, String>,
+    pub build_intent: fn(&Db) -> Result<Option<Intent>, String>,
 }
 ```
 

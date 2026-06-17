@@ -78,7 +78,7 @@ impl IntentHandler for SendNeededFactIdHandler {
         }
         let have_fact = context.require_fact(&input.have_fact_id)?;
         let have = have_id::project::decode::decode_fact(&have_fact.bytes)?;
-        if crate::core::store::persisted_fact(context.store()?, &have.fact_id)?.is_some() {
+        if crate::core::fact_db::persisted_fact(context.db()?, &have.fact_id)?.is_some() {
             return Ok(RuntimeEffects::new());
         }
         let need = need_id::fact::SyncNeedIdFact {
@@ -98,9 +98,9 @@ impl IntentHandler for SendNeededFactIdHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::db::Db;
     use crate::core::facts::{Fact, FactScope};
     use crate::core::schema::CORE_SCHEMA_SOURCE;
-    use crate::core::store::Store;
     use crate::protocol::connection::send_facts_on_connection;
     use crate::protocol::sync::have_id::encode as sync_have_id_layout;
     use crate::protocol::sync::have_id::fact::SyncHaveIdFact;
@@ -108,7 +108,7 @@ mod tests {
 
     #[test]
     fn send_needed_fact_id_emits_need_fact_for_missing_fact() {
-        let store = Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("store");
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("store");
         let have_fact = sync_have_id_fact([4; 32], [8; 32], 777);
         let intent = send_needed_fact_id_intent(SendNeededFactId {
             have_fact_id: have_fact.id,
@@ -117,7 +117,7 @@ mod tests {
         let output = SendNeededFactIdHandler::new()
             .handle(
                 &intent,
-                &HandlerContext::with_facts([have_fact.clone()]).with_store(&store),
+                &HandlerContext::with_facts([have_fact.clone()]).with_db(&store),
             )
             .expect("send need id");
 

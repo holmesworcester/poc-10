@@ -6,8 +6,8 @@
 //! Query helpers decode that row state and never write, construct facts,
 //! project, or dispatch intents.
 
+use crate::core::db::{Db, DEFAULT_QUERY_LIMIT};
 use crate::core::facts::FactId;
-use crate::core::store::{Store, DEFAULT_QUERY_LIMIT};
 use rusqlite::{params, Row};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,7 +45,7 @@ pub fn decode_connection_fact_receipt_row(
 }
 
 pub fn origin_connection_ids_for_fact(
-    store: &Store,
+    store: &Db,
     received_fact_id: FactId,
 ) -> Result<Vec<FactId>, String> {
     let mut stmt = store

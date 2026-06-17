@@ -6,14 +6,14 @@
 
 use crate::core::cli::{decode_hex_32_named as decode_hex_32, encode_hex, CliArgs, CliOutput};
 use crate::core::command::{AuthoredFacts, CommandClock};
-use crate::core::store::Store;
+use crate::core::db::Db;
 
 use super::api;
 
 pub const GRANT_ADMIN_USAGE: &str = "grant-admin WORKSPACE_ID_HEX USER_ID_HEX";
 
 pub fn grant_admin(
-    store: &Store,
+    store: &Db,
     clock: &dyn CommandClock,
     args: CliArgs<'_>,
 ) -> Result<AuthoredFacts<api::GrantAdminReceipt>, String> {

@@ -13,8 +13,8 @@ pub mod project;
 
 pub use author::advertisement_fact;
 
+use crate::core::db::{TableInsert, TableName, TypedTableSchema, Value};
 use crate::core::facts::FactId;
-use crate::core::store::{TableInsert, TableName, TypedTableSchema, Value};
 
 pub const TYPE_SYNC_HAVE_ID: u8 = encode::TYPE_SYNC_HAVE_ID;
 

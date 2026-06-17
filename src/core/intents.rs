@@ -22,18 +22,18 @@
 //! the local retry does not repeat accepted work.
 //!
 //! Handlers are reactive runtime code, not user-facing commands. They may ask
-//! core to load specific facts and may use query helpers through `Store`, then
+//! core to load specific facts and may use query helpers through `Db`, then
 //! return `RuntimeEffects` for runtime workers to commit atomically. If a handler
 //! needs to wait for missing input, return `retry_intent`; if it observes a
 //! semantic violation that should not be retried, return a fatal error.
 
+use crate::core::db::Db;
 use crate::core::effects::RuntimeEffects;
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::store::{IntentWorkRow, Store};
 use std::collections::BTreeMap;
 use std::fmt;
 
-pub use crate::core::store::{RowMutation, TableDeleteWhere, TableInsert, TypedTableSchema, Value};
+pub use crate::core::db::{RowMutation, TableDeleteWhere, TableInsert, TypedTableSchema, Value};
 
 /// Stable queue routing key for an intent handler.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -76,6 +76,31 @@ pub struct Intent {
     pub key: Vec<u8>,
     /// Opaque handler-owned payload bytes.
     pub payload: Vec<u8>,
+}
+
+/// One raw row in the durable or local intent work table.
+///
+/// `core::intents` owns converting between this mechanical queue row and an
+/// `Intent`; `handle_intent` owns the SQL lifecycle for rows with this shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IntentWorkRow {
+    pub(crate) kind: String,
+    pub(crate) idempotence_key: Vec<u8>,
+    pub(crate) payload: Vec<u8>,
+}
+
+impl IntentWorkRow {
+    pub(crate) fn new(
+        kind: impl Into<String>,
+        idempotence_key: impl Into<Vec<u8>>,
+        payload: impl Into<Vec<u8>>,
+    ) -> Self {
+        Self {
+            kind: kind.into(),
+            idempotence_key: idempotence_key.into(),
+            payload: payload.into(),
+        }
+    }
 }
 
 impl Intent {
@@ -196,12 +221,12 @@ impl HandlerMode {
 ///
 /// Durable and local queue dispatch both build this immediately before
 /// `handle`.
-/// The handler gets only the facts it requested plus the store for explicit
+/// The handler gets only the facts it requested plus the database for explicit
 /// query helpers; it cannot reach runtime workers directly.
 #[derive(Clone, Default)]
 pub struct HandlerContext<'a> {
     facts: BTreeMap<FactId, Fact>,
-    store: Option<&'a Store>,
+    db: Option<&'a Db>,
     mode: HandlerMode,
 }
 
@@ -210,7 +235,7 @@ impl fmt::Debug for HandlerContext<'_> {
         formatter
             .debug_struct("HandlerContext")
             .field("facts", &self.facts)
-            .field("has_store", &self.store.is_some())
+            .field("has_db", &self.db.is_some())
             .field("mode", &self.mode)
             .finish()
     }
@@ -226,14 +251,14 @@ impl<'a> HandlerContext<'a> {
     pub fn with_facts(facts: impl IntoIterator<Item = Fact>) -> Self {
         Self {
             facts: facts.into_iter().map(|fact| (fact.id, fact)).collect(),
-            store: None,
+            db: None,
             mode: HandlerMode::Live,
         }
     }
 
-    /// Attach the store handle used by query helpers.
-    pub fn with_store(mut self, store: &'a Store) -> Self {
-        self.store = Some(store);
+    /// Attach the database handle used by query helpers.
+    pub fn with_db(mut self, db: &'a Db) -> Self {
+        self.db = Some(db);
         self
     }
 
@@ -253,10 +278,10 @@ impl<'a> HandlerContext<'a> {
         self.mode.is_replay()
     }
 
-    /// Borrow the store or return a fatal handler error if none was attached.
-    pub fn store(&self) -> Result<&Store, HandlerError> {
-        self.store
-            .ok_or_else(|| HandlerError::fatal("handler context missing store"))
+    /// Borrow the database or return a fatal handler error if none was attached.
+    pub fn db(&self) -> Result<&Db, HandlerError> {
+        self.db
+            .ok_or_else(|| HandlerError::fatal("handler context missing db"))
     }
 
     /// Return a preloaded fact by id.
@@ -278,7 +303,7 @@ impl<'a> HandlerContext<'a> {
     /// Require non-local fact bytes for outbound or sync-visible work.
     ///
     /// Local facts are deliberately rejected here so handlers do not accidentally
-    /// send store-private material through generic protocol paths.
+    /// send database-private material through generic protocol paths.
     pub fn require_non_local_fact_bytes(&self, id: &FactId) -> Result<&[u8], HandlerError> {
         let fact = self.require_fact(id)?;
         if fact.scope == FactScope::Local {
@@ -308,7 +333,7 @@ pub trait IntentHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::store::TableName;
+    use crate::core::db::TableName;
     use rusqlite::types::Value as SqliteValue;
 
     const TEST_TABLE: TableName = TableName::new("test.rows");

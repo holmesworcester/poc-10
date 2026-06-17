@@ -7,9 +7,9 @@
 //! admission.
 
 use crate::core::command::{AuthoredFacts, CommandClock, LocalEncryptionCapability, WorkspaceId};
+use crate::core::db::Db;
 use crate::core::facts::{Fact, FactId};
 use crate::core::project_fact::ProjectionContext;
-use crate::core::store::Store;
 use crate::protocol::auth;
 use crate::protocol::content::message::author;
 use crate::protocol::content::message::fact::MAX_TEXT_BYTES;
@@ -46,7 +46,7 @@ struct MessageCommandAuthoring {
 }
 
 pub fn send_message(
-    store: &Store,
+    store: &Db,
     clock: &dyn CommandClock,
     workspace_id: WorkspaceId,
     text: &str,
@@ -63,7 +63,7 @@ pub fn send_message(
 }
 
 pub fn generate_messages(
-    store: &Store,
+    store: &Db,
     clock: &dyn CommandClock,
     workspace_id: WorkspaceId,
     count: usize,
@@ -116,7 +116,7 @@ pub fn generate_messages(
 }
 
 fn prepare_authoring(
-    store: &Store,
+    store: &Db,
     workspace_id: WorkspaceId,
 ) -> Result<MessageCommandAuthoring, String> {
     let signing = auth::endpoint::api::local_signing_capability(store, workspace_id)?;
@@ -140,7 +140,7 @@ fn prepare_authoring(
 }
 
 fn build_message_facts(
-    store: &Store,
+    store: &Db,
     workspace_id: WorkspaceId,
     text: &str,
     created_at_ms: u64,
@@ -210,7 +210,7 @@ fn deterministic_generated_text(
 }
 
 fn local_author_user_id(
-    store: &Store,
+    store: &Db,
     workspace_id: WorkspaceId,
 ) -> Result<Option<crate::core::facts::FactId>, String> {
     Ok(
@@ -219,7 +219,7 @@ fn local_author_user_id(
     )
 }
 
-fn retained_floor_from_tombstones(store: &Store, workspace_id: WorkspaceId) -> Result<u64, String> {
+fn retained_floor_from_tombstones(store: &Db, workspace_id: WorkspaceId) -> Result<u64, String> {
     queries::retained_floor_from_tombstones(store, workspace_id)
 }
 
@@ -233,7 +233,7 @@ fn retained_floor_from_tombstones(store: &Store, workspace_id: WorkspaceId) -> R
 // ---------------------------------------------------------------------------
 
 pub fn local_encryption_capability(
-    store: &Store,
+    store: &Db,
     workspace_id: WorkspaceId,
 ) -> Result<LocalEncryptionCapability, String> {
     let encryption = latest_local_key_secret(store, workspace_id)?;
@@ -247,7 +247,7 @@ pub fn local_encryption_capability(
 }
 
 fn latest_local_key_secret(
-    store: &Store,
+    store: &Db,
     workspace_id: [u8; 32],
 ) -> Result<auth::local_key_secret::fact::LocalKeySecretFact, String> {
     store
@@ -375,7 +375,7 @@ mod tests {
         let mut runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
         let workspace_clock = FnClock(|| 1_000);
         let workspace = crate::protocol::auth::workspace::api::create_workspace_with_identity(
-            runtime.store(),
+            runtime.db(),
             &workspace_clock,
             "test",
             crate::protocol::auth::workspace::api::BootstrapIdentity {
@@ -391,7 +391,7 @@ mod tests {
             .expect("submit workspace");
         drain_runtime_work_for_test(&mut runtime, 8, 512);
         let frontier = crate::protocol::auth::key_wrap::api::create_key_frontier(
-            runtime.store(),
+            runtime.db(),
             crate::protocol::auth::key_wrap::api::CreateKeyFrontier {
                 created_at_ms: 2_000,
                 workspace_id,
@@ -404,21 +404,19 @@ mod tests {
         drain_runtime_work_for_test(&mut runtime, 8, 512);
         let message_clock = FnClock(|| 10_000);
 
-        let output = generate_messages(runtime.store(), &message_clock, workspace_id, 4, 32)
+        let output = generate_messages(runtime.db(), &message_clock, workspace_id, 4, 32)
             .expect("generate messages");
-        let membership = crate::protocol::auth::workspace::queries::local_membership(
-            runtime.store(),
-            workspace_id,
-        )
-        .expect("membership query")
-        .expect("local membership");
+        let membership =
+            crate::protocol::auth::workspace::queries::local_membership(runtime.db(), workspace_id)
+                .expect("membership query")
+                .expect("local membership");
         let signing = crate::protocol::auth::endpoint::api::local_signing_capability(
-            runtime.store(),
+            runtime.db(),
             workspace_id,
         )
         .expect("local signing");
         let encryption =
-            local_encryption_capability(runtime.store(), workspace_id).expect("local encryption");
+            local_encryption_capability(runtime.db(), workspace_id).expect("local encryption");
 
         assert_eq!(output.facts.len(), 8);
         for (index, facts) in output.facts.chunks_exact(2).enumerate() {

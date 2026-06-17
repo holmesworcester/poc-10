@@ -13,8 +13,8 @@ pub mod queries;
 
 use std::net::SocketAddr;
 
+use crate::core::db::{TableInsert, TableName, TypedTableSchema, Value};
 use crate::core::facts::FactId;
-use crate::core::store::{TableInsert, TableName, TypedTableSchema, Value};
 
 use crate::protocol::connection::request::encode::encode_optional_addr;
 

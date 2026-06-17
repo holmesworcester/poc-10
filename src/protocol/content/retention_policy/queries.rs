@@ -6,8 +6,8 @@
 //! policy without re-decoding every historical fact. Keep supersession rules
 //! here and row creation in the retention policy projector.
 
+use crate::core::db::{Db, DEFAULT_QUERY_LIMIT};
 use crate::core::facts::FactId;
-use crate::core::store::{Store, DEFAULT_QUERY_LIMIT};
 use crate::protocol::content;
 use rusqlite::{params, Row};
 use std::collections::BTreeSet;
@@ -59,14 +59,14 @@ pub fn decode_policy_row(row: &Row<'_>) -> rusqlite::Result<RetentionPolicyRow> 
 }
 
 pub fn active_for_workspace(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
 ) -> Result<Option<RetentionPolicyRow>, String> {
     active_for_scope(store, workspace_id, SCOPE_KIND_WORKSPACE, workspace_id)
 }
 
 pub fn active_for_scope(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
     scope_kind: u8,
     scope_id: FactId,
@@ -86,7 +86,7 @@ pub fn active_for_scope(
 }
 
 pub fn policies_for_scope(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
     scope_kind: u8,
     scope_id: FactId,
@@ -127,7 +127,7 @@ pub fn policies_for_scope(
 }
 
 pub fn count_messages_below_minute(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
     floor_minute: u64,
 ) -> Result<usize, String> {
@@ -148,7 +148,7 @@ pub fn count_messages_below_minute(
 }
 
 pub fn status_report(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
     now_ms: Option<u64>,
 ) -> Result<StatusReport, String> {
@@ -189,7 +189,7 @@ pub fn status_report(
 
 #[cfg(test)]
 mod tests {
-    use crate::core::store::Store;
+    use crate::core::db::Db;
     use crate::protocol::registry::FACTS_SCHEMA_SOURCE;
 
     use super::super::fact::{RetentionPolicyFact, SCOPE_KIND_WORKSPACE};
@@ -198,7 +198,7 @@ mod tests {
 
     #[test]
     fn active_policy_follows_supersedes_chain_over_created_at_order() {
-        let store = Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE]).expect("store");
+        let store = Db::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE]).expect("store");
         let workspace_id = [1; 32];
         let old_id = [2; 32];
         let new_id = [3; 32];

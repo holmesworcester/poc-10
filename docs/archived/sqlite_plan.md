@@ -140,4 +140,4 @@ during projection commit and inserts affected owners directly into
 - Fact storage and fact purge helpers now live in `core::fact_store`;
   `pipeline_storage.rs` is gone.
 - Core pipeline modules and protocol matchers now prepare direct SQL against
-  their owned tables instead of using a generic Store selected-row adapter.
+  their owned tables instead of using a generic Db selected-row adapter.

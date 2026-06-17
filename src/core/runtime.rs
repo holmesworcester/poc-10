@@ -1,7 +1,7 @@
 //! Generic target runtime.
 //!
 //! Runtime is the place where the generic core engine becomes an executable
-//! protocol instance. Core owns the mechanics: open the store, submit facts and
+//! protocol instance. Core owns the mechanics: open the database, submit facts and
 //! intents, run pending fact projection, admit due time wakes, and dispatch
 //! handler work through SQLite-backed queues. Protocol code supplies the schema
 //! sources, projector router, handler registry, and row mutation allowlist that
@@ -16,11 +16,12 @@
 //! protocol handler.
 //!
 //! This is the facade a protocol host should use when it wants the whole core
-//! engine. Runtime holds the concrete store, projector, and protocol
+//! engine. Runtime holds the concrete database, projector, and protocol
 //! description, and composes the bounded projection and intent workers into
 //! command, daemon, and replay ordering.
 
 use crate::core::command::AuthoredFacts;
+use crate::core::db::{Db, SchemaSource, TableName};
 use crate::core::effects::RuntimeEffects;
 use crate::core::facts::Fact;
 use crate::core::handle_intent::{dispatch_intents, HandlerSet};
@@ -29,7 +30,6 @@ use crate::core::project_fact::{
     self, FactAdmissionFn, FactRoute, Projector, RuntimeEffectMode, Timeline,
 };
 use crate::core::schema::{CORE_SCHEMA_SOURCE, INTENTS, LOCAL_INTENTS};
-use crate::core::store::{SchemaSource, Store, TableName};
 use std::path::Path;
 
 pub use crate::core::handle_intent::{
@@ -41,7 +41,7 @@ pub type ProjectorFactory = fn() -> Box<dyn Projector>;
 /// Protocol-owned declarations needed by core's runtime engine.
 ///
 /// The description is static so a runtime instance cannot drift after opening
-/// its store. `schema_sources` declare protocol tables, `row_mutation_tables`
+/// its database. `schema_sources` declare protocol tables, `row_mutation_tables`
 /// is the allowlist for effects, `projector` defines projection, and `handlers`
 /// define the queued work core may dispatch.
 #[derive(Clone, Copy)]
@@ -70,7 +70,7 @@ pub struct RuntimeDescription {
 /// runtime instance.
 pub struct Runtime {
     description: &'static RuntimeDescription,
-    store: Store,
+    db: Db,
     projector: Box<dyn Projector>,
     handlers: HandlerSet,
 }
@@ -79,9 +79,9 @@ impl Runtime {
     /// Open an in-memory runtime with core and protocol schema sources applied.
     pub fn open_memory(description: &'static RuntimeDescription) -> Result<Self, String> {
         let schema_sources = runtime_schema_sources(description);
-        let store = Store::open_memory_with_schema_sources(&schema_sources)
-            .map_err(|err| format!("open target memory store: {err}"))?;
-        Self::from_store(description, store)
+        let db = Db::open_memory_with_schema_sources(&schema_sources)
+            .map_err(|err| format!("open target memory db: {err}"))?;
+        Self::from_db(description, db)
     }
 
     /// Open a disk-backed runtime with core and protocol schema sources applied.
@@ -90,52 +90,52 @@ impl Runtime {
         path: impl AsRef<Path>,
     ) -> Result<Self, String> {
         let schema_sources = runtime_schema_sources(description);
-        let store = Store::open_disk_with_schema_sources(path, &schema_sources)
-            .map_err(|err| format!("open target disk store: {err}"))?;
-        Self::from_store(description, store)
+        let db = Db::open_disk_with_schema_sources(path, &schema_sources)
+            .map_err(|err| format!("open target disk db: {err}"))?;
+        Self::from_db(description, db)
     }
 
-    fn from_store(description: &'static RuntimeDescription, store: Store) -> Result<Self, String> {
+    fn from_db(description: &'static RuntimeDescription, db: Db) -> Result<Self, String> {
         Ok(Self {
             description,
-            store,
+            db,
             projector: (description.projector)(),
             handlers: HandlerSet::new(description.handlers),
         })
     }
 
-    /// Borrow the runtime's store handle.
+    /// Borrow the runtime's database handle.
     ///
-    /// This exposes the concrete SQLite-backed store for query helpers and
+    /// This exposes the concrete SQLite-backed database for query helpers and
     /// daemon IO code that must share the same connection-local memory tables as
     /// the runtime. New runtime flows should prefer the typed methods below so
     /// projection and intent ordering stay centralized here.
-    pub fn store(&self) -> &Store {
-        &self.store
+    pub fn db(&self) -> &Db {
+        &self.db
     }
 
     /// Count retained facts without loading their bytes.
     pub fn fact_count(&self) -> usize {
-        self.store
+        self.db
             .fact_count()
-            .expect("runtime fact count should load from store")
+            .expect("runtime fact count should load from database")
     }
 
     /// Count facts currently queued for projection.
     pub fn pending_fact_count(&self) -> usize {
-        project_fact::pending_fact_count(&self.store)
+        project_fact::pending_fact_count(&self.db)
     }
 
     /// Count durable plus ephemeral queued intents.
     pub fn pending_intent_count(&self) -> usize {
         let stored = self
-            .store
+            .db
             .table_row_count(INTENTS)
-            .expect("runtime intent count should load from store");
+            .expect("runtime intent count should load from database");
         let local = self
-            .store
+            .db
             .table_row_count(LOCAL_INTENTS)
-            .expect("runtime local intent count should load from store");
+            .expect("runtime local intent count should load from database");
         stored + local
     }
 
@@ -146,17 +146,13 @@ impl Runtime {
 
     /// Admit one fact and mark it pending for projection.
     pub fn submit_fact(&mut self, fact: Fact) -> bool {
-        project_fact::submit_fact_with_admission(&self.store, fact, self.description.fact_admission)
+        project_fact::submit_fact_with_admission(&self.db, fact, self.description.fact_admission)
             .expect("runtime fact submission should persist")
     }
 
     /// Admit many facts in one transaction.
     pub fn submit_facts(&mut self, facts: impl IntoIterator<Item = Fact>) -> Result<usize, String> {
-        project_fact::submit_facts_with_admission(
-            &self.store,
-            facts,
-            self.description.fact_admission,
-        )
+        project_fact::submit_facts_with_admission(&self.db, facts, self.description.fact_admission)
     }
 
     /// Queue durable idempotent work for the protocol handler registry.
@@ -165,12 +161,12 @@ impl Runtime {
     /// pass. Use `submit_local_intent` for work that is only valid on this
     /// process and should disappear on restart.
     pub fn submit_intent(&mut self, intent: Intent) -> Result<bool, String> {
-        crate::core::handle_intent::submit_intent_to_table(&self.store, INTENTS, intent)
+        crate::core::handle_intent::submit_intent_to_table(&self.db, INTENTS, intent)
     }
 
     /// Queue ephemeral work for this runtime connection.
     pub fn submit_local_intent(&mut self, intent: Intent) -> Result<bool, String> {
-        crate::core::handle_intent::submit_local_intent_to_store(&self.store, intent)
+        crate::core::handle_intent::submit_local_intent_to_db(&self.db, intent)
     }
 
     /// Commit the facts returned by a user-facing command and return its receipt.
@@ -179,8 +175,8 @@ impl Runtime {
     /// caller after the command's authored facts have been retained and queued
     /// for projection.
     pub fn submit_authored_facts<T>(&mut self, output: AuthoredFacts<T>) -> Result<T, String> {
-        project_fact::submit_authored_facts_to_store(
-            &self.store,
+        project_fact::submit_authored_facts_to_db(
+            &self.db,
             output,
             self.description.row_mutation_tables,
             self.description.fact_admission,
@@ -199,8 +195,8 @@ impl Runtime {
         effects: RuntimeEffects,
         label: &str,
     ) -> Result<(), String> {
-        project_fact::commit_effects::commit_runtime_effects_to_store(
-            &self.store,
+        project_fact::commit_effects::commit_runtime_effects_to_db(
+            &self.db,
             &effects,
             self.description.row_mutation_tables,
             self.description.fact_admission,
@@ -215,7 +211,7 @@ impl Runtime {
     /// and leaves any remaining projection work queued for a later runtime turn.
     pub fn drain_projection_once(&mut self, limit: usize) -> Result<WorkStatus, String> {
         project_fact::drain_projection(
-            &self.store,
+            &self.db,
             self.projector.as_ref(),
             self.description.row_mutation_tables,
             self.description.fact_admission,
@@ -232,7 +228,7 @@ impl Runtime {
     /// remaining work queued.
     pub fn drain_intents_once(&mut self, limit: usize) -> Result<WorkStatus, String> {
         dispatch_intents(
-            &self.store,
+            &self.db,
             &self.handlers,
             self.description.row_mutation_tables,
             self.description.fact_admission,
@@ -251,7 +247,7 @@ impl Runtime {
         limit: usize,
     ) -> Result<usize, String> {
         project_fact::process_due_time_range(
-            &self.store,
+            &self.db,
             timeline,
             start_exclusive,
             end_inclusive,
@@ -259,7 +255,7 @@ impl Runtime {
         )
     }
 
-    /// Run the replay entry point against this runtime's store.
+    /// Run the replay entry point against this runtime's database.
     ///
     /// Replay drops queued intents and other schema-declared non-fact runtime
     /// state, then drains retained facts through replay-mode projection and
@@ -270,7 +266,7 @@ impl Runtime {
         order: crate::core::replay::ReplayOrder,
     ) -> Result<crate::core::replay::ReplayReport, String> {
         crate::core::replay::run_replay(
-            &self.store,
+            &self.db,
             self.projector.as_ref(),
             self.description.handlers,
             self.description.row_mutation_tables,
@@ -280,27 +276,27 @@ impl Runtime {
     }
 
     /// Compute the canonical, order-independent digest of replay-relevant state.
-    pub fn state_summary(&self) -> Result<crate::core::replay::StateSummary, String> {
-        crate::core::replay::state_summary(&self.store)
+    pub fn state_summary(&self) -> Result<crate::core::replay_check::StateSummary, String> {
+        crate::core::replay_check::state_summary(&self.db)
     }
 
-    /// Write a standalone snapshot of this runtime's store to `path`.
+    /// Write a standalone snapshot of this runtime's database to `path`.
     pub fn snapshot_to(&self, path: &Path) -> Result<(), String> {
-        self.store.backup_into(path)
+        self.db.backup_into(path)
     }
 
     /// Prove replay idempotence and projection-order independence on scratch
-    /// copies of this runtime's store.
+    /// copies of this runtime's database.
     ///
-    /// Snapshots the live store, then runs the canonical, idempotent, reverse,
+    /// Snapshots the live database, then runs the canonical, idempotent, reverse,
     /// and scrambled replay plans against independent scratch databases and
-    /// compares their state digests. The live store is never mutated. Scratch
-    /// runtimes are opened here in core so protocol CLI hosts never open a store
+    /// compares their state digests. The live database is never mutated. Scratch
+    /// runtimes are opened here in core so protocol CLI hosts never open a database
     /// themselves.
     pub fn replay_check(
         &self,
         scratch_dir: &Path,
-    ) -> Result<crate::core::replay::ReplayCheckReport, String> {
+    ) -> Result<crate::core::replay_check::ReplayCheckReport, String> {
         use crate::core::replay::ReplayOrder;
 
         let snapshot = scratch_dir.join("snapshot.db");
@@ -333,7 +329,7 @@ impl Runtime {
             summaries.push(((*name).to_string(), runtime.state_summary()?));
         }
 
-        Ok(crate::core::replay::compare_replay_passes(summaries))
+        Ok(crate::core::replay_check::compare_replay_passes(summaries))
     }
 }
 
@@ -468,7 +464,7 @@ mod tests {
 
         assert!(
             runtime
-                .store()
+                .db()
                 .fact_exists(&external_fact.id)
                 .expect("fact exists"),
             "fact lookup should read externally committed facts from SQLite"
@@ -485,7 +481,7 @@ mod tests {
             .expect("submit authored facts");
 
         assert_eq!(
-            runtime.store().fact(&fact.id).expect("load fact"),
+            runtime.db().fact(&fact.id).expect("load fact"),
             Some(fact.clone()),
             "command-authored fact should be retained immediately"
         );
@@ -496,7 +492,7 @@ mod tests {
         );
         assert_eq!(
             runtime
-                .store()
+                .db()
                 .table_row_count(crate::core::schema::INCOMING_FACTS)
                 .expect("incoming count"),
             0,
@@ -594,10 +590,7 @@ mod tests {
 
         assert!(err.contains("bad test fact rejected by admission"), "{err}");
         assert!(
-            !runtime
-                .store()
-                .fact_exists(&rejected.id)
-                .expect("fact exists"),
+            !runtime.db().fact_exists(&rejected.id).expect("fact exists"),
             "rejected fact must not be persisted"
         );
     }

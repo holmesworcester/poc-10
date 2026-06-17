@@ -1,10 +1,10 @@
 use topo::core::crypto;
+use topo::core::db::Db;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::IntentKind;
 use topo::core::intents::{HandlerContext, IntentHandler};
 use topo::core::network::{self, NetworkTarget};
 use topo::core::schema::CORE_SCHEMA_SOURCE;
-use topo::core::store::Store;
 use topo::protocol::auth;
 use topo::protocol::auth::endpoint as endpoint_rows;
 use topo::protocol::auth::endpoint::fact::EndpointFact;
@@ -44,7 +44,7 @@ fn connection_fact() -> (Fact, ConnectionFact) {
     (fact, connection)
 }
 
-fn seed_connection_row(store: &Store, connection_id: [u8; 32], connection: &ConnectionFact) {
+fn seed_connection_row(store: &Db, connection_id: [u8; 32], connection: &ConnectionFact) {
     store
         .insert_table_values(vec![connection_rows::connection_row(
             connection_rows::ConnectionRowFields {
@@ -94,7 +94,7 @@ fn send_facts_on_connection_refuses_forged_local_fact_reference() {
         connection_id: connection_fact.id,
         fact_ids: vec![fact.id],
     });
-    let context = HandlerContext::with_facts([connection_fact, fact]).with_store(&store);
+    let context = HandlerContext::with_facts([connection_fact, fact]).with_db(&store);
 
     let err = SendFactsOnConnectionHandler::new()
         .handle(&intent, &context)
@@ -126,8 +126,7 @@ fn send_facts_on_connection_refuses_forged_private_tag_reference() {
             connection_id: connection_fact.id,
             fact_ids: vec![fact.id],
         });
-        let context =
-            HandlerContext::with_facts([connection_fact.clone(), fact]).with_store(&store);
+        let context = HandlerContext::with_facts([connection_fact.clone(), fact]).with_db(&store);
 
         let err = SendFactsOnConnectionHandler::new()
             .handle(&intent, &context)
@@ -159,7 +158,7 @@ fn send_facts_on_connection_accepts_normal_shared_facts() {
         fact_ids: vec![fact.id],
     });
     let context =
-        HandlerContext::with_facts([connection_fact.clone(), fact.clone()]).with_store(&store);
+        HandlerContext::with_facts([connection_fact.clone(), fact.clone()]).with_db(&store);
 
     let output = SendFactsOnConnectionHandler::new()
         .handle(&intent, &context)
@@ -229,8 +228,8 @@ fn idempotence_keys_distinguish_parallel_batches_on_same_route() {
     );
 }
 
-fn store_with_local_endpoint() -> Store {
-    let store = Store::open_memory_with_schema_sources(&[
+fn store_with_local_endpoint() -> Db {
+    let store = Db::open_memory_with_schema_sources(&[
         CORE_SCHEMA_SOURCE,
         network::SCHEMA_SOURCE,
         FACTS_SCHEMA_SOURCE,

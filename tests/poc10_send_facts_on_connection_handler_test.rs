@@ -1,11 +1,11 @@
 //! Tests for the target `send_facts_on_connection` handler.
 
 use topo::core::crypto;
+use topo::core::db::Db;
 use topo::core::facts::Fact;
 use topo::core::intents::{HandlerContext, IntentHandler};
 use topo::core::network::{self, NetworkTarget};
 use topo::core::schema::CORE_SCHEMA_SOURCE;
-use topo::core::store::Store;
 use topo::protocol::auth::endpoint as endpoint_rows;
 use topo::protocol::auth::endpoint::fact::EndpointFact;
 use topo::protocol::connection::connection as connection_rows;
@@ -83,7 +83,7 @@ fn well_formed_send_intent_packs_fixed_frame_into_outgoing_queue() {
     let output = handler
         .handle(
             &intent,
-            &HandlerContext::with_facts([connection_fact.clone(), fact.clone()]).with_store(&store),
+            &HandlerContext::with_facts([connection_fact.clone(), fact.clone()]).with_db(&store),
         )
         .expect("connection::frame packaging succeeds");
 
@@ -102,8 +102,8 @@ fn well_formed_send_intent_packs_fixed_frame_into_outgoing_queue() {
     assert_eq!(opened.facts, vec![fact.bytes]);
 }
 
-fn store_with_local_endpoint() -> Store {
-    let store = Store::open_memory_with_schema_sources(&[
+fn store_with_local_endpoint() -> Db {
+    let store = Db::open_memory_with_schema_sources(&[
         CORE_SCHEMA_SOURCE,
         network::SCHEMA_SOURCE,
         FACTS_SCHEMA_SOURCE,

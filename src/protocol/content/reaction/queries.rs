@@ -7,8 +7,8 @@
 //! message content key. Keep this file as the place to ask "what reactions
 //! does the store expose?" rather than "should this reaction be admitted?"
 
+use crate::core::db::Db;
 use crate::core::facts::FactId;
-use crate::core::store::Store;
 use rusqlite::params;
 
 use super::fact::{AuthorId, WorkspaceId, REACTION_NONCE_BYTES};
@@ -25,7 +25,7 @@ pub struct ReactionRow {
 }
 
 pub fn reaction_rows_for_workspace(
-    store: &Store,
+    store: &Db,
     workspace_id: WorkspaceId,
 ) -> Result<Vec<ReactionRow>, String> {
     let mut stmt = store

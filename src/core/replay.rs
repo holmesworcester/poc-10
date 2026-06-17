@@ -10,7 +10,7 @@
 //! and independent of fact projection order.
 //!
 //! Ownership boundary. Replay reuses the ordinary projection and dispatch
-//! workers; it adds three things on top: a store-owned reset of schema-declared
+//! workers; it adds three things on top: a db-owned reset of schema-declared
 //! replay tables, projection-order control used by the reverse and scrambled
 //! diagnostics, and replay-mode projection context. Projectors decide how their
 //! facts behave in replay through `ProjectionContext::is_replay()`.
@@ -22,19 +22,17 @@
 //! Recurring operational schedules are not installed during replay, so they
 //! cannot fire.
 //!
-//! State summary. `state_summary` hashes the store-declared replay summary
-//! tables in a canonical, order-independent way. Core and protocol schema
-//! sources declare which tables are retained fact storage, resettable runtime
-//! state, and summary-visible derived state, so replay never decides by ad hoc
-//! SQLite table enumeration.
+//! Replay state is explicit: core and protocol schema sources declare which
+//! tables are retained fact storage and which tables are resettable runtime
+//! state, so replay never decides by ad hoc SQLite table enumeration.
 
+use crate::core::db::{quoted_table_name, Db, TableName};
 use crate::core::facts::FactId;
 use crate::core::handle_intent::{dispatch_intents, HandlerRoute, HandlerSet, WorkStatus};
 use crate::core::intents::HandlerMode;
 use crate::core::network::OUTGOING_TABLE;
 use crate::core::project_fact::{self, FactAdmissionFn, Projector, RuntimeEffectMode};
 use crate::core::schema::{CONTEXT_EDGES, FACTS, INTENTS, LOCAL_INTENTS, TIME_WAKES};
-use crate::core::store::{Store, TableName};
 use std::collections::BTreeSet;
 
 const REPLAY_WORK_LIMIT: usize = 4096;
@@ -92,115 +90,14 @@ pub struct ReplayReport {
     pub network_rows: usize,
 }
 
-/// One hashed state area in a [`StateSummary`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AreaSummary {
-    /// Table name owning this area.
-    pub area: String,
-    /// Canonical hash of the area's rows.
-    pub hash: [u8; 32],
-    /// Row count in the area.
-    pub count: usize,
-}
-
-/// A stable, order-independent digest of replay-relevant state.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StateSummary {
-    /// Overall digest combining every per-area hash and count.
-    pub state_hash: [u8; 32],
-    /// Per-area hashes and counts, ordered by area name.
-    pub areas: Vec<AreaSummary>,
-}
-
-/// One replay-check pass: a named replay plan and the state it reached.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReplayCheckPass {
-    /// Pass name (canonical, idempotent, reverse, scramble-N).
-    pub name: String,
-    /// State digest this pass reached on its scratch copy.
-    pub state_hash: [u8; 32],
-    /// Per-area differences from the canonical pass, if any.
-    pub area_diffs: Vec<String>,
-}
-
-/// Result of comparing every replay-check pass against the canonical pass.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReplayCheckReport {
-    /// State digest of the canonical pass; every pass should match it.
-    pub canonical_hash: [u8; 32],
-    /// All passes that ran, including the canonical pass itself.
-    pub passes: Vec<ReplayCheckPass>,
-    /// Names of passes whose digest diverged from canonical.
-    pub mismatched: Vec<String>,
-}
-
-/// Compare each replay pass summary against the canonical pass.
-///
-/// `passes` is `(name, summary)` for every pass, with the canonical pass first.
-/// The report records per-area diffs for any pass whose digest diverges, which
-/// localizes a determinism bug to a specific table.
-pub fn compare_replay_passes(passes: Vec<(String, StateSummary)>) -> ReplayCheckReport {
-    let canonical = passes
-        .first()
-        .map(|(_, summary)| summary.clone())
-        .expect("replay-check runs at least the canonical pass");
-    let mut report = ReplayCheckReport {
-        canonical_hash: canonical.state_hash,
-        passes: Vec::new(),
-        mismatched: Vec::new(),
-    };
-    for (name, summary) in passes {
-        let area_diffs = if summary.state_hash == canonical.state_hash {
-            Vec::new()
-        } else {
-            report.mismatched.push(name.clone());
-            area_diffs(&canonical, &summary)
-        };
-        report.passes.push(ReplayCheckPass {
-            name,
-            state_hash: summary.state_hash,
-            area_diffs,
-        });
-    }
-    report
-}
-
-/// Report which state areas differ between two summaries, with their counts.
-fn area_diffs(left: &StateSummary, right: &StateSummary) -> Vec<String> {
-    let mut names: Vec<&str> = left
-        .areas
-        .iter()
-        .map(|area| area.area.as_str())
-        .chain(right.areas.iter().map(|area| area.area.as_str()))
-        .collect();
-    names.sort_unstable();
-    names.dedup();
-
-    let mut diffs = Vec::new();
-    for name in names {
-        let left_area = left.areas.iter().find(|area| area.area == name);
-        let right_area = right.areas.iter().find(|area| area.area == name);
-        let differs = match (left_area, right_area) {
-            (Some(l), Some(r)) => l.hash != r.hash || l.count != r.count,
-            _ => true,
-        };
-        if differs {
-            let left_count = left_area.map(|area| area.count).unwrap_or(0);
-            let right_count = right_area.map(|area| area.count).unwrap_or(0);
-            diffs.push(format!("{name}: canonical={left_count} pass={right_count}"));
-        }
-    }
-    diffs
-}
-
-/// Run the replay entry point against an opened store.
+/// Run the replay entry point against an opened db.
 ///
 /// Steps: count and drop queued intents, wipe derived state, mark retained facts
 /// pending in the requested order, then run replay-mode queue steps until the
 /// replay barrier is idle. Returns counters, or an error if replay produced
 /// network rows before the barrier.
 pub fn run_replay(
-    store: &Store,
+    db: &Db,
     projector: &dyn Projector,
     routes: &'static [HandlerRoute],
     allowed_tables: &[TableName],
@@ -208,41 +105,41 @@ pub fn run_replay(
     order: ReplayOrder,
 ) -> Result<ReplayReport, String> {
     let mut report = ReplayReport {
-        dropped_durable_intents: table_count(store, INTENTS)?,
-        dropped_local_intents: table_count(store, LOCAL_INTENTS)?,
+        dropped_durable_intents: table_count(db, INTENTS)?,
+        dropped_local_intents: table_count(db, LOCAL_INTENTS)?,
         ..ReplayReport::default()
     };
-    let facts_before = fact_id_set(store)?;
+    let facts_before = fact_id_set(db)?;
 
-    report.wiped_tables = wipe_derived_state(store)?;
-    report.retained_facts = table_count(store, FACTS)?;
+    report.wiped_tables = wipe_derived_state(db)?;
+    report.retained_facts = table_count(db, FACTS)?;
 
-    let drive = ReplayDrive::new(store, projector, allowed_tables, fact_admission, routes);
+    let drive = ReplayDrive::new(db, projector, allowed_tables, fact_admission, routes);
     let mut counters = ReplayCounters::default();
     match order {
         ReplayOrder::Canonical => {
-            project_fact::enqueue_retained_facts_for_replay(store)?;
+            project_fact::enqueue_retained_facts_for_replay(db)?;
             drive.drain_until_barrier(&mut counters)?;
         }
         ReplayOrder::Reverse | ReplayOrder::Scramble { .. } => {
-            for fact_id in ordered_fact_ids(store, order)? {
-                project_fact::enqueue_retained_fact_for_replay(store, fact_id)?;
+            for fact_id in ordered_fact_ids(db, order)? {
+                project_fact::enqueue_retained_fact_for_replay(db, fact_id)?;
                 drive.drain_until_barrier(&mut counters)?;
             }
             drive.drain_until_barrier(&mut counters)?;
         }
     }
 
-    let facts_after = fact_id_set(store)?;
+    let facts_after = fact_id_set(db)?;
     report.emitted_facts = facts_after.difference(&facts_before).count();
     report.purged_facts = facts_before.difference(&facts_after).count();
     report.projected_facts = counters.projected_facts;
     report.replayed_intents = counters.replayed_intents;
-    report.standing_time_wakes = table_count(store, TIME_WAKES)?;
-    report.context_edges = table_count(store, CONTEXT_EDGES)?;
-    report.row_mutations = materialized_row_count(store)?;
-    let remaining_queued_work = table_count(store, INTENTS)? + table_count(store, LOCAL_INTENTS)?;
-    report.network_rows = table_count(store, OUTGOING_TABLE)?;
+    report.standing_time_wakes = table_count(db, TIME_WAKES)?;
+    report.context_edges = table_count(db, CONTEXT_EDGES)?;
+    report.row_mutations = materialized_row_count(db)?;
+    let remaining_queued_work = table_count(db, INTENTS)? + table_count(db, LOCAL_INTENTS)?;
+    report.network_rows = table_count(db, OUTGOING_TABLE)?;
 
     if remaining_queued_work > 0 {
         return Err(format!(
@@ -260,30 +157,22 @@ pub fn run_replay(
     Ok(report)
 }
 
-/// Compute the canonical state digest for the current store.
-pub fn state_summary(store: &Store) -> Result<StateSummary, String> {
-    let mut areas = Vec::new();
-    for summary in store.replay_summary_table_hashes()? {
-        areas.push(AreaSummary {
-            area: summary.table,
-            hash: summary.hash,
-            count: summary.count,
-        });
-    }
-    areas.sort_by(|left, right| left.area.cmp(&right.area));
-
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"topo:replay-state-summary:v1");
-    for area in &areas {
-        hasher.update(&(area.area.len() as u64).to_le_bytes());
-        hasher.update(area.area.as_bytes());
-        hasher.update(&(area.count as u64).to_le_bytes());
-        hasher.update(&area.hash);
-    }
-    Ok(StateSummary {
-        state_hash: *hasher.finalize().as_bytes(),
-        areas,
+/// Clear every schema-declared replay-resettable table.
+///
+/// Replay callers do not provide a keep-list. Protected tables are excluded by
+/// construction when the database opens, so retained fact storage cannot be
+/// cleared by a replay bug in a caller.
+pub fn clear_replay_reset_tables(db: &Db) -> Result<usize, String> {
+    db.write_transaction(|tx| {
+        let mut cleared = 0usize;
+        for table in tx.replay_reset_tables() {
+            let quoted = quoted_table_name(*table)?;
+            tx.conn().execute(&format!("DELETE FROM {quoted}"), [])?;
+            cleared += 1;
+        }
+        Ok(cleared)
     })
+    .map_err(|err| format!("clear replay reset tables: {err}"))
 }
 
 #[derive(Debug, Clone, Default)]
@@ -298,7 +187,7 @@ struct ReplayCounters {
 /// handler context. Each step drains one projection batch and one intent batch;
 /// the barrier repeats that visible queue order until a step is idle.
 struct ReplayDrive<'a> {
-    store: &'a Store,
+    db: &'a Db,
     projector: &'a dyn Projector,
     allowed_tables: &'a [TableName],
     fact_admission: Option<FactAdmissionFn>,
@@ -307,7 +196,7 @@ struct ReplayDrive<'a> {
 
 impl<'a> ReplayDrive<'a> {
     fn new(
-        store: &'a Store,
+        db: &'a Db,
         projector: &'a dyn Projector,
         allowed_tables: &'a [TableName],
         fact_admission: Option<FactAdmissionFn>,
@@ -315,7 +204,7 @@ impl<'a> ReplayDrive<'a> {
     ) -> Self {
         let handlers = HandlerSet::new(routes);
         Self {
-            store,
+            db,
             projector,
             allowed_tables,
             fact_admission,
@@ -341,7 +230,7 @@ impl<'a> ReplayDrive<'a> {
 
     fn drain_projection(&self, counters: &mut ReplayCounters) -> Result<WorkStatus, String> {
         let progress = project_fact::drain_projection(
-            self.store,
+            self.db,
             self.projector,
             self.allowed_tables,
             self.fact_admission,
@@ -353,7 +242,7 @@ impl<'a> ReplayDrive<'a> {
 
     fn dispatch_replay(&self, counters: &mut ReplayCounters) -> Result<WorkStatus, String> {
         let progress = dispatch_intents(
-            self.store,
+            self.db,
             &self.handlers,
             self.allowed_tables,
             self.fact_admission,
@@ -367,19 +256,19 @@ impl<'a> ReplayDrive<'a> {
 }
 
 /// Wipe every schema-declared replay-resettable table.
-fn wipe_derived_state(store: &Store) -> Result<usize, String> {
-    store.clear_replay_reset_tables()
+fn wipe_derived_state(db: &Db) -> Result<usize, String> {
+    clear_replay_reset_tables(db)
 }
 
 /// Compute the fact admission order for the requested replay order.
-fn ordered_fact_ids(store: &Store, order: ReplayOrder) -> Result<Vec<FactId>, String> {
+fn ordered_fact_ids(db: &Db, order: ReplayOrder) -> Result<Vec<FactId>, String> {
     // Canonical admission order: received_at then fact id, matching the pending
     // projection batch ordering used in normal operation.
     let sql = "SELECT f.id
                FROM facts f
                JOIN local_fact_admissions m ON m.fact_id = f.id
                ORDER BY m.received_at, f.id";
-    let mut stmt = store
+    let mut stmt = db
         .conn()
         .prepare(sql)
         .map_err(|err| format!("load canonical fact order: {err}"))?;
@@ -414,8 +303,8 @@ fn scramble_key(seed: u64, fact_id: &FactId) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
-fn fact_id_set(store: &Store) -> Result<BTreeSet<FactId>, String> {
-    let mut stmt = store
+fn fact_id_set(db: &Db) -> Result<BTreeSet<FactId>, String> {
+    let mut stmt = db
         .conn()
         .prepare("SELECT id FROM facts")
         .map_err(|err| format!("load fact ids: {err}"))?;
@@ -437,19 +326,18 @@ fn fact_id_from_bytes(bytes: Vec<u8>) -> Result<FactId, String> {
 }
 
 /// Total materialized read-model / sync / connection rows after replay.
-fn materialized_row_count(store: &Store) -> Result<usize, String> {
+fn materialized_row_count(db: &Db) -> Result<usize, String> {
     let mut total = 0;
-    for table in store.replay_summary_tables() {
+    for table in db.replay_summary_tables() {
         if RUNTIME_INDEX_TABLES.contains(table) {
             continue;
         }
-        total += table_count(store, *table)?;
+        total += table_count(db, *table)?;
     }
     Ok(total)
 }
 
-fn table_count(store: &Store, table: TableName) -> Result<usize, String> {
-    store
-        .table_row_count(table)
+fn table_count(db: &Db, table: TableName) -> Result<usize, String> {
+    db.table_row_count(table)
         .map_err(|err| format!("count {}: {err}", table.as_str()))
 }

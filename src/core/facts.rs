@@ -1,7 +1,7 @@
 //! Protocol-neutral fact identity and visibility scope.
 //!
 //! Facts are the immutable inputs to the runtime. Core gives every byte string
-//! a content id and records how this store admitted it; projection later turns
+//! a content id and records how this database admitted it; projection later turns
 //! that byte string into protocol rows, context, time wakes, and follow-up
 //! intents. This file deliberately stops before any protocol-specific meaning:
 //! a fact tag, signature, message body, key wrap, or sync frame is interpreted
@@ -9,11 +9,11 @@
 //!
 //! The id is the BLAKE3 hash of the bytes, so changing scope or timestamp does
 //! not change content identity. Scope and timestamp are local admission
-//! metadata. They describe how this store may expose the bytes and how pending
+//! metadata. They describe how this database may expose the bytes and how pending
 //! projection should be ordered; they are not part of the protocol payload.
 //!
 //! Scope is deliberately small. `Global` can be synced, `Local` is private to
-//! the store, and `Scoped` gives a protocol-defined namespace plus id for data
+//! the database, and `Scoped` gives a protocol-defined namespace plus id for data
 //! that should only move inside that boundary. If a new kind of visibility is
 //! needed, change this file and the storage codecs together; do not smuggle it
 //! into protocol payload bytes.
@@ -51,8 +51,8 @@ impl ScopeKind {
 /// Local visibility attached to fact bytes at admission time.
 ///
 /// Scope is not part of the hash. The same bytes admitted twice with different
-/// scopes still identify the same fact; `store` keeps the first local
-/// admission record that made those bytes visible in this store.
+/// scopes still identify the same fact; `db` keeps the first local
+/// admission record that made those bytes visible in this database.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FactScope {
     Global,

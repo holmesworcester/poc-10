@@ -6,8 +6,8 @@
 //! a file is valid or deleted; those invariants belong to file projection and
 //! file-deletion projection.
 
+use crate::core::db::Db;
 use crate::core::facts::FactId;
-use crate::core::store::Store;
 use rusqlite::params;
 
 use super::fact::{AuthorId, RootHash, WorkspaceId};
@@ -27,10 +27,7 @@ pub struct ContentFileRow {
     pub sealed_metadata: Vec<u8>,
 }
 
-pub fn content_file_rows(
-    store: &Store,
-    workspace_id: FactId,
-) -> Result<Vec<ContentFileRow>, String> {
+pub fn content_file_rows(store: &Db, workspace_id: FactId) -> Result<Vec<ContentFileRow>, String> {
     let mut stmt = store
         .conn()
         .prepare(

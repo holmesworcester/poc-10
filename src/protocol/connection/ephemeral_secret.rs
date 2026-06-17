@@ -17,8 +17,8 @@ pub mod fact;
 pub mod project;
 
 use crate::core::crypto::{X25519PrivateKey, X25519PublicKey};
+use crate::core::db::{Db, TableInsert, TableName, TypedTableSchema, Value};
 use crate::core::facts::FactId;
-use crate::core::store::{Store, TableInsert, TableName, TypedTableSchema, Value};
 use rusqlite::{params, OptionalExtension, Row};
 
 use fact::EndpointId;
@@ -92,7 +92,7 @@ pub fn decode_connection_ephemeral_secret_row(
 }
 
 pub fn connection_ephemeral_secret_by_id(
-    store: &Store,
+    store: &Db,
     secret_id: FactId,
 ) -> Result<Option<ConnectionEphemeralSecretRow>, String> {
     store
@@ -114,7 +114,7 @@ pub fn connection_ephemeral_secret_by_id(
 }
 
 pub fn connection_ephemeral_secret_rows(
-    store: &Store,
+    store: &Db,
 ) -> Result<Vec<ConnectionEphemeralSecretRow>, String> {
     let mut stmt = store
         .conn()
@@ -131,7 +131,7 @@ pub fn connection_ephemeral_secret_rows(
         .map_err(|err| format!("load ephemeral secret rows: {err}"))?;
     let rows = stmt
         .query_map(
-            params![crate::core::store::DEFAULT_QUERY_LIMIT as i64],
+            params![crate::core::db::DEFAULT_QUERY_LIMIT as i64],
             decode_connection_ephemeral_secret_row,
         )
         .map_err(|err| format!("load ephemeral secret rows: {err}"))?;

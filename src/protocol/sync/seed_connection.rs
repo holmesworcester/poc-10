@@ -7,12 +7,12 @@
 
 use crate::core::effects::RuntimeEffects;
 use crate::core::{
+    db::Db,
     facts::{Fact, FactId},
     intents::{
         HandlerContext, HandlerError, HandlerFactId, HandlerResult, Intent, IntentHandler,
         IntentKind,
     },
-    store::Store,
 };
 use crate::protocol::connection::send_facts_on_connection::{
     send_facts_on_connection_intent, SendFactsOnConnection,
@@ -84,7 +84,7 @@ impl IntentHandler for SeedConnectionSyncHandler {
         if context.is_replay() {
             return Ok(RuntimeEffects::new());
         }
-        let store = context.store()?;
+        let store = context.db()?;
         let Some(_) =
             connection::connection::queries::connection_by_id(store, &input.connection_id)
                 .map_err(|err| {
@@ -97,13 +97,13 @@ impl IntentHandler for SeedConnectionSyncHandler {
     }
 }
 
-pub fn advertise_connection_shareable_facts(store: &Store, connection_id: FactId) -> HandlerResult {
+pub fn advertise_connection_shareable_facts(store: &Db, connection_id: FactId) -> HandlerResult {
     append_connection_shareable_facts(RuntimeEffects::new(), store, connection_id)
 }
 
 pub fn append_connection_shareable_facts(
     output: RuntimeEffects,
-    store: &Store,
+    store: &Db,
     connection_id: FactId,
 ) -> HandlerResult {
     let range = sync::local_setting::active_range(store)?;
@@ -121,12 +121,12 @@ pub fn append_connection_shareable_facts(
         })))
 }
 
-pub fn advertise_indexed_fact_to_connections(store: &Store, fact: &Fact) -> HandlerResult {
+pub fn advertise_indexed_fact_to_connections(store: &Db, fact: &Fact) -> HandlerResult {
     advertise_indexed_fact_to_connections_except(store, fact, &BTreeSet::new())
 }
 
 pub fn advertise_indexed_fact_to_connections_except(
-    store: &Store,
+    store: &Db,
     fact: &Fact,
     excluded_connection_ids: &BTreeSet<FactId>,
 ) -> HandlerResult {
@@ -142,7 +142,7 @@ pub fn advertise_indexed_fact_to_connections_except(
 
 fn append_live_tail_send(
     output: RuntimeEffects,
-    store: &Store,
+    store: &Db,
     connection_id: FactId,
     fact: &Fact,
 ) -> HandlerResult {
@@ -167,11 +167,11 @@ fn append_live_tail_send(
 mod tests {
     use super::*;
     use crate::core::crypto;
+    use crate::core::db::Db;
     use crate::core::facts::{FactScope, ScopeKind};
     use crate::core::intents::RowMutation;
     use crate::core::project_fact::{ProjectionContext, Projector};
     use crate::core::schema::CORE_SCHEMA_SOURCE;
-    use crate::core::store::Store;
     use crate::protocol::auth::endpoint::{self as endpoint_rows, fact::EndpointFact};
     use crate::protocol::auth::endpoint_shared::{
         self as endpoint_shared_rows,
@@ -193,9 +193,8 @@ mod tests {
 
     #[test]
     fn seed_connection_sync_handler_depends_on_connection_row_not_response_fact() {
-        let store =
-            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
-                .expect("store");
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+            .expect("store");
         let connection_id = [8; 32];
         let row = connection::connection::connection_row(
             connection::connection::ConnectionRowFields::without_addresses(
@@ -217,7 +216,7 @@ mod tests {
 
         assert!(handler.input_fact_ids(&intent).expect("inputs").is_empty());
         let output = handler
-            .handle(&intent, &HandlerContext::new().with_store(&store))
+            .handle(&intent, &HandlerContext::new().with_db(&store))
             .expect("handle seed");
 
         assert_eq!(output.facts.len(), 1);
@@ -226,15 +225,14 @@ mod tests {
 
     #[test]
     fn seed_connection_sync_handler_waits_until_connection_row_exists() {
-        let store =
-            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
-                .expect("store");
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+            .expect("store");
         let intent = seed_connection_sync_intent(SeedConnectionSync {
             connection_id: [8; 32],
         });
 
         let output = SeedConnectionSyncHandler::new()
-            .handle(&intent, &HandlerContext::new().with_store(&store))
+            .handle(&intent, &HandlerContext::new().with_db(&store))
             .expect("handle seed without row");
 
         assert!(output.facts.is_empty());
@@ -243,9 +241,8 @@ mod tests {
 
     #[test]
     fn advertise_connection_shareable_facts_emits_root_compare_and_send_intent() {
-        let store =
-            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
-                .expect("store");
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+            .expect("store");
         let workspace_id = [9; 32];
         let connection_id = [8; 32];
         let fact = Fact::new(
@@ -294,9 +291,8 @@ mod tests {
 
     #[test]
     fn advertise_connection_shareable_facts_uses_local_sync_range_setting() {
-        let store =
-            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
-                .expect("store");
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+            .expect("store");
         let connection_id = [8; 32];
         let range = sync::compare::fact::TimestampRange { start: 10, end: 20 };
         let row = connection::connection::connection_row(
@@ -328,9 +324,8 @@ mod tests {
 
     #[test]
     fn live_tail_send_expands_projector_context_for_trigger_fact() {
-        let store =
-            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
-                .expect("store");
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+            .expect("store");
         let workspace_id = [9; 32];
         let connection_id = [8; 32];
         let local_secret = [11; 32];
@@ -341,8 +336,8 @@ mod tests {
 
         store
             .write_transaction(|tx| {
-                crate::core::store::insert_fact_and_pending_in_tx(tx, &context_fact)?;
-                crate::core::store::insert_fact_and_pending_in_tx(tx, &owner_fact)?;
+                crate::core::fact_db::insert_fact_and_pending_in_tx(tx, &context_fact)?;
+                crate::core::fact_db::insert_fact_and_pending_in_tx(tx, &owner_fact)?;
                 Ok(())
             })
             .expect("persist facts");
@@ -427,7 +422,7 @@ mod tests {
         }
     }
 
-    fn record_share(store: &Store, workspace_id: FactId, fact: &Fact, context_have: Vec<FactId>) {
+    fn record_share(store: &Db, workspace_id: FactId, fact: &Fact, context_have: Vec<FactId>) {
         shared_fact::record_sync_contribution(
             store,
             &ShareFactWithSync {
@@ -443,7 +438,7 @@ mod tests {
     }
 
     fn project_sync_range_setting(
-        store: &Store,
+        store: &Db,
         effective_at_ms: u64,
         range: sync::compare::fact::TimestampRange,
     ) {

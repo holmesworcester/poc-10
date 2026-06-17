@@ -1,7 +1,7 @@
 //! Process lifecycle for a long-running protocol `start` command.
 //!
 //! Core owns only the reusable mechanics: parse daemon flags, hold the
-//! per-store lock, bind the TCP listener, publish the readiness line, react to
+//! per-database lock, bind the TCP listener, publish the readiness line, react to
 //! stop/reset, and run a bounded tick from the selected protocol's declarative
 //! daemon description. The tick is protocol-agnostic: fire recurring intents,
 //! accept network bytes, commit protocol-classified incoming effects, process
@@ -25,6 +25,7 @@
 //! directly.
 
 use crate::core::cli::{CliArgs, CliOutput};
+use crate::core::db::Db;
 use crate::core::effects::RuntimeEffects;
 use crate::core::handle_intent::{
     HandlerRoute, RecurringIntentBuilder, RecurringIntentContext, WorkStatus,
@@ -32,7 +33,6 @@ use crate::core::handle_intent::{
 use crate::core::network;
 use crate::core::project_fact::Timeline;
 use crate::core::runtime::Runtime;
-use crate::core::store::Store;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::net::SocketAddr;
@@ -96,7 +96,7 @@ pub struct DaemonTimeWake {
     /// Timeline namespace to process.
     pub timeline: fn() -> Timeline,
     /// Current inclusive high-water mark for that timeline.
-    pub end_inclusive: fn(&Store) -> Result<Option<u64>, String>,
+    pub end_inclusive: fn(&Db) -> Result<Option<u64>, String>,
 }
 
 /// Run one bounded daemon tick.
@@ -186,7 +186,7 @@ fn drain_time_wakes(
         if remaining == 0 {
             break;
         }
-        let Some(end_inclusive) = (wake.end_inclusive)(runtime.store())? else {
+        let Some(end_inclusive) = (wake.end_inclusive)(runtime.db())? else {
             continue;
         };
         let admitted =
@@ -198,7 +198,7 @@ fn drain_time_wakes(
 }
 
 fn drain_outgoing_network(runtime: &mut Runtime, work_limit: usize) -> Result<WorkStatus, String> {
-    let report = network::pump_outgoing(runtime.store(), work_limit, work_limit)?;
+    let report = network::pump_outgoing(runtime.db(), work_limit, work_limit)?;
     Ok(WorkStatus::progressed(report.sent_frames > 0))
 }
 
@@ -255,7 +255,7 @@ impl RecurringScheduler {
 
     /// Fire every schedule whose next-fire time has arrived.
     ///
-    /// Each due schedule builds its current intent from store state and queues it
+    /// Each due schedule builds its current intent from database state and queues it
     /// as live local work for the same tick's drain to dispatch. The builder may
     /// return `None` to skip a tick. Returns the number of intents queued.
     pub fn fire_due(
@@ -270,7 +270,7 @@ impl RecurringScheduler {
                 continue;
             }
             let builder_context = RecurringIntentContext { now_ms, local_addr };
-            if let Some(intent) = (schedule.build_intent)(runtime.store(), builder_context)? {
+            if let Some(intent) = (schedule.build_intent)(runtime.db(), builder_context)? {
                 if intent.kind.as_str() != schedule.kind {
                     return Err(format!(
                         "recurring builder for {} produced intent kind {}",
@@ -766,7 +766,7 @@ mod tests {
     }
 
     fn recurring_builder(
-        _store: &Store,
+        _store: &Db,
         context: RecurringIntentContext,
     ) -> Result<Option<Intent>, String> {
         assert!(
@@ -901,7 +901,7 @@ mod tests {
             network::listen("127.0.0.1:0".parse().expect("listen addr")).expect("daemon listener");
         let mut runtime = Runtime::open_memory(&TEST_RUNTIME).expect("runtime");
         network::queue_outgoing(
-            runtime.store(),
+            runtime.db(),
             NetworkTarget::new(peer_addr),
             OutgoingFrame {
                 bytes: b"tick queued frame".to_vec(),
@@ -925,7 +925,7 @@ mod tests {
         assert!(status.progressed);
         assert_eq!(reader.join().expect("reader thread"), b"tick queued frame");
         assert!(network::claim_outgoing_for_target(
-            runtime.store(),
+            runtime.db(),
             NetworkTarget::new(peer_addr),
             16
         )

@@ -5,9 +5,9 @@
 //! that the stored coordinate key matches it. They never write, construct facts,
 //! project, or dispatch intents.
 
+use crate::core::db::{Db, DEFAULT_QUERY_LIMIT};
 use crate::core::facts::FactId;
 use crate::core::runtime::Runtime;
-use crate::core::store::{Store, DEFAULT_QUERY_LIMIT};
 use crate::protocol::content;
 use rusqlite::{params, OptionalExtension, Row};
 use std::collections::BTreeSet;
@@ -133,7 +133,7 @@ fn latest_local_recipient_key(
     workspace_id: FactId,
 ) -> Result<Option<FactId>, String> {
     runtime
-        .store()
+        .db()
         .conn()
         .query_row(
             "SELECT recipient_key_id
@@ -160,7 +160,7 @@ pub fn lookup_key_wrap(runtime: &Runtime, query: KeyWrapQuery) -> Result<KeyWrap
         return Err("recipient key is missing or superseded".to_string());
     }
     let row = runtime
-        .store()
+        .db()
         .conn()
         .query_row(
             "SELECT workspace_id,
@@ -210,7 +210,7 @@ pub fn key_access(
     now_ms: Option<u64>,
 ) -> Result<KeyAccessStatus, String> {
     let access = local_key_secret_frontier_exists(
-        runtime.store(),
+        runtime.db(),
         query.workspace_id,
         query.removal_frontier_id,
     )? && !workspace_retired_from_access(runtime, query.workspace_id, now_ms)?;
@@ -223,7 +223,7 @@ pub fn key_access(
 
 pub fn local_key_secret_count(runtime: &Runtime) -> usize {
     runtime
-        .store()
+        .db()
         .conn()
         .query_row("SELECT COUNT(*) FROM local_key_secret_rows", [], |row| {
             row.get::<_, i64>(0).map(|count| count as usize)
@@ -232,7 +232,7 @@ pub fn local_key_secret_count(runtime: &Runtime) -> usize {
 }
 
 fn local_key_secret_frontier_exists(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
     frontier_id: FactId,
 ) -> Result<bool, String> {
@@ -251,7 +251,7 @@ fn local_key_secret_frontier_exists(
         .map_err(|err| format!("load local key secret access row: {err}"))
 }
 
-fn local_key_secret_frontiers(store: &Store, workspace_id: FactId) -> Result<Vec<FactId>, String> {
+fn local_key_secret_frontiers(store: &Db, workspace_id: FactId) -> Result<Vec<FactId>, String> {
     let mut stmt = store
         .conn()
         .prepare(
@@ -273,7 +273,7 @@ fn local_key_secret_frontiers(store: &Store, workspace_id: FactId) -> Result<Vec
 
 pub fn key_wrap_count(runtime: &Runtime) -> Result<usize, String> {
     runtime
-        .store()
+        .db()
         .conn()
         .query_row("SELECT COUNT(*) FROM key_wrap_rows", [], |row| {
             row.get::<_, i64>(0).map(|count| count as usize)
@@ -283,7 +283,7 @@ pub fn key_wrap_count(runtime: &Runtime) -> Result<usize, String> {
 
 fn workspace_key_wrap_count(runtime: &Runtime, workspace_id: FactId) -> Result<usize, String> {
     runtime
-        .store()
+        .db()
         .conn()
         .query_row(
             "SELECT COUNT(*)
@@ -299,7 +299,7 @@ pub fn key_status_report(
     runtime: &Runtime,
     workspace_id: FactId,
 ) -> Result<KeyStatusReport, String> {
-    let store = runtime.store();
+    let store = runtime.db();
     let leaves = history_leaf_rows(store, workspace_id)?;
     let message_tombstones =
         content::message::queries::message_tombstone_count(store, workspace_id)?;
@@ -343,7 +343,7 @@ pub fn key_status_report(
     })
 }
 
-fn recipient_key_count(store: &Store, workspace_id: FactId) -> Result<usize, String> {
+fn recipient_key_count(store: &Db, workspace_id: FactId) -> Result<usize, String> {
     store
         .conn()
         .query_row(
@@ -356,7 +356,7 @@ fn recipient_key_count(store: &Store, workspace_id: FactId) -> Result<usize, Str
         .map_err(|err| format!("count recipient keys: {err}"))
 }
 
-fn local_recipient_key_count(store: &Store, workspace_id: FactId) -> Result<usize, String> {
+fn local_recipient_key_count(store: &Db, workspace_id: FactId) -> Result<usize, String> {
     store
         .conn()
         .query_row(
@@ -369,7 +369,7 @@ fn local_recipient_key_count(store: &Store, workspace_id: FactId) -> Result<usiz
         .map_err(|err| format!("count local recipient keys: {err}"))
 }
 
-fn local_history_node_secret_count(store: &Store, workspace_id: FactId) -> Result<usize, String> {
+fn local_history_node_secret_count(store: &Db, workspace_id: FactId) -> Result<usize, String> {
     store
         .conn()
         .query_row(
@@ -382,10 +382,7 @@ fn local_history_node_secret_count(store: &Store, workspace_id: FactId) -> Resul
         .map_err(|err| format!("count local history node secrets: {err}"))
 }
 
-fn local_history_node_tombstone_count(
-    store: &Store,
-    workspace_id: FactId,
-) -> Result<usize, String> {
+fn local_history_node_tombstone_count(store: &Db, workspace_id: FactId) -> Result<usize, String> {
     store
         .conn()
         .query_row(
@@ -399,7 +396,7 @@ fn local_history_node_tombstone_count(
         .map_err(|err| format!("count local history node tombstones: {err}"))
 }
 
-fn removal_frontier_ids(store: &Store, workspace_id: FactId) -> Result<Vec<FactId>, String> {
+fn removal_frontier_ids(store: &Db, workspace_id: FactId) -> Result<Vec<FactId>, String> {
     let mut stmt = store
         .conn()
         .prepare(
@@ -424,11 +421,11 @@ fn workspace_retired_from_access(
     workspace_id: FactId,
     now_ms: Option<u64>,
 ) -> Result<bool, String> {
-    if content::message::queries::message_tombstone_count(runtime.store(), workspace_id)? > 0 {
+    if content::message::queries::message_tombstone_count(runtime.db(), workspace_id)? > 0 {
         return Ok(true);
     }
     let live_messages =
-        content::message::queries::content_message_rows(runtime.store(), workspace_id)?;
+        content::message::queries::content_message_rows(runtime.db(), workspace_id)?;
     let horizon_floor = now_ms
         .map(|ms| (ms / 60_000).saturating_sub(30 * 24 * 60))
         .unwrap_or(0);
@@ -442,7 +439,7 @@ fn workspace_retired_from_access(
     Ok(false)
 }
 
-fn history_leaf_rows(store: &Store, workspace_id: FactId) -> Result<Vec<HistoryLeafRow>, String> {
+fn history_leaf_rows(store: &Db, workspace_id: FactId) -> Result<Vec<HistoryLeafRow>, String> {
     let messages = content::message::queries::content_message_rows(store, workspace_id)?;
     let live_message_ids = messages
         .iter()
@@ -491,7 +488,7 @@ fn recipient_key_is_superseded(
     recipient_key_id: FactId,
 ) -> Result<bool, String> {
     let target = runtime
-        .store()
+        .db()
         .conn()
         .query_row(
             "SELECT endpoint_id
@@ -508,7 +505,7 @@ fn recipient_key_is_superseded(
         return Ok(false);
     };
     runtime
-        .store()
+        .db()
         .conn()
         .query_row(
             "SELECT 1
@@ -529,7 +526,7 @@ fn recipient_key_is_superseded(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::store::Store;
+    use crate::core::db::Db;
     use crate::protocol::auth::key_wrap::fact::WrappedSecretKind;
     use crate::protocol::auth::key_wrap::key_wrap_insert;
     use crate::protocol::registry::FACTS_SCHEMA_SOURCE;
@@ -560,7 +557,7 @@ mod tests {
             signer_public_key: [11; 32],
             wrap,
         };
-        let store = Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE]).expect("store");
+        let store = Db::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE]).expect("store");
         let insert = key_wrap_insert(row.clone()).expect("insert");
         store
             .write_transaction(|tx| tx.insert_values_in_tx(&insert).map(|_| ()))

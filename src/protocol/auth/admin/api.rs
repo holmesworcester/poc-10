@@ -8,8 +8,8 @@
 
 use crate::core::command::AuthoredFacts;
 use crate::core::crypto::Ed25519PrivateKey;
+use crate::core::db::Db;
 use crate::core::facts::{Fact, FactId};
-use crate::core::store::Store;
 use crate::protocol::auth;
 
 use super::author;
@@ -29,7 +29,7 @@ pub struct GrantAdminReceipt {
 }
 
 pub fn grant_admin(
-    store: &Store,
+    store: &Db,
     input: GrantAdmin,
 ) -> Result<AuthoredFacts<GrantAdminReceipt>, String> {
     let membership = auth::workspace::queries::local_membership(store, input.workspace_id)?

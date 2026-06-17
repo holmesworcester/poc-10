@@ -4,12 +4,12 @@
 //! assertion is about core behavior: projectors own replay-mode emissions, core
 //! passes replay mode to handlers, and handlers own replay-time no-ops.
 
+use topo::core::db::SchemaSource;
 use topo::core::effects::RuntimeEffects;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{HandlerContext, HandlerResult, Intent, IntentHandler, IntentKind};
 use topo::core::project_fact::{ProjectionContext, ProjectionOutput, Projector};
 use topo::core::runtime::{HandlerRoute, Runtime, RuntimeDescription};
-use topo::core::store::SchemaSource;
 
 const REPLAY_OK: &str = "replay_ok";
 const LIVE_ONLY: &str = "live_only";

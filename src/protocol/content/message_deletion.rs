@@ -15,7 +15,7 @@ pub mod queries;
 
 pub const TYPE_CONTENT_MESSAGE_DELETION: u8 = encode::TYPE_CONTENT_MESSAGE_DELETION;
 
-pub const MESSAGE_DELETION_ROWS: crate::core::store::TableName =
+pub const MESSAGE_DELETION_ROWS: crate::core::db::TableName =
     crate::protocol::registry::read_models::MESSAGE_DELETION_ROWS;
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::ContentMessageDeletionFact, String> {

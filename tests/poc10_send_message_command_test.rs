@@ -1,7 +1,7 @@
 //! Integration tests for the `send_message` command.
 //!
 //! The tests build the projected local identity/key state a real command sees,
-//! drive the command directly with `Store` plus a fixed clock, and assert: (1)
+//! drive the command directly with `Db` plus a fixed clock, and assert: (1)
 //! the happy path produces a message fact plus signature evidence and a
 //! receipt, (2) blank or empty text is rejected, (3) the produced fact is a
 //! `content_message` fact whose ciphertext decrypts back to the original
@@ -11,8 +11,8 @@ use std::cell::Cell;
 
 use topo::core::command::{CommandClock, WorkspaceId};
 use topo::core::crypto;
+use topo::core::db::Db;
 use topo::core::runtime::Runtime;
-use topo::core::store::Store;
 use topo::protocol::app::MATCH_RUNTIME;
 use topo::protocol::auth::key_wrap::api::{create_key_frontier, CreateKeyFrontier};
 use topo::protocol::auth::workspace::api::{create_workspace_with_identity, BootstrapIdentity};
@@ -51,15 +51,15 @@ fn drain_runtime_work_for_test(runtime: &mut Runtime, max_rounds: usize, limit: 
     panic!("runtime work did not become idle within {max_rounds} rounds");
 }
 
-fn open_store() -> Store {
-    Store::open_memory().expect("open memory store")
+fn open_store() -> Db {
+    Db::open_memory().expect("open memory store")
 }
 
 fn runtime_with_workspace_and_key() -> (Runtime, WorkspaceId) {
     let mut runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
     let workspace_clock = FixedClock::new(1_000);
     let workspace = create_workspace_with_identity(
-        runtime.store(),
+        runtime.db(),
         &workspace_clock,
         "Research",
         BootstrapIdentity {
@@ -75,7 +75,7 @@ fn runtime_with_workspace_and_key() -> (Runtime, WorkspaceId) {
         .expect("submit workspace");
     drain_runtime_work_for_test(&mut runtime, 8, 512);
     let frontier = create_key_frontier(
-        runtime.store(),
+        runtime.db(),
         CreateKeyFrontier {
             created_at_ms: 2_000,
             workspace_id,
@@ -94,7 +94,7 @@ fn send_message_happy_path_emits_message_and_signature_facts() {
     let (runtime, workspace_id) = runtime_with_workspace_and_key();
     let clock = FixedClock::new(60_000);
 
-    let output = send_message(runtime.store(), &clock, workspace_id, "hello, target tree")
+    let output = send_message(runtime.db(), &clock, workspace_id, "hello, target tree")
         .expect("happy path send_message");
 
     assert_eq!(output.receipt.workspace_id, workspace_id);
@@ -134,7 +134,7 @@ fn send_message_fact_round_trips_through_decode_content_message() {
     let clock = FixedClock::new(120_000);
 
     let text = "round-trip me through decode_fact";
-    let output = send_message(runtime.store(), &clock, workspace_id, text).expect("send_message");
+    let output = send_message(runtime.db(), &clock, workspace_id, text).expect("send_message");
 
     assert_eq!(output.facts.len(), 2, "message plus signature proof");
     let message = decode_fact(&output.facts[0].bytes).expect("decode content message");
@@ -144,7 +144,7 @@ fn send_message_fact_round_trips_through_decode_content_message() {
     assert_eq!(signature.target_fact_id, output.facts[0].id);
 
     // Recover the plaintext using the same workspace key the command queried.
-    let encryption = local_encryption_capability(runtime.store(), workspace_id)
+    let encryption = local_encryption_capability(runtime.db(), workspace_id)
         .expect("store encryption capability");
     let plaintext = crypto::xchacha20poly1305_decrypt(
         &encryption.key_secret,

@@ -1,11 +1,11 @@
 //! Behavioural tests for the target `create_connection` handler.
 
 use topo::core::crypto::{self, ED25519_SIGNATURE_BYTES};
+use topo::core::db::Db;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{HandlerContext, IntentHandler};
 use topo::core::network;
 use topo::core::schema::CORE_SCHEMA_SOURCE;
-use topo::core::store::Store;
 use topo::protocol::auth::endpoint as endpoint_rows;
 use topo::protocol::auth::endpoint::fact::EndpointFact;
 use topo::protocol::auth::invite_secret::encode as invite_layout;
@@ -45,7 +45,7 @@ fn create_handler_emits_responder_secret_and_sealed_connection() {
                 scenario.invite_fact.clone(),
                 scenario.receive_fact.clone(),
             ])
-            .with_store(&store),
+            .with_db(&store),
         )
         .expect("handler produces connection fact");
 
@@ -116,7 +116,7 @@ fn handler_rejects_request_addressed_to_a_different_endpoint() {
                 scenario.invite_fact.clone(),
                 scenario.receive_fact.clone(),
             ])
-            .with_store(&store),
+            .with_db(&store),
         )
         .expect_err("handler rejects mismatched request");
     assert!(
@@ -231,8 +231,8 @@ fn synthesize_scenario(opts: SynthOpts) -> Scenario {
     }
 }
 
-fn test_store() -> Store {
-    Store::open_memory_with_schema_sources(&[
+fn test_store() -> Db {
+    Db::open_memory_with_schema_sources(&[
         CORE_SCHEMA_SOURCE,
         network::SCHEMA_SOURCE,
         FACTS_SCHEMA_SOURCE,

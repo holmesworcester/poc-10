@@ -1,8 +1,10 @@
 use std::collections::BTreeSet;
 
 use rusqlite::{params, Connection};
+use topo::core::db::{Db, ReplayTables, SchemaSource, TableInsert, TableName, Value};
+use topo::core::replay::clear_replay_reset_tables;
+use topo::core::replay_check::replay_summary_table_hashes;
 use topo::core::schema::CORE_SCHEMA_SOURCE;
-use topo::core::store::{ReplayTables, SchemaSource, Store, TableInsert, TableName, Value};
 use topo::protocol::content::{file, reaction};
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 
@@ -62,10 +64,10 @@ fn sqlite_table_names(path: &std::path::Path) -> BTreeSet<String> {
 #[test]
 fn schema_sources_execute_declared_ddl() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let path = tmp.path().join("schema-store.db");
+    let path = tmp.path().join("schema-db.db");
     let sources = checked_schema_sources();
 
-    Store::open_disk_with_schema_sources(&path, &sources).expect("open store");
+    Db::open_disk_with_schema_sources(&path, &sources).expect("open db");
     let actual = sqlite_table_names(&path);
     for expected in [
         "facts",
@@ -79,7 +81,7 @@ fn schema_sources_execute_declared_ddl() {
         assert!(actual.contains(expected), "missing schema table {expected}");
     }
 
-    Store::open_disk_with_schema_sources(&path, &sources).expect("reopen executes idempotent DDL");
+    Db::open_disk_with_schema_sources(&path, &sources).expect("reopen executes idempotent DDL");
 }
 
 #[test]
@@ -88,8 +90,8 @@ fn core_local_intents_table_is_temp() {
     let path = tmp.path().join("schema-memory-store.db");
     let local_intents = TableName::new("local_intents");
 
-    let store = Store::open_disk_with_schema_sources(&path, &[CORE_SCHEMA_SOURCE])
-        .expect("open store with core schema");
+    let store = Db::open_disk_with_schema_sources(&path, &[CORE_SCHEMA_SOURCE])
+        .expect("open db with core schema");
     assert_eq!(
         store
             .table_row_count(local_intents)
@@ -101,8 +103,8 @@ fn core_local_intents_table_is_temp() {
         "local_intents should not be durable"
     );
 
-    let reopened = Store::open_disk_with_schema_sources(&path, &[CORE_SCHEMA_SOURCE])
-        .expect("reopen store with core schema");
+    let reopened = Db::open_disk_with_schema_sources(&path, &[CORE_SCHEMA_SOURCE])
+        .expect("reopen db with core schema");
     assert_eq!(
         reopened
             .table_row_count(local_intents)
@@ -117,8 +119,8 @@ fn core_incoming_facts_table_is_temp() {
     let path = tmp.path().join("incoming-facts-store.db");
     let incoming_facts = TableName::new("incoming_facts");
 
-    let store = Store::open_disk_with_schema_sources(&path, &[CORE_SCHEMA_SOURCE])
-        .expect("open store with core schema");
+    let store = Db::open_disk_with_schema_sources(&path, &[CORE_SCHEMA_SOURCE])
+        .expect("open db with core schema");
     assert_eq!(
         store
             .table_row_count(incoming_facts)
@@ -130,8 +132,8 @@ fn core_incoming_facts_table_is_temp() {
         "incoming_facts should not be durable"
     );
 
-    let reopened = Store::open_disk_with_schema_sources(&path, &[CORE_SCHEMA_SOURCE])
-        .expect("reopen store with core schema");
+    let reopened = Db::open_disk_with_schema_sources(&path, &[CORE_SCHEMA_SOURCE])
+        .expect("reopen db with core schema");
     assert_eq!(
         reopened
             .table_row_count(incoming_facts)
@@ -143,10 +145,9 @@ fn core_incoming_facts_table_is_temp() {
 #[test]
 fn schema_sources_create_typed_tables_and_indexes() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let path = tmp.path().join("typed-schema-store.db");
+    let path = tmp.path().join("typed-schema-db.db");
 
-    Store::open_disk_with_schema_sources(&path, &[TYPED_MESSAGES_SCHEMA])
-        .expect("create typed table");
+    Db::open_disk_with_schema_sources(&path, &[TYPED_MESSAGES_SCHEMA]).expect("create typed table");
     let conn = Connection::open(&path).expect("open sqlite");
     let columns = conn
         .prepare("PRAGMA table_info(typed_messages)")
@@ -174,7 +175,7 @@ fn schema_sources_create_typed_tables_and_indexes() {
         .expect("query typed index");
     assert_eq!(index_count, 1);
 
-    Store::open_disk_with_schema_sources(&path, &[TYPED_MESSAGES_SCHEMA])
+    Db::open_disk_with_schema_sources(&path, &[TYPED_MESSAGES_SCHEMA])
         .expect("reopen keeps explicit DDL idempotent");
 }
 
@@ -182,8 +183,8 @@ fn schema_sources_create_typed_tables_and_indexes() {
 fn content_read_model_rows_materialize_into_typed_tables() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("content-read-models.db");
-    Store::open_disk_with_schema_sources(&path, &[FACTS_SCHEMA_SOURCE])
-        .expect("open content schema store");
+    Db::open_disk_with_schema_sources(&path, &[FACTS_SCHEMA_SOURCE])
+        .expect("open content schema db");
     let conn = Connection::open(&path).expect("open sqlite");
 
     conn.execute(
@@ -352,8 +353,8 @@ fn content_read_model_rows_materialize_into_typed_tables() {
 
 #[test]
 fn replay_lifecycle_reset_preserves_protected_tables() {
-    let store = Store::open_memory_with_schema_sources(&[REPLAY_LIFECYCLE_SCHEMA])
-        .expect("open lifecycle store");
+    let store =
+        Db::open_memory_with_schema_sources(&[REPLAY_LIFECYCLE_SCHEMA]).expect("open lifecycle db");
     store
         .insert_table_values(vec![
             TableInsert {
@@ -376,9 +377,7 @@ fn replay_lifecycle_reset_preserves_protected_tables() {
         .expect("seed lifecycle rows");
 
     assert_eq!(
-        store
-            .clear_replay_reset_tables()
-            .expect("clear replay reset"),
+        clear_replay_reset_tables(&store).expect("clear replay reset"),
         1
     );
     assert_eq!(
@@ -394,9 +393,7 @@ fn replay_lifecycle_reset_preserves_protected_tables() {
         0
     );
 
-    let summaries = store
-        .replay_summary_table_hashes()
-        .expect("hash replay summary tables");
+    let summaries = replay_summary_table_hashes(&store).expect("hash replay summary tables");
     assert_eq!(summaries.len(), 2);
     assert_eq!(
         summaries
@@ -417,9 +414,8 @@ fn replay_lifecycle_reset_preserves_protected_tables() {
 }
 
 #[test]
-fn core_replay_preserves_only_retained_fact_store_and_resets_runtime_tables() {
-    let store =
-        Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open core store");
+fn core_replay_preserves_only_retained_facts_and_resets_runtime_tables() {
+    let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open core db");
     let protected = store
         .replay_protected_tables()
         .iter()
@@ -454,7 +450,7 @@ CREATE TABLE IF NOT EXISTS replay_protected_rows (
         },
     };
 
-    let err = match Store::open_memory_with_schema_sources(&[BAD_SCHEMA]) {
+    let err = match Db::open_memory_with_schema_sources(&[BAD_SCHEMA]) {
         Ok(_) => panic!("overlapping replay lifecycle declarations must reject"),
         Err(err) => err,
     };
@@ -468,8 +464,8 @@ CREATE TABLE IF NOT EXISTS replay_protected_rows (
 #[test]
 fn typed_table_values_keep_idempotent_conflict_checks() {
     const COLUMNS: &[&str] = &["workspace_id", "message_id", "created_at_ms", "deleted"];
-    let store = Store::open_memory_with_schema_sources(&[TYPED_MESSAGES_SCHEMA])
-        .expect("open memory store");
+    let store =
+        Db::open_memory_with_schema_sources(&[TYPED_MESSAGES_SCHEMA]).expect("open memory db");
     let row = TableInsert {
         table: TYPED_MESSAGES,
         columns: COLUMNS,

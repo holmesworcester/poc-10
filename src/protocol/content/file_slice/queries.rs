@@ -7,8 +7,8 @@
 //! already accepted this slice proof. This file gathers those rows without
 //! changing state.
 
+use crate::core::db::Db;
 use crate::core::facts::FactId;
-use crate::core::store::Store;
 use rusqlite::params;
 
 use super::fact::WorkspaceId;
@@ -24,7 +24,7 @@ pub struct ContentFileSliceRow {
 }
 
 pub fn file_slice_rows_for_file(
-    store: &Store,
+    store: &Db,
     workspace_id: WorkspaceId,
     file_id: FactId,
 ) -> Result<Vec<ContentFileSliceRow>, String> {

@@ -53,7 +53,7 @@ in `src/core` or `src/protocol`.
 ## File Ownership
 
 - `src/core/` contains protocol-neutral mechanics only: facts, context,
-  matchers, projection contracts, intents, handler dispatch, store, wire,
+  matchers, projection contracts, intents, handler dispatch, database access, wire,
   crypto, network queues, TCP, command-time authoring, and schema declarations.
 - `src/protocol/<scope>/<fact_family>/` owns one fact family's role files:
   fact shape (`fact.rs`), canonical byte encoding (`encode.rs`), local authoring
@@ -73,7 +73,7 @@ in `src/core` or `src/protocol`.
   forbidden.
 - Shared authored-fact and command-time primitives live in `src/core/command.rs`.
   Concrete authoring functions live in the fact module that owns the emitted
-  fact, receive `Store` and `CommandClock` directly when they need current
+  fact, receive `Db` and `CommandClock` directly when they need current
   projected state, and return `AuthoredFacts` instead of driving runtime work.
 - There is no `mod.rs`. Root manifest files such as `src/core.rs`,
   `src/protocol.rs`, and `src/protocol/<scope>.rs` are declaration-only.
@@ -133,7 +133,7 @@ explicitly archived or the user asks for history.
 - Projectors may use `core::crypto` when encryption or decryption is pure over
   the fact and supplied context. Decrypting a payload with a secret from context
   is materialization, not authentication.
-- Projectors must not query the store, call handlers, call other projectors,
+- Projectors must not query the database, call handlers, call other projectors,
   submit facts, open network sockets, read clocks, mutate process-local state,
   or perform broad scans.
 - A projector that cannot proceed emits a standing context need. A projector
@@ -287,7 +287,7 @@ projection rows directly, run projectors, or become a second command layer.
   integers, tags, and bounded slots.
 - Decoders reject wrong tags, wrong lengths, trailing bytes, non-canonical
   padding, and invalid enum values.
-- Store code is a generic row substrate. It must not learn protocol table
+- Db code is a generic row substrate. It must not learn protocol table
   meaning, sync ranges, connection routes, or context semantics.
 
 ### Wire And Codec Style
@@ -365,12 +365,12 @@ keys already observed before retirement.
 
 ## Commands
 
-- Commands are pure constructors over explicit parameters, `Store` queries, and
+- Commands are pure constructors over explicit parameters, `Db` queries, and
   a `CommandClock`.
 - Commands may query allowed local capabilities such as signer or encryption
   secrets from protocol-owned state. They must not mint capabilities unless the
   owning auth fact module explicitly owns that command.
-- Commands do not write the store, drive runtime workers, dispatch handlers,
+- Commands do not write the database, drive runtime workers, dispatch handlers,
   call projection/intent drains, parse CLI argv, or format user output.
 - Any invariant required for accepting received/shared facts must be enforced by
   layout decoding, projector validation, context matching, or handler

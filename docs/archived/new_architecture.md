@@ -167,7 +167,7 @@ src/
       context.rs
       dispatch.rs
       project_pending_facts.rs
-    store.rs
+    db.rs
     store/
       sql.rs
     wake.rs

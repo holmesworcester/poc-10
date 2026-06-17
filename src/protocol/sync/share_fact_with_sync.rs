@@ -8,11 +8,11 @@
 //! dependency closure from fact bodies.
 
 use crate::core::{
+    fact_db::persisted_fact,
     intents::{
         HandlerContext, HandlerError, HandlerFactId, HandlerFactId as FactId, HandlerResult,
         Intent, IntentHandler, IntentKind,
     },
-    store::persisted_fact,
     wire::{Reader as PayloadReader, WireError as PayloadError, Writer as PayloadWriter},
 };
 use crate::protocol::sync::{seed_connection, shared_fact};
@@ -188,7 +188,7 @@ impl IntentHandler for ShareFactWithSyncHandler {
                             // Context links came from projector-validated offers. A context fact may
                             // already be purged by the time this queued handler runs.
                             for fact_id in &input.context_have {
-                                let Some(fact) = persisted_fact(context.store()?, fact_id)? else {
+                                let Some(fact) = persisted_fact(context.db()?, fact_id)? else {
                                     continue;
                                 };
                                 HandlerContext::with_facts([fact])
@@ -201,7 +201,7 @@ impl IntentHandler for ShareFactWithSyncHandler {
                         "share_record_sync_contribution",
                         || -> Result<bool, HandlerError> {
                             Ok(shared_fact::record_sync_contribution(
-                                context.store()?,
+                                context.db()?,
                                 &input,
                                 Some(owner),
                             )?)
@@ -210,13 +210,13 @@ impl IntentHandler for ShareFactWithSyncHandler {
                     if changed && !context.is_replay() {
                         crate::core::perf_profile::measure_result("share_live_tail", || {
                             let excluded = crate::protocol::connection::fact_receipt::origin_connection_ids_for_fact(
-                                context.store()?,
+                                context.db()?,
                                 input.owner_fact_id,
                             )?
                             .into_iter()
                             .collect::<std::collections::BTreeSet<_>>();
                             seed_connection::advertise_indexed_fact_to_connections_except(
-                                context.store()?,
+                                context.db()?,
                                 owner,
                                 &excluded,
                             )
@@ -230,7 +230,7 @@ impl IntentHandler for ShareFactWithSyncHandler {
                         "share_record_sync_contribution",
                         || -> Result<bool, HandlerError> {
                             Ok(shared_fact::record_sync_contribution(
-                                context.store()?,
+                                context.db()?,
                                 &input,
                                 None,
                             )?)
@@ -247,10 +247,10 @@ impl IntentHandler for ShareFactWithSyncHandler {
 mod tests {
     use super::*;
     use crate::core::crypto;
+    use crate::core::db::Db;
     use crate::core::facts::{Fact, FactScope, ScopeKind};
     use crate::core::intents::{HandlerContext, IntentHandler};
     use crate::core::schema::CORE_SCHEMA_SOURCE;
-    use crate::core::store::Store;
     use crate::protocol::auth::endpoint::{self as endpoint_rows, fact::EndpointFact};
     use crate::protocol::auth::endpoint_shared::{
         self as endpoint_shared_rows,
@@ -261,9 +261,8 @@ mod tests {
 
     #[test]
     fn share_fact_with_sync_suppresses_live_tail_to_origin_connection() {
-        let store =
-            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
-                .expect("store");
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+            .expect("store");
         let workspace_id = [9; 32];
         let local_secret = [11; 32];
         let local_endpoint = crypto::x25519_public_key(&local_secret);
@@ -350,7 +349,7 @@ mod tests {
         let output = ShareFactWithSyncHandler::new()
             .handle(
                 &intent,
-                &HandlerContext::with_facts([owner.clone()]).with_store(&store),
+                &HandlerContext::with_facts([owner.clone()]).with_db(&store),
             )
             .expect("share with sync");
 

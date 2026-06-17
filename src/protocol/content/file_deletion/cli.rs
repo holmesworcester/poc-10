@@ -7,8 +7,8 @@
 //! projection modules.
 
 use crate::core::cli::{decode_hex_32_named, encode_hex_32, CliOutput};
+use crate::core::db::Db;
 use crate::core::facts::FactId;
-use crate::core::store::Store;
 use crate::protocol::content::file::queries::{self, ContentFileRow};
 
 use super::api::DeleteFileReceipt;
@@ -25,7 +25,7 @@ pub fn delete_file_output(receipt: &DeleteFileReceipt) -> CliOutput {
 }
 
 pub fn resolve_file_selector(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
     selector: &str,
 ) -> Result<ContentFileRow, String> {

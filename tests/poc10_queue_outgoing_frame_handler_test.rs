@@ -5,11 +5,11 @@
 use std::net::TcpListener;
 
 use topo::core::crypto;
+use topo::core::db::Db;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{retry_intent_reason, HandlerContext, IntentHandler};
 use topo::core::network;
 use topo::core::schema::CORE_SCHEMA_SOURCE;
-use topo::core::store::Store;
 use topo::protocol::auth::endpoint as endpoint_rows;
 use topo::protocol::auth::endpoint::fact::EndpointFact;
 use topo::protocol::connection::connection as connection_rows;
@@ -42,7 +42,7 @@ fn well_formed_frame_resolves_route_and_queues_outbound_row() {
     let output = handler
         .handle(
             &intent,
-            &HandlerContext::with_facts([connection_fact]).with_store(&store),
+            &HandlerContext::with_facts([connection_fact]).with_db(&store),
         )
         .expect("network send should queue frame");
 
@@ -93,7 +93,7 @@ fn resolved_route_queues_without_opening_tcp_peer() {
     let output = QueueOutgoingFrameHandler::new()
         .handle(
             &intent,
-            &HandlerContext::with_facts([connection_fact]).with_store(&store),
+            &HandlerContext::with_facts([connection_fact]).with_db(&store),
         )
         .expect("queue handler only queues outgoing bytes");
 
@@ -124,7 +124,7 @@ fn missing_route_requests_retry_without_consuming_intent() {
     let err = QueueOutgoingFrameHandler::new()
         .handle(
             &intent,
-            &HandlerContext::with_facts([connection_fact]).with_store(&store),
+            &HandlerContext::with_facts([connection_fact]).with_db(&store),
         )
         .expect_err("missing route should request retry");
 
@@ -143,8 +143,8 @@ fn local_endpoint() -> EndpointFact {
     }
 }
 
-fn test_store() -> Store {
-    Store::open_memory_with_schema_sources(&[
+fn test_store() -> Db {
+    Db::open_memory_with_schema_sources(&[
         CORE_SCHEMA_SOURCE,
         network::SCHEMA_SOURCE,
         FACTS_SCHEMA_SOURCE,
@@ -187,7 +187,7 @@ fn connection_with_return_route(
     (connection_fact, connection)
 }
 
-fn seed_connection_route(store: &Store, connection_id: [u8; 32], connection: &ConnectionFact) {
+fn seed_connection_route(store: &Db, connection_id: [u8; 32], connection: &ConnectionFact) {
     let rows = vec![
         connection_rows::connection_row(connection_rows::ConnectionRowFields {
             connection_id,

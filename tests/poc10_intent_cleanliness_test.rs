@@ -309,7 +309,7 @@ fn target_projectors_stay_pure_context_to_intents() {
         let text = source_text(&path);
         let production = production_text_before_unit_tests(&text);
         for forbidden in [
-            "Store",
+            "Db",
             "table_rows",
             "insert_table_rows",
             "delete_table_rows",
@@ -713,7 +713,7 @@ fn temporary_protocol_context_helpers_do_not_emit_work_or_rows() {
             "ProjectionOutput",
             "Projector",
             "TableRow",
-            "Store",
+            "Db",
             "insert_table_rows",
             "delete_table_rows",
             "write_transaction",
@@ -1113,7 +1113,7 @@ fn target_intent_files_only_encode_intent_payloads() {
     for path in fact_family_files_named(root, "intent.rs") {
         let text = source_text(&path);
         for forbidden in [
-            "Store",
+            "Db",
             "TableRow",
             "TableName",
             "AtomicIntent",
@@ -1445,7 +1445,7 @@ fn target_protocol_registry_owns_protocol_tables_without_runtime_io() {
     let mut offenders = Vec::new();
     for line in meaningful_source_lines(&text) {
         for forbidden in [
-            "Store",
+            "Db",
             "ContextChangePipeline",
             "RuntimeDescription",
             "match_daemon_tick",
@@ -2173,7 +2173,7 @@ fn target_schema_sources_are_explicit_sql_only() {
 #[test]
 fn target_schema_substrate_stays_protocol_neutral() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let path = root.join("src/core/store.rs");
+    let path = root.join("src/core/db.rs");
     let text = source_text(&path);
     let production = production_text_before_unit_tests(&text);
     let mut offenders = Vec::new();
@@ -2228,7 +2228,7 @@ fn target_layout_files_do_not_own_projection_intents_handlers_or_cli() {
             "IntentHandler",
             "HandlerOutput",
             "HandlerContext",
-            "Store",
+            "Db",
             "core::network",
             "std::net",
             "CliArgs",
@@ -2323,7 +2323,7 @@ fn protocol_cli_files_do_not_own_app_runtime_effects() {
         for forbidden in [
             "Runtime::open",
             "Runtime::<",
-            "Store::open",
+            "Db::open",
             "core::cli::run",
             "MATCH_CLI_COMMANDS",
             "dispatch_cli_intents",

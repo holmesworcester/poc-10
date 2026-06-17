@@ -30,7 +30,7 @@ branches.
 Accountable criteria:
 
 1. `pipeline_storage.rs` is gone. Fact persistence lives in
-   `src/core/fact_store.rs`, and it must not contain queue scheduling, context
+   `src/core/fact_db.rs`, and it must not contain queue scheduling, context
    matching, projection commit policy, or intent dispatch policy.
 2. Each pipeline worker owns the SQL for the tables it drains or updates:
    `project_pending_facts.rs` owns fact enqueue, due time wake admission,
@@ -45,7 +45,7 @@ Accountable criteria:
    limited to fact payloads, intent payloads, opaque protocol row values, and
    transitional row encoding that cannot yet be represented by typed schema
    columns.
-5. `Store` stays generic and small enough to justify its public surface. Core
+5. `Db` stays generic and small enough to justify its public surface. Core
    pipeline modules that own typed runtime tables use `store.conn()` and direct
    SQL. Protocol modules still use row-table helpers for opaque read-model
    rows and cannot issue arbitrary writes through core.
@@ -93,7 +93,7 @@ Accountable criteria:
   with dispatch, not in the generic fact/context storage module.
 - Done in this branch: context edge reads, context matching, and scope-key
   handling use declared typed SQLite rows instead of byte-row scans.
-- Done in this branch: `context_store.rs` was removed as a sink. Standing
+- Done in this branch: `context_db.rs` was removed as a sink. Standing
   context row access, matcher assembly, and context wake assembly now live in
   `pipeline/context.rs`; reusable checked insert-select execution lives in
   `core::select`.
@@ -152,7 +152,7 @@ Accountable criteria:
   p8sql schema sources.
 - Done in this branch: the local clock is a typed core table accessed through
   direct SQL, not an opaque `TableRow`.
-- Done in this branch: the generic Store selected-row API is gone. Core
+- Done in this branch: the generic Db selected-row API is gone. Core
   pipeline modules and protocol matchers prepare their own typed SQL instead
   of routing through `ColumnValue`/`SelectedRow` adapters.
 - Done in this branch: `schema_dsl.rs` is a small line-oriented parser for the
@@ -165,10 +165,10 @@ Accountable criteria:
 - Done in this branch: `core::wire` no longer has scalar fixed-layout wrapper
   structs (`U8`, `U16be`, `U32be`, `U64be`, `Bool8`) or unused crypto-size
   aliases. Callers use direct `put_*`/`take_*` helpers for primitive fields.
-- Done in this branch: Store no longer reconstructs typed SQLite tables back
+- Done in this branch: Db no longer reconstructs typed SQLite tables back
   into opaque key/value rows for reads. Protocol read models query typed
   columns directly, and production-dead typed row decoders were removed.
-- Done in this branch: Store no longer writes typed SQLite tables through the
+- Done in this branch: Db no longer writes typed SQLite tables through the
   opaque key/value row adapter. Opaque row helpers are limited to declared row
   tables; typed read-model writes now commit as `PipelineEffects` SQL value
   inserts/deletes against schema columns.
@@ -189,7 +189,7 @@ Accountable criteria:
 - Done in this branch: core pipeline file count was reduced by consolidating
   project-pending-facts/fact-context/admission, dispatch/intent queue, context
   row/codec, and context match/wake modules. `sqlite_names.rs` was also folded
-  into `core::store`.
+  into `core::db`.
 - Done in this branch: the private pipeline SQL interpreter for
   `PipelineEffects` was renamed from `pipeline/effects.rs` to
   `pipeline/commit_effects.rs`, leaving `core/effects.rs` as the public effect
@@ -197,7 +197,7 @@ Accountable criteria:
 - Done in this branch: TCP frame pumping was folded into `core::network`, so
   the opaque network row boundary and socket mechanics live in one file.
 
-## 1. Store All Intents In SQLite Queues
+## 1. Db All Intents In SQLite Queues
 
 Target:
 
@@ -310,13 +310,13 @@ Good candidates:
    `INSERT OR IGNORE ... SELECT` during projection commit.
 
 Done in this branch: core pipeline reads/writes typed runtime tables directly
-with SQL. `Store` now provides connection/transaction ownership plus the
+with SQL. `Db` now provides connection/transaction ownership plus the
 remaining protocol-facing row-table adapter.
 
-Store cleanup note: `Store` is still large because it owns connection lifecycle,
+Db cleanup note: `Db` is still large because it owns connection lifecycle,
 generic row-table operations, typed-table row encoding for protocol read
 models, and schema application/validation. The public Rust `Schema` path has
-been removed, so the next safe split is internal only: keep `Store` as the
+been removed, so the next safe split is internal only: keep `Db` as the
 facade and move typed-table/schema helpers behind narrower private modules
 without changing callers.
 
@@ -412,6 +412,6 @@ Before real parallel workers:
 1. Add queue claim/lease columns.
 2. Claim with transaction-local update/select semantics.
 3. Keep commits idempotent.
-4. Use one `Store` handle per worker with WAL enabled.
+4. Use one `Db` handle per worker with WAL enabled.
 
 For now, target a simpler single-threaded queue scheduler.

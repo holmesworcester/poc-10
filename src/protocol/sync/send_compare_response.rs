@@ -81,7 +81,7 @@ impl IntentHandler for SendSyncCompareResponseHandler {
         let compare =
             crate::protocol::sync::compare::project::decode::decode_fact(&compare_fact.bytes)?;
         let mut output = RuntimeEffects::new();
-        let (plan, expanded_send_fact_ids) = if let Ok(store) = context.store() {
+        let (plan, expanded_send_fact_ids) = if let Ok(store) = context.db() {
             let available_facts =
                 crate::protocol::sync::shared_fact::shareable_facts_for_connection(
                     store,

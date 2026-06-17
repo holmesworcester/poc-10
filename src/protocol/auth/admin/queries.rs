@@ -4,7 +4,7 @@
 //! state directly. They never write, construct facts, project, or dispatch
 //! intents.
 
-use crate::core::store::{Store, DEFAULT_QUERY_LIMIT};
+use crate::core::db::{Db, DEFAULT_QUERY_LIMIT};
 use rusqlite::{params, Row};
 
 use super::fact::{AdminId, AdminPublicKey, UserId, WorkspaceId};
@@ -20,7 +20,7 @@ pub struct AdminRow {
 }
 
 pub fn admin_rows_in_workspace(
-    store: &Store,
+    store: &Db,
     workspace_id: WorkspaceId,
 ) -> Result<Vec<AdminRow>, String> {
     let mut stmt = store

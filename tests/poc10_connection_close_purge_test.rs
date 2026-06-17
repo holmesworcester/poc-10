@@ -144,27 +144,27 @@ fn closing_connection_purges_connection_fact_and_row() {
     drain_projection_for_test(&mut runtime, 8, 64);
 
     assert!(runtime
-        .store()
+        .db()
         .fact_exists(&initiator_ephemeral_id)
         .expect("initiator fact exists"));
     assert!(!runtime
-        .store()
+        .db()
         .fact_exists(&responder_ephemeral_id)
         .expect("responder fact exists"));
     assert!(runtime
-        .store()
+        .db()
         .fact_exists(&connection_id)
         .expect("connection fact exists"));
     assert_eq!(
         runtime
-            .store()
+            .db()
             .table_row_count(CONNECTION_EPHEMERAL_SECRET_ROWS)
             .expect("secret rows"),
         1
     );
     assert_eq!(
         runtime
-            .store()
+            .db()
             .table_row_count(CONNECTION_ROWS)
             .expect("connection rows"),
         1
@@ -178,27 +178,27 @@ fn closing_connection_purges_connection_fact_and_row() {
     drain_runtime_work_for_test(&mut runtime, 16, 64);
 
     assert!(runtime
-        .store()
+        .db()
         .fact_exists(&initiator_ephemeral_id)
         .expect("initiator fact exists after close"));
     assert!(!runtime
-        .store()
+        .db()
         .fact_exists(&responder_ephemeral_id)
         .expect("responder fact exists after close"));
     assert!(!runtime
-        .store()
+        .db()
         .fact_exists(&connection_id)
         .expect("connection fact exists after close"));
     assert_eq!(
         runtime
-            .store()
+            .db()
             .table_row_count(CONNECTION_EPHEMERAL_SECRET_ROWS)
             .expect("secret rows after close"),
         1
     );
     assert_eq!(
         runtime
-            .store()
+            .db()
             .table_row_count(CONNECTION_ROWS)
             .expect("connection rows after close"),
         0
@@ -208,7 +208,7 @@ fn closing_connection_purges_connection_fact_and_row() {
 
     assert!(
         runtime
-            .store()
+            .db()
             .fact_exists(&request_fact.id)
             .expect("request fact exists"),
         "closing the connection must not purge the request history"

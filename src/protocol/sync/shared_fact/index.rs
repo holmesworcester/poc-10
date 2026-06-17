@@ -4,17 +4,15 @@
 //! validated context belongs to that fact's sync leaf. This module turns those
 //! rows into connection-specific fact lists by checking endpoint membership,
 //! connection workspace authorization, and whether the named fact still exists
-//! in the core store.
+//! in the core db.
 //!
 //! Keep sync visibility here. Fact admission belongs to projectors, and
 //! connection framing belongs to `send_facts_on_connection`; callers use this
 //! file to ask what a peer is allowed to learn.
 
+use crate::core::db::{Db, TableInsert, TableName, TypedTableSchema, Value, DEFAULT_QUERY_LIMIT};
+use crate::core::fact_db::persisted_fact;
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::store::persisted_fact;
-use crate::core::store::{
-    Store, TableInsert, TableName, TypedTableSchema, Value, DEFAULT_QUERY_LIMIT,
-};
 use crate::protocol::{
     auth, connection,
     sync::{
@@ -174,7 +172,7 @@ pub struct SyncStatus {
 }
 
 pub fn record_sync_contribution(
-    store: &Store,
+    store: &Db,
     input: &share_fact_with_sync::ShareFactWithSync,
     owner: Option<&Fact>,
 ) -> Result<bool, String> {
@@ -223,7 +221,7 @@ fn validate_sync_owner(
 }
 
 fn upsert_sync_contribution(
-    store: &Store,
+    store: &Db,
     input: &share_fact_with_sync::ShareFactWithSync,
     owner: &Fact,
 ) -> Result<bool, String> {
@@ -314,7 +312,7 @@ fn upsert_sync_contribution(
 }
 
 fn retract_sync_contribution(
-    store: &Store,
+    store: &Db,
     input: &share_fact_with_sync::ShareFactWithSync,
 ) -> Result<bool, String> {
     store
@@ -353,7 +351,7 @@ fn retract_sync_contribution(
 }
 
 fn update_node_path_in_tx(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
     timestamp_ms: u64,
     old_summary: Option<RangeSummary>,
@@ -391,11 +389,11 @@ fn update_node_path_in_tx(
 }
 
 fn delete_context_rows_for_leaf(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
     owner_fact_id: FactId,
 ) -> rusqlite::Result<usize> {
-    store.delete_where_in_tx(&crate::core::store::TableDeleteWhere {
+    store.delete_where_in_tx(&crate::core::db::TableDeleteWhere {
         table: NEGENTROPY_CONTEXT_HAVE_ROWS,
         columns: &["workspace_id", "owner_fact_id"],
         values: vec![
@@ -406,7 +404,7 @@ fn delete_context_rows_for_leaf(
 }
 
 fn negentropy_node_row_for_node(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
     level: u8,
     start_timestamp_ms: u64,
@@ -518,8 +516,8 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use std::thread;
 
-    fn store() -> Store {
-        Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+    fn store() -> Db {
+        Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
             .expect("store")
     }
 
@@ -632,7 +630,7 @@ mod tests {
         let input = upsert(workspace_id, &fact, Vec::new());
         let barrier = Arc::new(Barrier::new(2));
         drop(
-            Store::open_disk_with_schema_sources(&path, &[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+            Db::open_disk_with_schema_sources(&path, &[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
                 .expect("seed store schema"),
         );
 
@@ -643,11 +641,11 @@ mod tests {
                 let input = input.clone();
                 let barrier = Arc::clone(&barrier);
                 thread::spawn(move || {
-                    let store = Store::open_disk_with_schema_sources(
+                    let store = Db::open_disk_with_schema_sources(
                         &path,
                         &[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE],
                     )
-                    .expect("open store");
+                    .expect("open db");
                     barrier.wait();
                     record_sync_contribution(&store, &input, Some(&fact))
                         .expect("record contribution")
@@ -663,8 +661,8 @@ mod tests {
         assert_eq!(changed, 1);
 
         let store =
-            Store::open_disk_with_schema_sources(&path, &[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
-                .expect("reopen store");
+            Db::open_disk_with_schema_sources(&path, &[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("reopen db");
         assert_eq!(negentropy_leaf_rows(&store).expect("leaf rows").len(), 1);
         let root = range_summary_for_workspace(&store, workspace_id, TimestampRange::ROOT)
             .expect("root summary");
@@ -711,8 +709,8 @@ mod tests {
         let owner = fact(workspace_id, 20, 2);
         store
             .write_transaction(|tx| {
-                crate::core::store::insert_fact_and_pending_in_tx(tx, &context)?;
-                crate::core::store::insert_fact_and_pending_in_tx(tx, &owner)?;
+                crate::core::fact_db::insert_fact_and_pending_in_tx(tx, &context)?;
+                crate::core::fact_db::insert_fact_and_pending_in_tx(tx, &owner)?;
                 Ok(())
             })
             .expect("persist facts");
@@ -790,9 +788,9 @@ mod tests {
 
         store
             .write_transaction(|tx| {
-                crate::core::store::insert_fact_and_pending_in_tx(tx, &invite_fact)?;
-                crate::core::store::insert_fact_and_pending_in_tx(tx, &request_fact)?;
-                crate::core::store::insert_fact_and_pending_in_tx(tx, &shareable)?;
+                crate::core::fact_db::insert_fact_and_pending_in_tx(tx, &invite_fact)?;
+                crate::core::fact_db::insert_fact_and_pending_in_tx(tx, &request_fact)?;
+                crate::core::fact_db::insert_fact_and_pending_in_tx(tx, &shareable)?;
                 Ok(())
             })
             .expect("persist facts");
@@ -839,7 +837,7 @@ mod tests {
         );
     }
 
-    fn seed_authorized_connection(store: &Store, workspace_id: FactId) -> FactId {
+    fn seed_authorized_connection(store: &Db, workspace_id: FactId) -> FactId {
         let connection_id = [8; 32];
         let local_secret = [11; 32];
         let local_endpoint = crypto::x25519_public_key(&local_secret);
@@ -890,7 +888,7 @@ mod tests {
     }
 }
 
-pub fn sync_status(store: &Store) -> Result<SyncStatus, String> {
+pub fn sync_status(store: &Db) -> Result<SyncStatus, String> {
     let mut count = 0u64;
     let mut fingerprint = [0u8; 32];
     for row in negentropy_node_rows(store)? {
@@ -908,7 +906,7 @@ pub fn sync_status(store: &Store) -> Result<SyncStatus, String> {
 }
 
 pub fn shareable_facts_for_connection(
-    store: &Store,
+    store: &Db,
     connection_id: FactId,
 ) -> Result<Vec<Fact>, String> {
     let entries = shareable_fact_entries_for_connection(store, connection_id)?;
@@ -922,7 +920,7 @@ pub fn shareable_facts_for_connection(
 }
 
 pub fn range_summary_for_connection(
-    store: &Store,
+    store: &Db,
     connection_id: FactId,
     range: TimestampRange,
 ) -> Result<RangeSummary, String> {
@@ -936,7 +934,7 @@ pub fn range_summary_for_connection(
 }
 
 pub fn range_summary_for_workspace(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
     range: TimestampRange,
 ) -> Result<RangeSummary, String> {
@@ -959,7 +957,7 @@ struct ShareableFactEntry {
 }
 
 fn shareable_fact_entries_for_connection(
-    store: &Store,
+    store: &Db,
     connection_id: FactId,
 ) -> Result<Vec<ShareableFactEntry>, String> {
     let Some(connection) = connection_row_by_id(store, connection_id)? else {
@@ -996,7 +994,7 @@ fn shareable_fact_entries_for_connection(
 }
 
 fn authorized_workspaces_for_connection(
-    store: &Store,
+    store: &Db,
     connection_id: FactId,
 ) -> Result<BTreeSet<FactId>, String> {
     let Some(connection) = connection_row_by_id(store, connection_id)? else {
@@ -1019,7 +1017,7 @@ fn authorized_workspaces_for_connection(
 }
 
 pub fn shareable_facts_for_connection_range(
-    store: &Store,
+    store: &Db,
     connection_id: FactId,
     start_timestamp_ms: u64,
     end_timestamp_ms: u64,
@@ -1084,7 +1082,7 @@ pub fn shareable_facts_for_connection_range(
 }
 
 pub fn expand_fact_ids_with_context_for_connection(
-    store: &Store,
+    store: &Db,
     connection_id: FactId,
     fact_ids: &[FactId],
 ) -> Result<Vec<FactId>, String> {
@@ -1113,7 +1111,7 @@ pub fn expand_fact_ids_with_context_for_connection(
 }
 
 pub fn shareable_fact_for_connection(
-    store: &Store,
+    store: &Db,
     connection_id: FactId,
     fact_id: FactId,
 ) -> Result<Option<Fact>, String> {
@@ -1123,7 +1121,7 @@ pub fn shareable_fact_for_connection(
 }
 
 pub fn connection_id_for_peer_or_connection(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
     peer_or_connection_id: FactId,
 ) -> Result<Option<FactId>, String> {
@@ -1153,10 +1151,7 @@ pub fn connection_id_for_peer_or_connection(
     Ok(None)
 }
 
-pub fn connection_ids_for_shareable_fact(
-    store: &Store,
-    fact: &Fact,
-) -> Result<Vec<FactId>, String> {
+pub fn connection_ids_for_shareable_fact(store: &Db, fact: &Fact) -> Result<Vec<FactId>, String> {
     let mut connection_ids = Vec::new();
     let workspace_ids = shareable_workspaces_for_fact(store, fact)?;
     let Some(local_endpoint) = auth::endpoint::author::local_endpoint(store)? else {
@@ -1182,7 +1177,7 @@ pub fn connection_ids_for_shareable_fact(
     Ok(connection_ids)
 }
 
-fn shareable_workspaces_for_fact(store: &Store, fact: &Fact) -> Result<Vec<FactId>, String> {
+fn shareable_workspaces_for_fact(store: &Db, fact: &Fact) -> Result<Vec<FactId>, String> {
     if let FactScope::Scoped { kind, id } = &fact.scope {
         if kind.as_str() == "workspace" {
             return Ok(vec![*id]);
@@ -1199,19 +1194,19 @@ fn shareable_workspaces_for_fact(store: &Store, fact: &Fact) -> Result<Vec<FactI
 }
 
 fn connection_rows(
-    store: &Store,
+    store: &Db,
 ) -> Result<Vec<connection::connection::queries::ConnectionRow>, String> {
     connection::connection::queries::connection_rows(store)
 }
 
 fn connection_row_by_id(
-    store: &Store,
+    store: &Db,
     connection_id: FactId,
 ) -> Result<Option<connection::connection::queries::ConnectionRow>, String> {
     connection::connection::queries::connection_by_id(store, &connection_id)
 }
 
-fn endpoint_memberships(store: &Store) -> Result<BTreeSet<(FactId, FactId)>, String> {
+fn endpoint_memberships(store: &Db) -> Result<BTreeSet<(FactId, FactId)>, String> {
     Ok(auth::endpoint_shared::queries::all_memberships(store)?
         .into_iter()
         .map(|membership| (membership.workspace_id, membership.endpoint_id))
@@ -1219,7 +1214,7 @@ fn endpoint_memberships(store: &Store) -> Result<BTreeSet<(FactId, FactId)>, Str
 }
 
 fn connection_workspaces(
-    store: &Store,
+    store: &Db,
     connection: &connection::connection::queries::ConnectionRow,
 ) -> Result<BTreeSet<FactId>, String> {
     let mut workspace_ids = BTreeSet::new();
@@ -1237,7 +1232,7 @@ fn connection_workspaces(
 }
 
 fn connection_invite_secret_id(
-    store: &Store,
+    store: &Db,
     connection: &connection::connection::queries::ConnectionRow,
 ) -> Result<Option<FactId>, String> {
     if let Some(request) = open_unified_connection_request_for_sync(store, connection)? {
@@ -1249,7 +1244,7 @@ fn connection_invite_secret_id(
 }
 
 fn open_unified_connection_request_for_sync(
-    store: &Store,
+    store: &Db,
     connection: &connection::connection::queries::ConnectionRow,
 ) -> Result<Option<connection::request::fact::ConnectionRequestFact>, String> {
     let mut request_bytes = Vec::new();
@@ -1286,7 +1281,7 @@ fn open_unified_connection_request_for_sync(
 }
 
 fn connection_ephemeral_secrets(
-    store: &Store,
+    store: &Db,
 ) -> Result<Vec<connection::ephemeral_secret::fact::ConnectionEphemeralSecretFact>, String> {
     connection::ephemeral_secret::connection_ephemeral_secret_rows(store).map(|rows| {
         rows.into_iter()
@@ -1302,7 +1297,7 @@ fn connection_ephemeral_secrets(
     })
 }
 
-pub fn shareable_fact_rows(store: &Store) -> Result<Vec<ShareableFactRow>, String> {
+pub fn shareable_fact_rows(store: &Db) -> Result<Vec<ShareableFactRow>, String> {
     let mut stmt = store
         .conn()
         .prepare(
@@ -1322,7 +1317,7 @@ pub fn shareable_fact_rows(store: &Store) -> Result<Vec<ShareableFactRow>, Strin
         .map_err(|err| format!("decode shareable fact rows: {err}"))
 }
 
-pub fn negentropy_leaf_rows(store: &Store) -> Result<Vec<NegentropyLeafRow>, String> {
+pub fn negentropy_leaf_rows(store: &Db) -> Result<Vec<NegentropyLeafRow>, String> {
     let mut stmt = store
         .conn()
         .prepare(
@@ -1343,7 +1338,7 @@ pub fn negentropy_leaf_rows(store: &Store) -> Result<Vec<NegentropyLeafRow>, Str
 }
 
 fn negentropy_leaf_row_for_owner(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
     owner_fact_id: FactId,
 ) -> Result<Option<NegentropyLeafRow>, String> {
@@ -1361,9 +1356,7 @@ fn negentropy_leaf_row_for_owner(
         .map_err(|err| format!("load negentropy leaf row: {err}"))
 }
 
-pub fn negentropy_context_have_rows(
-    store: &Store,
-) -> Result<Vec<NegentropyContextHaveRow>, String> {
+pub fn negentropy_context_have_rows(store: &Db) -> Result<Vec<NegentropyContextHaveRow>, String> {
     let mut stmt = store
         .conn()
         .prepare(
@@ -1383,7 +1376,7 @@ pub fn negentropy_context_have_rows(
         .map_err(|err| format!("decode negentropy context-have rows: {err}"))
 }
 
-pub fn negentropy_node_rows(store: &Store) -> Result<Vec<NegentropyNodeRow>, String> {
+pub fn negentropy_node_rows(store: &Db) -> Result<Vec<NegentropyNodeRow>, String> {
     let mut stmt = store
         .conn()
         .prepare(
@@ -1404,7 +1397,7 @@ pub fn negentropy_node_rows(store: &Store) -> Result<Vec<NegentropyNodeRow>, Str
 }
 
 fn negentropy_context_have_rows_for_leaf(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
     owner_fact_id: FactId,
 ) -> Result<Vec<NegentropyContextHaveRow>, String> {
@@ -1429,7 +1422,7 @@ fn negentropy_context_have_rows_for_leaf(
 }
 
 pub fn negentropy_context_have_for_leaf(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
     owner_fact_id: FactId,
 ) -> Result<Vec<FactId>, String> {
@@ -1443,7 +1436,7 @@ pub fn negentropy_context_have_for_leaf(
     Ok(context_ids)
 }
 
-fn fact_for_shareable_row(store: &Store, row: &ShareableFactRow) -> Result<Option<Fact>, String> {
+fn fact_for_shareable_row(store: &Db, row: &ShareableFactRow) -> Result<Option<Fact>, String> {
     let Some(fact) = persisted_fact(store, &row.fact_id)? else {
         return Ok(None);
     };

@@ -317,7 +317,7 @@ fn cutover_target_runtime_facade_owns_context_app() {
     let root = root();
     assert!(
         root.join("src/core/runtime.rs").is_file(),
-        "add a generic core runtime facade that owns Store, ContextChangePipeline, registries, command output submission, projection drain, and deferred intent dispatch"
+        "add a generic core runtime facade that owns Db, ContextChangePipeline, registries, command output submission, projection drain, and deferred intent dispatch"
     );
     assert!(
         !root.join("src/match_runtime.rs").exists(),
@@ -1037,7 +1037,7 @@ fn cutover_runtime_step_commits_projection_context_rows_and_intents_atomically()
                 .to_string(),
         );
     }
-    if core_daemon.contains("network::delete_inbound(runtime.store(), inbound)?;")
+    if core_daemon.contains("network::delete_inbound(runtime.db(), inbound)?;")
         && !core_daemon.contains("if !retried")
     {
         offenders.push(
@@ -1163,7 +1163,7 @@ fn cutover_network_io_boundaries_are_live_only_work() {
     }
     if !handle_intent.contains("LOCAL_INTENTS")
         || !core_schema.contains("CREATE TEMP TABLE IF NOT EXISTS local_intents")
-        || !handle_intent.contains("submit_local_intent_to_store")
+        || !handle_intent.contains("submit_local_intent_to_db")
     {
         offenders.push(
             "core intent worker does not visibly route ephemeral intents to a TEMP local intent queue"

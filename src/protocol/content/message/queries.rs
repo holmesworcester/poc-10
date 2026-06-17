@@ -6,8 +6,8 @@
 //! place to ask "what messages does the store expose?" rather than
 //! "should this message be admitted?"
 
+use crate::core::db::Db;
 use crate::core::facts::FactId;
-use crate::core::store::Store;
 use rusqlite::{params, OptionalExtension};
 
 use super::fact::{FrontierId, WorkspaceId, CIPHERTEXT_BYTES};
@@ -39,7 +39,7 @@ pub struct ContentMessageRow {
     pub minute: u64,
 }
 
-pub fn opened_messages(store: &Store, workspace_id: FactId) -> Result<Vec<OpenedMessage>, String> {
+pub fn opened_messages(store: &Db, workspace_id: FactId) -> Result<Vec<OpenedMessage>, String> {
     let mut stmt = store
         .conn()
         .prepare(
@@ -67,7 +67,7 @@ pub fn opened_messages(store: &Store, workspace_id: FactId) -> Result<Vec<Opened
     Ok(rows)
 }
 
-pub fn count_for_workspace(store: &Store, workspace_id: FactId) -> Result<ContentCount, String> {
+pub fn count_for_workspace(store: &Db, workspace_id: FactId) -> Result<ContentCount, String> {
     store
         .conn()
         .query_row(
@@ -87,7 +87,7 @@ pub fn count_for_workspace(store: &Store, workspace_id: FactId) -> Result<Conten
         .map_err(|err| format!("read content message rows: {err}"))
 }
 
-pub(crate) fn max_created_at_ms(store: &Store) -> Result<u64, String> {
+pub(crate) fn max_created_at_ms(store: &Db) -> Result<u64, String> {
     store
         .conn()
         .query_row(
@@ -99,7 +99,7 @@ pub(crate) fn max_created_at_ms(store: &Store) -> Result<u64, String> {
 }
 
 pub fn content_message_rows(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
 ) -> Result<Vec<ContentMessageRow>, String> {
     let mut stmt = store
@@ -130,7 +130,7 @@ pub fn content_message_rows(
 }
 
 pub fn content_message_row(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
     message_id: FactId,
 ) -> Result<Option<ContentMessageRow>, String> {
@@ -159,7 +159,7 @@ pub fn content_message_row(
 }
 
 pub(crate) fn message_author_user_id(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
     message_id: FactId,
 ) -> Result<Option<FactId>, String> {
@@ -182,7 +182,7 @@ pub(crate) fn message_author_user_id(
 }
 
 pub(crate) fn message_exists(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
     message_id: FactId,
 ) -> Result<bool, String> {
@@ -190,7 +190,7 @@ pub(crate) fn message_exists(
 }
 
 pub(crate) fn retained_floor_from_tombstones(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
 ) -> Result<u64, String> {
     store
@@ -206,15 +206,12 @@ pub(crate) fn retained_floor_from_tombstones(
         .map_err(|err| format!("load message tombstones for send: {err}"))
 }
 
-pub(crate) fn message_tombstone_count(
-    store: &Store,
-    workspace_id: FactId,
-) -> Result<usize, String> {
+pub(crate) fn message_tombstone_count(store: &Db, workspace_id: FactId) -> Result<usize, String> {
     message_tombstone_count_at_or_after(store, workspace_id, 0)
 }
 
 pub(crate) fn message_tombstone_count_at_or_after(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
     floor_minute: u64,
 ) -> Result<usize, String> {
@@ -231,7 +228,7 @@ pub(crate) fn message_tombstone_count_at_or_after(
 }
 
 pub(crate) fn message_tombstone_ids_below(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
     floor_minute: u64,
 ) -> Result<Vec<FactId>, String> {

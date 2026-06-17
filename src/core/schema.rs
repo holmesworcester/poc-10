@@ -24,7 +24,7 @@
 //! in a protocol module when it stores protocol meaning, even if core commits
 //! the row mutation.
 
-use crate::core::store::{ReplayTables, SchemaSource, TableName};
+use crate::core::db::{ReplayTables, SchemaSource, TableName};
 
 /// Content-addressed durable fact byte table.
 pub(crate) const FACTS: TableName = TableName::new("facts");
@@ -62,7 +62,7 @@ const CORE_REPLAY_RESET_TABLES: &[TableName] = &[
 
 const CORE_REPLAY_SUMMARY_TABLES: &[TableName] = &[FACTS, CONTEXT_EDGES, TIME_WAKES];
 
-/// The core SQLite schema source applied to every runtime store.
+/// The core SQLite schema source applied to every runtime database.
 ///
 /// The DDL is intentionally ordinary SQL rather than a DSL. Core-owned typed
 /// tables are declared here; protocol modules and core IO modules contribute

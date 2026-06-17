@@ -3,7 +3,7 @@
 //! Core owns no command names and no protocol behavior. It only provides the
 //! small dispatch shape needed by a binary: a CLI command advertises its name,
 //! usage, and help text, and the runner calls the matching function with a
-//! caller-owned context. The context is where protocol code can keep a store,
+//! caller-owned context. The context is where protocol code can keep a database,
 //! workers, TCP helpers, or anything else it needs; this file never imports
 //! those concepts.
 //!

@@ -6,7 +6,7 @@
 
 use crate::core::cli::{decode_hex_32_named as core_decode_hex_32, encode_hex, CliArgs, CliOutput};
 use crate::core::command::{AuthoredFacts, CommandClock};
-use crate::core::store::Store;
+use crate::core::db::Db;
 
 use super::{api, queries};
 
@@ -21,7 +21,7 @@ pub const KEY_NODE_USAGE: &str = "key-node WORKSPACE_ID_HEX REMOVAL_FRONTIER_ID_
 pub const KEYS_USAGE: &str = "keys WORKSPACE_ID_HEX";
 
 pub fn key_recipient(
-    store: &Store,
+    store: &Db,
     clock: &dyn CommandClock,
     args: CliArgs<'_>,
 ) -> Result<AuthoredFacts<api::CreateRecipientKeyReceipt>, String> {
@@ -38,7 +38,7 @@ pub fn key_recipient(
 }
 
 pub fn rotate_recipient(
-    store: &Store,
+    store: &Db,
     clock: &dyn CommandClock,
     args: CliArgs<'_>,
     previous_recipient_key_id: [u8; 32],
@@ -56,7 +56,7 @@ pub fn rotate_recipient(
 }
 
 pub fn key_recipient_rotation(
-    store: &Store,
+    store: &Db,
     clock: &dyn CommandClock,
     args: CliArgs<'_>,
     previous_recipient_key_id: [u8; 32],
@@ -90,7 +90,7 @@ pub fn key_recipient_rotation_output(
 }
 
 pub fn key_frontier(
-    store: &Store,
+    store: &Db,
     clock: &dyn CommandClock,
     args: CliArgs<'_>,
 ) -> Result<AuthoredFacts<api::CreateKeyFrontierReceipt>, String> {

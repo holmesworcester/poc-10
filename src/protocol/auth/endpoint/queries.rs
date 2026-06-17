@@ -4,8 +4,8 @@
 //! need local private keys use the capability helper in `api.rs`; display
 //! and selection code use this module.
 
+use crate::core::db::Db;
 use crate::core::facts::FactId;
-use crate::core::store::Store;
 use rusqlite::{params, OptionalExtension};
 
 use super::LOCAL_KEY;
@@ -16,7 +16,7 @@ pub struct LocalEndpointPublic {
     pub signing_public_key: [u8; 32],
 }
 
-pub fn local_endpoint_public(store: &Store) -> Result<Option<LocalEndpointPublic>, String> {
+pub fn local_endpoint_public(store: &Db) -> Result<Option<LocalEndpointPublic>, String> {
     store
         .conn()
         .query_row(

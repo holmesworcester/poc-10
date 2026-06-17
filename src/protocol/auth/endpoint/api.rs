@@ -5,7 +5,7 @@
 //! capability access in `author.rs`.
 
 use crate::core::command::{AuthoredFacts, LocalSigningCapability, WorkspaceId};
-use crate::core::store::Store;
+use crate::core::db::Db;
 use crate::protocol::auth;
 
 use super::author::{create_local_endpoint, endpoint_fact, local_endpoint};
@@ -18,7 +18,7 @@ pub struct LocalEndpointOutput {
 }
 
 pub fn local_or_create(
-    store: &Store,
+    store: &Db,
     created_at_ms: u64,
 ) -> Result<AuthoredFacts<LocalEndpointOutput>, String> {
     match local_endpoint(store)? {
@@ -39,7 +39,7 @@ pub fn local_or_create(
 }
 
 pub fn local_signing_capability(
-    store: &Store,
+    store: &Db,
     workspace_id: WorkspaceId,
 ) -> Result<LocalSigningCapability, String> {
     let endpoint =
@@ -62,9 +62,9 @@ pub fn local_signing_capability(
 
 #[cfg(test)]
 mod tests {
+    use crate::core::db::Db;
     use crate::core::facts::FactScope;
     use crate::core::schema::CORE_SCHEMA_SOURCE;
-    use crate::core::store::Store;
     use crate::protocol::auth::endpoint::project::decode;
     use crate::protocol::registry::FACTS_SCHEMA_SOURCE;
 
@@ -73,9 +73,8 @@ mod tests {
 
     #[test]
     fn local_or_create_returns_local_endpoint_fact_when_missing() {
-        let store =
-            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
-                .expect("open store");
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+            .expect("open db");
 
         let output = local_or_create(&store, 10).expect("create endpoint");
 
@@ -91,9 +90,8 @@ mod tests {
 
     #[test]
     fn local_or_create_reuses_projected_local_endpoint_rows() {
-        let store =
-            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
-                .expect("open store");
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+            .expect("open db");
         let endpoint = create_local_endpoint();
         store
             .insert_table_values(vec![super::super::local_endpoint_insert(&endpoint)])

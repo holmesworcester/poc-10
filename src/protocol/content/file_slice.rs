@@ -14,7 +14,7 @@ pub mod queries;
 
 pub const TYPE_CONTENT_FILE_SLICE: u8 = encode::TYPE_CONTENT_FILE_SLICE;
 
-pub const FILE_SLICE_ROWS: crate::core::store::TableName =
+pub const FILE_SLICE_ROWS: crate::core::db::TableName =
     crate::protocol::registry::read_models::FILE_SLICE_ROWS;
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::ContentFileSliceFact, String> {

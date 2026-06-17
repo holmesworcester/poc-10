@@ -3,8 +3,8 @@
 use std::cell::Cell;
 
 use topo::core::command::{CommandClock, WorkspaceId};
+use topo::core::db::Db;
 use topo::core::runtime::Runtime;
-use topo::core::store::Store;
 use topo::protocol::app::MATCH_RUNTIME;
 use topo::protocol::auth::signature::project::{
     authenticate as signature_authenticate, decode as signature_decode,
@@ -44,7 +44,7 @@ fn runtime_with_workspace() -> (Runtime, WorkspaceId) {
     let mut runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
     let clock = FixedClock(Cell::new(1_000));
     let workspace = create_workspace_with_identity(
-        runtime.store(),
+        runtime.db(),
         &clock,
         "Deletion",
         BootstrapIdentity {
@@ -68,7 +68,7 @@ fn delete_message_emits_decodable_target_fact() {
     let clock = FixedClock(Cell::new(100));
 
     let output = delete_message(
-        runtime.store(),
+        runtime.db(),
         &clock,
         workspace_id,
         [2; 32],
@@ -103,7 +103,7 @@ fn delete_file_emits_decodable_target_fact() {
     let clock = FixedClock(Cell::new(200));
 
     let output =
-        delete_file(runtime.store(), &clock, workspace_id, [5; 32], [6; 32]).expect("delete file");
+        delete_file(runtime.db(), &clock, workspace_id, [5; 32], [6; 32]).expect("delete file");
 
     assert_eq!(output.facts.len(), 2);
     assert_eq!(output.receipt.created_at_ms, 200);
@@ -124,7 +124,7 @@ fn delete_file_emits_decodable_target_fact() {
 
 #[test]
 fn deletion_commands_reject_empty_ids() {
-    let store = Store::open_memory().expect("store");
+    let store = Db::open_memory().expect("store");
     let clock = FixedClock(Cell::new(0));
 
     let err = delete_message(&store, &clock, [0; 32], [2; 32], [7; 32], 1, [3; 32])

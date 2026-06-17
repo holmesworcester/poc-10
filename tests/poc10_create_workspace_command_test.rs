@@ -3,8 +3,8 @@
 use std::cell::Cell;
 
 use topo::core::command::CommandClock;
+use topo::core::db::Db;
 use topo::core::schema::CORE_SCHEMA_SOURCE;
-use topo::core::store::Store;
 use topo::protocol::auth::{
     admin, endpoint, invite_accepted,
     signature::project::{authenticate as signature_authenticate, decode as signature_decode},
@@ -26,7 +26,7 @@ impl CommandClock for FixedClock {
 
 #[test]
 fn create_workspace_emits_decodable_workspace_fact() {
-    let store = Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+    let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
         .expect("store");
     let clock = FixedClock(Cell::new(60_000));
 
@@ -62,7 +62,7 @@ fn create_workspace_emits_decodable_workspace_fact() {
 
 #[test]
 fn create_workspace_authors_first_user_through_bootstrap_invite_and_admin_grant() {
-    let store = Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+    let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
         .expect("store");
     let clock = FixedClock(Cell::new(70_000));
 
@@ -161,7 +161,7 @@ fn create_workspace_authors_first_user_through_bootstrap_invite_and_admin_grant(
 
 #[test]
 fn create_workspace_rejects_blank_or_oversize_name() {
-    let store = Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+    let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
         .expect("store");
     let clock = FixedClock(Cell::new(0));
 

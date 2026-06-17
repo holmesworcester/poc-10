@@ -9,7 +9,7 @@ pub mod encode;
 pub mod fact;
 pub mod project;
 
-use crate::core::store::TableName;
+use crate::core::db::TableName;
 
 pub const TYPE_RECIPIENT_KEY: u8 = encode::TYPE_RECIPIENT_KEY;
 

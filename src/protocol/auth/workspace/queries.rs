@@ -5,9 +5,9 @@
 //! or dispatch intents.
 
 use crate::core::crypto::Ed25519PublicKey;
+use crate::core::db::{Db, DEFAULT_QUERY_LIMIT};
 use crate::core::facts::FactId;
 use crate::core::runtime::Runtime;
-use crate::core::store::{Store, DEFAULT_QUERY_LIMIT};
 use crate::protocol::auth;
 use crate::protocol::auth::endpoint_shared;
 use crate::protocol::connection;
@@ -33,7 +33,7 @@ pub struct WorkspaceSummary {
     pub name: String,
 }
 
-pub fn list_workspaces(store: &Store) -> Result<Vec<WorkspaceSummary>, String> {
+pub fn list_workspaces(store: &Db) -> Result<Vec<WorkspaceSummary>, String> {
     let mut stmt = store
         .conn()
         .prepare(
@@ -58,7 +58,7 @@ pub fn list_workspaces(store: &Store) -> Result<Vec<WorkspaceSummary>, String> {
     .map_err(|err| format!("decode workspace rows: {err}"))
 }
 
-pub fn workspace_by_id(store: &Store, workspace_id: FactId) -> Result<WorkspaceSummary, String> {
+pub fn workspace_by_id(store: &Db, workspace_id: FactId) -> Result<WorkspaceSummary, String> {
     let row = store
         .conn()
         .query_row(
@@ -80,7 +80,7 @@ pub fn workspace_by_id(store: &Store, workspace_id: FactId) -> Result<WorkspaceS
     })
 }
 
-pub fn count_workspaces(store: &Store) -> Result<usize, String> {
+pub fn count_workspaces(store: &Db) -> Result<usize, String> {
     store
         .conn()
         .query_row("SELECT COUNT(*) FROM workspace_rows", [], |row| {
@@ -112,7 +112,7 @@ pub struct LocalWorkspaceMembership {
     pub endpoint_shared: EndpointSharedRow,
 }
 
-pub fn local_memberships(store: &Store) -> Result<Vec<LocalWorkspaceMembership>, String> {
+pub fn local_memberships(store: &Db) -> Result<Vec<LocalWorkspaceMembership>, String> {
     let Some(local_endpoint) = local_endpoint_id(store)? else {
         return Ok(Vec::new());
     };
@@ -140,7 +140,7 @@ pub fn local_memberships(store: &Store) -> Result<Vec<LocalWorkspaceMembership>,
 }
 
 pub fn local_membership(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
 ) -> Result<Option<EndpointSharedRow>, String> {
     let Some(local_endpoint) = local_endpoint_id(store)? else {
@@ -153,7 +153,7 @@ pub fn local_membership(
     )
 }
 
-fn local_endpoint_id(store: &Store) -> Result<Option<FactId>, String> {
+fn local_endpoint_id(store: &Db) -> Result<Option<FactId>, String> {
     auth::endpoint::queries::local_endpoint_public(store).map(|row| row.map(|row| row.endpoint))
 }
 
@@ -178,23 +178,23 @@ pub struct RuntimeCountReport {
 
 pub fn runtime_count_report(runtime: &Runtime) -> Result<RuntimeCountReport, String> {
     let workspace_rows = runtime
-        .store()
+        .db()
         .table_row_count(super::WORKSPACE_ROWS)
         .map_err(|err| format!("count workspace rows: {err}"))?;
     let facts = runtime.fact_count();
-    let sync_facts = shared_fact::sync_status(runtime.store())?.indexed_facts;
+    let sync_facts = shared_fact::sync_status(runtime.db())?.indexed_facts;
     let applied_facts = facts.saturating_sub(runtime.pending_fact_count());
     let pending_intents = runtime.pending_intent_count();
     let connections = runtime
-        .store()
+        .db()
         .table_row_count(connection::connection::CONNECTION_ROWS)
         .map_err(|err| format!("count connections: {err}"))?;
     let connection_requests = runtime
-        .store()
+        .db()
         .table_row_count(connection::request::CONNECTION_REQUEST_ROWS)
         .map_err(|err| format!("count connection requests: {err}"))?;
     let invite_accepted = runtime
-        .store()
+        .db()
         .table_row_count(auth::invite_accepted::INVITE_ACCEPTED_ROWS)
         .map_err(|err| format!("count invite accepted: {err}"))?;
     Ok(RuntimeCountReport {

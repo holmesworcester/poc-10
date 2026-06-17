@@ -116,12 +116,8 @@ impl IntentHandler for QueueOutgoingFrameHandler {
             return Ok(RuntimeEffects::new());
         }
         let target = resolve_target(&input.routing_key, context)?;
-        network::queue_outgoing(
-            context.store()?,
-            target,
-            OutgoingFrame { bytes: input.frame },
-        )
-        .map_err(|err| HandlerError::fatal(format!("queue_outgoing_frame enqueue: {err}")))?;
+        network::queue_outgoing(context.db()?, target, OutgoingFrame { bytes: input.frame })
+            .map_err(|err| HandlerError::fatal(format!("queue_outgoing_frame enqueue: {err}")))?;
         Ok(RuntimeEffects::new())
     }
 }
@@ -151,16 +147,15 @@ fn resolve_connection_row_target(
     context: &HandlerContext,
 ) -> Result<NetworkTarget, HandlerError> {
     let Some(connection) =
-        connection::connection::queries::connection_by_id(context.store()?, connection_id)
-            .map_err(|err| {
-                HandlerError::fatal(format!("queue_outgoing_frame route row read: {err}"))
-            })?
+        connection::connection::queries::connection_by_id(context.db()?, connection_id).map_err(
+            |err| HandlerError::fatal(format!("queue_outgoing_frame route row read: {err}")),
+        )?
     else {
         return Err(retry_intent(
             "queue_outgoing_frame route: queue_outgoing_frame missing connection row",
         ));
     };
-    let local_endpoint = endpoint::author::local_endpoint(context.store()?)?
+    let local_endpoint = endpoint::author::local_endpoint(context.db()?)?
         .ok_or_else(|| HandlerError::fatal("queue_outgoing_frame requires local endpoint state"))?;
     let addr = if local_endpoint.endpoint == connection.from_endpoint {
         connection.initiator_addr

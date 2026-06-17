@@ -1,6 +1,6 @@
 //! Protocol-neutral command authoring primitives.
 //!
-//! User-facing commands may query the store directly and read an injected
+//! User-facing commands may query the database directly and read an injected
 //! command clock. Commands return authored facts plus a typed receipt; runtime
 //! submission is the only path that retains those facts and wakes projection.
 

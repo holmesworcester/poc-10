@@ -18,7 +18,7 @@ pub mod fact;
 pub mod project;
 pub mod queries;
 
-use crate::core::store::{TableInsert, TableName, TypedTableSchema, Value};
+use crate::core::db::{TableInsert, TableName, TypedTableSchema, Value};
 
 pub const TYPE_KEY_WRAP: u8 = encode::TYPE_KEY_WRAP;
 

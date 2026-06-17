@@ -6,8 +6,8 @@
 
 use crate::core::command::AuthoredFacts;
 use crate::core::crypto::{self, Ed25519PrivateKey, Ed25519PublicKey};
+use crate::core::db::Db;
 use crate::core::facts::FactId;
-use crate::core::store::Store;
 use crate::protocol::auth::signature::author::AuthoredFactEvidence;
 use crate::protocol::{auth, content};
 
@@ -65,7 +65,7 @@ pub struct AuthorCompactReport {
 }
 
 pub fn author_set_with_auto_floor(
-    store: &Store,
+    store: &Db,
     input: AuthorPolicy,
 ) -> Result<AuthoredFacts<AuthorSetReport>, String> {
     if input.ttl_minutes == 0 {
@@ -102,7 +102,7 @@ pub fn author_set_with_auto_floor(
     .with_facts(authored.into_facts().to_vec()))
 }
 
-pub fn plan_tighten(store: &Store, input: AuthorTighten) -> Result<TightenPlan, String> {
+pub fn plan_tighten(store: &Db, input: AuthorTighten) -> Result<TightenPlan, String> {
     if input.ttl_minutes == 0 {
         return Err("retention policy ttl_minutes must be non-zero".to_string());
     }
@@ -130,7 +130,7 @@ pub fn plan_tighten(store: &Store, input: AuthorTighten) -> Result<TightenPlan, 
 }
 
 pub fn author_tighten(
-    store: &Store,
+    store: &Db,
     input: AuthorTighten,
 ) -> Result<AuthoredFacts<AuthorTightenReport>, String> {
     let author_user_id = local_admin_user_id(store, input.workspace_id)?;
@@ -164,7 +164,7 @@ pub fn author_tighten(
 }
 
 pub fn author_compact(
-    store: &Store,
+    store: &Db,
     input: AuthorCompact,
 ) -> Result<AuthoredFacts<AuthorCompactReport>, String> {
     let active = queries::active_for_workspace(store, input.workspace_id)?
@@ -193,7 +193,7 @@ pub fn author_compact(
 }
 
 fn policy_fact(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
     supersedes_policy_id: Option<FactId>,
     ttl_minutes: u32,
@@ -225,7 +225,7 @@ fn policy_fact(
 }
 
 fn local_signing_material(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
 ) -> Result<(FactId, Ed25519PublicKey, Ed25519PrivateKey), String> {
     auth::workspace::queries::local_membership(store, workspace_id)?
@@ -241,7 +241,7 @@ fn local_signing_material(
     Ok((endpoint_id, public_key, private_key))
 }
 
-fn local_admin_user_id(store: &Store, workspace_id: FactId) -> Result<FactId, String> {
+fn local_admin_user_id(store: &Db, workspace_id: FactId) -> Result<FactId, String> {
     let membership = auth::workspace::queries::local_membership(store, workspace_id)?
         .ok_or_else(|| "local endpoint has not joined this workspace".to_string())?;
     let user_id = membership.user_authority_fact_id;

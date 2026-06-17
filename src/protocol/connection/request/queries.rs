@@ -10,8 +10,8 @@
 
 use std::net::SocketAddr;
 
+use crate::core::db::{Db, DEFAULT_QUERY_LIMIT};
 use crate::core::facts::FactId;
-use crate::core::store::{Store, DEFAULT_QUERY_LIMIT};
 use rusqlite::{params, OptionalExtension, Row};
 
 use crate::protocol::auth::endpoint::author::local_endpoint;
@@ -67,7 +67,7 @@ fn decode_bootstrap_connection_attempt_row(
 }
 
 pub fn bootstrap_connection_attempt_rows(
-    store: &Store,
+    store: &Db,
 ) -> Result<Vec<BootstrapConnectionAttemptRow>, String> {
     let mut stmt = store
         .conn()
@@ -104,7 +104,7 @@ pub struct MembershipConnectionPlan {
 /// `endpoint_shared` in the same workspace (mutual membership). Otherwise
 /// `None`: the caller must bootstrap from an invite instead.
 pub fn choose_connection_mode(
-    store: &Store,
+    store: &Db,
     target_endpoint: FactId,
 ) -> Result<Option<MembershipConnectionPlan>, String> {
     let Some(local) = local_endpoint(store)? else {
@@ -147,7 +147,7 @@ pub struct PendingConnectionRequest {
 /// Local outbound membership request rows whose request id has no connection
 /// (response) row yet. The live `maintain_connections` loop queues one send per
 /// entry; an answered request drops out so a connected peer stops being retried.
-pub fn pending_connection_requests(store: &Store) -> Result<Vec<PendingConnectionRequest>, String> {
+pub fn pending_connection_requests(store: &Db) -> Result<Vec<PendingConnectionRequest>, String> {
     let answered = answered_request_ids(store)?;
     let mut pending = Vec::new();
     let mut stmt = store
@@ -188,7 +188,7 @@ pub fn pending_connection_requests(store: &Store) -> Result<Vec<PendingConnectio
 }
 
 pub fn request_by_id(
-    store: &Store,
+    store: &Db,
     request_id: &FactId,
 ) -> Result<Option<ConnectionRequestRow>, String> {
     store
@@ -209,18 +209,15 @@ pub fn request_by_id(
         .map_err(|err| format!("read connection request row: {err}"))
 }
 
-pub fn request_route_by_id(
-    store: &Store,
-    request_id: &FactId,
-) -> Result<Option<SocketAddr>, String> {
+pub fn request_route_by_id(store: &Db, request_id: &FactId) -> Result<Option<SocketAddr>, String> {
     Ok(request_by_id(store, request_id)?.and_then(|row| row.peer_addr))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::db::Db;
     use crate::core::schema::CORE_SCHEMA_SOURCE;
-    use crate::core::store::Store;
     use crate::protocol::registry::FACTS_SCHEMA_SOURCE;
 
     // The full transition — Bootstrap before mutual membership, Normal after a
@@ -230,9 +227,8 @@ mod tests {
     // no membership connection to choose.
     #[test]
     fn no_local_endpoint_yields_no_membership_connection() {
-        let store =
-            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
-                .expect("store");
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+            .expect("store");
         assert_eq!(
             choose_connection_mode(&store, [9; 32]).expect("query"),
             None

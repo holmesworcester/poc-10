@@ -6,12 +6,12 @@
 
 use crate::core::cli::{encode_hex_32, CliArgs, CliOutput};
 use crate::core::command::{AuthoredFacts, CommandClock};
+use crate::core::db::{Db, TableInsert, TableName, TypedTableSchema, Value};
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::project_fact::{
     verify_fact_id, FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
 };
-use crate::core::store::{Store, TableInsert, TableName, TypedTableSchema, Value};
 use rusqlite::{OptionalExtension, Row};
 
 use super::compare::fact::TimestampRange;
@@ -175,7 +175,7 @@ pub fn setting_fact(effective_at_ms: u64, mode: SyncSettingMode) -> Result<Fact,
     ))
 }
 
-pub fn current_setting(store: &Store) -> Result<Option<SyncSettingRow>, String> {
+pub fn current_setting(store: &Db) -> Result<Option<SyncSettingRow>, String> {
     store
         .conn()
         .query_row(
@@ -190,7 +190,7 @@ pub fn current_setting(store: &Store) -> Result<Option<SyncSettingRow>, String> 
         .map_err(|err| format!("read sync local setting row: {err}"))
 }
 
-pub fn active_range(store: &Store) -> Result<TimestampRange, String> {
+pub fn active_range(store: &Db) -> Result<TimestampRange, String> {
     Ok(match current_setting(store)?.map(|row| row.mode) {
         Some(SyncSettingMode::Range(range)) => range,
         Some(SyncSettingMode::All) | None => TimestampRange::ROOT,
@@ -383,9 +383,8 @@ mod tests {
 
     #[test]
     fn current_setting_uses_most_recent_row_then_fact_id() {
-        let store =
-            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
-                .expect("store");
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+            .expect("store");
         let older = setting_fact(
             100,
             SyncSettingMode::Range(TimestampRange { start: 1, end: 2 }),

@@ -12,7 +12,7 @@ pub mod encode;
 pub mod fact;
 pub mod project;
 
-use crate::core::store::{TableInsert, TableName, TypedTableSchema, Value};
+use crate::core::db::{TableInsert, TableName, TypedTableSchema, Value};
 
 /// Invite-secret projection rows, keyed by
 /// `bootstrap_hash || workspace_id_or_zero || invite_fact_id_or_zero`. A

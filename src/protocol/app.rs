@@ -17,9 +17,9 @@
 
 use crate::core::app::ProtocolDescription;
 use crate::core::daemon::{DaemonDescription, DaemonTimeWake, InboundNetworkFrame};
+use crate::core::db::Db;
 use crate::core::effects::RuntimeEffects;
 use crate::core::runtime::RuntimeDescription;
-use crate::core::store::Store;
 use crate::protocol::registry::{
     authenticate_fact_for_admission, protocol_projector, FACT_ROUTES, HANDLER_ROUTES,
     ROW_MUTATION_TABLES, SCHEMA_SOURCES,
@@ -70,6 +70,6 @@ fn receive_network_frame_effects(input: InboundNetworkFrame) -> Result<RuntimeEf
     )
 }
 
-fn current_message_expiration_minute(_store: &Store) -> Result<Option<u64>, String> {
+fn current_message_expiration_minute(_store: &Db) -> Result<Option<u64>, String> {
     Ok(Some(crate::core::daemon::now_ms() / 60_000))
 }

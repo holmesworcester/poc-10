@@ -6,11 +6,11 @@
 //! protocol-local version adapters, while write activation remains fixed by the
 //! release profile.
 
+use topo::core::db::TableName;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{RowMutation, Value};
 use topo::core::project_fact::{verify_fact_id, FactRoute};
 use topo::core::project_fact::{ProjectionContext, ProjectionOutput};
-use topo::core::store::TableName;
 use topo::core::versioning::{
     active_from_protocol_for_tag, bundle_for_protocol, classify_received_fact, compute_ceiling,
     validate_fact_version_manifest, FactVersionManifestEntry, FactVersionProjector,

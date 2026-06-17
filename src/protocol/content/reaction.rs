@@ -11,7 +11,7 @@ pub mod fact;
 pub mod project;
 pub mod queries;
 
-use crate::core::store::TableName;
+use crate::core::db::TableName;
 
 pub const REACTION_ROWS: TableName = crate::protocol::registry::read_models::REACTION_ROWS;
 

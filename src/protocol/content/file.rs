@@ -14,8 +14,7 @@ pub mod queries;
 
 pub const TYPE_CONTENT_FILE: u8 = encode::TYPE_CONTENT_FILE;
 
-pub const FILE_ROWS: crate::core::store::TableName =
-    crate::protocol::registry::read_models::FILE_ROWS;
+pub const FILE_ROWS: crate::core::db::TableName = crate::protocol::registry::read_models::FILE_ROWS;
 pub(crate) const FILE_KEY_COLUMNS: &[&str] =
     crate::protocol::registry::read_models::CONTENT_FILES.key_columns;
 

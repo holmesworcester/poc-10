@@ -6,8 +6,8 @@
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
 
+use crate::core::db::{Db, DEFAULT_QUERY_LIMIT};
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::store::{Store, DEFAULT_QUERY_LIMIT};
 use rusqlite::{params, OptionalExtension, Row};
 
 use crate::protocol::auth;
@@ -58,7 +58,7 @@ pub fn decode_connection_row(row: &Row<'_>) -> rusqlite::Result<ConnectionRow> {
     })
 }
 
-pub fn answered_request_ids(store: &Store) -> Result<BTreeSet<FactId>, String> {
+pub fn answered_request_ids(store: &Db) -> Result<BTreeSet<FactId>, String> {
     let mut answered = BTreeSet::new();
     for row in connection_rows(store)? {
         answered.insert(row.request_id);
@@ -66,7 +66,7 @@ pub fn answered_request_ids(store: &Store) -> Result<BTreeSet<FactId>, String> {
     Ok(answered)
 }
 
-pub fn connection_rows(store: &Store) -> Result<Vec<ConnectionRow>, String> {
+pub fn connection_rows(store: &Db) -> Result<Vec<ConnectionRow>, String> {
     let mut stmt = store
         .conn()
         .prepare(
@@ -92,7 +92,7 @@ pub fn connection_rows(store: &Store) -> Result<Vec<ConnectionRow>, String> {
 }
 
 pub fn connection_by_id(
-    store: &Store,
+    store: &Db,
     connection_id: &FactId,
 ) -> Result<Option<ConnectionRow>, String> {
     store
@@ -118,7 +118,7 @@ pub fn connection_by_id(
 }
 
 pub fn has_connection_between(
-    store: &Store,
+    store: &Db,
     left_endpoint: FactId,
     right_endpoint: FactId,
 ) -> Result<bool, String> {

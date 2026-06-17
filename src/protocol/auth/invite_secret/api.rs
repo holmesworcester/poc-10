@@ -17,8 +17,8 @@ use std::str::FromStr;
 
 use crate::core::command::AuthoredFacts;
 use crate::core::crypto;
+use crate::core::db::Db;
 use crate::core::facts::FactId;
-use crate::core::store::Store;
 use crate::protocol::auth;
 use crate::protocol::auth::signature::author::AuthoredFactEvidence;
 
@@ -92,7 +92,7 @@ pub struct CreateInviteServer {
 }
 
 pub fn create(
-    store: &Store,
+    store: &Db,
     input: CreateInvite,
 ) -> Result<AuthoredFacts<CreateInviteReceipt>, String> {
     let endpoint_output = auth::endpoint::api::local_or_create(store, input.created_at_ms)?;
@@ -161,7 +161,7 @@ pub fn create(
 }
 
 pub fn create_device_link(
-    store: &Store,
+    store: &Db,
     input: CreateDeviceLink,
 ) -> Result<AuthoredFacts<CreateInviteReceipt>, String> {
     let endpoint_output = auth::endpoint::api::local_or_create(store, input.created_at_ms)?;
@@ -227,7 +227,7 @@ pub fn create_device_link(
 }
 
 pub fn create_invite_server(
-    store: &Store,
+    store: &Db,
     input: CreateInviteServer,
 ) -> Result<AuthoredFacts<CreateInviteReceipt>, String> {
     let endpoint_output = auth::endpoint::api::local_or_create(store, input.created_at_ms)?;
@@ -314,7 +314,7 @@ pub struct AcceptInviteServer {
 }
 
 pub fn accept(
-    store: &Store,
+    store: &Db,
     input: AcceptInvite,
 ) -> Result<AuthoredFacts<AcceptInviteReceipt>, String> {
     let endpoint_output = auth::endpoint::api::local_or_create(store, input.created_at_ms)?;
@@ -431,7 +431,7 @@ fn endpoint_role_for_shared(role: InviteEndpointRole) -> auth::endpoint_shared::
 }
 
 pub fn accept_device_link(
-    store: &Store,
+    store: &Db,
     input: AcceptDeviceLink,
 ) -> Result<AuthoredFacts<AcceptInviteReceipt>, String> {
     if !input.invite.identity_scope {
@@ -486,7 +486,7 @@ pub fn accept_device_link(
 }
 
 pub fn accept_invite_server(
-    store: &Store,
+    store: &Db,
     input: AcceptInviteServer,
 ) -> Result<AuthoredFacts<AcceptInviteReceipt>, String> {
     if !input.invite.identity_scope
@@ -681,7 +681,7 @@ struct LocalAdminAuthority {
 }
 
 fn local_admin_id(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
     signing_public_key: [u8; 32],
 ) -> Result<LocalAdminAuthority, String> {
@@ -702,7 +702,7 @@ fn local_admin_id(
 }
 
 fn reject_duplicate_join(
-    store: &Store,
+    store: &Db,
     endpoint_id: FactId,
     workspace_id: FactId,
 ) -> Result<(), String> {

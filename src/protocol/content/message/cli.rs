@@ -14,8 +14,8 @@ use crate::core::cli::{
 };
 use crate::core::command::{AuthoredFacts, CommandClock};
 use crate::core::crypto::{self, XChaCha20Poly1305Key, XChaCha20Poly1305Nonce};
+use crate::core::db::Db;
 use crate::core::facts::FactId;
-use crate::core::store::Store;
 use crate::protocol::auth;
 use crate::protocol::content::{file, file_slice, message, message_deletion, reaction};
 use rusqlite::{params, OptionalExtension};
@@ -65,7 +65,7 @@ pub struct DeleteMessageReceipt {
 }
 
 pub fn send(
-    store: &Store,
+    store: &Db,
     clock: &dyn CommandClock,
     args: CliArgs<'_>,
 ) -> Result<AuthoredFacts<message::api::SendReceipt>, String> {
@@ -86,7 +86,7 @@ pub fn send_output(receipt: &message::api::SendReceipt, text: &str) -> CliOutput
 }
 
 pub fn generate(
-    store: &Store,
+    store: &Db,
     clock: &dyn CommandClock,
     args: CliArgs<'_>,
 ) -> Result<AuthoredFacts<message::api::GenerateReceipt>, String> {
@@ -112,7 +112,7 @@ pub fn generated_output(
 }
 
 pub fn react(
-    store: &Store,
+    store: &Db,
     clock: &dyn CommandClock,
     args: CliArgs<'_>,
 ) -> Result<AuthoredFacts<ReactReceipt>, String> {
@@ -178,7 +178,7 @@ pub fn react_output(receipt: &ReactReceipt) -> CliOutput {
 }
 
 pub fn send_file(
-    store: &Store,
+    store: &Db,
     clock: &dyn CommandClock,
     args: CliArgs<'_>,
 ) -> Result<AuthoredFacts<SendFileReceipt>, String> {
@@ -292,7 +292,7 @@ pub fn send_file_output(receipt: &SendFileReceipt) -> CliOutput {
 }
 
 pub fn delete_message(
-    store: &Store,
+    store: &Db,
     clock: &dyn CommandClock,
     args: CliArgs<'_>,
 ) -> Result<AuthoredFacts<DeleteMessageReceipt>, String> {
@@ -328,7 +328,7 @@ pub fn delete_message_output(receipt: &DeleteMessageReceipt) -> CliOutput {
     ])
 }
 
-pub fn messages(store: &Store, args: CliArgs<'_>) -> Result<CliOutput, String> {
+pub fn messages(store: &Db, args: CliArgs<'_>) -> Result<CliOutput, String> {
     args.require_len(1, MESSAGES_USAGE)?;
     let workspace_id = decode_id(args.get(0).expect("length checked"))?;
     let messages = queries::opened_messages(store, workspace_id)?;
@@ -371,7 +371,7 @@ pub fn messages(store: &Store, args: CliArgs<'_>) -> Result<CliOutput, String> {
     Ok(CliOutput::lines(lines))
 }
 
-pub fn content_count(store: &Store, args: CliArgs<'_>) -> Result<queries::ContentCount, String> {
+pub fn content_count(store: &Db, args: CliArgs<'_>) -> Result<queries::ContentCount, String> {
     args.require_len(1, CONTENT_COUNT_USAGE)?;
     let workspace_id = decode_id(args.get(0).expect("length checked"))?;
     queries::count_for_workspace(store, workspace_id)
@@ -386,7 +386,7 @@ pub fn content_count_output(count: queries::ContentCount) -> CliOutput {
     ])
 }
 
-pub fn files(store: &Store, args: CliArgs<'_>) -> Result<CliOutput, String> {
+pub fn files(store: &Db, args: CliArgs<'_>) -> Result<CliOutput, String> {
     if args.values().is_empty() || args.values().len() > 2 {
         return Err(FILES_USAGE.to_string());
     }
@@ -424,7 +424,7 @@ pub fn files(store: &Store, args: CliArgs<'_>) -> Result<CliOutput, String> {
     Ok(CliOutput::lines(lines))
 }
 
-pub fn save_file(store: &Store, args: CliArgs<'_>) -> Result<CliOutput, String> {
+pub fn save_file(store: &Db, args: CliArgs<'_>) -> Result<CliOutput, String> {
     args.require_len(3, SAVE_FILE_USAGE)?;
     let workspace_id = decode_id(args.get(0).expect("length checked"))?;
     let file = resolve_file_selector(store, workspace_id, args.get(1).unwrap())?;
@@ -464,7 +464,7 @@ pub fn save_file(store: &Store, args: CliArgs<'_>) -> Result<CliOutput, String> 
     ]))
 }
 
-pub fn view(store: &Store, args: CliArgs<'_>) -> Result<CliOutput, String> {
+pub fn view(store: &Db, args: CliArgs<'_>) -> Result<CliOutput, String> {
     let workspace_id = match args.values() {
         [] => selected_workspace_id(store)?,
         [value] => decode_id(value)?,
@@ -578,7 +578,7 @@ pub fn view(store: &Store, args: CliArgs<'_>) -> Result<CliOutput, String> {
     Ok(CliOutput::lines(lines))
 }
 
-fn selected_workspace_id(store: &Store) -> Result<FactId, String> {
+fn selected_workspace_id(store: &Db) -> Result<FactId, String> {
     let memberships = auth::workspace::queries::local_memberships(store)?;
     match memberships.as_slice() {
         [] => Err("no joined workspaces; create or accept one first".to_string()),
@@ -588,7 +588,7 @@ fn selected_workspace_id(store: &Store) -> Result<FactId, String> {
 }
 
 fn author_name(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
     signer_endpoint_id: FactId,
 ) -> Result<Option<String>, String> {
@@ -601,16 +601,12 @@ fn author_name(
     Ok(None)
 }
 
-fn user_name(
-    store: &Store,
-    workspace_id: FactId,
-    user_id: FactId,
-) -> Result<Option<String>, String> {
+fn user_name(store: &Db, workspace_id: FactId, user_id: FactId) -> Result<Option<String>, String> {
     auth::user::queries::user_by_id(store, workspace_id, user_id)
         .map(|row| row.map(|row| row.username))
 }
 
-fn local_author_user_id(store: &Store, workspace_id: FactId) -> Result<FactId, String> {
+fn local_author_user_id(store: &Db, workspace_id: FactId) -> Result<FactId, String> {
     auth::workspace::queries::local_membership(store, workspace_id)?
         .map(|membership| membership.user_authority_fact_id)
         .ok_or_else(|| "local endpoint has not joined this workspace".to_string())
@@ -625,7 +621,7 @@ struct MessageSelection {
 }
 
 fn resolve_message_selector(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
     selector: &str,
 ) -> Result<MessageSelection, String> {
@@ -729,7 +725,7 @@ struct ReactionDisplayRow {
 }
 
 fn reactions_by_message(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
 ) -> Result<BTreeMap<FactId, Vec<ReactionDisplayRow>>, String> {
     let mut grouped: BTreeMap<FactId, Vec<ReactionDisplayRow>> = BTreeMap::new();
@@ -764,7 +760,7 @@ fn reactions_by_message(
 }
 
 fn files_by_message(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
 ) -> Result<BTreeMap<FactId, Vec<FileDisplayRow>>, String> {
     let mut grouped: BTreeMap<FactId, Vec<FileDisplayRow>> = BTreeMap::new();
@@ -774,7 +770,7 @@ fn files_by_message(
     Ok(grouped)
 }
 
-fn visible_files(store: &Store, workspace_id: FactId) -> Result<Vec<FileDisplayRow>, String> {
+fn visible_files(store: &Db, workspace_id: FactId) -> Result<Vec<FileDisplayRow>, String> {
     let mut rows = file::queries::content_file_rows(store, workspace_id)?
         .into_iter()
         .map(|row| {
@@ -820,7 +816,7 @@ fn visible_files(store: &Store, workspace_id: FactId) -> Result<Vec<FileDisplayR
 }
 
 fn message_is_visible(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
     message_id: FactId,
 ) -> Result<bool, String> {
@@ -828,7 +824,7 @@ fn message_is_visible(
 }
 
 fn file_slices(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
     file_id: FactId,
 ) -> Result<Vec<file_slice::queries::ContentFileSliceRow>, String> {
@@ -836,7 +832,7 @@ fn file_slices(
 }
 
 fn resolve_file_selector(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
     selector: &str,
 ) -> Result<FileDisplayRow, String> {
@@ -908,7 +904,7 @@ fn decode_file_metadata(bytes: &[u8]) -> Result<FileMetadata, String> {
 }
 
 fn signing_fields(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
 ) -> Result<(FactId, crypto::Ed25519PublicKey, crypto::Ed25519PrivateKey), String> {
     let signing = auth::endpoint::api::local_signing_capability(store, workspace_id)?;
@@ -923,7 +919,7 @@ fn signing_fields(
 }
 
 fn authored_reaction_fact(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
     created_at_ms: u64,
     reaction: reaction::fact::ContentReactionFact,
@@ -945,7 +941,7 @@ fn authored_reaction_fact(
 }
 
 fn authored_file_fact(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
     created_at_ms: u64,
     file: file::fact::ContentFileFact,
@@ -971,7 +967,7 @@ fn authored_file_fact(
 }
 
 fn authored_file_slice_fact(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
     created_at_ms: u64,
     slice: file_slice::fact::ContentFileSliceFact,
@@ -1056,7 +1052,7 @@ fn open_bytes(
 }
 
 fn local_content_key(
-    store: &Store,
+    store: &Db,
     workspace_id: FactId,
     frontier_id: FactId,
     minute: u64,

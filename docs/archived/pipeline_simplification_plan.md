@@ -23,7 +23,7 @@ Core owns work-item mechanics.
 
 Target core files:
 
-- `src/core/store.rs`: SQLite connection, transactions, fact storage primitives,
+- `src/core/db.rs`: SQLite connection, transactions, fact storage primitives,
   and typed row primitives.
 - `src/core/project_fact.rs`: `drain_facts`, `project_fact`, projection commit,
   context matching/requeue, and time wakes.
@@ -81,7 +81,7 @@ struct AuthoredCommand<T> {
 }
 
 fn command(
-    store: &Store,
+    store: &Db,
     clock: &dyn CommandClock,
     input: Input,
 ) -> Result<AuthoredCommand<Receipt>, String> {
@@ -239,7 +239,7 @@ Projection commit stays in `project_fact.rs` for readability. It owns:
 Sketch:
 
 ```rust
-fn commit_projection(tx: &Store, input: ProjectionInput, output: ProjectionOutput) -> Result<()> {
+fn commit_projection(tx: &Db, input: ProjectionInput, output: ProjectionOutput) -> Result<()> {
     retain_or_drop_incoming(tx, &input, output.retain_self)?;
 
     if input.is_retained_after_commit() {
@@ -257,7 +257,7 @@ Need/offer matching happens only during projection commit:
 
 ```rust
 fn commit_context_and_requeue_matches(
-    tx: &Store,
+    tx: &Db,
     owner: FactId,
     next: ContextSet,
 ) -> Result<()> {
@@ -336,9 +336,9 @@ Intent commit stays in `handle_intent.rs` even if it duplicates short storage
 helpers from projection. Prefer readable local transaction bodies over abstract
 shared commit machinery.
 
-## Store
+## Db
 
-`store.rs` provides storage mechanics only:
+`db.rs` provides storage mechanics only:
 
 - transaction helpers,
 - retained fact primitives,
@@ -362,7 +362,7 @@ delete_where
 delete_all_rows
 ```
 
-Bad store methods are workflow-shaped and do not belong in `store.rs`:
+Bad store methods are workflow-shaped and do not belong in `db.rs`:
 
 ```rust
 project_fact
@@ -372,7 +372,7 @@ requeue_context_matches
 replay_all_facts
 ```
 
-`store.rs` may provide `delete_all_rows(table)` or `clear_tables(tables)`.
+`db.rs` may provide `delete_all_rows(table)` or `clear_tables(tables)`.
 Replay code chooses which tables to wipe.
 
 ## Protocol Rows
@@ -380,7 +380,7 @@ Replay code chooses which tables to wipe.
 Projectors and handlers emit typed row mutations from protocol schema. They do
 not emit raw SQL.
 
-Protocol schema declares table names, columns, and key columns. Store builds
+Protocol schema declares table names, columns, and key columns. Db builds
 generic SQL from registered schema:
 
 ```rust
@@ -418,7 +418,7 @@ fn run_replay() -> Result<(), String> {
 Replay wipe policy lives with daemon/replay, not store:
 
 ```rust
-fn wipe_derived_state(tx: &Store, schema: &ProtocolSchema) -> Result<()> {
+fn wipe_derived_state(tx: &Db, schema: &ProtocolSchema) -> Result<()> {
     for table in core_replay_reset_tables() {
         tx.delete_all_rows(table)?;
     }
@@ -467,7 +467,7 @@ time-wake subscriptions emitted by projectors.
 - Same-drain context probing is removed.
 - Replay is a daemon/runtime-owned wipe/rebuild over retained facts, with
   `replay.rs` limited to orchestration and diagnostics.
-- Store contains storage primitives, not workflow policy.
+- Db contains storage primitives, not workflow policy.
 - All fact projectors absorb decode/authenticate/adapt helpers into `project.rs`
   and document local context/replay/retention decisions.
 - Significant black-box tests pass.

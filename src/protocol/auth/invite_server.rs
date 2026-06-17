@@ -10,8 +10,8 @@ pub mod encode;
 pub mod fact;
 pub mod project;
 
+use crate::core::db::{TableInsert, TableName, TypedTableSchema, Value};
 use crate::core::facts::FactId;
-use crate::core::store::{TableInsert, TableName, TypedTableSchema, Value};
 
 pub const TYPE_INVITE_SERVER: u8 = encode::TYPE_INVITE_SERVER;
 

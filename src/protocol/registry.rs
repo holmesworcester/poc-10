@@ -20,6 +20,7 @@
 //! module that owns the policy and keep this file declarative.
 
 use crate::core::cli::CliCommand;
+use crate::core::db::{ReplayTables, SchemaSource, TableName};
 use crate::core::facts::Fact;
 use crate::core::intents::TypedTableSchema;
 use crate::core::network;
@@ -27,7 +28,6 @@ use crate::core::project_fact::{
     FactRoute, ProjectionContext, ProjectionOutput, Projector, RouterProjector,
 };
 use crate::core::runtime::{HandlerRoute, RecurringIntentSpec};
-use crate::core::store::{ReplayTables, SchemaSource, TableName};
 use crate::protocol::cli as command;
 use crate::protocol::{auth, connection, content, sync};
 

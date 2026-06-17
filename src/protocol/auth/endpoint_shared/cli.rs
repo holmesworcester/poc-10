@@ -5,7 +5,7 @@
 //! app/runtime boundary.
 
 use crate::core::cli::{decode_hex_32_named, encode_hex, CliArgs, CliOutput};
-use crate::core::store::Store;
+use crate::core::db::Db;
 use crate::protocol::auth;
 
 use super::fact::EndpointRole;
@@ -14,7 +14,7 @@ use super::queries;
 pub const IDENTITY_USAGE: &str = "identity";
 pub const PEERS_USAGE: &str = "peers WORKSPACE_ID_HEX";
 
-pub fn identity(store: &Store, _args: CliArgs<'_>) -> Result<CliOutput, String> {
+pub fn identity(store: &Db, _args: CliArgs<'_>) -> Result<CliOutput, String> {
     let endpoint = auth::endpoint::queries::local_endpoint_public(store)?
         .ok_or_else(|| "local endpoint has not been created".to_string())?;
     let mut lines = vec![
@@ -37,7 +37,7 @@ pub fn identity(store: &Store, _args: CliArgs<'_>) -> Result<CliOutput, String> 
     Ok(CliOutput::lines(lines))
 }
 
-pub fn peers(store: &Store, args: CliArgs<'_>) -> Result<CliOutput, String> {
+pub fn peers(store: &Db, args: CliArgs<'_>) -> Result<CliOutput, String> {
     let workspace = args.get(0).ok_or_else(|| PEERS_USAGE.to_string())?;
     let workspace_id = decode_hex_32_named(workspace, "workspace id")?;
     let lines = queries::peers_in_workspace(store, workspace_id)?

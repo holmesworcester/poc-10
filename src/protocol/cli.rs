@@ -7,7 +7,7 @@
 //! submit authored facts when a command authors work.
 //!
 //! This file is a command router, not a domain model. Each function should stay
-//! thin: parse through the owning fact module, pass `Store`/`CommandClock` to
+//! thin: parse through the owning fact module, pass `Db`/`CommandClock` to
 //! the owning command or query helper, submit `AuthoredFacts` when the command
 //! authors work, and format with the owning module's CLI helpers. If the code
 //! starts proving authority, constructing payload bytes, or interpreting
@@ -17,9 +17,10 @@
 use crate::core::cli::{decode_hex_32_named as decode_hex_32, encode_hex_32, CliArgs, CliOutput};
 use crate::core::command::{AuthoredFacts, CommandClock};
 use crate::core::daemon;
-use crate::core::replay::{ReplayOrder, ReplayReport, StateSummary};
+use crate::core::db::Db;
+use crate::core::replay::{ReplayOrder, ReplayReport};
+use crate::core::replay_check::StateSummary;
 use crate::core::runtime::Runtime;
-use crate::core::store::Store;
 use crate::protocol::connection;
 use crate::protocol::sync;
 use crate::protocol::{auth, content};
@@ -56,25 +57,22 @@ impl MatchCliContext {
 
     fn with_command_inputs<T>(
         &mut self,
-        run: impl FnOnce(&Store, &dyn CommandClock) -> Result<T, String>,
+        run: impl FnOnce(&Db, &dyn CommandClock) -> Result<T, String>,
     ) -> Result<T, String> {
         let clock = FixedClock(self.command_timestamp()?);
-        run(self.runtime.store(), &clock)
+        run(self.runtime.db(), &clock)
     }
 
     fn command_timestamp(&self) -> Result<u64, String> {
-        next_cli_timestamp(self.runtime.store(), self.explicit_at_ms)
+        next_cli_timestamp(self.runtime.db(), self.explicit_at_ms)
     }
 
     fn explicit_at_ms(&self) -> Option<u64> {
         self.explicit_at_ms
     }
 
-    fn query_store<T>(
-        &mut self,
-        run: impl FnOnce(&Store) -> Result<T, String>,
-    ) -> Result<T, String> {
-        run(self.runtime.store())
+    fn query_db<T>(&mut self, run: impl FnOnce(&Db) -> Result<T, String>) -> Result<T, String> {
+        run(self.runtime.db())
     }
 
     fn query_runtime<T>(
@@ -153,11 +151,11 @@ pub(crate) fn connect(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<Cl
 }
 
 pub(crate) fn identity(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    ctx.query_store(|store| auth::endpoint_shared::cli::identity(store, args))
+    ctx.query_db(|store| auth::endpoint_shared::cli::identity(store, args))
 }
 
 pub(crate) fn peers(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    ctx.query_store(|store| auth::endpoint_shared::cli::peers(store, args))
+    ctx.query_db(|store| auth::endpoint_shared::cli::peers(store, args))
 }
 
 pub(crate) fn invite(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
@@ -200,7 +198,7 @@ pub(crate) fn workspaces(
     ctx: &mut MatchCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
-    let output = ctx.query_store(|store| auth::workspace::cli::workspaces(store, args))?;
+    let output = ctx.query_db(|store| auth::workspace::cli::workspaces(store, args))?;
     Ok(auth::workspace::cli::workspaces_output(&output))
 }
 
@@ -211,7 +209,7 @@ pub(crate) fn count(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliO
 }
 
 pub(crate) fn users(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    let output = ctx.query_store(|store| auth::user::cli::users(store, args))?;
+    let output = ctx.query_db(|store| auth::user::cli::users(store, args))?;
     Ok(auth::user::cli::users_output(&output))
 }
 
@@ -294,7 +292,7 @@ pub(crate) fn key_node(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<C
     let args = auth::key_wrap::cli::key_node_args(args)?;
     let created_at_ms = ctx.command_timestamp()?;
     let output = auth::key_wrap::api::create_history_node(
-        ctx.runtime().store(),
+        ctx.runtime().db(),
         auth::key_wrap::api::CreateHistoryNode {
             created_at_ms,
             workspace_id: args.workspace_id,
@@ -324,7 +322,7 @@ pub(crate) fn disappearing_set(
     let args = content::retention_policy::cli::parse_disappearing_set_args(cli_args.values())?;
     let now_ms = ctx.command_timestamp()?;
     let output = content::retention_policy::api::author_set_with_auto_floor(
-        ctx.runtime().store(),
+        ctx.runtime().db(),
         content::retention_policy::api::AuthorPolicy {
             workspace_id: args.workspace_id,
             now_ms,
@@ -351,7 +349,7 @@ pub(crate) fn disappearing_status(
 ) -> Result<CliOutput, String> {
     let workspace_id = content::retention_policy::cli::status_workspace_id(args)?;
     let now_ms = ctx.explicit_at_ms();
-    let report = ctx.query_store(|store| {
+    let report = ctx.query_db(|store| {
         content::retention_policy::queries::status_report(store, workspace_id, now_ms)
     })?;
     Ok(content::retention_policy::cli::status_output(&report))
@@ -371,8 +369,8 @@ pub(crate) fn disappearing_tighten(
         now_ms,
         ttl_minutes: args.ttl_minutes,
     };
-    let plan = content::retention_policy::api::plan_tighten(ctx.runtime().store(), input)?;
-    let output = content::retention_policy::api::author_tighten(ctx.runtime().store(), input)?;
+    let plan = content::retention_policy::api::plan_tighten(ctx.runtime().db(), input)?;
+    let output = content::retention_policy::api::author_tighten(ctx.runtime().db(), input)?;
     let receipt = ctx.submit_authored_facts(output)?;
     Ok(CliOutput::lines(vec![
         format!("policy_fact_id: {}", encode_hex_32(&receipt.policy_fact_id)),
@@ -390,7 +388,7 @@ pub(crate) fn disappearing_compact(
     let workspace_id = content::retention_policy::cli::compact_workspace_id(args)?;
     let now_ms = ctx.command_timestamp()?;
     let output = content::retention_policy::api::author_compact(
-        ctx.runtime().store(),
+        ctx.runtime().db(),
         content::retention_policy::api::AuthorCompact {
             workspace_id,
             now_ms,
@@ -420,7 +418,7 @@ pub(crate) fn send(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOu
         .to_string();
     let timestamp = ctx.command_timestamp()?;
     let clock = FixedClock(timestamp);
-    let output = content::message::cli::send(ctx.runtime().store(), &clock, args)?;
+    let output = content::message::cli::send(ctx.runtime().db(), &clock, args)?;
     let receipt = ctx.submit_authored_facts(output)?;
     Ok(content::message::cli::send_output(&receipt, &text))
 }
@@ -432,7 +430,7 @@ pub(crate) fn react(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliO
         .and_then(|value| decode_hex_32(value, "workspace id"))?;
     let timestamp = ctx.command_timestamp()?;
     let clock = FixedClock(timestamp);
-    let output = content::message::cli::react(ctx.runtime().store(), &clock, args)?;
+    let output = content::message::cli::react(ctx.runtime().db(), &clock, args)?;
     let receipt = ctx.submit_authored_facts(output)?;
     Ok(content::message::cli::react_output(&receipt))
 }
@@ -444,17 +442,17 @@ pub(crate) fn send_file(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<
         .and_then(|value| decode_hex_32(value, "workspace id"))?;
     let timestamp = ctx.command_timestamp()?;
     let clock = FixedClock(timestamp);
-    let output = content::message::cli::send_file(ctx.runtime().store(), &clock, args)?;
+    let output = content::message::cli::send_file(ctx.runtime().db(), &clock, args)?;
     let receipt = ctx.submit_authored_facts(output)?;
     Ok(content::message::cli::send_file_output(&receipt))
 }
 
 pub(crate) fn files(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    ctx.query_store(|store| content::message::cli::files(store, args))
+    ctx.query_db(|store| content::message::cli::files(store, args))
 }
 
 pub(crate) fn save_file(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    ctx.query_store(|store| content::message::cli::save_file(store, args))
+    ctx.query_db(|store| content::message::cli::save_file(store, args))
 }
 
 pub(crate) fn delete_file(
@@ -465,7 +463,7 @@ pub(crate) fn delete_file(
         return Err(content::file_deletion::cli::DELETE_FILE_USAGE.to_string());
     }
     let workspace_id = decode_hex_32(args.get(0).unwrap(), "workspace id")?;
-    let file = ctx.query_store(|store| {
+    let file = ctx.query_db(|store| {
         content::file_deletion::cli::resolve_file_selector(
             store,
             workspace_id,
@@ -475,7 +473,7 @@ pub(crate) fn delete_file(
     let timestamp = ctx.command_timestamp()?;
     let clock = FixedClock(timestamp);
     let output = content::file_deletion::api::delete_file(
-        ctx.runtime().store(),
+        ctx.runtime().db(),
         &clock,
         workspace_id,
         file.file_fact_id,
@@ -495,17 +493,17 @@ pub(crate) fn delete_message(
         .and_then(|value| decode_hex_32(value, "workspace id"))?;
     let timestamp = ctx.command_timestamp()?;
     let clock = FixedClock(timestamp);
-    let output = content::message::cli::delete_message(ctx.runtime().store(), &clock, args)?;
+    let output = content::message::cli::delete_message(ctx.runtime().db(), &clock, args)?;
     let receipt = ctx.submit_authored_facts(output)?;
     Ok(content::message::cli::delete_message_output(&receipt))
 }
 
 pub(crate) fn messages(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    ctx.query_store(|store| content::message::cli::messages(store, args))
+    ctx.query_db(|store| content::message::cli::messages(store, args))
 }
 
 pub(crate) fn view(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    ctx.query_store(|store| content::message::cli::view(store, args))
+    ctx.query_db(|store| content::message::cli::view(store, args))
 }
 
 pub(crate) fn grant_admin(
@@ -540,7 +538,7 @@ pub(crate) fn generate(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<C
         Ok::<FixedClock, String>(FixedClock(timestamp))
     })?;
     let output = crate::core::perf_profile::measure_result("command_build", || {
-        content::message::cli::generate(ctx.runtime().store(), &clock, args)
+        content::message::cli::generate(ctx.runtime().db(), &clock, args)
     })?;
     let receipt = crate::core::perf_profile::measure_result("commit", || {
         ctx.runtime_mut().submit_authored_facts(output)
@@ -557,14 +555,14 @@ pub(crate) fn sync_status(
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     sync::shared_fact::cli::require_sync_status_args(args)?;
-    let status = ctx.query_store(crate::protocol::sync::shared_fact::sync_status)?;
+    let status = ctx.query_db(crate::protocol::sync::shared_fact::sync_status)?;
     Ok(sync::shared_fact::cli::sync_status_output(&status))
 }
 
 pub(crate) fn sync(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
     match sync::local_setting::parse_sync_args(args)? {
         sync::local_setting::SyncCliCommand::Show => {
-            let setting = ctx.query_store(sync::local_setting::current_setting)?;
+            let setting = ctx.query_db(sync::local_setting::current_setting)?;
             Ok(sync::local_setting::sync_setting_output(setting.as_ref()))
         }
         sync::local_setting::SyncCliCommand::Set(mode) => {
@@ -581,7 +579,7 @@ pub(crate) fn content_count(
     ctx: &mut MatchCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
-    let output = ctx.query_store(|store| content::message::cli::content_count(store, args))?;
+    let output = ctx.query_db(|store| content::message::cli::content_count(store, args))?;
     Ok(content::message::cli::content_count_output(output))
 }
 
@@ -644,7 +642,7 @@ pub(crate) fn intent_registry(
     Ok(CliOutput::lines(lines))
 }
 
-fn replay_check_output(report: &crate::core::replay::ReplayCheckReport) -> CliOutput {
+fn replay_check_output(report: &crate::core::replay_check::ReplayCheckReport) -> CliOutput {
     let mut lines = vec![
         format!("ok: {}", report.mismatched.is_empty()),
         format!("passes: {}", report.passes.len()),
@@ -721,7 +719,7 @@ fn scratch_dir_for(db: &Path) -> PathBuf {
     parent.join(format!(".topo-replay-check-{}", std::process::id()))
 }
 
-fn next_cli_timestamp(store: &Store, explicit_at_ms: Option<u64>) -> Result<u64, String> {
+fn next_cli_timestamp(store: &Db, explicit_at_ms: Option<u64>) -> Result<u64, String> {
     if let Some(timestamp) = explicit_at_ms {
         return Ok(timestamp);
     }

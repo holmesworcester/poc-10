@@ -2,14 +2,14 @@ use std::io::Read;
 use std::net::{SocketAddr, TcpListener};
 use std::thread;
 
+use topo::core::db::Db;
 use topo::core::network::{self, NetworkTarget, OutgoingNetworkRow};
-use topo::core::store::Store;
 
 #[test]
 fn outgoing_network_rows_are_opaque_and_idempotent() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("network-queues.db");
-    let store = Store::open_disk_with_schema_sources(&path, &[network::SCHEMA_SOURCE]).unwrap();
+    let store = Db::open_disk_with_schema_sources(&path, &[network::SCHEMA_SOURCE]).unwrap();
     let addr: SocketAddr = "127.0.0.1:41000".parse().unwrap();
     let other_addr: SocketAddr = "127.0.0.1:41001".parse().unwrap();
     let target = NetworkTarget::new(addr);
@@ -81,7 +81,7 @@ fn outgoing_network_rows_are_opaque_and_idempotent() {
         "deleting the final frame for an address prunes its active target row"
     );
 
-    let reopened = Store::open_disk_with_schema_sources(&path, &[network::SCHEMA_SOURCE]).unwrap();
+    let reopened = Db::open_disk_with_schema_sources(&path, &[network::SCHEMA_SOURCE]).unwrap();
     assert!(
         network::claim_outgoing_for_target(&reopened, target, 16)
             .unwrap()
@@ -98,7 +98,7 @@ fn outgoing_network_rows_are_opaque_and_idempotent() {
 
 #[test]
 fn outgoing_pump_writes_queued_rows_and_deletes_sent_frames() {
-    let store = Store::open_memory_with_schema_sources(&[network::SCHEMA_SOURCE]).unwrap();
+    let store = Db::open_memory_with_schema_sources(&[network::SCHEMA_SOURCE]).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
     let addr = listener.local_addr().expect("listener addr");
     let target = NetworkTarget::new(addr);
@@ -143,7 +143,7 @@ fn outgoing_pump_writes_queued_rows_and_deletes_sent_frames() {
 
 #[test]
 fn outgoing_pump_leaves_rows_queued_when_target_is_unavailable() {
-    let store = Store::open_memory_with_schema_sources(&[network::SCHEMA_SOURCE]).unwrap();
+    let store = Db::open_memory_with_schema_sources(&[network::SCHEMA_SOURCE]).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind closed listener");
     let addr = listener.local_addr().expect("listener addr");
     drop(listener);
