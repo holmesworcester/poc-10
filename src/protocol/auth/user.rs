@@ -15,10 +15,7 @@ pub mod project;
 pub mod queries;
 
 use crate::core::facts::FactId;
-use crate::core::row_schema::{RowField, RowTableSchema, RowValue};
-use crate::core::store::{TableName, TableRow};
-
-use fact::USERNAME_BYTES;
+use crate::core::store::{TableInsert, TableName, TypedTableSchema, Value};
 
 pub const TYPE_USER: u8 = encode::TYPE_USER;
 
@@ -26,19 +23,20 @@ pub const TYPE_USER: u8 = encode::TYPE_USER;
 /// fact id of the user fact being projected.
 pub const USER_ROWS: TableName = TableName::new("user_rows");
 
-const USER_ROW_KEY_FIELDS: &[RowField] = &[
-    RowField::bytes32("workspace_id"),
-    RowField::bytes32("user_id"),
+pub const USER_COLUMNS: &[&str] = &[
+    "workspace_id",
+    "user_id",
+    "created_at_ms",
+    "public_key",
+    "user_invite_id",
+    "username",
 ];
-const USER_ROW_VALUE_FIELDS: &[RowField] = &[
-    RowField::u64be("created_at_ms"),
-    RowField::bytes32("public_key"),
-    RowField::bytes32("user_invite_id"),
-    RowField::bytes("username", USERNAME_BYTES),
-];
-
-pub const USER_ROW_SCHEMA: RowTableSchema =
-    RowTableSchema::new(USER_ROWS, USER_ROW_KEY_FIELDS, USER_ROW_VALUE_FIELDS);
+pub const USER_KEY_COLUMNS: &[&str] = &["workspace_id", "user_id"];
+pub const USER_TABLE: TypedTableSchema = TypedTableSchema {
+    table: USER_ROWS,
+    columns: USER_COLUMNS,
+    key_columns: USER_KEY_COLUMNS,
+};
 
 /// Row key for a user: `workspace_id || user_id`, matching the schema key fields.
 pub fn user_key(workspace_id: &FactId, user_id: &FactId) -> Vec<u8> {
@@ -48,23 +46,15 @@ pub fn user_key(workspace_id: &FactId, user_id: &FactId) -> Vec<u8> {
     key
 }
 
-pub fn user_row(
-    user_id: FactId,
-    user_invite_id: [u8; 32],
-    fact: &fact::UserFact,
-) -> Result<TableRow, String> {
-    USER_ROW_SCHEMA.row(
-        &[
-            RowValue::Bytes(fact.workspace_id.to_vec()),
-            RowValue::Bytes(user_id.to_vec()),
-        ],
-        &[
-            RowValue::U64(fact.created_at_ms),
-            RowValue::Bytes(fact.public_key.to_vec()),
-            RowValue::Bytes(user_invite_id.to_vec()),
-            RowValue::Bytes(fact.username.padded_bytes().to_vec()),
-        ],
-    )
+pub fn user_row(user_id: FactId, user_invite_id: [u8; 32], fact: &fact::UserFact) -> TableInsert {
+    USER_TABLE.insert(vec![
+        Value::Bytes(fact.workspace_id.to_vec()),
+        Value::Bytes(user_id.to_vec()),
+        Value::U64(fact.created_at_ms),
+        Value::Bytes(fact.public_key.to_vec()),
+        Value::Bytes(user_invite_id.to_vec()),
+        Value::Bytes(fact.username.padded_bytes().to_vec()),
+    ])
 }
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::UserFact, String> {

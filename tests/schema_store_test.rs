@@ -1,25 +1,15 @@
 use std::collections::BTreeSet;
 
 use rusqlite::{params, Connection};
-use topo::core::row_schema::{RowField, RowTableSchema, RowValue};
 use topo::core::schema::CORE_SCHEMA_SOURCE;
-use topo::core::store::{ReplayTables, SchemaSource, Store, TableName, TableRow};
+use topo::core::store::{ReplayTables, SchemaSource, Store, TableInsert, TableName, Value};
 use topo::protocol::content::{file, reaction};
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 
 const TYPED_MESSAGES: TableName = TableName::new("typed_messages");
-const TEST_ROWS: TableName = TableName::new("test_rows");
-const SCHEMA_BACKED_ROWS: TableName = TableName::new("schema_backed_rows");
 const REPLAY_PROTECTED_ROWS: TableName = TableName::new("replay_protected_rows");
 const REPLAY_RESET_ROWS: TableName = TableName::new("replay_reset_rows");
-
-const SCHEMA_BACKED_KEY: &[RowField] = &[RowField::bytes32("owner")];
-const SCHEMA_BACKED_VALUE: &[RowField] = &[
-    RowField::u64be("created_at_ms"),
-    RowField::bytes("payload", 2),
-];
-const SCHEMA_BACKED_ROW_SCHEMA: RowTableSchema =
-    RowTableSchema::new(SCHEMA_BACKED_ROWS, SCHEMA_BACKED_KEY, SCHEMA_BACKED_VALUE);
+const LIFECYCLE_COLUMNS: &[&str] = &["id", "payload"];
 
 const TYPED_MESSAGES_SCHEMA: SchemaSource = SchemaSource {
     ddl: r#"
@@ -33,48 +23,20 @@ CREATE TABLE IF NOT EXISTS typed_messages (
 CREATE INDEX IF NOT EXISTS typed_messages_by_workspace_created
     ON typed_messages (workspace_id, created_at_ms);
 "#,
-    row_tables: &[],
-    row_schemas: &[],
-    replay: ReplayTables::EMPTY,
-};
-
-const TEST_ROWS_SCHEMA: SchemaSource = SchemaSource {
-    ddl: r#"
-CREATE TABLE IF NOT EXISTS test_rows (
-    row_key BLOB PRIMARY KEY NOT NULL,
-    row_value BLOB NOT NULL
-);
-"#,
-    row_tables: &[TEST_ROWS],
-    row_schemas: &[],
-    replay: ReplayTables::EMPTY,
-};
-
-const SCHEMA_BACKED_ROWS_SCHEMA: SchemaSource = SchemaSource {
-    ddl: r#"
-CREATE TABLE IF NOT EXISTS schema_backed_rows (
-    row_key BLOB PRIMARY KEY NOT NULL,
-    row_value BLOB NOT NULL
-);
-"#,
-    row_tables: &[],
-    row_schemas: &[SCHEMA_BACKED_ROW_SCHEMA],
     replay: ReplayTables::EMPTY,
 };
 
 const REPLAY_LIFECYCLE_SCHEMA: SchemaSource = SchemaSource {
     ddl: r#"
 CREATE TABLE IF NOT EXISTS replay_protected_rows (
-    row_key BLOB PRIMARY KEY NOT NULL,
-    row_value BLOB NOT NULL
+    id BLOB PRIMARY KEY NOT NULL,
+    payload BLOB NOT NULL
 );
 CREATE TABLE IF NOT EXISTS replay_reset_rows (
-    row_key BLOB PRIMARY KEY NOT NULL,
-    row_value BLOB NOT NULL
+    id BLOB PRIMARY KEY NOT NULL,
+    payload BLOB NOT NULL
 );
 "#,
-    row_tables: &[REPLAY_PROTECTED_ROWS, REPLAY_RESET_ROWS],
-    row_schemas: &[],
     replay: ReplayTables {
         protected: &[REPLAY_PROTECTED_ROWS],
         reset: &[REPLAY_RESET_ROWS],
@@ -98,12 +60,12 @@ fn sqlite_table_names(path: &std::path::Path) -> BTreeSet<String> {
 }
 
 #[test]
-fn schema_sources_execute_declared_ddl_and_allowlisted_row_tables() {
+fn schema_sources_execute_declared_ddl() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("schema-store.db");
     let sources = checked_schema_sources();
 
-    let store = Store::open_disk_with_schema_sources(&path, &sources).expect("open store");
+    Store::open_disk_with_schema_sources(&path, &sources).expect("open store");
     let actual = sqlite_table_names(&path);
     for expected in [
         "facts",
@@ -116,21 +78,6 @@ fn schema_sources_execute_declared_ddl_and_allowlisted_row_tables() {
     ] {
         assert!(actual.contains(expected), "missing schema table {expected}");
     }
-
-    store
-        .insert_table_rows(vec![TableRow {
-            table: TableName::new("workspace_rows"),
-            key: b"sample".to_vec(),
-            value: 1u64.to_be_bytes().to_vec(),
-        }])
-        .expect("insert row into allowlisted row table");
-
-    assert_eq!(
-        store
-            .table_row(TableName::new("workspace_rows"), b"sample")
-            .expect("read row"),
-        Some(1u64.to_be_bytes().to_vec())
-    );
 
     Store::open_disk_with_schema_sources(&path, &sources).expect("reopen executes idempotent DDL");
 }
@@ -408,16 +355,22 @@ fn replay_lifecycle_reset_preserves_protected_tables() {
     let store = Store::open_memory_with_schema_sources(&[REPLAY_LIFECYCLE_SCHEMA])
         .expect("open lifecycle store");
     store
-        .insert_table_rows(vec![
-            TableRow {
+        .insert_table_values(vec![
+            TableInsert {
                 table: REPLAY_PROTECTED_ROWS,
-                key: b"protected".to_vec(),
-                value: b"kept".to_vec(),
+                columns: LIFECYCLE_COLUMNS,
+                values: vec![
+                    Value::Bytes(b"protected".to_vec()),
+                    Value::Bytes(b"kept".to_vec()),
+                ],
             },
-            TableRow {
+            TableInsert {
                 table: REPLAY_RESET_ROWS,
-                key: b"derived".to_vec(),
-                value: b"cleared".to_vec(),
+                columns: LIFECYCLE_COLUMNS,
+                values: vec![
+                    Value::Bytes(b"derived".to_vec()),
+                    Value::Bytes(b"cleared".to_vec()),
+                ],
             },
         ])
         .expect("seed lifecycle rows");
@@ -430,15 +383,15 @@ fn replay_lifecycle_reset_preserves_protected_tables() {
     );
     assert_eq!(
         store
-            .table_row(REPLAY_PROTECTED_ROWS, b"protected")
-            .expect("read protected row"),
-        Some(b"kept".to_vec())
+            .table_row_count(REPLAY_PROTECTED_ROWS)
+            .expect("count protected rows"),
+        1
     );
     assert_eq!(
         store
-            .table_row(REPLAY_RESET_ROWS, b"derived")
-            .expect("read reset row"),
-        None
+            .table_row_count(REPLAY_RESET_ROWS)
+            .expect("count reset rows"),
+        0
     );
 
     let summaries = store
@@ -490,12 +443,10 @@ fn replay_lifecycle_rejects_protected_reset_overlap() {
     const BAD_SCHEMA: SchemaSource = SchemaSource {
         ddl: r#"
 CREATE TABLE IF NOT EXISTS replay_protected_rows (
-    row_key BLOB PRIMARY KEY NOT NULL,
-    row_value BLOB NOT NULL
+    id BLOB PRIMARY KEY NOT NULL,
+    payload BLOB NOT NULL
 );
 "#,
-        row_tables: &[REPLAY_PROTECTED_ROWS],
-        row_schemas: &[],
         replay: ReplayTables {
             protected: &[REPLAY_PROTECTED_ROWS],
             reset: &[REPLAY_PROTECTED_ROWS],
@@ -515,109 +466,47 @@ CREATE TABLE IF NOT EXISTS replay_protected_rows (
 }
 
 #[test]
-fn typed_tables_reject_opaque_row_helpers() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let path = tmp.path().join("typed-row-store.db");
-    let store =
-        Store::open_disk_with_schema_sources(&path, &[TYPED_MESSAGES_SCHEMA]).expect("open store");
-    let err = store
-        .insert_table_rows(vec![TableRow {
-            table: TYPED_MESSAGES,
-            key: vec![0; 64],
-            value: vec![0; 9],
-        }])
-        .expect_err("typed tables must not accept opaque row writes");
-    assert!(
-        err.to_string().contains("not an opaque row table"),
-        "unexpected error: {err}"
-    );
-}
-
-#[test]
-fn row_helpers_require_row_table_allowlist() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let path = tmp.path().join("typed-key-value-store.db");
-    let key_value_shape = SchemaSource {
-        ddl: r#"
-CREATE TABLE IF NOT EXISTS legacy_key_value_shape (
-    row_key BLOB PRIMARY KEY NOT NULL,
-    row_value BLOB NOT NULL
-);
-        "#,
-        row_tables: &[],
-        row_schemas: &[],
-        replay: ReplayTables::EMPTY,
-    };
-
-    let store = Store::open_disk_with_schema_sources(&path, &[key_value_shape])
-        .expect("key/value table block creates a typed table unless allowlisted");
-    let err = store
-        .insert_table_rows(vec![TableRow {
-            table: TableName::new("legacy_key_value_shape"),
-            key: b"k".to_vec(),
-            value: b"v".to_vec(),
-        }])
-        .expect_err("non-allowlisted key/value table should reject row helper");
-
-    assert!(err.to_string().contains("not an opaque row table"));
-}
-
-#[test]
-fn schema_backed_row_tables_are_allowlisted_and_keep_declared_shape() {
-    let store = Store::open_memory_with_schema_sources(&[SCHEMA_BACKED_ROWS_SCHEMA])
-        .expect("open schema-backed row store");
-    let row = SCHEMA_BACKED_ROW_SCHEMA
-        .row(
-            &[RowValue::Bytes(vec![1; 32])],
-            &[RowValue::U64(9), RowValue::Bytes(vec![7, 8])],
-        )
-        .expect("schema row");
-
-    assert_eq!(store.row_schemas(), &[SCHEMA_BACKED_ROW_SCHEMA]);
-    assert_eq!(
-        store.insert_table_rows(vec![row.clone()]).expect("insert"),
-        1
-    );
-
-    let stored = store
-        .table_row(SCHEMA_BACKED_ROWS, &row.key)
-        .expect("read")
-        .expect("stored row");
-    assert_eq!(
-        SCHEMA_BACKED_ROW_SCHEMA
-            .decode_value(&stored)
-            .expect("decode value"),
-        vec![RowValue::U64(9), RowValue::Bytes(vec![7, 8])]
-    );
-}
-
-#[test]
-fn allowlisted_row_tables_keep_idempotent_conflict_checks() {
-    let store =
-        Store::open_memory_with_schema_sources(&[TEST_ROWS_SCHEMA]).expect("open memory store");
-    let row = TableRow {
-        table: TEST_ROWS,
-        key: b"k".to_vec(),
-        value: b"one".to_vec(),
+fn typed_table_values_keep_idempotent_conflict_checks() {
+    const COLUMNS: &[&str] = &["workspace_id", "message_id", "created_at_ms", "deleted"];
+    let store = Store::open_memory_with_schema_sources(&[TYPED_MESSAGES_SCHEMA])
+        .expect("open memory store");
+    let row = TableInsert {
+        table: TYPED_MESSAGES,
+        columns: COLUMNS,
+        values: vec![
+            Value::Bytes(vec![1; 32]),
+            Value::Bytes(vec![2; 32]),
+            Value::U64(9),
+            Value::Bool(false),
+        ],
     };
 
     assert_eq!(
-        store.insert_table_rows(vec![row.clone()]).expect("insert"),
+        store
+            .insert_table_values(vec![row.clone()])
+            .expect("insert"),
         1
     );
     assert_eq!(
         store
-            .insert_table_rows(vec![row.clone()])
+            .insert_table_values(vec![row.clone()])
             .expect("idempotent insert"),
         0
     );
 
     let err = store
-        .insert_table_rows(vec![TableRow {
-            value: b"two".to_vec(),
+        .insert_table_values(vec![TableInsert {
+            values: vec![
+                Value::Bytes(vec![1; 32]),
+                Value::Bytes(vec![2; 32]),
+                Value::U64(10),
+                Value::Bool(false),
+            ],
             ..row
         }])
         .expect_err("conflicting insert must reject");
 
-    assert!(err.to_string().contains("conflicting row for test_rows"));
+    assert!(err
+        .to_string()
+        .contains("conflicting row for typed_messages"));
 }

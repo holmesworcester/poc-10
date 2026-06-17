@@ -168,15 +168,9 @@ fn endpoint_shared_fact(
     let endpoint_id = if let Some(endpoint_fact) = input.new_endpoint_fact {
         auth::endpoint::project::decode::decode_fact(&endpoint_fact.bytes)?.endpoint
     } else {
-        let value = input
-            .store
-            .table_row(
-                auth::endpoint::LOCAL_ENDPOINT_ROWS,
-                auth::endpoint::LOCAL_KEY,
-            )
-            .map_err(|err| format!("load local endpoint: {err}"))?
-            .ok_or_else(|| "local endpoint row is missing".to_string())?;
-        id32(&value, "local endpoint")?
+        auth::endpoint::queries::local_endpoint_public(input.store)?
+            .ok_or_else(|| "local endpoint row is missing".to_string())?
+            .endpoint
     };
     let fact = auth::endpoint_shared::author::authored_endpoint_shared_fact(
         input.created_at_ms,
@@ -196,12 +190,6 @@ fn endpoint_shared_fact(
         input.created_at_ms,
     )?;
     Ok(AuthoredFactEvidence { fact, signature })
-}
-
-fn id32(value: &[u8], label: &str) -> Result<[u8; 32], String> {
-    value
-        .try_into()
-        .map_err(|_| format!("{label} row must be 32 bytes"))
 }
 
 fn user_invite_fact(

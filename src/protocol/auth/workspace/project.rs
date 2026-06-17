@@ -303,9 +303,9 @@ impl WorkspaceProjector {
                     fact.id,
                     fact.id,
                 ))
-                .row_mutation(RowMutation::PutRow(super::workspace_row(
+                .row_mutation(RowMutation::InsertValues(super::workspace_insert(
                     fact.id, &workspace,
-                )?)),
+                ))),
             fact.id,
             fact,
             context_have_from_needs(_context, [&signature_need]),
@@ -319,7 +319,7 @@ mod projector_tests {
     use crate::core::context::{ContextNeed, ContextOffer};
     use crate::core::project_fact::MatchedContext;
     use crate::protocol::auth::endpoint_shared::fact::EndpointRole;
-    use crate::protocol::auth::workspace::{author, encode, queries};
+    use crate::protocol::auth::workspace::author;
     use crate::protocol::auth::{invite_accepted, invite_secret};
     use std::collections::BTreeSet;
 
@@ -372,29 +372,6 @@ mod projector_tests {
             .expect_err("mismatched accepted workspace must reject");
 
         assert!(err.contains("different workspace"), "{err}");
-    }
-
-    #[test]
-    fn workspace_row_schema_preserves_payload_bytes_and_decodes_fields() {
-        let fact = super::super::fact::WorkspaceFact {
-            created_at_ms: 42,
-            public_key: [7; 32],
-            name: super::super::fact::WorkspaceName::new("Engineering").expect("name"),
-        };
-
-        let row = super::super::workspace_row([9; 32], &fact).expect("workspace row");
-
-        assert_eq!(row.table, super::super::WORKSPACE_ROWS);
-        assert_eq!(
-            row.value,
-            encode::encode_payload(&fact).expect("fact payload bytes")
-        );
-        let decoded =
-            queries::decode_workspace_row(&row.key, &row.value).expect("decode workspace row");
-        assert_eq!(decoded.workspace_id, [9; 32]);
-        assert_eq!(decoded.created_at_ms, 42);
-        assert_eq!(decoded.public_key, [7; 32]);
-        assert_eq!(decoded.name, "Engineering");
     }
 
     fn accepted_fact(

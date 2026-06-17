@@ -236,7 +236,7 @@ use crate::protocol::auth::unwrap_key_wrap::{unwrap_key_wrap_intent, UnwrapKeyWr
 use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
 use super::fact::KeyWrapFact;
-use super::key_wrap_row;
+use super::key_wrap_insert;
 use super::queries::KeyWrapRow;
 
 // ---------------------------------------------------------------------------
@@ -851,7 +851,7 @@ fn key_wrap(
     // 3. Materialize: write the accepted wrap row and emit unwrap work.
     output = share_fact_with_sync(
         output
-            .row_mutation(RowMutation::PutRow(key_wrap_row(KeyWrapRow {
+            .row_mutation(RowMutation::InsertValues(key_wrap_insert(KeyWrapRow {
                 key_wrap_id: fact.id,
                 signer_public_key,
                 wrap: wrap.clone(),

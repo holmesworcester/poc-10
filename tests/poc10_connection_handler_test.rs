@@ -32,7 +32,9 @@ fn create_handler_emits_responder_secret_and_sealed_connection() {
     });
     let store = test_store();
     store
-        .insert_table_rows(endpoint_rows::endpoint_rows(&scenario.endpoint))
+        .insert_table_values(vec![endpoint_rows::local_endpoint_insert(
+            &scenario.endpoint,
+        )])
         .expect("seed local endpoint");
 
     let output = CreateConnectionHandler::new()
@@ -101,7 +103,9 @@ fn handler_rejects_request_addressed_to_a_different_endpoint() {
     });
     let store = test_store();
     store
-        .insert_table_rows(endpoint_rows::endpoint_rows(&scenario.endpoint))
+        .insert_table_values(vec![endpoint_rows::local_endpoint_insert(
+            &scenario.endpoint,
+        )])
         .expect("seed local endpoint");
 
     let err = CreateConnectionHandler::new()

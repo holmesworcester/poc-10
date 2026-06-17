@@ -276,8 +276,9 @@ impl SyncCompareProjector {
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 3. Materialize.
-        let output = ProjectionOutput::new()
-            .row_mutation(RowMutation::PutRow(sync_compare_row(fact.id, &compare)?));
+        let output = ProjectionOutput::new().row_mutation(RowMutation::InsertValues(
+            sync_compare_row(fact.id, &compare),
+        ));
         if context.is_replay() {
             return Ok(output);
         }

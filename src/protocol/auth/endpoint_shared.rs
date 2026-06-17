@@ -14,8 +14,7 @@ pub mod project;
 pub mod queries;
 
 use crate::core::facts::FactId;
-use crate::core::row_schema::{RowField, RowTableSchema, RowValue};
-use crate::core::store::{TableName, TableRow};
+use crate::core::store::{TableInsert, TableName, TypedTableSchema, Value};
 
 pub const TYPE_ENDPOINT_SHARED: u8 = encode::TYPE_ENDPOINT_SHARED;
 
@@ -24,43 +23,37 @@ pub const TYPE_ENDPOINT_SHARED: u8 = encode::TYPE_ENDPOINT_SHARED;
 /// of the projected endpoint-shared fact.
 pub const ENDPOINT_SHARED_ROWS: TableName = TableName::new("auth_endpoint_shared_rows");
 
-const ENDPOINT_SHARED_ROW_KEY_FIELDS: &[RowField] = &[
-    RowField::bytes32("workspace_id"),
-    RowField::bytes32("endpoint_shared_id"),
+pub const ENDPOINT_SHARED_COLUMNS: &[&str] = &[
+    "workspace_id",
+    "endpoint_shared_id",
+    "created_at_ms",
+    "endpoint_id",
+    "signing_public_key",
+    "endpoint_role",
+    "user_authority_fact_id",
+    "device_name",
 ];
-const ENDPOINT_SHARED_ROW_VALUE_FIELDS: &[RowField] = &[
-    RowField::u64be("created_at_ms"),
-    RowField::bytes32("endpoint_id"),
-    RowField::bytes32("signing_public_key"),
-    RowField::u8("endpoint_role"),
-    RowField::bytes32("user_authority_fact_id"),
-    RowField::bytes("device_name", fact::ENDPOINT_DEVICE_NAME_BYTES),
-];
-
-pub const ENDPOINT_SHARED_ROW_SCHEMA: RowTableSchema = RowTableSchema::new(
-    ENDPOINT_SHARED_ROWS,
-    ENDPOINT_SHARED_ROW_KEY_FIELDS,
-    ENDPOINT_SHARED_ROW_VALUE_FIELDS,
-);
+pub const ENDPOINT_SHARED_KEY_COLUMNS: &[&str] = &["workspace_id", "endpoint_shared_id"];
+pub const ENDPOINT_SHARED_TABLE: TypedTableSchema = TypedTableSchema {
+    table: ENDPOINT_SHARED_ROWS,
+    columns: ENDPOINT_SHARED_COLUMNS,
+    key_columns: ENDPOINT_SHARED_KEY_COLUMNS,
+};
 
 pub fn endpoint_shared_row(
     endpoint_shared_id: FactId,
     fact: &fact::EndpointSharedFact,
-) -> Result<TableRow, String> {
-    ENDPOINT_SHARED_ROW_SCHEMA.row(
-        &[
-            RowValue::Bytes(fact.workspace_id.to_vec()),
-            RowValue::Bytes(endpoint_shared_id.to_vec()),
-        ],
-        &[
-            RowValue::U64(fact.created_at_ms),
-            RowValue::Bytes(fact.endpoint_id.to_vec()),
-            RowValue::Bytes(fact.signing_public_key.to_vec()),
-            RowValue::U8(fact.endpoint_role.as_u8()),
-            RowValue::Bytes(fact.user_authority_fact_id.to_vec()),
-            RowValue::Bytes(fact.device_name.padded_bytes().to_vec()),
-        ],
-    )
+) -> TableInsert {
+    ENDPOINT_SHARED_TABLE.insert(vec![
+        Value::Bytes(fact.workspace_id.to_vec()),
+        Value::Bytes(endpoint_shared_id.to_vec()),
+        Value::U64(fact.created_at_ms),
+        Value::Bytes(fact.endpoint_id.to_vec()),
+        Value::Bytes(fact.signing_public_key.to_vec()),
+        Value::U64(u64::from(fact.endpoint_role.as_u8())),
+        Value::Bytes(fact.user_authority_fact_id.to_vec()),
+        Value::Bytes(fact.device_name.padded_bytes().to_vec()),
+    ])
 }
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::EndpointSharedFact, String> {

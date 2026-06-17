@@ -10,13 +10,11 @@ pub mod author;
 pub mod encode;
 pub mod fact;
 pub mod project;
-pub mod queries;
 
 pub use author::advertisement_fact;
 
 use crate::core::facts::FactId;
-use crate::core::row_schema::{RowField, RowTableSchema, RowValue};
-use crate::core::store::{TableName, TableRow};
+use crate::core::store::{TableInsert, TableName, TypedTableSchema, Value};
 
 pub const TYPE_SYNC_HAVE_ID: u8 = encode::TYPE_SYNC_HAVE_ID;
 
@@ -27,35 +25,26 @@ pub const TYPE_SYNC_HAVE_ID: u8 = encode::TYPE_SYNC_HAVE_ID;
 /// fact id is re-advertised from a later range compare.
 pub const SYNC_HAVE_ID_ROWS: TableName = TableName::new("sync_have_id_rows");
 
-const SYNC_HAVE_ID_ROW_KEY_FIELDS: &[RowField] = &[
-    RowField::bytes32("connection_id"),
-    RowField::bytes32("fact_id"),
+pub const SYNC_HAVE_ID_COLUMNS: &[&str] = &[
+    "connection_id",
+    "fact_id",
+    "timestamp",
+    "advertised_fact_id",
 ];
-const SYNC_HAVE_ID_ROW_VALUE_FIELDS: &[RowField] = &[
-    RowField::u64be("timestamp"),
-    RowField::bytes32("advertised_fact_id"),
-];
+pub const SYNC_HAVE_ID_KEY_COLUMNS: &[&str] = &["connection_id", "fact_id"];
+pub const SYNC_HAVE_ID_TABLE: TypedTableSchema = TypedTableSchema {
+    table: SYNC_HAVE_ID_ROWS,
+    columns: SYNC_HAVE_ID_COLUMNS,
+    key_columns: SYNC_HAVE_ID_KEY_COLUMNS,
+};
 
-pub const SYNC_HAVE_ID_ROW_SCHEMA: RowTableSchema = RowTableSchema::new(
-    SYNC_HAVE_ID_ROWS,
-    SYNC_HAVE_ID_ROW_KEY_FIELDS,
-    SYNC_HAVE_ID_ROW_VALUE_FIELDS,
-);
-
-pub fn sync_have_id_row(
-    row_fact_id: FactId,
-    fact: &fact::SyncHaveIdFact,
-) -> Result<TableRow, String> {
-    SYNC_HAVE_ID_ROW_SCHEMA.row(
-        &[
-            RowValue::Bytes(fact.connection_id.to_vec()),
-            RowValue::Bytes(row_fact_id.to_vec()),
-        ],
-        &[
-            RowValue::U64(fact.timestamp),
-            RowValue::Bytes(fact.fact_id.to_vec()),
-        ],
-    )
+pub fn sync_have_id_row(row_fact_id: FactId, fact: &fact::SyncHaveIdFact) -> TableInsert {
+    SYNC_HAVE_ID_TABLE.insert(vec![
+        Value::Bytes(fact.connection_id.to_vec()),
+        Value::Bytes(row_fact_id.to_vec()),
+        Value::U64(fact.timestamp),
+        Value::Bytes(fact.fact_id.to_vec()),
+    ])
 }
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::SyncHaveIdFact, String> {

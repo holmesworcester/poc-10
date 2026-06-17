@@ -9,7 +9,7 @@
 use crate::core::command::AuthoredFacts;
 use crate::core::crypto::Ed25519PrivateKey;
 use crate::core::facts::{Fact, FactId};
-use crate::core::store::{Store, DEFAULT_QUERY_LIMIT};
+use crate::core::store::Store;
 use crate::protocol::auth;
 
 use super::author;
@@ -34,12 +34,7 @@ pub fn grant_admin(
 ) -> Result<AuthoredFacts<GrantAdminReceipt>, String> {
     let membership = auth::workspace::queries::local_membership(store, input.workspace_id)?
         .ok_or_else(|| "local endpoint has not joined this workspace".to_string())?;
-    let authority_admin_id = store
-        .table_rows_with_key_prefix(super::ADMIN_ROWS, &input.workspace_id, DEFAULT_QUERY_LIMIT)
-        .map_err(|err| format!("load admin rows: {err}"))?
-        .into_iter()
-        .map(|(key, value)| queries::decode_admin_row(&key, &value))
-        .collect::<Result<Vec<_>, _>>()?
+    let authority_admin_id = queries::admin_rows_in_workspace(store, input.workspace_id)?
         .into_iter()
         .find(|admin| admin.user_fact_id == membership.user_authority_fact_id)
         .map(|admin| admin.admin_id)

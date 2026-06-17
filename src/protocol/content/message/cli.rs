@@ -606,15 +606,8 @@ fn user_name(
     workspace_id: FactId,
     user_id: FactId,
 ) -> Result<Option<String>, String> {
-    let user_key = auth::user::user_key(&workspace_id, &user_id);
-    let Some(value) = store
-        .table_row(auth::user::USER_ROWS, &user_key)
-        .map_err(|err| format!("read user row: {err}"))?
-    else {
-        return Ok(None);
-    };
-    let row = auth::user::queries::decode_user_row(&user_key, &value)?;
-    Ok(Some(row.username))
+    auth::user::queries::user_by_id(store, workspace_id, user_id)
+        .map(|row| row.map(|row| row.username))
 }
 
 fn local_author_user_id(store: &Store, workspace_id: FactId) -> Result<FactId, String> {

@@ -18,7 +18,7 @@ use std::str::FromStr;
 use crate::core::command::AuthoredFacts;
 use crate::core::crypto;
 use crate::core::facts::FactId;
-use crate::core::store::{Store, DEFAULT_QUERY_LIMIT};
+use crate::core::store::Store;
 use crate::protocol::auth;
 use crate::protocol::auth::signature::author::AuthoredFactEvidence;
 
@@ -691,12 +691,7 @@ fn local_admin_id(
         return Err("local endpoint signing key does not match workspace membership".to_string());
     }
 
-    store
-        .table_rows_with_key_prefix(auth::admin::ADMIN_ROWS, &workspace_id, DEFAULT_QUERY_LIMIT)
-        .map_err(|err| format!("load admin rows: {err}"))?
-        .into_iter()
-        .map(|(key, value)| auth::admin::queries::decode_admin_row(&key, &value))
-        .collect::<Result<Vec<_>, _>>()?
+    auth::admin::queries::admin_rows_in_workspace(store, workspace_id)?
         .into_iter()
         .find(|admin| admin.user_fact_id == membership.user_authority_fact_id)
         .map(|admin| LocalAdminAuthority {
@@ -711,14 +706,11 @@ fn reject_duplicate_join(
     endpoint_id: FactId,
     workspace_id: FactId,
 ) -> Result<(), String> {
-    let mut prefix = Vec::with_capacity(64);
-    prefix.extend_from_slice(&endpoint_id);
-    prefix.extend_from_slice(&workspace_id);
-    if !store
-        .table_rows_with_key_prefix(auth::invite_accepted::INVITE_ACCEPTED_ROWS, &prefix, 1)
-        .map_err(|err| format!("load accepted invites: {err}"))?
-        .is_empty()
-    {
+    if auth::invite_accepted::queries::accepted_endpoint_in_workspace(
+        store,
+        endpoint_id,
+        workspace_id,
+    )? {
         return Err("endpoint is already joined to workspace".to_string());
     }
     Ok(())

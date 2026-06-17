@@ -17,8 +17,7 @@ pub mod project;
 pub mod queries;
 
 use crate::core::facts::FactId;
-use crate::core::row_schema::{RowField, RowTableSchema, RowValue};
-use crate::core::store::{TableName, TableRow};
+use crate::core::store::{TableInsert, TableName, TypedTableSchema, Value};
 
 pub use queries::origin_connection_ids_for_fact;
 
@@ -28,41 +27,33 @@ pub use queries::origin_connection_ids_for_fact;
 /// authorize the received payload or replace projector receipt validation.
 pub const CONNECTION_FACT_RECEIPT_ROWS: TableName = TableName::new("connection_fact_receipt_rows");
 
-const CONNECTION_FACT_RECEIPT_ROW_KEY_FIELDS: &[RowField] = &[
-    RowField::bytes32("received_fact_id"),
-    RowField::bytes32("receipt_fact_id"),
+pub const CONNECTION_FACT_RECEIPT_COLUMNS: &[&str] = &[
+    "received_fact_id",
+    "receipt_fact_id",
+    "has_connection",
+    "connection_id",
 ];
-const CONNECTION_FACT_RECEIPT_ROW_VALUE_FIELDS: &[RowField] = &[
-    RowField::u8("present"),
-    RowField::u8("has_connection"),
-    RowField::bytes32("connection_id"),
-];
-
-pub const CONNECTION_FACT_RECEIPT_ROW_SCHEMA: RowTableSchema = RowTableSchema::new(
-    CONNECTION_FACT_RECEIPT_ROWS,
-    CONNECTION_FACT_RECEIPT_ROW_KEY_FIELDS,
-    CONNECTION_FACT_RECEIPT_ROW_VALUE_FIELDS,
-);
+pub const CONNECTION_FACT_RECEIPT_KEY_COLUMNS: &[&str] = &["received_fact_id", "receipt_fact_id"];
+pub const CONNECTION_FACT_RECEIPT_TABLE: TypedTableSchema = TypedTableSchema {
+    table: CONNECTION_FACT_RECEIPT_ROWS,
+    columns: CONNECTION_FACT_RECEIPT_COLUMNS,
+    key_columns: CONNECTION_FACT_RECEIPT_KEY_COLUMNS,
+};
 
 pub fn connection_fact_receipt_row(
     receipt_fact_id: FactId,
     receipt: &fact::ConnectionFactReceipt,
-) -> Result<TableRow, String> {
+) -> Result<TableInsert, String> {
     let (has_connection, connection_id) = match receipt.connection_id {
         Some(connection_id) => (1, connection_id),
         None => (0, [0; 32]),
     };
-    CONNECTION_FACT_RECEIPT_ROW_SCHEMA.row(
-        &[
-            RowValue::Bytes(receipt.received_fact_id.to_vec()),
-            RowValue::Bytes(receipt_fact_id.to_vec()),
-        ],
-        &[
-            RowValue::U8(1),
-            RowValue::U8(has_connection),
-            RowValue::Bytes(connection_id.to_vec()),
-        ],
-    )
+    Ok(CONNECTION_FACT_RECEIPT_TABLE.insert(vec![
+        Value::Bytes(receipt.received_fact_id.to_vec()),
+        Value::Bytes(receipt_fact_id.to_vec()),
+        Value::U64(has_connection),
+        Value::Bytes(connection_id.to_vec()),
+    ]))
 }
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::ConnectionFactReceipt, String> {

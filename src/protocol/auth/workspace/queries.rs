@@ -6,13 +6,13 @@
 
 use crate::core::crypto::Ed25519PublicKey;
 use crate::core::facts::FactId;
-use crate::core::row_schema::RowValue;
 use crate::core::runtime::Runtime;
 use crate::core::store::{Store, DEFAULT_QUERY_LIMIT};
 use crate::protocol::auth;
 use crate::protocol::auth::endpoint_shared;
 use crate::protocol::connection;
 use crate::protocol::sync::shared_fact;
+use rusqlite::{params, OptionalExtension, Row};
 
 use super::fact::{WorkspaceId, WorkspacePublicKey, WORKSPACE_NAME_BYTES};
 use endpoint_shared::queries::EndpointSharedRow;
@@ -34,28 +34,44 @@ pub struct WorkspaceSummary {
 }
 
 pub fn list_workspaces(store: &Store) -> Result<Vec<WorkspaceSummary>, String> {
-    let mut workspaces = Vec::new();
-    for (key, value) in store
-        .table_rows_page(super::WORKSPACE_ROWS, DEFAULT_QUERY_LIMIT)
-        .map_err(|err| format!("read workspace rows: {err}"))?
-    {
-        let row = decode_workspace_row(&key, &value)?;
-        workspaces.push(WorkspaceSummary {
+    let mut stmt = store
+        .conn()
+        .prepare(
+            "SELECT workspace_id, created_at_ms, public_key, name
+             FROM workspace_rows
+             ORDER BY workspace_id
+             LIMIT ?1",
+        )
+        .map_err(|err| format!("read workspace rows: {err}"))?;
+    let rows = stmt
+        .query_map(params![DEFAULT_QUERY_LIMIT as i64], decode_workspace_row)
+        .map_err(|err| format!("read workspace rows: {err}"))?;
+    rows.map(|row| {
+        row.map(|row| WorkspaceSummary {
             workspace_id: row.workspace_id,
             created_at_ms: row.created_at_ms,
             public_key: row.public_key,
             name: row.name,
-        });
-    }
-    Ok(workspaces)
+        })
+    })
+    .collect::<rusqlite::Result<Vec<_>>>()
+    .map_err(|err| format!("decode workspace rows: {err}"))
 }
 
 pub fn workspace_by_id(store: &Store, workspace_id: FactId) -> Result<WorkspaceSummary, String> {
-    let value = store
-        .table_row(super::WORKSPACE_ROWS, &workspace_id)
+    let row = store
+        .conn()
+        .query_row(
+            "SELECT workspace_id, created_at_ms, public_key, name
+             FROM workspace_rows
+             WHERE workspace_id = ?1
+             LIMIT 1",
+            params![workspace_id],
+            decode_workspace_row,
+        )
+        .optional()
         .map_err(|err| format!("read workspace row: {err}"))?
         .ok_or_else(|| format!("workspace row not found for {}", hex_id(&workspace_id)))?;
-    let row = decode_workspace_row(&workspace_id, &value)?;
     Ok(WorkspaceSummary {
         workspace_id: row.workspace_id,
         created_at_ms: row.created_at_ms,
@@ -66,7 +82,10 @@ pub fn workspace_by_id(store: &Store, workspace_id: FactId) -> Result<WorkspaceS
 
 pub fn count_workspaces(store: &Store) -> Result<usize, String> {
     store
-        .table_row_count(super::WORKSPACE_ROWS)
+        .conn()
+        .query_row("SELECT COUNT(*) FROM workspace_rows", [], |row| {
+            row.get::<_, i64>(0).map(|count| count as usize)
+        })
         .map_err(|err| format!("count workspace rows: {err}"))
 }
 
@@ -135,19 +154,7 @@ pub fn local_membership(
 }
 
 fn local_endpoint_id(store: &Store) -> Result<Option<FactId>, String> {
-    store
-        .table_row(
-            auth::endpoint::LOCAL_ENDPOINT_ROWS,
-            auth::endpoint::LOCAL_KEY,
-        )
-        .map_err(|err| format!("load local endpoint: {err}"))?
-        .map(|value| {
-            value
-                .as_slice()
-                .try_into()
-                .map_err(|_| "local endpoint row must be 32 bytes".to_string())
-        })
-        .transpose()
+    auth::endpoint::queries::local_endpoint_public(store).map(|row| row.map(|row| row.endpoint))
 }
 
 // ---------------------------------------------------------------------------
@@ -202,50 +209,18 @@ pub fn runtime_count_report(runtime: &Runtime) -> Result<RuntimeCountReport, Str
     })
 }
 
-pub(crate) fn decode_workspace_row(key: &[u8], value: &[u8]) -> Result<WorkspaceRow, String> {
-    let key_fields = super::WORKSPACE_ROW_SCHEMA.decode_key(key)?;
-    let value_fields = super::WORKSPACE_ROW_SCHEMA.decode_value(value)?;
-    let workspace_id = bytes32_field(&key_fields[0], "workspace_id")?;
-    let created_at_ms = u64_field(&value_fields[0], "created_at_ms")?;
-    let public_key = bytes32_field(&value_fields[1], "public_key")?;
-    let name = workspace_name_field(&value_fields[2])?;
+pub(crate) fn decode_workspace_row(row: &Row<'_>) -> rusqlite::Result<WorkspaceRow> {
+    let bytes: Vec<u8> = row.get(3)?;
+    let padded: [u8; WORKSPACE_NAME_BYTES] = bytes.as_slice().try_into().map_err(|_| {
+        rusqlite::Error::InvalidParameterName("workspace name slot has wrong length".to_string())
+    })?;
+    let name = super::fact::WorkspaceName::from_padded(padded)
+        .map(|name| name.to_string())
+        .map_err(|err| rusqlite::Error::InvalidParameterName(format!("{err:?}")))?;
     Ok(WorkspaceRow {
-        workspace_id,
-        created_at_ms,
-        public_key,
+        workspace_id: row.get(0)?,
+        created_at_ms: row.get::<_, i64>(1)? as u64,
+        public_key: row.get(2)?,
         name,
     })
-}
-
-fn bytes32_field(value: &RowValue, name: &str) -> Result<[u8; 32], String> {
-    let bytes = bytes_field(value, name)?;
-    bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| format!("{name} must be 32 bytes"))
-}
-
-fn bytes_field(value: &RowValue, name: &str) -> Result<Vec<u8>, String> {
-    match value {
-        RowValue::Bytes(bytes) => Ok(bytes.clone()),
-        _ => Err(format!("{name} must be bytes")),
-    }
-}
-
-fn u64_field(value: &RowValue, name: &str) -> Result<u64, String> {
-    match value {
-        RowValue::U64(value) => Ok(*value),
-        _ => Err(format!("{name} must be u64")),
-    }
-}
-
-fn workspace_name_field(value: &RowValue) -> Result<String, String> {
-    let bytes = bytes_field(value, "name")?;
-    let padded: [u8; WORKSPACE_NAME_BYTES] = bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| "workspace name slot has wrong length".to_string())?;
-    super::fact::WorkspaceName::from_padded(padded)
-        .map(|name| name.to_string())
-        .map_err(|err| format!("{err:?}"))
 }

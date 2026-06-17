@@ -8,6 +8,7 @@ use std::net::SocketAddr;
 
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::store::{Store, DEFAULT_QUERY_LIMIT};
+use rusqlite::{params, OptionalExtension, Row};
 
 use crate::protocol::auth;
 use crate::protocol::connection::request::{
@@ -18,16 +19,12 @@ use crate::protocol::connection::{
     frame_small, request,
 };
 
-use super::{connection_key, EndpointId, CONNECTION_ROWS, CONNECTION_ROW_SCHEMA};
+use super::EndpointId;
 
-fn addr_block(
-    value: &crate::core::row_schema::RowValue,
-    name: &str,
-) -> Result<[u8; ADDR_BLOCK_BYTES], String> {
-    value
-        .as_bytes(name)?
-        .try_into()
-        .map_err(|_| format!("connection row {name} block is malformed"))
+fn addr_block(value: Vec<u8>, name: &str) -> rusqlite::Result<[u8; ADDR_BLOCK_BYTES]> {
+    value.as_slice().try_into().map_err(|_| {
+        rusqlite::Error::InvalidParameterName(format!("connection row {name} block is malformed"))
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,20 +40,19 @@ pub struct ConnectionRow {
     pub initiator_addr: Option<SocketAddr>,
 }
 
-pub fn decode_connection_row(key: &[u8], value: &[u8]) -> Result<ConnectionRow, String> {
-    let key_fields = CONNECTION_ROW_SCHEMA.decode_key(key)?;
-    let value_fields = CONNECTION_ROW_SCHEMA.decode_value(value)?;
-    let responder_addr = decode_optional_addr(&addr_block(&value_fields[6], "responder_addr")?)?;
-    let initiator_addr = decode_optional_addr(&addr_block(&value_fields[7], "initiator_addr")?)?;
+pub fn decode_connection_row(row: &Row<'_>) -> rusqlite::Result<ConnectionRow> {
+    let responder_addr = decode_optional_addr(&addr_block(row.get(6)?, "responder_addr")?)
+        .map_err(rusqlite::Error::InvalidParameterName)?;
+    let initiator_addr = decode_optional_addr(&addr_block(row.get(7)?, "initiator_addr")?)
+        .map_err(rusqlite::Error::InvalidParameterName)?;
     Ok(ConnectionRow {
-        connection_id: key_fields[0].as_bytes32("connection_id")?,
-        from_endpoint: value_fields[0].as_bytes32("from_endpoint")?,
-        to_endpoint: value_fields[1].as_bytes32("to_endpoint")?,
-        request_id: value_fields[2].as_bytes32("request_id")?,
-        responder_ephemeral_public_key: value_fields[3]
-            .as_bytes32("responder_ephemeral_public_key")?,
-        handshake_hash: value_fields[4].as_bytes32("handshake_hash")?,
-        connection_secret: value_fields[5].as_bytes32("connection_secret")?,
+        connection_id: row.get(0)?,
+        from_endpoint: row.get(1)?,
+        to_endpoint: row.get(2)?,
+        request_id: row.get(3)?,
+        responder_ephemeral_public_key: row.get(4)?,
+        handshake_hash: row.get(5)?,
+        connection_secret: row.get(8)?,
         responder_addr,
         initiator_addr,
     })
@@ -71,23 +67,54 @@ pub fn answered_request_ids(store: &Store) -> Result<BTreeSet<FactId>, String> {
 }
 
 pub fn connection_rows(store: &Store) -> Result<Vec<ConnectionRow>, String> {
-    store
-        .table_rows_page(CONNECTION_ROWS, DEFAULT_QUERY_LIMIT)
-        .map_err(|err| format!("read connection rows: {err}"))?
-        .into_iter()
-        .map(|(key, value)| decode_connection_row(&key, &value))
-        .collect()
+    let mut stmt = store
+        .conn()
+        .prepare(
+            "SELECT connection_id,
+                    from_endpoint,
+                    to_endpoint,
+                    request_id,
+                    responder_ephemeral_public_key,
+                    handshake_hash,
+                    responder_addr,
+                    initiator_addr,
+                    connection_secret
+             FROM connection_rows
+             ORDER BY connection_id
+             LIMIT ?1",
+        )
+        .map_err(|err| format!("read connection rows: {err}"))?;
+    let rows = stmt
+        .query_map(params![DEFAULT_QUERY_LIMIT as i64], decode_connection_row)
+        .map_err(|err| format!("read connection rows: {err}"))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|err| format!("decode connection rows: {err}"))
 }
 
 pub fn connection_by_id(
     store: &Store,
     connection_id: &FactId,
 ) -> Result<Option<ConnectionRow>, String> {
-    let row = store
-        .table_row(CONNECTION_ROWS, &connection_key(connection_id))
-        .map_err(|err| format!("read connection row: {err}"))?;
-    row.map(|value| decode_connection_row(connection_id, &value))
-        .transpose()
+    store
+        .conn()
+        .query_row(
+            "SELECT connection_id,
+                    from_endpoint,
+                    to_endpoint,
+                    request_id,
+                    responder_ephemeral_public_key,
+                    handshake_hash,
+                    responder_addr,
+                    initiator_addr,
+                    connection_secret
+             FROM connection_rows
+             WHERE connection_id = ?1
+             LIMIT 1",
+            params![connection_id],
+            decode_connection_row,
+        )
+        .optional()
+        .map_err(|err| format!("read connection row: {err}"))
 }
 
 pub fn has_connection_between(
@@ -147,42 +174,4 @@ fn is_private_local_fact_tag(tag: u8) -> bool {
             | frame_observation::encode::TYPE_CONNECTION_FRAME_OBSERVATION
             | fact_receipt::encode::TYPE_CONNECTION_FACT_RECEIPT
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::protocol::connection::connection::ConnectionRowFields;
-
-    #[test]
-    fn connection_row_roundtrips_through_schema() {
-        let fields = ConnectionRowFields {
-            connection_id: [1; 32],
-            from_endpoint: [2; 32],
-            to_endpoint: [3; 32],
-            request_id: [4; 32],
-            responder_ephemeral_public_key: [5; 32],
-            handshake_hash: [6; 32],
-            connection_secret: [7; 32],
-            responder_addr: Some("127.0.0.1:41002".parse().unwrap()),
-            initiator_addr: Some("127.0.0.1:41001".parse().unwrap()),
-        };
-        let row = super::super::connection_row(fields).expect("connection row");
-        let decoded = decode_connection_row(&row.key, &row.value).expect("decode connection row");
-        assert_eq!(decoded.connection_id, [1; 32]);
-        assert_eq!(decoded.from_endpoint, [2; 32]);
-        assert_eq!(decoded.to_endpoint, [3; 32]);
-        assert_eq!(decoded.request_id, [4; 32]);
-        assert_eq!(decoded.responder_ephemeral_public_key, [5; 32]);
-        assert_eq!(decoded.handshake_hash, [6; 32]);
-        assert_eq!(decoded.connection_secret, [7; 32]);
-        assert_eq!(
-            decoded.responder_addr,
-            Some("127.0.0.1:41002".parse().unwrap())
-        );
-        assert_eq!(
-            decoded.initiator_addr,
-            Some("127.0.0.1:41001".parse().unwrap())
-        );
-    }
 }

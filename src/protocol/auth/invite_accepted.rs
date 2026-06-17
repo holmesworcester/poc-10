@@ -14,10 +14,9 @@ pub mod project;
 pub mod queries;
 
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::row_schema::{RowField, RowTableSchema, RowValue};
-use crate::core::store::{TableName, TableRow};
+use crate::core::store::{TableInsert, TableName, TypedTableSchema, Value};
 use crate::protocol::auth::invite_secret::fact::InviteSecretFact;
-use crate::protocol::connection::request::encode::{encode_optional_addr, ADDR_BLOCK_BYTES};
+use crate::protocol::connection::request::encode::encode_optional_addr;
 
 pub const TYPE_INVITE_ACCEPTED: u8 = encode::TYPE_INVITE_ACCEPTED;
 pub const AUTH_WORKSPACE_ACCEPTED_ROLE: &str = "auth_workspace_accepted";
@@ -26,49 +25,44 @@ pub const AUTH_WORKSPACE_ACCEPTED_ROLE: &str = "auth_workspace_accepted";
 /// `accepted_endpoint_id || workspace_id || invite_fact_id`.
 pub const INVITE_ACCEPTED_ROWS: TableName = TableName::new("invite_accepted_rows");
 
-const INVITE_ACCEPTED_ROW_KEY_FIELDS: &[RowField] = &[
-    RowField::bytes32("accepted_endpoint_id"),
-    RowField::bytes32("workspace_id"),
-    RowField::bytes32("invite_fact_id"),
+pub const INVITE_ACCEPTED_COLUMNS: &[&str] = &[
+    "accepted_endpoint_id",
+    "workspace_id",
+    "invite_fact_id",
+    "invite_accepted_fact_id",
+    "bootstrap_hash",
+    "bootstrap_secret",
+    "bootstrap_endpoint_id",
+    "bootstrap_addr",
+    "user_authority_fact_id_or_zero",
+    "endpoint_role",
+    "identity_scope",
 ];
-const INVITE_ACCEPTED_ROW_VALUE_FIELDS: &[RowField] = &[
-    RowField::bytes32("invite_accepted_fact_id"),
-    RowField::bytes32("bootstrap_hash"),
-    RowField::bytes32("bootstrap_secret"),
-    RowField::bytes32("bootstrap_endpoint_id"),
-    RowField::bytes("bootstrap_addr", ADDR_BLOCK_BYTES),
-    RowField::bytes32("user_authority_fact_id_or_zero"),
-    RowField::u8("endpoint_role"),
-    RowField::u8("identity_scope"),
-];
-
-pub const INVITE_ACCEPTED_ROW_SCHEMA: RowTableSchema = RowTableSchema::new(
-    INVITE_ACCEPTED_ROWS,
-    INVITE_ACCEPTED_ROW_KEY_FIELDS,
-    INVITE_ACCEPTED_ROW_VALUE_FIELDS,
-);
+pub const INVITE_ACCEPTED_KEY_COLUMNS: &[&str] =
+    &["accepted_endpoint_id", "workspace_id", "invite_fact_id"];
+pub const INVITE_ACCEPTED_TABLE: TypedTableSchema = TypedTableSchema {
+    table: INVITE_ACCEPTED_ROWS,
+    columns: INVITE_ACCEPTED_COLUMNS,
+    key_columns: INVITE_ACCEPTED_KEY_COLUMNS,
+};
 
 pub fn invite_accepted_row(
     invite_accepted_fact_id: [u8; 32],
     fact: &fact::InviteAcceptedFact,
-) -> Result<TableRow, String> {
-    INVITE_ACCEPTED_ROW_SCHEMA.row(
-        &[
-            RowValue::Bytes(fact.accepted_endpoint_id.to_vec()),
-            RowValue::Bytes(fact.workspace_id.to_vec()),
-            RowValue::Bytes(fact.invite_fact_id.to_vec()),
-        ],
-        &[
-            RowValue::Bytes(invite_accepted_fact_id.to_vec()),
-            RowValue::Bytes(fact.bootstrap_hash.to_vec()),
-            RowValue::Bytes(fact.bootstrap_secret.to_vec()),
-            RowValue::Bytes(fact.bootstrap_endpoint_id.to_vec()),
-            RowValue::Bytes(encode_optional_addr(Some(fact.bootstrap_addr))?.to_vec()),
-            RowValue::Bytes(fact.user_authority_fact_id.unwrap_or([0; 32]).to_vec()),
-            RowValue::U8(fact.endpoint_role.as_u8()),
-            RowValue::U8(u8::from(fact.identity_scope)),
-        ],
-    )
+) -> Result<TableInsert, String> {
+    Ok(INVITE_ACCEPTED_TABLE.insert(vec![
+        Value::Bytes(fact.accepted_endpoint_id.to_vec()),
+        Value::Bytes(fact.workspace_id.to_vec()),
+        Value::Bytes(fact.invite_fact_id.to_vec()),
+        Value::Bytes(invite_accepted_fact_id.to_vec()),
+        Value::Bytes(fact.bootstrap_hash.to_vec()),
+        Value::Bytes(fact.bootstrap_secret.to_vec()),
+        Value::Bytes(fact.bootstrap_endpoint_id.to_vec()),
+        Value::Bytes(encode_optional_addr(Some(fact.bootstrap_addr))?.to_vec()),
+        Value::Bytes(fact.user_authority_fact_id.unwrap_or([0; 32]).to_vec()),
+        Value::U64(u64::from(fact.endpoint_role.as_u8())),
+        Value::U64(u64::from(u8::from(fact.identity_scope))),
+    ]))
 }
 
 pub fn derived_invite_secret(fact: &fact::InviteAcceptedFact) -> InviteSecretFact {

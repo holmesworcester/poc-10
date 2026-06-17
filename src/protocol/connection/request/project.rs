@@ -990,7 +990,7 @@ fn project_sender_request(
     };
     Ok(output
         .offer(connection_request_offer(fact.id, fact.id))
-        .row_mutation(RowMutation::PutRow(connection_request_row(
+        .row_mutation(RowMutation::InsertValues(connection_request_row(
             fact.id,
             fact.id,
             request.initiator_ephemeral_secret_fact_id,
@@ -1254,7 +1254,7 @@ mod tests {
         assert!(projected.effects.row_mutations.iter().any(|mutation| {
             matches!(
                 mutation,
-                RowMutation::PutRow(row) if row.table == CONNECTION_REQUEST_ROWS
+                RowMutation::InsertValues(insert) if insert.table == CONNECTION_REQUEST_ROWS
             )
         }));
 

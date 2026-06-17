@@ -33,7 +33,8 @@ use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
-use crate::core::store::{ReplayTables, SchemaSource, Store, TableName, TableRow};
+use crate::core::store::{ReplayTables, SchemaSource, Store, TableName};
+use rusqlite::{params, OptionalExtension};
 
 /// Ephemeral outgoing network frame queue table.
 pub const OUTGOING_TABLE: TableName = TableName::new("network_outgoing");
@@ -51,16 +52,16 @@ const WRITE_FRAME_BUDGET: Duration = Duration::from_secs(1);
 pub const SCHEMA_SOURCE: SchemaSource = SchemaSource {
     ddl: r#"
 CREATE TEMP TABLE IF NOT EXISTS network_outgoing (
-    row_key BLOB PRIMARY KEY NOT NULL,
-    row_value BLOB NOT NULL
+    queue_key BLOB PRIMARY KEY NOT NULL,
+    target_addr TEXT NOT NULL,
+    frame_bytes BLOB NOT NULL
 );
+CREATE INDEX IF NOT EXISTS network_outgoing_by_target
+    ON network_outgoing (target_addr, queue_key);
 CREATE TEMP TABLE IF NOT EXISTS network_outgoing_targets (
-    row_key BLOB PRIMARY KEY NOT NULL,
-    row_value BLOB NOT NULL
+    target_addr TEXT PRIMARY KEY NOT NULL
 );
 "#,
-    row_tables: &[OUTGOING_TABLE, OUTGOING_TARGETS_TABLE],
-    row_schemas: &[],
     replay: ReplayTables {
         protected: &[],
         reset: &[OUTGOING_TABLE, OUTGOING_TARGETS_TABLE],
@@ -152,9 +153,8 @@ pub fn queue_outgoing(
 pub fn enqueue_outgoing(store: &Store, rows: &[OutgoingNetworkRow]) -> Result<usize, String> {
     store
         .write_transaction(|tx| {
-            let inserted_frames =
-                tx.insert_table_rows_in_tx(rows.iter().map(outgoing_table_row).collect())?;
-            tx.insert_table_rows_in_tx(outgoing_target_table_rows(rows))?;
+            let inserted_frames = insert_outgoing_rows_in_tx(tx, rows)?;
+            insert_outgoing_targets_in_tx(tx, rows)?;
             Ok(inserted_frames)
         })
         .map_err(|err| format!("enqueue outgoing network rows: {err}"))
@@ -170,12 +170,32 @@ pub fn claim_outgoing_for_target(
     target: NetworkTarget,
     limit: usize,
 ) -> Result<Vec<OutgoingNetworkRow>, String> {
-    store
-        .table_rows_with_key_prefix(OUTGOING_TABLE, &target_prefix(target.addr()), limit)
-        .map_err(|err| format!("claim outgoing network rows: {err}"))?
-        .into_iter()
-        .map(|(key, value)| decode_outgoing(key, &value))
-        .collect()
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    let mut stmt = store
+        .conn()
+        .prepare(
+            "SELECT queue_key, frame_bytes
+             FROM network_outgoing
+             WHERE target_addr = ?1
+             ORDER BY queue_key
+             LIMIT ?2",
+        )
+        .map_err(|err| format!("claim outgoing network rows: {err}"))?;
+    let rows = stmt
+        .query_map(params![target_addr(target), limit], |row| {
+            let key = row.get::<_, Vec<u8>>(0)?;
+            let bytes = row.get::<_, Vec<u8>>(1)?;
+            Ok((key, bytes))
+        })
+        .map_err(|err| format!("claim outgoing network rows: {err}"))?;
+    rows.map(|row| {
+        row.map_err(|err| format!("claim outgoing network rows: {err}"))
+            .and_then(|(key, bytes)| decode_outgoing_for_target(target, key, &bytes))
+    })
+    .collect()
 }
 
 /// Discover targets with queued outgoing rows.
@@ -187,12 +207,28 @@ pub fn queued_outgoing_targets(store: &Store, limit: usize) -> Result<Vec<Networ
     if limit == 0 {
         return Ok(Vec::new());
     }
-    store
-        .table_rows_with_key_prefix(OUTGOING_TARGETS_TABLE, &[], limit)
-        .map_err(|err| format!("discover outgoing network targets: {err}"))?
-        .into_iter()
-        .map(|(key, _)| decode_target_key(&key).map(NetworkTarget::new))
-        .collect()
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    let mut stmt = store
+        .conn()
+        .prepare(
+            "SELECT target_addr
+             FROM network_outgoing_targets
+             ORDER BY target_addr
+             LIMIT ?1",
+        )
+        .map_err(|err| format!("discover outgoing network targets: {err}"))?;
+    let rows = stmt
+        .query_map(params![limit], |row| row.get::<_, String>(0))
+        .map_err(|err| format!("discover outgoing network targets: {err}"))?;
+    rows.map(|row| {
+        row.map_err(|err| format!("discover outgoing network targets: {err}"))
+            .and_then(|addr| {
+                SocketAddr::from_str(&addr)
+                    .map(NetworkTarget::new)
+                    .map_err(|_| "network target address is invalid".to_string())
+            })
+    })
+    .collect()
 }
 
 /// Counts observed while draining the queued outgoing network rows.
@@ -244,10 +280,7 @@ pub fn pump_outgoing(
 pub fn delete_outgoing(store: &Store, rows: &[OutgoingNetworkRow]) -> Result<(), String> {
     store
         .write_transaction(|tx| {
-            tx.delete_table_rows_in_tx(
-                OUTGOING_TABLE,
-                rows.iter().map(|row| row.key.clone()).collect(),
-            )?;
+            delete_outgoing_rows_in_tx(tx, rows)?;
             prune_outgoing_targets_in_tx(tx, rows)?;
             Ok(())
         })
@@ -255,37 +288,120 @@ pub fn delete_outgoing(store: &Store, rows: &[OutgoingNetworkRow]) -> Result<(),
         .map_err(|err| format!("delete outgoing network rows: {err}"))
 }
 
-fn outgoing_table_row(row: &OutgoingNetworkRow) -> TableRow {
-    TableRow {
-        table: OUTGOING_TABLE,
-        key: row.key.clone(),
-        value: row.bytes.clone(),
-    }
-}
-
-fn outgoing_target_table_rows(rows: &[OutgoingNetworkRow]) -> Vec<TableRow> {
-    let mut targets = Vec::new();
+fn insert_outgoing_rows_in_tx(
+    store: &Store,
+    rows: &[OutgoingNetworkRow],
+) -> rusqlite::Result<usize> {
+    let mut inserted = 0usize;
     for row in rows {
-        if targets.contains(&row.target) {
-            continue;
+        let target_addr = target_addr(row.target);
+        let changed = store.conn().execute(
+            "INSERT OR IGNORE INTO network_outgoing
+                (queue_key, target_addr, frame_bytes)
+             VALUES (?1, ?2, ?3)",
+            params![
+                row.key.as_slice(),
+                target_addr.as_str(),
+                row.bytes.as_slice()
+            ],
+        )?;
+        if changed == 0 && !outgoing_row_matches(store, row, &target_addr)? {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "conflicting outgoing network row".to_string(),
+            ));
         }
-        targets.push(row.target);
+        inserted += changed;
     }
-    targets.into_iter().map(outgoing_target_table_row).collect()
+    Ok(inserted)
 }
 
-fn outgoing_target_table_row(target: NetworkTarget) -> TableRow {
-    TableRow {
-        table: OUTGOING_TARGETS_TABLE,
-        key: target_prefix(target.addr()),
-        value: Vec::new(),
+fn outgoing_row_matches(
+    store: &Store,
+    row: &OutgoingNetworkRow,
+    target_addr: &str,
+) -> rusqlite::Result<bool> {
+    store
+        .conn()
+        .query_row(
+            "SELECT target_addr, frame_bytes
+             FROM network_outgoing
+             WHERE queue_key = ?1
+             LIMIT 1",
+            params![row.key.as_slice()],
+            |existing| {
+                Ok((
+                    existing.get::<_, String>(0)?,
+                    existing.get::<_, Vec<u8>>(1)?,
+                ))
+            },
+        )
+        .optional()
+        .map(|existing| {
+            existing
+                .map(|(existing_target, bytes)| {
+                    existing_target == target_addr && bytes.as_slice() == row.bytes.as_slice()
+                })
+                .unwrap_or(false)
+        })
+}
+
+fn insert_outgoing_targets_in_tx(
+    store: &Store,
+    rows: &[OutgoingNetworkRow],
+) -> rusqlite::Result<()> {
+    for target in unique_targets(rows) {
+        store.conn().execute(
+            "INSERT OR IGNORE INTO network_outgoing_targets (target_addr)
+             VALUES (?1)",
+            params![target_addr(target)],
+        )?;
     }
+    Ok(())
+}
+
+fn delete_outgoing_rows_in_tx(
+    store: &Store,
+    rows: &[OutgoingNetworkRow],
+) -> rusqlite::Result<usize> {
+    let mut deleted = 0usize;
+    for row in rows {
+        deleted += store.conn().execute(
+            "DELETE FROM network_outgoing WHERE queue_key = ?1",
+            params![row.key.as_slice()],
+        )?;
+    }
+    Ok(deleted)
 }
 
 fn prune_outgoing_targets_in_tx(
     store: &Store,
     rows: &[OutgoingNetworkRow],
 ) -> rusqlite::Result<()> {
+    for target in unique_targets(rows) {
+        let target_addr = target_addr(target);
+        let has_rows = store
+            .conn()
+            .query_row(
+                "SELECT 1
+                 FROM network_outgoing
+                 WHERE target_addr = ?1
+                 LIMIT 1",
+                params![target_addr.as_str()],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !has_rows {
+            store.conn().execute(
+                "DELETE FROM network_outgoing_targets WHERE target_addr = ?1",
+                params![target_addr.as_str()],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn unique_targets(rows: &[OutgoingNetworkRow]) -> Vec<NetworkTarget> {
     let mut targets = Vec::new();
     for row in rows {
         if targets.contains(&row.target) {
@@ -293,25 +409,25 @@ fn prune_outgoing_targets_in_tx(
         }
         targets.push(row.target);
     }
-    for target in targets {
-        if store
-            .table_rows_with_key_prefix(OUTGOING_TABLE, &target_prefix(target.addr()), 1)?
-            .is_empty()
-        {
-            store.delete_table_rows_in_tx(
-                OUTGOING_TARGETS_TABLE,
-                vec![target_prefix(target.addr())],
-            )?;
-        }
-    }
-    Ok(())
+    targets
 }
 
-fn decode_outgoing(key: Vec<u8>, value: &[u8]) -> Result<OutgoingNetworkRow, String> {
+fn target_addr(target: NetworkTarget) -> String {
+    target.addr().to_string()
+}
+
+fn decode_outgoing_for_target(
+    target: NetworkTarget,
+    key: Vec<u8>,
+    value: &[u8],
+) -> Result<OutgoingNetworkRow, String> {
     let addr = decode_addr_from_key(&key)?;
+    if addr != target.addr() {
+        return Err("network row key target does not match row target".to_string());
+    }
     Ok(OutgoingNetworkRow {
         key,
-        target: NetworkTarget::new(addr),
+        target,
         bytes: value.to_vec(),
     })
 }
@@ -329,14 +445,6 @@ fn decode_addr_from_key(key: &[u8]) -> Result<SocketAddr, String> {
     let (addr, addr_end) = decode_addr_prefix(key)?;
     if key.len() != addr_end + 32 {
         return Err("network row key has invalid length".to_string());
-    }
-    Ok(addr)
-}
-
-fn decode_target_key(key: &[u8]) -> Result<SocketAddr, String> {
-    let (addr, addr_end) = decode_addr_prefix(key)?;
-    if key.len() != addr_end {
-        return Err("network target key has invalid length".to_string());
     }
     Ok(addr)
 }
@@ -528,13 +636,23 @@ fn pump_outgoing_target(
 fn delete_outgoing_target_if_empty(store: &Store, target: NetworkTarget) -> Result<(), String> {
     store
         .write_transaction(|tx| {
-            if tx
-                .table_rows_with_key_prefix(OUTGOING_TABLE, &target_prefix(target.addr()), 1)?
-                .is_empty()
-            {
-                tx.delete_table_rows_in_tx(
-                    OUTGOING_TARGETS_TABLE,
-                    vec![target_prefix(target.addr())],
+            let target_addr = target_addr(target);
+            let has_rows = tx
+                .conn()
+                .query_row(
+                    "SELECT 1
+                     FROM network_outgoing
+                     WHERE target_addr = ?1
+                     LIMIT 1",
+                    params![target_addr.as_str()],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if !has_rows {
+                tx.conn().execute(
+                    "DELETE FROM network_outgoing_targets WHERE target_addr = ?1",
+                    params![target_addr.as_str()],
                 )?;
             }
             Ok(())

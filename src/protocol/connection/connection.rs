@@ -14,33 +14,32 @@ pub mod queries;
 use std::net::SocketAddr;
 
 use crate::core::facts::FactId;
-use crate::core::row_schema::{RowField, RowTableSchema, RowValue};
-use crate::core::store::{TableName, TableRow};
+use crate::core::store::{TableInsert, TableName, TypedTableSchema, Value};
 
-use crate::protocol::connection::request::encode::{encode_optional_addr, ADDR_BLOCK_BYTES};
+use crate::protocol::connection::request::encode::encode_optional_addr;
 
 pub type EndpointId = FactId;
 
 /// Durable rows for materialized connections, keyed by the connection fact id.
 pub const CONNECTION_ROWS: TableName = TableName::new("connection_rows");
 
-const CONNECTION_ROW_KEY_FIELDS: &[RowField] = &[RowField::bytes32("connection_id")];
-const CONNECTION_ROW_VALUE_FIELDS: &[RowField] = &[
-    RowField::bytes32("from_endpoint"),
-    RowField::bytes32("to_endpoint"),
-    RowField::bytes32("request_id"),
-    RowField::bytes32("responder_ephemeral_public_key"),
-    RowField::bytes32("handshake_hash"),
-    RowField::bytes32("connection_secret"),
-    RowField::bytes("responder_addr", ADDR_BLOCK_BYTES),
-    RowField::bytes("initiator_addr", ADDR_BLOCK_BYTES),
+pub const CONNECTION_COLUMNS: &[&str] = &[
+    "connection_id",
+    "from_endpoint",
+    "to_endpoint",
+    "request_id",
+    "responder_ephemeral_public_key",
+    "handshake_hash",
+    "connection_secret",
+    "responder_addr",
+    "initiator_addr",
 ];
-
-pub const CONNECTION_ROW_SCHEMA: RowTableSchema = RowTableSchema::new(
-    CONNECTION_ROWS,
-    CONNECTION_ROW_KEY_FIELDS,
-    CONNECTION_ROW_VALUE_FIELDS,
-);
+pub const CONNECTION_KEY_COLUMNS: &[&str] = &["connection_id"];
+pub const CONNECTION_TABLE: TypedTableSchema = TypedTableSchema {
+    table: CONNECTION_ROWS,
+    columns: CONNECTION_COLUMNS,
+    key_columns: CONNECTION_KEY_COLUMNS,
+};
 
 pub fn connection_key(connection_id: &FactId) -> Vec<u8> {
     connection_id.to_vec()
@@ -83,18 +82,16 @@ impl ConnectionRowFields {
     }
 }
 
-pub fn connection_row(fields: ConnectionRowFields) -> Result<TableRow, String> {
-    CONNECTION_ROW_SCHEMA.row(
-        &[RowValue::Bytes(fields.connection_id.to_vec())],
-        &[
-            RowValue::Bytes(fields.from_endpoint.to_vec()),
-            RowValue::Bytes(fields.to_endpoint.to_vec()),
-            RowValue::Bytes(fields.request_id.to_vec()),
-            RowValue::Bytes(fields.responder_ephemeral_public_key.to_vec()),
-            RowValue::Bytes(fields.handshake_hash.to_vec()),
-            RowValue::Bytes(fields.connection_secret.to_vec()),
-            RowValue::Bytes(encode_optional_addr(fields.responder_addr)?.to_vec()),
-            RowValue::Bytes(encode_optional_addr(fields.initiator_addr)?.to_vec()),
-        ],
-    )
+pub fn connection_row(fields: ConnectionRowFields) -> Result<TableInsert, String> {
+    Ok(CONNECTION_TABLE.insert(vec![
+        Value::Bytes(fields.connection_id.to_vec()),
+        Value::Bytes(fields.from_endpoint.to_vec()),
+        Value::Bytes(fields.to_endpoint.to_vec()),
+        Value::Bytes(fields.request_id.to_vec()),
+        Value::Bytes(fields.responder_ephemeral_public_key.to_vec()),
+        Value::Bytes(fields.handshake_hash.to_vec()),
+        Value::Bytes(fields.connection_secret.to_vec()),
+        Value::Bytes(encode_optional_addr(fields.responder_addr)?.to_vec()),
+        Value::Bytes(encode_optional_addr(fields.initiator_addr)?.to_vec()),
+    ]))
 }

@@ -96,7 +96,7 @@ mod tests {
                 .expect("open store");
         let endpoint = create_local_endpoint();
         store
-            .insert_table_rows(super::super::endpoint_rows(&endpoint))
+            .insert_table_values(vec![super::super::local_endpoint_insert(&endpoint)])
             .expect("insert endpoint rows");
 
         let output = local_or_create(&store, 20).expect("reuse endpoint");

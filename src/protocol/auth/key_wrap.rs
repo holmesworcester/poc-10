@@ -18,8 +18,7 @@ pub mod fact;
 pub mod project;
 pub mod queries;
 
-use crate::core::row_schema::{RowField, RowTableSchema, RowValue};
-use crate::core::store::{TableName, TableRow};
+use crate::core::store::{TableInsert, TableName, TypedTableSchema, Value};
 
 pub const TYPE_KEY_WRAP: u8 = encode::TYPE_KEY_WRAP;
 
@@ -28,49 +27,50 @@ pub const TYPE_KEY_WRAP: u8 = encode::TYPE_KEY_WRAP;
 /// creation and unwrapping can address them.
 pub const KEY_WRAP_ROWS: TableName = TableName::new("key_wrap_rows");
 
-const KEY_WRAP_ROW_KEY_FIELDS: &[RowField] = &[
-    RowField::bytes32("workspace_id"),
-    RowField::bytes32("frontier_id"),
-    RowField::bytes32("recipient_key_id"),
-    RowField::u8("wrapped_secret_kind"),
-    RowField::u64be("range_start"),
-    RowField::u64be("range_width"),
-    RowField::bytes("bit_depth", 2),
-    RowField::bytes32("fact_id_prefix"),
+pub const KEY_WRAP_COLUMNS: &[&str] = &[
+    "workspace_id",
+    "frontier_id",
+    "recipient_key_id",
+    "wrapped_secret_kind",
+    "range_start",
+    "range_width",
+    "bit_depth",
+    "fact_id_prefix",
+    "key_wrap_id",
+    "signer_public_key",
+    "wrap",
 ];
-const KEY_WRAP_ROW_VALUE_FIELDS: &[RowField] = &[
-    RowField::u8("version"),
-    RowField::bytes32("key_wrap_id"),
-    RowField::bytes32("signer_public_key"),
-    RowField::bytes("wrap", encode::KEY_WRAP_BYTES),
+pub const KEY_WRAP_KEY_COLUMNS: &[&str] = &[
+    "workspace_id",
+    "frontier_id",
+    "recipient_key_id",
+    "wrapped_secret_kind",
+    "range_start",
+    "range_width",
+    "bit_depth",
+    "fact_id_prefix",
 ];
+pub const KEY_WRAP_TABLE: TypedTableSchema = TypedTableSchema {
+    table: KEY_WRAP_ROWS,
+    columns: KEY_WRAP_COLUMNS,
+    key_columns: KEY_WRAP_KEY_COLUMNS,
+};
 
-pub const KEY_WRAP_ROW_SCHEMA: RowTableSchema = RowTableSchema::new(
-    KEY_WRAP_ROWS,
-    KEY_WRAP_ROW_KEY_FIELDS,
-    KEY_WRAP_ROW_VALUE_FIELDS,
-);
-
-pub fn key_wrap_row(input: queries::KeyWrapRow) -> Result<TableRow, String> {
+pub fn key_wrap_insert(input: queries::KeyWrapRow) -> Result<TableInsert, String> {
     let wrap = &input.wrap;
-    // Validates the wrap and produces canonical fact bytes for the row value.
+    // Validates the wrap and stores canonical fact bytes for diagnostic replay.
     let wrap_bytes = encode::encode_key_wrap(wrap)?;
-    KEY_WRAP_ROW_SCHEMA.row(
-        &[
-            RowValue::Bytes(wrap.workspace_id.to_vec()),
-            RowValue::Bytes(wrap.frontier_id.to_vec()),
-            RowValue::Bytes(wrap.recipient_key_id.to_vec()),
-            RowValue::U8(wrap.wrapped_secret_kind.as_u8()),
-            RowValue::U64(wrap.range_start),
-            RowValue::U64(wrap.range_width),
-            RowValue::Bytes(wrap.bit_depth.to_be_bytes().to_vec()),
-            RowValue::Bytes(wrap.fact_id_prefix.to_vec()),
-        ],
-        &[
-            RowValue::U8(1),
-            RowValue::Bytes(input.key_wrap_id.to_vec()),
-            RowValue::Bytes(input.signer_public_key.to_vec()),
-            RowValue::Bytes(wrap_bytes),
-        ],
-    )
+    Ok(KEY_WRAP_TABLE.insert(vec![
+        Value::Bytes(wrap.workspace_id.to_vec()),
+        Value::Bytes(wrap.frontier_id.to_vec()),
+        Value::Bytes(wrap.recipient_key_id.to_vec()),
+        Value::U64(u64::from(wrap.wrapped_secret_kind.as_u8())),
+        Value::U64(wrap.range_start),
+        Value::U64(wrap.range_width),
+        Value::U64(u64::from(wrap.bit_depth)),
+        Value::Bytes(wrap.fact_id_prefix.to_vec()),
+        Value::Bytes(input.key_wrap_id.to_vec()),
+        Value::Bytes(input.signer_public_key.to_vec()),
+        Value::Bytes(wrap_bytes),
+    ]))
 }

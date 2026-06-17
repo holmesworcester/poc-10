@@ -6,8 +6,9 @@
 
 use crate::core::facts::FactId;
 use crate::core::store::Store;
+use rusqlite::{params, OptionalExtension};
 
-use super::{LOCAL_ENDPOINT_ROWS, LOCAL_ENDPOINT_SIGNING_PUBLIC_KEY_ROWS, LOCAL_KEY};
+use super::LOCAL_KEY;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalEndpointPublic {
@@ -16,31 +17,32 @@ pub struct LocalEndpointPublic {
 }
 
 pub fn local_endpoint_public(store: &Store) -> Result<Option<LocalEndpointPublic>, String> {
-    let endpoint = store
-        .table_row(LOCAL_ENDPOINT_ROWS, LOCAL_KEY)
-        .map_err(|err| format!("load local endpoint: {err}"))?;
-    let signing_public_key = store
-        .table_row(LOCAL_ENDPOINT_SIGNING_PUBLIC_KEY_ROWS, LOCAL_KEY)
-        .map_err(|err| format!("load local endpoint signing public key: {err}"))?;
-
-    match (endpoint, signing_public_key) {
-        (None, None) => Ok(None),
-        (Some(endpoint), Some(signing_public_key)) => {
-            let endpoint = id32(&endpoint, "local endpoint")?;
-            let signing_public_key =
-                id32(&signing_public_key, "local endpoint signing public key")?;
-            Ok(Some(LocalEndpointPublic {
-                endpoint,
-                signing_public_key,
-            }))
-        }
-        (None, Some(_)) => Err("local endpoint public key is missing".to_string()),
-        (Some(_), None) => Err("local endpoint signing public key is missing".to_string()),
-    }
+    store
+        .conn()
+        .query_row(
+            "SELECT endpoint_id, signing_public_key
+             FROM local_endpoint_rows
+             WHERE local_key = ?1
+             LIMIT 1",
+            params![LOCAL_KEY],
+            |row| {
+                let endpoint = id32(&row.get::<_, Vec<u8>>(0)?, "local endpoint")?;
+                let signing_public_key = id32(
+                    &row.get::<_, Vec<u8>>(1)?,
+                    "local endpoint signing public key",
+                )?;
+                Ok(LocalEndpointPublic {
+                    endpoint,
+                    signing_public_key,
+                })
+            },
+        )
+        .optional()
+        .map_err(|err| format!("load local endpoint: {err}"))
 }
 
-fn id32(value: &[u8], label: &str) -> Result<[u8; 32], String> {
+fn id32(value: &[u8], label: &str) -> rusqlite::Result<[u8; 32]> {
     value
         .try_into()
-        .map_err(|_| format!("{label} row must be 32 bytes"))
+        .map_err(|_| rusqlite::Error::InvalidParameterName(format!("{label} row must be 32 bytes")))
 }

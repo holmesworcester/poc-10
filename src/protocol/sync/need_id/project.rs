@@ -231,7 +231,7 @@ impl SyncNeedIdProjector {
         }
         // 3. Materialize.
         Ok(ProjectionOutput::new()
-            .row_mutation(RowMutation::PutRow(sync_need_id_row(fact.id, &need)?))
+            .row_mutation(RowMutation::InsertValues(sync_need_id_row(fact.id, &need)))
             .intent(send_requested_fact_intent(SendRequestedFact {
                 need_fact_id: fact.id,
             })))

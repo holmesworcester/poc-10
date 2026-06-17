@@ -10,11 +10,9 @@ pub mod author;
 pub mod encode;
 pub mod fact;
 pub mod project;
-pub mod queries;
 
 use crate::core::facts::FactId;
-use crate::core::row_schema::{RowField, RowTableSchema, RowValue};
-use crate::core::store::{TableName, TableRow};
+use crate::core::store::{TableInsert, TableName, TypedTableSchema, Value};
 
 pub const TYPE_SYNC_COMPARE: u8 = encode::TYPE_SYNC_COMPARE;
 
@@ -24,38 +22,32 @@ pub const TYPE_SYNC_COMPARE: u8 = encode::TYPE_SYNC_COMPARE;
 /// fingerprint), and the response-requested flag.
 pub const SYNC_COMPARE_ROWS: TableName = TableName::new("sync_compare_rows");
 
-const SYNC_COMPARE_ROW_KEY_FIELDS: &[RowField] = &[
-    RowField::bytes32("connection_id"),
-    RowField::bytes32("fact_id"),
+pub const SYNC_COMPARE_COLUMNS: &[&str] = &[
+    "connection_id",
+    "fact_id",
+    "range_start",
+    "range_end",
+    "count",
+    "fingerprint",
+    "response_requested",
 ];
-const SYNC_COMPARE_ROW_VALUE_FIELDS: &[RowField] = &[
-    RowField::u64be("range_start"),
-    RowField::u64be("range_end"),
-    RowField::u64be("count"),
-    RowField::bytes32("fingerprint"),
-    RowField::u8("response_requested"),
-];
+pub const SYNC_COMPARE_KEY_COLUMNS: &[&str] = &["connection_id", "fact_id"];
+pub const SYNC_COMPARE_TABLE: TypedTableSchema = TypedTableSchema {
+    table: SYNC_COMPARE_ROWS,
+    columns: SYNC_COMPARE_COLUMNS,
+    key_columns: SYNC_COMPARE_KEY_COLUMNS,
+};
 
-pub const SYNC_COMPARE_ROW_SCHEMA: RowTableSchema = RowTableSchema::new(
-    SYNC_COMPARE_ROWS,
-    SYNC_COMPARE_ROW_KEY_FIELDS,
-    SYNC_COMPARE_ROW_VALUE_FIELDS,
-);
-
-pub fn sync_compare_row(fact_id: FactId, fact: &fact::SyncCompareFact) -> Result<TableRow, String> {
-    SYNC_COMPARE_ROW_SCHEMA.row(
-        &[
-            RowValue::Bytes(fact.connection_id.to_vec()),
-            RowValue::Bytes(fact_id.to_vec()),
-        ],
-        &[
-            RowValue::U64(fact.range.start),
-            RowValue::U64(fact.range.end),
-            RowValue::U64(fact.summary.count),
-            RowValue::Bytes(fact.summary.fingerprint.to_vec()),
-            RowValue::U8(u8::from(fact.response_requested)),
-        ],
-    )
+pub fn sync_compare_row(fact_id: FactId, fact: &fact::SyncCompareFact) -> TableInsert {
+    SYNC_COMPARE_TABLE.insert(vec![
+        Value::Bytes(fact.connection_id.to_vec()),
+        Value::Bytes(fact_id.to_vec()),
+        Value::Bytes(fact.range.start.to_be_bytes().to_vec()),
+        Value::Bytes(fact.range.end.to_be_bytes().to_vec()),
+        Value::U64(fact.summary.count),
+        Value::Bytes(fact.summary.fingerprint.to_vec()),
+        Value::U64(u64::from(u8::from(fact.response_requested))),
+    ])
 }
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::SyncCompareFact, String> {

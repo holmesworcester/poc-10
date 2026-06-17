@@ -12,17 +12,13 @@ use std::net::SocketAddr;
 
 use crate::core::facts::FactId;
 use crate::core::store::{Store, DEFAULT_QUERY_LIMIT};
+use rusqlite::{params, OptionalExtension, Row};
 
 use crate::protocol::auth::endpoint::author::local_endpoint;
 use crate::protocol::auth::endpoint_shared::queries::all_memberships;
 use crate::protocol::connection::connection::queries::answered_request_ids;
 use crate::protocol::connection::request::{
     encode::ADDR_BLOCK_BYTES, project::decode::decode_optional_addr,
-};
-
-use super::{
-    BOOTSTRAP_CONNECTION_ATTEMPT_ROWS, BOOTSTRAP_CONNECTION_ATTEMPT_ROW_SCHEMA,
-    CONNECTION_REQUEST_ROWS, CONNECTION_REQUEST_ROW_SCHEMA,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,48 +38,54 @@ pub struct BootstrapConnectionAttemptRow {
     pub request_id: FactId,
 }
 
-pub fn decode_connection_request_row(
-    key: &[u8],
-    value: &[u8],
-) -> Result<ConnectionRequestRow, String> {
-    let key_fields = CONNECTION_REQUEST_ROW_SCHEMA.decode_key(key)?;
-    let value_fields = CONNECTION_REQUEST_ROW_SCHEMA.decode_value(value)?;
-    let peer_addr_block: [u8; ADDR_BLOCK_BYTES] = value_fields[2]
-        .as_bytes("peer_addr")?
-        .try_into()
-        .map_err(|_| "connection request row peer_addr block is malformed".to_string())?;
-    let peer_addr = decode_optional_addr(&peer_addr_block)?;
+pub fn decode_connection_request_row(row: &Row<'_>) -> rusqlite::Result<ConnectionRequestRow> {
+    let peer_addr_block: Vec<u8> = row.get(3)?;
+    let peer_addr_block: [u8; ADDR_BLOCK_BYTES] =
+        peer_addr_block.as_slice().try_into().map_err(|_| {
+            rusqlite::Error::InvalidParameterName(
+                "connection request row peer_addr block is malformed".to_string(),
+            )
+        })?;
+    let peer_addr =
+        decode_optional_addr(&peer_addr_block).map_err(rusqlite::Error::InvalidParameterName)?;
     Ok(ConnectionRequestRow {
-        request_id: key_fields[0].as_bytes32("request_id")?,
-        request_sent_id: value_fields[0].as_bytes32("request_sent_id")?,
-        initiator_ephemeral_secret_fact_id: value_fields[1]
-            .as_bytes32("initiator_ephemeral_secret_fact_id")?,
+        request_id: row.get(0)?,
+        request_sent_id: row.get(1)?,
+        initiator_ephemeral_secret_fact_id: row.get(2)?,
         peer_addr,
-        sealed_request_bytes: value_fields[3].as_bytes("sealed_request_bytes")?.to_vec(),
+        sealed_request_bytes: row.get(4)?,
     })
 }
 
 fn decode_bootstrap_connection_attempt_row(
-    key: &[u8],
-    value: &[u8],
-) -> Result<BootstrapConnectionAttemptRow, String> {
-    let key_fields = BOOTSTRAP_CONNECTION_ATTEMPT_ROW_SCHEMA.decode_key(key)?;
-    let value_fields = BOOTSTRAP_CONNECTION_ATTEMPT_ROW_SCHEMA.decode_value(value)?;
+    row: &Row<'_>,
+) -> rusqlite::Result<BootstrapConnectionAttemptRow> {
     Ok(BootstrapConnectionAttemptRow {
-        invite_accepted_fact_id: key_fields[0].as_bytes32("invite_accepted_fact_id")?,
-        request_id: value_fields[0].as_bytes32("request_id")?,
+        invite_accepted_fact_id: row.get(0)?,
+        request_id: row.get(1)?,
     })
 }
 
 pub fn bootstrap_connection_attempt_rows(
     store: &Store,
 ) -> Result<Vec<BootstrapConnectionAttemptRow>, String> {
-    store
-        .table_rows_page(BOOTSTRAP_CONNECTION_ATTEMPT_ROWS, DEFAULT_QUERY_LIMIT)
-        .map_err(|err| format!("read bootstrap connection attempt rows: {err}"))?
-        .into_iter()
-        .map(|(key, value)| decode_bootstrap_connection_attempt_row(&key, &value))
-        .collect()
+    let mut stmt = store
+        .conn()
+        .prepare(
+            "SELECT invite_accepted_fact_id, request_id
+             FROM bootstrap_connection_attempt_rows
+             ORDER BY invite_accepted_fact_id
+             LIMIT ?1",
+        )
+        .map_err(|err| format!("read bootstrap connection attempt rows: {err}"))?;
+    let rows = stmt
+        .query_map(
+            params![DEFAULT_QUERY_LIMIT as i64],
+            decode_bootstrap_connection_attempt_row,
+        )
+        .map_err(|err| format!("read bootstrap connection attempt rows: {err}"))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|err| format!("decode bootstrap connection attempt rows: {err}"))
 }
 
 /// A membership connection we can open to a known endpoint without an invite.
@@ -148,11 +150,27 @@ pub struct PendingConnectionRequest {
 pub fn pending_connection_requests(store: &Store) -> Result<Vec<PendingConnectionRequest>, String> {
     let answered = answered_request_ids(store)?;
     let mut pending = Vec::new();
-    for (key, value) in store
-        .table_rows_page(CONNECTION_REQUEST_ROWS, DEFAULT_QUERY_LIMIT)
-        .map_err(|err| format!("read membership connection request rows: {err}"))?
-    {
-        let row = decode_connection_request_row(&key, &value)?;
+    let mut stmt = store
+        .conn()
+        .prepare(
+            "SELECT request_id,
+                    request_sent_id,
+                    initiator_ephemeral_secret_fact_id,
+                    peer_addr,
+                    sealed_request_bytes
+             FROM connection_request_rows
+             ORDER BY request_id
+             LIMIT ?1",
+        )
+        .map_err(|err| format!("read membership connection request rows: {err}"))?;
+    let rows = stmt
+        .query_map(
+            params![DEFAULT_QUERY_LIMIT as i64],
+            decode_connection_request_row,
+        )
+        .map_err(|err| format!("read membership connection request rows: {err}"))?;
+    for row in rows {
+        let row = row.map_err(|err| format!("decode connection request row: {err}"))?;
         let Some(addr) = row.peer_addr else {
             continue;
         };
@@ -173,14 +191,22 @@ pub fn request_by_id(
     store: &Store,
     request_id: &FactId,
 ) -> Result<Option<ConnectionRequestRow>, String> {
-    let row = store
-        .table_row(
-            CONNECTION_REQUEST_ROWS,
-            &super::connection_request_key(request_id),
+    store
+        .conn()
+        .query_row(
+            "SELECT request_id,
+                    request_sent_id,
+                    initiator_ephemeral_secret_fact_id,
+                    peer_addr,
+                    sealed_request_bytes
+             FROM connection_request_rows
+             WHERE request_id = ?1
+             LIMIT 1",
+            params![request_id],
+            decode_connection_request_row,
         )
-        .map_err(|err| format!("read connection request row: {err}"))?;
-    row.map(|value| decode_connection_request_row(request_id, &value))
-        .transpose()
+        .optional()
+        .map_err(|err| format!("read connection request row: {err}"))
 }
 
 pub fn request_route_by_id(
@@ -211,37 +237,5 @@ mod tests {
             choose_connection_mode(&store, [9; 32]).expect("query"),
             None
         );
-    }
-
-    #[test]
-    fn connection_request_row_roundtrips_through_schema() {
-        use crate::protocol::connection::request::encode::SEALED_FACT_BYTES;
-
-        let sealed = vec![7u8; SEALED_FACT_BYTES];
-        let row = super::super::connection_request_row(
-            [1; 32],
-            [2; 32],
-            [3; 32],
-            Some("127.0.0.1:41000".parse().unwrap()),
-            &sealed,
-        )
-        .expect("connection request row");
-        let decoded =
-            decode_connection_request_row(&row.key, &row.value).expect("decode request row");
-        assert_eq!(decoded.request_id, [1; 32]);
-        assert_eq!(decoded.request_sent_id, [2; 32]);
-        assert_eq!(decoded.initiator_ephemeral_secret_fact_id, [3; 32]);
-        assert_eq!(decoded.peer_addr, Some("127.0.0.1:41000".parse().unwrap()));
-        assert_eq!(decoded.sealed_request_bytes, sealed);
-    }
-
-    #[test]
-    fn bootstrap_attempt_row_roundtrips_through_schema() {
-        let row =
-            super::super::bootstrap_connection_attempt_row([1; 32], [2; 32]).expect("attempt row");
-        let decoded = decode_bootstrap_connection_attempt_row(&row.key, &row.value)
-            .expect("decode attempt row");
-        assert_eq!(decoded.invite_accepted_fact_id, [1; 32]);
-        assert_eq!(decoded.request_id, [2; 32]);
     }
 }

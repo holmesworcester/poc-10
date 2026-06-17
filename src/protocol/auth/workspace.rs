@@ -14,40 +14,28 @@ pub mod fact;
 pub mod project;
 pub mod queries;
 
+use crate::core::facts::FactId;
+use crate::core::store::{TableInsert, TableName, TypedTableSchema, Value};
+
 pub const TYPE_WORKSPACE: u8 = encode::TYPE_WORKSPACE;
 
-pub const WORKSPACE_ROWS: crate::core::store::TableName =
-    crate::core::store::TableName::new("workspace_rows");
+pub const WORKSPACE_ROWS: TableName = TableName::new("workspace_rows");
 
-const WORKSPACE_ROW_KEY_FIELDS: &[crate::core::row_schema::RowField] =
-    &[crate::core::row_schema::RowField::bytes32("workspace_id")];
-const WORKSPACE_ROW_VALUE_FIELDS: &[crate::core::row_schema::RowField] = &[
-    crate::core::row_schema::RowField::u64be("created_at_ms"),
-    crate::core::row_schema::RowField::bytes32("public_key"),
-    crate::core::row_schema::RowField::bytes("name", fact::WORKSPACE_NAME_BYTES),
-];
+pub const WORKSPACE_COLUMNS: &[&str] = &["workspace_id", "created_at_ms", "public_key", "name"];
+pub const WORKSPACE_KEY_COLUMNS: &[&str] = &["workspace_id"];
+pub const WORKSPACE_TABLE: TypedTableSchema = TypedTableSchema {
+    table: WORKSPACE_ROWS,
+    columns: WORKSPACE_COLUMNS,
+    key_columns: WORKSPACE_KEY_COLUMNS,
+};
 
-pub const WORKSPACE_ROW_SCHEMA: crate::core::row_schema::RowTableSchema =
-    crate::core::row_schema::RowTableSchema::new(
-        WORKSPACE_ROWS,
-        WORKSPACE_ROW_KEY_FIELDS,
-        WORKSPACE_ROW_VALUE_FIELDS,
-    );
-
-pub(crate) fn workspace_row(
-    workspace_id: crate::core::facts::FactId,
-    fact: &fact::WorkspaceFact,
-) -> Result<crate::core::store::TableRow, String> {
-    WORKSPACE_ROW_SCHEMA.row(
-        &[crate::core::row_schema::RowValue::Bytes(
-            workspace_id.to_vec(),
-        )],
-        &[
-            crate::core::row_schema::RowValue::U64(fact.created_at_ms),
-            crate::core::row_schema::RowValue::Bytes(fact.public_key.to_vec()),
-            crate::core::row_schema::RowValue::Bytes(fact.name.padded_bytes().to_vec()),
-        ],
-    )
+pub(crate) fn workspace_insert(workspace_id: FactId, fact: &fact::WorkspaceFact) -> TableInsert {
+    WORKSPACE_TABLE.insert(vec![
+        Value::Bytes(workspace_id.to_vec()),
+        Value::U64(fact.created_at_ms),
+        Value::Bytes(fact.public_key.to_vec()),
+        Value::Bytes(fact.name.padded_bytes().to_vec()),
+    ])
 }
 
 pub fn scope(workspace_id: crate::core::facts::FactId) -> crate::core::facts::FactScope {

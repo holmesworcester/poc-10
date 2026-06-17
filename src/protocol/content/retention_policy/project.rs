@@ -411,7 +411,7 @@ impl RetentionPolicyProjector {
         );
 
         // 3. Materialize.
-        let row = policy_row(fact.id, &policy)?;
+        let row = policy_row(fact.id, &policy);
         Ok(share_fact_with_sync(
             waiting
                 .offer(crate::core::context::ContextOffer::range(
@@ -422,7 +422,7 @@ impl RetentionPolicyProjector {
                     fact.id,
                 ))
                 .offer(message::retention_floor_offer(fact.id, policy.workspace_id))
-                .row_mutation(RowMutation::PutRow(row)),
+                .row_mutation(RowMutation::InsertValues(row)),
             policy.workspace_id,
             fact,
             context_have,
@@ -514,7 +514,7 @@ mod projector_tests {
 
     use topo::core::crypto;
     use topo::core::facts::{Fact, FactScope};
-    use topo::core::intents::RowMutation;
+    use topo::core::intents::{RowMutation, Value};
     use topo::core::project_fact::{MatchedContext, ProjectionContext, Projector};
     use topo::protocol::auth;
     use topo::protocol::auth::admin;
@@ -522,7 +522,9 @@ mod projector_tests {
     use topo::protocol::content::retention_policy::fact::{
         RetentionPolicyFact, SCOPE_KIND_CHANNEL, SCOPE_KIND_WORKSPACE,
     };
-    use topo::protocol::content::retention_policy::{encode, project, queries};
+    use topo::protocol::content::retention_policy::{
+        encode, project, queries, RETENTION_POLICY_ROWS,
+    };
     use topo::protocol::sync::share_fact_with_sync;
 
     fn workspace_policy() -> RetentionPolicyFact {
@@ -845,9 +847,37 @@ mod projector_tests {
 
     fn decode_single_put_row(mutation: &RowMutation) -> queries::RetentionPolicyRow {
         match mutation {
-            RowMutation::PutRow(row) => queries::decode_policy_row(&row.key, &row.value)
-                .expect("decode retention policy row"),
-            _ => panic!("expected opaque put row"),
+            RowMutation::InsertValues(row) if row.table == RETENTION_POLICY_ROWS => {
+                queries::RetentionPolicyRow {
+                    workspace_id: bytes32(&row.values[0]),
+                    scope_kind: u64_value(&row.values[1]) as u8,
+                    scope_id: bytes32(&row.values[2]),
+                    policy_id: bytes32(&row.values[3]),
+                    created_at_ms: u64_value(&row.values[4]),
+                    ttl_minutes: u64_value(&row.values[5]) as u32,
+                    retire_minute: u64_value(&row.values[6]),
+                    author_user_id: bytes32(&row.values[7]),
+                    supersedes_policy_id: {
+                        let value = bytes32(&row.values[8]);
+                        (value != encode::NO_PREVIOUS_POLICY_ID).then_some(value)
+                    },
+                }
+            }
+            _ => panic!("expected retention policy insert"),
+        }
+    }
+
+    fn bytes32(value: &Value) -> [u8; 32] {
+        match value {
+            Value::Bytes(bytes) => bytes.as_slice().try_into().expect("bytes32"),
+            _ => panic!("expected bytes"),
+        }
+    }
+
+    fn u64_value(value: &Value) -> u64 {
+        match value {
+            Value::U64(value) => *value,
+            _ => panic!("expected u64"),
         }
     }
 

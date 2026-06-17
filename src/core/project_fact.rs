@@ -1686,22 +1686,16 @@ pub(crate) mod commit_effects {
     //! checks failures that do not need SQL: conflicting duplicate intents inside a
     //! batch and row mutations aimed at tables outside the runtime allowlist. The
     //! commit functions then rely on the store for the state-dependent checks:
-    //! content-addressed facts must match their ids, opaque row-table `PutRow`
-    //! effects must be new rows or exact duplicates, typed-table inserts must match
-    //! the full supplied row, and intent queue inserts must keep `(kind, key)`
-    //! stable.
+    //! content-addressed facts must match their ids, typed-table inserts must
+    //! be new rows or exact duplicates of the full supplied row, and intent
+    //! queue inserts must keep `(kind, key)` stable.
     //!
     //! That row-table rule is not the rule for all projection state. Context rows
     //! and time wakes are handled by owner in the projection commit boundary before
     //! this helper commits shared effects: needs/time wakes are replaced, while
     //! durable offers append idempotently.
-    //! Typed-table projections can also change visible state by emitting explicit
-    //! `DeleteWhere` and `InsertValues` mutations in the desired order. The opaque
-    //! `PutRow` path is narrower: it is for facts whose derived row key should
-    //! continue to name the same bytes across retries and later context wakeups. If
-    //! new context should change the value for an existing logical row, the protocol
-    //! should model that as typed-table delete/insert state or choose a different
-    //! row key, not rely on `PutRow` as an upsert.
+    //! Typed-table projections can change visible state by emitting explicit
+    //! `DeleteWhere` and `InsertValues` mutations in the desired order.
     //!
     //! The commit order is part of the contract. Purges run first so stale
     //! core-owned rows disappear before new facts and derived rows become visible.
@@ -1851,8 +1845,6 @@ pub(crate) mod commit_effects {
         allowed_tables: &[TableName],
     ) -> Result<(), String> {
         let table = match mutation {
-            RowMutation::PutRow(row) => row.table,
-            RowMutation::DeleteRow(delete) => delete.table,
             RowMutation::InsertValues(insert) => insert.table,
             RowMutation::DeleteWhere(delete) => delete.table,
         };

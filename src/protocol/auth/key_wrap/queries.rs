@@ -9,12 +9,11 @@ use crate::core::facts::FactId;
 use crate::core::runtime::Runtime;
 use crate::core::store::{Store, DEFAULT_QUERY_LIMIT};
 use crate::protocol::content;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, OptionalExtension, Row};
 use std::collections::BTreeSet;
 
-use super::encode;
-use super::fact::KeyWrapFact;
-use super::{project::decode, KEY_WRAP_ROW_SCHEMA};
+use super::fact::{KeyWrapFact, WrappedSecretKind};
+use super::project::decode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyWrapQuery {
@@ -80,22 +79,53 @@ pub struct KeyWrapRow {
     pub wrap: KeyWrapFact,
 }
 
-fn decode_key_wrap_row(key: &[u8], value: &[u8]) -> Result<KeyWrapRow, String> {
-    let value_fields = KEY_WRAP_ROW_SCHEMA.decode_value(value)?;
-    if value_fields[0].as_u8("version")? != 1 {
-        return Err("invalid key wrap row value".to_string());
-    }
-    let key_wrap_id = value_fields[1].as_bytes32("key_wrap_id")?;
-    let signer_public_key = value_fields[2].as_bytes32("signer_public_key")?;
-    let wrap = decode::decode_key_wrap(value_fields[3].as_bytes("wrap")?)?;
-    if key != encode::key_wrap_coordinate_key(&wrap)? {
-        return Err("key wrap row key does not match value".to_string());
+fn decode_key_wrap_row(row: &Row<'_>) -> rusqlite::Result<KeyWrapRow> {
+    let workspace_id: FactId = row.get(0)?;
+    let frontier_id: FactId = row.get(1)?;
+    let recipient_key_id: FactId = row.get(2)?;
+    let wrapped_secret_kind = u8_column(row.get(3)?, "wrapped_secret_kind")?;
+    let range_start = u64_column(row.get(4)?, "range_start")?;
+    let range_width = u64_column(row.get(5)?, "range_width")?;
+    let bit_depth = u16_column(row.get(6)?, "bit_depth")?;
+    let fact_id_prefix: FactId = row.get(7)?;
+    let key_wrap_id: FactId = row.get(8)?;
+    let signer_public_key: FactId = row.get(9)?;
+    let wrap_bytes: Vec<u8> = row.get(10)?;
+    let wrap = decode::decode_key_wrap(&wrap_bytes).map_err(row_error)?;
+    if wrap.workspace_id != workspace_id
+        || wrap.frontier_id != frontier_id
+        || wrap.recipient_key_id != recipient_key_id
+        || wrap.wrapped_secret_kind.as_u8() != wrapped_secret_kind
+        || wrap.range_start != range_start
+        || wrap.range_width != range_width
+        || wrap.bit_depth != bit_depth
+        || wrap.fact_id_prefix != fact_id_prefix
+    {
+        return Err(row_error(
+            "key wrap row columns do not match wrap payload".to_string(),
+        ));
     }
     Ok(KeyWrapRow {
         key_wrap_id,
         signer_public_key,
         wrap,
     })
+}
+
+fn row_error(err: String) -> rusqlite::Error {
+    rusqlite::Error::InvalidParameterName(err)
+}
+
+fn u64_column(value: i64, name: &str) -> rusqlite::Result<u64> {
+    u64::try_from(value).map_err(|_| row_error(format!("{name} must be non-negative")))
+}
+
+fn u8_column(value: i64, name: &str) -> rusqlite::Result<u8> {
+    u8::try_from(value).map_err(|_| row_error(format!("{name} out of range")))
+}
+
+fn u16_column(value: i64, name: &str) -> rusqlite::Result<u16> {
+    u16::try_from(value).map_err(|_| row_error(format!("{name} out of range")))
 }
 
 fn latest_local_recipient_key(
@@ -129,17 +159,43 @@ pub fn lookup_key_wrap(runtime: &Runtime, query: KeyWrapQuery) -> Result<KeyWrap
     if recipient_key_is_superseded(runtime, query.workspace_id, query.recipient_key_id)? {
         return Err("recipient key is missing or superseded".to_string());
     }
-    let key = encode::frontier_root_key_wrap_coordinate_key(
-        query.workspace_id,
-        query.removal_frontier_id,
-        query.recipient_key_id,
-    );
-    let value = runtime
+    let row = runtime
         .store()
-        .table_row(super::KEY_WRAP_ROWS, &key)
+        .conn()
+        .query_row(
+            "SELECT workspace_id,
+                    frontier_id,
+                    recipient_key_id,
+                    wrapped_secret_kind,
+                    range_start,
+                    range_width,
+                    bit_depth,
+                    fact_id_prefix,
+                    key_wrap_id,
+                    signer_public_key,
+                    wrap
+             FROM key_wrap_rows
+             WHERE workspace_id = ?1
+               AND frontier_id = ?2
+               AND recipient_key_id = ?3
+               AND wrapped_secret_kind = ?4
+               AND range_start = 0
+               AND range_width = 0
+               AND bit_depth = 0
+               AND fact_id_prefix = ?5
+             LIMIT 1",
+            params![
+                query.workspace_id,
+                query.removal_frontier_id,
+                query.recipient_key_id,
+                i64::from(WrappedSecretKind::FrontierRoot.as_u8()),
+                [0_u8; 32],
+            ],
+            decode_key_wrap_row,
+        )
+        .optional()
         .map_err(|err| format!("load key wrap row: {err}"))?
         .ok_or_else(|| "key wrap is not available yet".to_string())?;
-    let row = decode_key_wrap_row(&key, &value)?;
     Ok(KeyWrapLookup {
         workspace_id: query.workspace_id,
         removal_frontier_id: query.removal_frontier_id,
@@ -218,16 +274,25 @@ fn local_key_secret_frontiers(store: &Store, workspace_id: FactId) -> Result<Vec
 pub fn key_wrap_count(runtime: &Runtime) -> Result<usize, String> {
     runtime
         .store()
-        .table_row_count(super::KEY_WRAP_ROWS)
+        .conn()
+        .query_row("SELECT COUNT(*) FROM key_wrap_rows", [], |row| {
+            row.get::<_, i64>(0).map(|count| count as usize)
+        })
         .map_err(|err| format!("count key wraps: {err}"))
 }
 
 fn workspace_key_wrap_count(runtime: &Runtime, workspace_id: FactId) -> Result<usize, String> {
     runtime
         .store()
-        .table_rows_with_key_prefix(super::KEY_WRAP_ROWS, &workspace_id, DEFAULT_QUERY_LIMIT)
-        .map(|rows| rows.len())
-        .map_err(|err| format!("load workspace key wraps: {err}"))
+        .conn()
+        .query_row(
+            "SELECT COUNT(*)
+             FROM key_wrap_rows
+             WHERE workspace_id = ?1",
+            params![workspace_id],
+            |row| row.get::<_, i64>(0).map(|count| count as usize),
+        )
+        .map_err(|err| format!("count workspace key wraps: {err}"))
 }
 
 pub fn key_status_report(
@@ -464,8 +529,11 @@ fn recipient_key_is_superseded(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::store::Store;
     use crate::protocol::auth::key_wrap::fact::WrappedSecretKind;
-    use crate::protocol::auth::key_wrap::key_wrap_row;
+    use crate::protocol::auth::key_wrap::key_wrap_insert;
+    use crate::protocol::registry::FACTS_SCHEMA_SOURCE;
+    use rusqlite::params;
 
     #[test]
     fn accepted_key_wrap_row_round_trips_by_coordinate() {
@@ -492,12 +560,33 @@ mod tests {
             signer_public_key: [11; 32],
             wrap,
         };
-        let table_row = key_wrap_row(row.clone()).expect("row");
+        let store = Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE]).expect("store");
+        let insert = key_wrap_insert(row.clone()).expect("insert");
+        store
+            .write_transaction(|tx| tx.insert_values_in_tx(&insert).map(|_| ()))
+            .expect("write row");
 
-        assert_eq!(table_row.table, super::super::KEY_WRAP_ROWS);
-        assert_eq!(
-            decode_key_wrap_row(&table_row.key, &table_row.value).expect("decode"),
-            row
-        );
+        let decoded = store
+            .conn()
+            .query_row(
+                "SELECT workspace_id,
+                        frontier_id,
+                        recipient_key_id,
+                        wrapped_secret_kind,
+                        range_start,
+                        range_width,
+                        bit_depth,
+                        fact_id_prefix,
+                        key_wrap_id,
+                        signer_public_key,
+                        wrap
+                 FROM key_wrap_rows
+                 WHERE workspace_id = ?1
+                 LIMIT 1",
+                params![[1_u8; 32]],
+                decode_key_wrap_row,
+            )
+            .expect("decode");
+        assert_eq!(decoded, row);
     }
 }

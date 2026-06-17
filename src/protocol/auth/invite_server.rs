@@ -9,11 +9,9 @@ pub mod author;
 pub mod encode;
 pub mod fact;
 pub mod project;
-pub mod queries;
 
 use crate::core::facts::FactId;
-use crate::core::row_schema::{RowField, RowTableSchema, RowValue};
-use crate::core::store::{TableName, TableRow};
+use crate::core::store::{TableInsert, TableName, TypedTableSchema, Value};
 
 pub const TYPE_INVITE_SERVER: u8 = encode::TYPE_INVITE_SERVER;
 
@@ -24,37 +22,31 @@ pub const INVITE_SERVER_ROWS: TableName = TableName::new("invite_server_rows");
 
 pub type InviteServerId = FactId;
 
-const INVITE_SERVER_ROW_KEY_FIELDS: &[RowField] = &[
-    RowField::bytes32("workspace_id"),
-    RowField::bytes32("invite_server_id"),
+pub const INVITE_SERVER_COLUMNS: &[&str] = &[
+    "workspace_id",
+    "invite_server_id",
+    "created_at_ms",
+    "public_key",
+    "authority_fact_id",
 ];
-const INVITE_SERVER_ROW_VALUE_FIELDS: &[RowField] = &[
-    RowField::u64be("created_at_ms"),
-    RowField::bytes32("public_key"),
-    RowField::bytes32("authority_fact_id"),
-];
-
-pub const INVITE_SERVER_ROW_SCHEMA: RowTableSchema = RowTableSchema::new(
-    INVITE_SERVER_ROWS,
-    INVITE_SERVER_ROW_KEY_FIELDS,
-    INVITE_SERVER_ROW_VALUE_FIELDS,
-);
+pub const INVITE_SERVER_KEY_COLUMNS: &[&str] = &["workspace_id", "invite_server_id"];
+pub const INVITE_SERVER_TABLE: TypedTableSchema = TypedTableSchema {
+    table: INVITE_SERVER_ROWS,
+    columns: INVITE_SERVER_COLUMNS,
+    key_columns: INVITE_SERVER_KEY_COLUMNS,
+};
 
 pub fn invite_server_row(
     invite_server_id: InviteServerId,
     fact: &fact::InviteServerFact,
-) -> Result<TableRow, String> {
-    INVITE_SERVER_ROW_SCHEMA.row(
-        &[
-            RowValue::Bytes(fact.workspace_id.to_vec()),
-            RowValue::Bytes(invite_server_id.to_vec()),
-        ],
-        &[
-            RowValue::U64(fact.created_at_ms),
-            RowValue::Bytes(fact.public_key.to_vec()),
-            RowValue::Bytes(fact.authority_fact_id.to_vec()),
-        ],
-    )
+) -> TableInsert {
+    INVITE_SERVER_TABLE.insert(vec![
+        Value::Bytes(fact.workspace_id.to_vec()),
+        Value::Bytes(invite_server_id.to_vec()),
+        Value::U64(fact.created_at_ms),
+        Value::Bytes(fact.public_key.to_vec()),
+        Value::Bytes(fact.authority_fact_id.to_vec()),
+    ])
 }
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::InviteServerFact, String> {

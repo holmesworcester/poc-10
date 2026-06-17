@@ -173,7 +173,7 @@ impl IntentHandler for MaintainConnectionsHandler {
             effects = effects
                 .fact(attempt.ephemeral_secret_fact)
                 .fact(attempt.request_fact)
-                .row_mutation(RowMutation::PutRow(
+                .row_mutation(RowMutation::InsertValues(
                     request::bootstrap_connection_attempt_row(
                         peer.invite_accepted_fact_id,
                         attempt.request_id,
@@ -255,15 +255,11 @@ mod tests {
         .expect("store");
         let peer_addr = "127.0.0.1:41000".parse().unwrap();
         let sealed = vec![7; request::encode::SEALED_FACT_BYTES];
+        let row =
+            request::connection_request_row([1; 32], [2; 32], [3; 32], Some(peer_addr), &sealed)
+                .expect("connection request row");
         store
-            .insert_table_rows(vec![request::connection_request_row(
-                [1; 32],
-                [2; 32],
-                [3; 32],
-                Some(peer_addr),
-                &sealed,
-            )
-            .expect("connection request row")])
+            .write_transaction(|tx| tx.insert_values_in_tx(&row).map(|_| ()))
             .expect("seed pending request row");
 
         let intent = build_maintain_connections_intent(
@@ -314,11 +310,14 @@ mod tests {
             identity_scope: true,
         };
         let accepted_id = [9; 32];
-        let mut rows = endpoint::endpoint_rows(&local);
-        rows.push(
-            invite_accepted::invite_accepted_row(accepted_id, &accepted).expect("accepted row"),
-        );
-        store.insert_table_rows(rows).expect("seed rows");
+        store
+            .insert_table_values(vec![endpoint::local_endpoint_insert(&local)])
+            .expect("seed endpoint rows");
+        let accepted_row =
+            invite_accepted::invite_accepted_row(accepted_id, &accepted).expect("accepted row");
+        store
+            .write_transaction(|tx| tx.insert_values_in_tx(&accepted_row).map(|_| ()))
+            .expect("seed accepted row");
 
         let intent = build_maintain_connections_intent(
             &store,
@@ -361,7 +360,7 @@ mod tests {
         assert!(effects.row_mutations.iter().any(|mutation| {
             matches!(
                 mutation,
-                RowMutation::PutRow(row) if row.table == request::BOOTSTRAP_CONNECTION_ATTEMPT_ROWS
+                RowMutation::InsertValues(row) if row.table == request::BOOTSTRAP_CONNECTION_ATTEMPT_ROWS
             )
         }));
         assert!(effects.local_intents.is_empty());

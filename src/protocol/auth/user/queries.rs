@@ -9,9 +9,9 @@ use crate::core::crypto::Ed25519PublicKey;
 use crate::core::facts::FactId;
 use crate::core::store::{Store, DEFAULT_QUERY_LIMIT};
 use crate::core::wire::FixedText;
+use rusqlite::{params, OptionalExtension, Row};
 
 use super::fact::{UserId, Username, WorkspaceId, USERNAME_BYTES};
-use super::{USER_ROWS, USER_ROW_SCHEMA};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserRow {
@@ -23,35 +23,48 @@ pub struct UserRow {
     pub username: String,
 }
 
-pub fn decode_user_row(key: &[u8], value: &[u8]) -> Result<UserRow, String> {
-    let key_fields = USER_ROW_SCHEMA.decode_key(key)?;
-    let value_fields = USER_ROW_SCHEMA.decode_value(value)?;
-    let username = read_username(value_fields[3].as_bytes("username")?)?;
+pub fn decode_user_row(row: &Row<'_>) -> rusqlite::Result<UserRow> {
+    let bytes: Vec<u8> = row.get(5)?;
+    let padded: [u8; USERNAME_BYTES] = bytes.as_slice().try_into().map_err(|_| {
+        rusqlite::Error::InvalidParameterName("username slot has wrong length".to_string())
+    })?;
+    let username: Username = FixedText::from_padded(padded)
+        .map_err(|err| rusqlite::Error::InvalidParameterName(format!("{err:?}")))?;
     Ok(UserRow {
-        workspace_id: key_fields[0].as_bytes32("workspace_id")?,
-        user_id: key_fields[1].as_bytes32("user_id")?,
-        created_at_ms: value_fields[0].as_u64("created_at_ms")?,
-        public_key: value_fields[1].as_bytes32("public_key")?,
-        user_invite_id: value_fields[2].as_bytes32("user_invite_id")?,
-        username,
+        workspace_id: row.get(0)?,
+        user_id: row.get(1)?,
+        created_at_ms: row.get::<_, i64>(2)? as u64,
+        public_key: row.get(3)?,
+        user_invite_id: row.get(4)?,
+        username: username.to_string(),
     })
 }
 
-fn read_username(bytes: &[u8]) -> Result<String, String> {
-    let padded: [u8; USERNAME_BYTES] = bytes
-        .try_into()
-        .map_err(|_| "username slot has wrong length".to_string())?;
-    let username: Username = FixedText::from_padded(padded).map_err(|err| format!("{err:?}"))?;
-    Ok(username.to_string())
-}
-
 pub fn users_in_workspace(store: &Store, workspace_id: FactId) -> Result<Vec<UserRow>, String> {
-    let mut rows = store
-        .table_rows_with_key_prefix(USER_ROWS, &workspace_id, DEFAULT_QUERY_LIMIT)
-        .map_err(|err| format!("load users: {err}"))?
-        .into_iter()
-        .map(|(key, value)| decode_user_row(&key, &value))
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut stmt = store
+        .conn()
+        .prepare(
+            "SELECT workspace_id,
+                    user_id,
+                    created_at_ms,
+                    public_key,
+                    user_invite_id,
+                    username
+             FROM user_rows
+             WHERE workspace_id = ?1
+             ORDER BY username, user_id
+             LIMIT ?2",
+        )
+        .map_err(|err| format!("load users: {err}"))?;
+    let rows = stmt
+        .query_map(
+            params![workspace_id, DEFAULT_QUERY_LIMIT as i64],
+            decode_user_row,
+        )
+        .map_err(|err| format!("load users: {err}"))?;
+    let mut rows = rows
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|err| format!("decode users: {err}"))?;
     rows.sort_by(|left, right| {
         left.username
             .cmp(&right.username)
@@ -60,28 +73,26 @@ pub fn users_in_workspace(store: &Store, workspace_id: FactId) -> Result<Vec<Use
     Ok(rows)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::protocol::auth::user::fact::UserFact;
-
-    #[test]
-    fn user_row_roundtrips_through_schema() {
-        let fact = UserFact {
-            created_at_ms: 42,
-            workspace_id: [1; 32],
-            public_key: [2; 32],
-            username: Username::new("alice").expect("username"),
-            signer_id: [5; 32],
-            signer_public_key: [6; 32],
-        };
-        let row = super::super::user_row([8; 32], [9; 32], &fact).expect("user row");
-        let decoded = decode_user_row(&row.key, &row.value).expect("decode user row");
-        assert_eq!(decoded.workspace_id, [1; 32]);
-        assert_eq!(decoded.user_id, [8; 32]);
-        assert_eq!(decoded.created_at_ms, 42);
-        assert_eq!(decoded.public_key, [2; 32]);
-        assert_eq!(decoded.user_invite_id, [9; 32]);
-        assert_eq!(decoded.username, "alice");
-    }
+pub fn user_by_id(
+    store: &Store,
+    workspace_id: FactId,
+    user_id: FactId,
+) -> Result<Option<UserRow>, String> {
+    store
+        .conn()
+        .query_row(
+            "SELECT workspace_id,
+                    user_id,
+                    created_at_ms,
+                    public_key,
+                    user_invite_id,
+                    username
+             FROM user_rows
+             WHERE workspace_id = ?1 AND user_id = ?2
+             LIMIT 1",
+            params![workspace_id, user_id],
+            decode_user_row,
+        )
+        .optional()
+        .map_err(|err| format!("load user row: {err}"))
 }

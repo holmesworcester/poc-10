@@ -19,13 +19,12 @@ pub mod project;
 pub mod queries;
 
 use crate::core::facts::FactId;
-use crate::core::row_schema::{RowField, RowTableSchema, RowValue};
-use crate::core::store::{TableName, TableRow};
+use crate::core::store::{TableInsert, TableName, TypedTableSchema, Value};
 
 use std::net::SocketAddr;
 
+use crate::protocol::connection::request::encode::encode_optional_addr;
 use crate::protocol::connection::request::encode::SEALED_FACT_BYTES;
-use crate::protocol::connection::request::encode::{encode_optional_addr, ADDR_BLOCK_BYTES};
 
 pub use project::{
     connection_for_request_need, connection_for_request_offer, connection_request_need,
@@ -38,29 +37,28 @@ pub const CONNECTION_REQUEST_ROWS: TableName = TableName::new("connection_reques
 pub const BOOTSTRAP_CONNECTION_ATTEMPT_ROWS: TableName =
     TableName::new("bootstrap_connection_attempt_rows");
 
-const CONNECTION_REQUEST_ROW_KEY_FIELDS: &[RowField] = &[RowField::bytes32("request_id")];
-const CONNECTION_REQUEST_ROW_VALUE_FIELDS: &[RowField] = &[
-    RowField::bytes32("request_sent_id"),
-    RowField::bytes32("initiator_ephemeral_secret_fact_id"),
-    RowField::bytes("peer_addr", ADDR_BLOCK_BYTES),
-    RowField::bytes("sealed_request_bytes", SEALED_FACT_BYTES),
+pub const CONNECTION_REQUEST_COLUMNS: &[&str] = &[
+    "request_id",
+    "request_sent_id",
+    "initiator_ephemeral_secret_fact_id",
+    "peer_addr",
+    "sealed_request_bytes",
 ];
+pub const CONNECTION_REQUEST_KEY_COLUMNS: &[&str] = &["request_id"];
+pub const CONNECTION_REQUEST_TABLE: TypedTableSchema = TypedTableSchema {
+    table: CONNECTION_REQUEST_ROWS,
+    columns: CONNECTION_REQUEST_COLUMNS,
+    key_columns: CONNECTION_REQUEST_KEY_COLUMNS,
+};
 
-pub const CONNECTION_REQUEST_ROW_SCHEMA: RowTableSchema = RowTableSchema::new(
-    CONNECTION_REQUEST_ROWS,
-    CONNECTION_REQUEST_ROW_KEY_FIELDS,
-    CONNECTION_REQUEST_ROW_VALUE_FIELDS,
-);
-
-const BOOTSTRAP_ATTEMPT_ROW_KEY_FIELDS: &[RowField] =
-    &[RowField::bytes32("invite_accepted_fact_id")];
-const BOOTSTRAP_ATTEMPT_ROW_VALUE_FIELDS: &[RowField] = &[RowField::bytes32("request_id")];
-
-pub const BOOTSTRAP_CONNECTION_ATTEMPT_ROW_SCHEMA: RowTableSchema = RowTableSchema::new(
-    BOOTSTRAP_CONNECTION_ATTEMPT_ROWS,
-    BOOTSTRAP_ATTEMPT_ROW_KEY_FIELDS,
-    BOOTSTRAP_ATTEMPT_ROW_VALUE_FIELDS,
-);
+pub const BOOTSTRAP_CONNECTION_ATTEMPT_COLUMNS: &[&str] =
+    &["invite_accepted_fact_id", "request_id"];
+pub const BOOTSTRAP_CONNECTION_ATTEMPT_KEY_COLUMNS: &[&str] = &["invite_accepted_fact_id"];
+pub const BOOTSTRAP_CONNECTION_ATTEMPT_TABLE: TypedTableSchema = TypedTableSchema {
+    table: BOOTSTRAP_CONNECTION_ATTEMPT_ROWS,
+    columns: BOOTSTRAP_CONNECTION_ATTEMPT_COLUMNS,
+    key_columns: BOOTSTRAP_CONNECTION_ATTEMPT_KEY_COLUMNS,
+};
 
 pub fn connection_request_key(request_id: &FactId) -> Vec<u8> {
     request_id.to_vec()
@@ -72,27 +70,25 @@ pub fn connection_request_row(
     initiator_ephemeral_secret_fact_id: FactId,
     peer_addr: Option<SocketAddr>,
     sealed_request_bytes: &[u8],
-) -> Result<TableRow, String> {
+) -> Result<TableInsert, String> {
     if sealed_request_bytes.len() != SEALED_FACT_BYTES {
         return Err("connection request row sealed bytes are malformed".to_string());
     }
-    CONNECTION_REQUEST_ROW_SCHEMA.row(
-        &[RowValue::Bytes(request_id.to_vec())],
-        &[
-            RowValue::Bytes(request_sent_id.to_vec()),
-            RowValue::Bytes(initiator_ephemeral_secret_fact_id.to_vec()),
-            RowValue::Bytes(encode_optional_addr(peer_addr)?.to_vec()),
-            RowValue::Bytes(sealed_request_bytes.to_vec()),
-        ],
-    )
+    Ok(CONNECTION_REQUEST_TABLE.insert(vec![
+        Value::Bytes(request_id.to_vec()),
+        Value::Bytes(request_sent_id.to_vec()),
+        Value::Bytes(initiator_ephemeral_secret_fact_id.to_vec()),
+        Value::Bytes(encode_optional_addr(peer_addr)?.to_vec()),
+        Value::Bytes(sealed_request_bytes.to_vec()),
+    ]))
 }
 
 pub fn bootstrap_connection_attempt_row(
     invite_accepted_fact_id: FactId,
     request_id: FactId,
-) -> Result<TableRow, String> {
-    BOOTSTRAP_CONNECTION_ATTEMPT_ROW_SCHEMA.row(
-        &[RowValue::Bytes(invite_accepted_fact_id.to_vec())],
-        &[RowValue::Bytes(request_id.to_vec())],
-    )
+) -> Result<TableInsert, String> {
+    Ok(BOOTSTRAP_CONNECTION_ATTEMPT_TABLE.insert(vec![
+        Value::Bytes(invite_accepted_fact_id.to_vec()),
+        Value::Bytes(request_id.to_vec()),
+    ]))
 }

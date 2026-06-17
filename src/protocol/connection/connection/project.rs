@@ -737,13 +737,13 @@ pub mod adapt {
 use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::intents::{RowMutation, TableDelete};
+use crate::core::intents::{RowMutation, Value};
 use crate::core::project_fact::{
     FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
 };
 use crate::protocol::connection::close;
 use crate::protocol::connection::connection::{
-    connection_key, connection_row, ConnectionRowFields, CONNECTION_ROWS,
+    connection_row, ConnectionRowFields, CONNECTION_TABLE,
 };
 use crate::protocol::connection::fact_receipt::fact::ReceiptPathInput;
 use crate::protocol::connection::fact_receipt::fact::RECEIVE_PATH_CONNECTION;
@@ -833,10 +833,9 @@ impl ConnectionProjector {
                 return Err("connection close context must be local".to_string());
             }
             return Ok(ProjectionOutput::new()
-                .row_mutation(RowMutation::DeleteRow(TableDelete {
-                    table: CONNECTION_ROWS,
-                    key: connection_key(&fact.id),
-                }))
+                .row_mutation(RowMutation::DeleteWhere(
+                    CONNECTION_TABLE.delete_by_key(vec![Value::Bytes(fact.id.to_vec())]),
+                ))
                 .purge_self(fact.id));
         }
 
@@ -937,7 +936,7 @@ fn project_initiator_connection(
 fn materialized_output(fact: &Fact, connection: &ConnectionFact) -> ProjectionOutput {
     ProjectionOutput::new()
         .offer(connection_offer(fact.id, fact.id))
-        .row_mutation(RowMutation::PutRow(
+        .row_mutation(RowMutation::InsertValues(
             connection_row(ConnectionRowFields {
                 connection_id: fact.id,
                 from_endpoint: connection.from_endpoint,
