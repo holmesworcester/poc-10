@@ -263,12 +263,10 @@ impl Runtime {
     ///
     /// Replay drops queued intents and other schema-declared non-fact runtime
     /// state, then drains retained facts through replay-mode projection and
-    /// handler context until the replay barrier is idle. The caller supplies the
-    /// replayable semantic time-wake timelines; replay must not run network IO,
-    /// recurring schedules, or operational wall-clock decisions.
+    /// handler context until the replay barrier is idle. Replay must not run
+    /// network IO, recurring schedules, or operational wall-clock decisions.
     pub fn replay(
         &mut self,
-        replay_time_wakes: &[crate::core::daemon::DaemonTimeWake],
         order: crate::core::replay::ReplayOrder,
     ) -> Result<crate::core::replay::ReplayReport, String> {
         crate::core::replay::run_replay(
@@ -277,7 +275,6 @@ impl Runtime {
             self.description.handlers,
             self.description.row_mutation_tables,
             self.description.fact_admission,
-            replay_time_wakes,
             order,
         )
     }
@@ -303,7 +300,6 @@ impl Runtime {
     pub fn replay_check(
         &self,
         scratch_dir: &Path,
-        replay_time_wakes: &[crate::core::daemon::DaemonTimeWake],
     ) -> Result<crate::core::replay::ReplayCheckReport, String> {
         use crate::core::replay::ReplayOrder;
 
@@ -332,7 +328,7 @@ impl Runtime {
                 .map_err(|err| format!("copy replay-check snapshot for {name}: {err}"))?;
             let mut runtime = Runtime::open_disk(self.description, &path)?;
             for order in *orders {
-                runtime.replay(replay_time_wakes, *order)?;
+                runtime.replay(*order)?;
             }
             summaries.push(((*name).to_string(), runtime.state_summary()?));
         }

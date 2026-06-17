@@ -3311,24 +3311,6 @@ pub(crate) fn process_due_time_range(
     )
 }
 
-/// Turn replay due time wakes into replay projection work.
-pub(crate) fn process_due_time_range_for_replay(
-    store: &Store,
-    timeline: Timeline,
-    start_exclusive: Option<u64>,
-    end_inclusive: u64,
-    limit: usize,
-) -> Result<usize, String> {
-    process_due_time_range_with_mode(
-        store,
-        timeline,
-        start_exclusive,
-        end_inclusive,
-        limit,
-        ProjectionMode::Replay,
-    )
-}
-
 /// Insert a fact and mark it pending in the same transaction.
 pub(crate) fn submit_fact_to_store(store: &Store, fact: Fact) -> Result<bool, String> {
     let inserted = store

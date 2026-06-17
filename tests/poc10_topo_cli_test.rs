@@ -20,10 +20,10 @@ fn con_help_is_served_by_the_product_boundary() {
 
     assert!(
         stdout.contains("Context CLI")
-            && stdout.contains("con --db PATH create-workspace")
+            && stdout.contains("con --db PATH [--at TIMESTAMP_MS] create-workspace")
             && stdout.contains("NAME --username USER --devicename DEVICE")
-            && stdout.contains("con --db PATH workspaces")
-            && stdout.contains("con --db PATH count")
+            && stdout.contains("con --db PATH [--at TIMESTAMP_MS] workspaces")
+            && stdout.contains("con --db PATH [--at TIMESTAMP_MS] count")
             && stdout.contains("con --db PATH start --listen IP PORT")
             && stdout.contains("target core runtime facade")
             && !stdout.contains("legacy"),
@@ -42,7 +42,7 @@ fn con_without_a_command_does_not_enter_legacy_cli() {
     let stderr = cli_harness::stderr(&output);
     assert!(
         stderr.contains("missing command")
-            && stderr.contains("con --db PATH create-workspace")
+            && stderr.contains("con --db PATH [--at TIMESTAMP_MS] create-workspace")
             && stderr.contains("NAME --username USER --devicename DEVICE")
             && !stderr.contains("legacy"),
         "missing command should be rejected at the target app boundary; got:\n{stderr}"
@@ -60,7 +60,7 @@ fn con_demo_is_rejected_at_the_product_boundary() {
     let stderr = cli_harness::stderr(&output);
     assert!(
         stderr.contains("unknown command `demo`")
-            && stderr.contains("con --db PATH create-workspace")
+            && stderr.contains("con --db PATH [--at TIMESTAMP_MS] create-workspace")
             && stderr.contains("NAME --username USER --devicename DEVICE")
             && !stderr.contains("walkthrough"),
         "`con demo` should be rejected by the central CLI registry; got:\n{stderr}"
@@ -78,7 +78,7 @@ fn con_negentropy_drain_is_not_registered() {
     let stderr = cli_harness::stderr(&output);
     assert!(
         stderr.contains("unknown command `negentropy-drain`")
-            && stderr.contains("con --db PATH sync-status")
+            && stderr.contains("con --db PATH [--at TIMESTAMP_MS] sync-status")
             && !stderr.contains("negentropy-drain [LIMIT]"),
         "`negentropy-drain` should be rejected while `sync-status` remains available; got:\n{stderr}"
     );
@@ -95,7 +95,9 @@ fn con_chop_now_is_not_registered() {
     let stderr = cli_harness::stderr(&output);
     assert!(
         stderr.contains("unknown command `chop-now`")
-            && stderr.contains("con --db PATH disappearing-set WORKSPACE_ID_HEX TTL_MINUTES [--floor MINUTE]")
+            && stderr.contains(
+                "con --db PATH [--at TIMESTAMP_MS] disappearing-set WORKSPACE_ID_HEX TTL_MINUTES [--floor MINUTE]"
+            )
             && !stderr.contains("con --db PATH chop-now"),
         "`chop-now` should be rejected while retention-floor commands remain available; got:\n{stderr}"
     );
@@ -112,8 +114,8 @@ fn con_cascade_fixture_commands_are_not_registered() {
         );
         let stderr = cli_harness::stderr(&output);
         assert!(
-            stderr.contains(&format!("unknown command `{command}`"))
-                && stderr.contains("con --db PATH replay [--reverse | --scramble --seed N]")
+        stderr.contains(&format!("unknown command `{command}`"))
+                && stderr.contains("con --db PATH [--at TIMESTAMP_MS] replay [--reverse | --scramble --seed N]")
                 && !stderr.contains("cascade"),
             "`{command}` should be rejected while replay order diagnostics remain available; got:\n{stderr}"
         );

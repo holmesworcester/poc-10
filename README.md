@@ -125,7 +125,7 @@ The current architecture is described by these boundaries:
   command authoring primitives (`src/core/command.rs`), byte-range context
   matching, generic runtime/app mechanics, pending fact processing, context wake
   fanout, intent dispatch, storage mechanics, wire field primitives, network
-  queues, TCP, clock, and crypto helpers.
+  queues, TCP, command-time authoring, and crypto helpers.
 - **Scope semantics.** Protocol scopes own fact semantics: layouts,
   projectors, context
   roles/ranges, command constructors, read-model rows, queries, CLI adapters,

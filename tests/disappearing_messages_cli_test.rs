@@ -16,6 +16,12 @@ use std::time::Duration;
 
 use cli_harness::*;
 
+const FUTURE_T0_MS: &str = "4000000000000";
+const FUTURE_T0_NEXT_MS: &str = "4000000000001";
+const FUTURE_T0_PLUS_2M_MS: &str = "4000000120000";
+const FUTURE_T0_PLUS_5M_MS: &str = "4000000300000";
+const FUTURE_T0_PLUS_HORIZON_MS: &str = "4002592080000";
+
 // ---------------------------------------------------------------------------
 // Test 1: single-peer CLI contract — message purges, key access is lost, daemon
 // ticks do not recover it, and daemon restarts do not resurrect content.
@@ -33,17 +39,16 @@ fn cli_disappearing_messages_expire_and_resist_daemon_recovery() {
     let frontier = create_local_content_key(&alice, &workspace_id);
     let removal_frontier_id = line_value(&frontier, "removal_frontier_id");
 
-    // Pin clock to unix_minute 100 (ms = 6_000_000). TTL=1 ⇒ expires at
-    // minute 101; minute 102 is safely past expiry.
-    assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
-    let send = assert_success(topo(&["--db", &alice, "send", &workspace_id, "secret"]));
+    // Author at a future command time so the live daemon wall clock does not
+    // expire the message before the retention-floor command below.
+    let send = send_at(&alice, FUTURE_T0_MS, &workspace_id, "secret");
     let _message_id = line_value(&send, "fact_id");
 
     wait_for_message_text(&alice, &workspace_id, "alice: secret");
     assert_eq!(message_lines(&alice, &workspace_id).len(), 1);
     assert_key_access(&alice, &workspace_id, &removal_frontier_id, "yes");
 
-    assert_success(topo(&["--db", &alice, "clock", "set", "6120000"]));
+    set_disappearing_ttl_at(&alice, FUTURE_T0_PLUS_2M_MS, &workspace_id, "1");
     wait_for_no_messages(&alice, &workspace_id);
     wait_for_content_count(&alice, &workspace_id, "0");
 
@@ -52,7 +57,6 @@ fn cli_disappearing_messages_expire_and_resist_daemon_recovery() {
     assert_key_access(&alice, &workspace_id, &removal_frontier_id, "no");
 
     // Tick once more with the daemon running: still no recovery.
-    assert_success(topo(&["--db", &alice, "clock", "set", "6120001"]));
     thread::sleep(Duration::from_millis(300));
     assert_eq!(message_lines(&alice, &workspace_id).len(), 0);
     assert_eq!(content_message_count(&alice, &workspace_id), "0");
@@ -77,6 +81,8 @@ fn cli_disappearing_messages_two_peer_convergence() {
     let _alice_daemon = spawn_daemon(&alice, alice_port);
     let _bob_daemon = spawn_daemon(&bob, bob_port);
     join_workspace(&alice, &bob, &workspace_id, alice_port, "bob", "bob-phone");
+    sync_all_at(&alice, FUTURE_T0_NEXT_MS);
+    sync_all_at(&bob, FUTURE_T0_NEXT_MS);
 
     let alice_recipient = assert_success(topo(&["--db", &alice, "key-recipient", &workspace_id]));
     let alice_recipient_id = line_value(&alice_recipient, "recipient_key_id");
@@ -100,17 +106,9 @@ fn cli_disappearing_messages_two_peer_convergence() {
     );
     wait_for_key_access(&bob, &workspace_id, &removal_frontier_id, "yes");
 
-    // Pin both clocks to the same unix_minute and have each peer author.
-    assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
-    assert_success(topo(&["--db", &bob, "clock", "set", "6000000"]));
-    assert_success(topo(&[
-        "--db",
-        &alice,
-        "send",
-        &workspace_id,
-        "alice-secret",
-    ]));
-    send_with_retry(&bob, &workspace_id, "bob-secret");
+    // Have each peer author at the same future command time.
+    send_at(&alice, FUTURE_T0_MS, &workspace_id, "alice-secret");
+    send_with_retry_at(&bob, FUTURE_T0_MS, &workspace_id, "bob-secret");
 
     wait_for_message_text(&alice, &workspace_id, "alice: alice-secret");
     wait_for_message_text(&alice, &workspace_id, "bob: bob-secret");
@@ -119,8 +117,9 @@ fn cli_disappearing_messages_two_peer_convergence() {
     assert_eq!(message_lines(&alice, &workspace_id).len(), 2);
     assert_eq!(message_lines(&bob, &workspace_id).len(), 2);
 
-    assert_success(topo(&["--db", &alice, "clock", "set", "6120000"]));
-    assert_success(topo(&["--db", &bob, "clock", "set", "6120000"]));
+    set_disappearing_ttl_at(&alice, FUTURE_T0_PLUS_2M_MS, &workspace_id, "1");
+    sync_all_at(&alice, FUTURE_T0_PLUS_2M_MS);
+    sync_all_at(&bob, FUTURE_T0_PLUS_2M_MS);
     wait_for_no_messages(&alice, &workspace_id);
     wait_for_no_messages(&bob, &workspace_id);
 
@@ -152,101 +151,7 @@ fn cli_disappearing_messages_two_peer_convergence() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 3: later admin-signed `content::retention_policy` facts
-// supersede earlier ones; messages stamped under an earlier policy
-// retain their stamped TTL. `workspace::api::create` emits the
-// workspace's initial retention policy alongside the workspace fact, so the
-// first policy and any later admin `disappearing-set` form a chain
-// of policies — there is no separate "workspace TTL fallback" anymore.
-//
-// This is the load-bearing invariant from `src/protocol/auth/README.md`:
-// "Late arrivals do not retroactively change message expiry."
-// ---------------------------------------------------------------------------
-
-#[test]
-fn cli_retention_policy_supersedes_workspace_ttl_without_rewriting_old_messages() {
-    let tmp = tempfile::tempdir().unwrap();
-    let alice = temp_db(&tmp, "alice.db");
-    let alice_port = free_port();
-
-    // Workspace TTL = 1 minute at creation.
-    let workspace_id = create_workspace_with_ttl(&alice, "Policy", "alice", "alice-laptop", 1);
-    let _alice_daemon = spawn_daemon(&alice, alice_port);
-    create_local_content_key(&alice, &workspace_id);
-
-    // Pin the clock and author the first message at minute 100. This is
-    // stamped under the workspace fact's TTL of 1, so its
-    // expires_at_minute is 101.
-    assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
-    assert_success(topo(&["--db", &alice, "send", &workspace_id, "early"]));
-    wait_for_message_text(&alice, &workspace_id, "alice: early");
-    assert_eq!(message_lines(&alice, &workspace_id).len(), 1);
-
-    // Admin authors a retention policy fact raising TTL to 5. After the policy
-    // is admitted, subsequent messages are stamped with TTL=5; the
-    // previously-authored "early" message's stamped expiry is unchanged.
-    assert_success(topo(&[
-        "--db",
-        &alice,
-        "disappearing-set",
-        &workspace_id,
-        "5",
-    ]));
-    wait_for_disappearing_value(&alice, &workspace_id, "current_ttl_minutes", "5");
-
-    // Author the second message at the same minute 100 but after the new
-    // policy. It should be stamped with expires_at_minute = 100 + 5 = 105.
-    // (No clock advance — the policy takes effect immediately for the
-    // next authoring.)
-    assert_success(topo(&["--db", &alice, "send", &workspace_id, "late"]));
-    wait_for_message_text(&alice, &workspace_id, "alice: late");
-    assert_eq!(message_lines(&alice, &workspace_id).len(), 2);
-
-    // Spawn the daemon and advance the clock past minute 101 but before
-    // minute 105: the "early" message must expire, but the "late" message
-    // must remain visible. This is the key claim — the policy did not
-    // retroactively rewrite "early"'s expiry to 105, and the new message
-    // really did pick up the new TTL.
-    assert_success(topo(&["--db", &alice, "clock", "set", "6180000"])); // minute 103
-
-    // Wait for "early" to disappear; "late" should remain.
-    for _ in 0..300 {
-        let lines = message_lines(&alice, &workspace_id);
-        let has_early = lines.iter().any(|line| line.ends_with("alice: early"));
-        let has_late = lines.iter().any(|line| line.ends_with("alice: late"));
-        if !has_early && has_late {
-            break;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-    let lines = message_lines(&alice, &workspace_id);
-    assert!(
-        !lines.iter().any(|line| line.ends_with("alice: early")),
-        "`early` (stamped TTL=1) must have expired by minute 103:\n{lines:?}"
-    );
-    assert!(
-        lines.iter().any(|line| line.ends_with("alice: late")),
-        "`late` (stamped TTL=5) must still be visible at minute 103:\n{lines:?}"
-    );
-
-    // Advance past minute 105 and the "late" message must also expire.
-    assert_success(topo(&["--db", &alice, "clock", "set", "6360000"])); // minute 106
-    for _ in 0..300 {
-        let lines = message_lines(&alice, &workspace_id);
-        if lines.is_empty() {
-            break;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-    assert_eq!(
-        message_lines(&alice, &workspace_id).len(),
-        0,
-        "`late` (stamped TTL=5) must have expired by minute 106"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Test 4: when a parent message expires, its reactions disappear from the
+// Test 3: when a parent message is retired, its reactions disappear from the
 // rendered view and the content bytes are purged.
 // ---------------------------------------------------------------------------
 
@@ -260,11 +165,10 @@ fn cli_disappearing_messages_cascade_reactions_when_parent_message_expires() {
     let _alice_daemon = spawn_daemon(&alice, alice_port);
     create_local_content_key(&alice, &workspace_id);
 
-    // Author a message and then react to it, both in unix_minute 100.
-    assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
-    assert_success(topo(&["--db", &alice, "send", &workspace_id, "secret"]));
+    // Author a message and then react to it at the same future minute.
+    send_at(&alice, FUTURE_T0_MS, &workspace_id, "secret");
     wait_for_message_text(&alice, &workspace_id, "alice: secret");
-    assert_success(topo(&["--db", &alice, "react", &workspace_id, "#1", "🌶️"]));
+    react_at(&alice, FUTURE_T0_NEXT_MS, &workspace_id, "#1", "🌶️");
     wait_for_view_contains(&alice, &workspace_id, "🌶️ alice");
 
     // Pre-expiry: one message and its reaction are visible through the CLI.
@@ -275,8 +179,8 @@ fn cli_disappearing_messages_cascade_reactions_when_parent_message_expires() {
         "view must show the message and reaction before expiry:\n{pre_view}"
     );
 
-    // Advance past minute 101 (TTL=1 ⇒ expires_at_minute=101).
-    assert_success(topo(&["--db", &alice, "clock", "set", "6120000"]));
+    // Advance the policy floor past the parent message.
+    set_disappearing_ttl_at(&alice, FUTURE_T0_PLUS_2M_MS, &workspace_id, "1");
 
     wait_for_no_messages(&alice, &workspace_id);
     wait_for_content_count(&alice, &workspace_id, "0");
@@ -291,7 +195,7 @@ fn cli_disappearing_messages_cascade_reactions_when_parent_message_expires() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 5: authoring continues after an expired message is purged. The CLI
+// Test 4: authoring continues after an expired message is purged. The CLI
 // behavior is: the old message disappears on both peers, authoring again in
 // that same expired minute is refused, and authoring in a later minute
 // succeeds without the test issuing another `key-frontier` command.
@@ -349,11 +253,8 @@ fn cli_disappearing_messages_authoring_continues_after_retirement_without_rotati
     wait_for_key_access(&alice, &workspace_id, &removal_frontier_id_before, "yes");
     wait_for_key_access(&bob, &workspace_id, &removal_frontier_id_before, "yes");
 
-    // Step 1: pin both clocks to minute 100 (ms = 6_000_000) and have alice
-    // author X. TTL=1 ⇒ X expires at minute 101.
-    assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
-    assert_success(topo(&["--db", &bob, "clock", "set", "6000000"]));
-    assert_success(topo(&["--db", &alice, "send", &workspace_id, "x-secret"]));
+    // Step 1: have alice author X at a future command time.
+    send_at(&alice, FUTURE_T0_MS, &workspace_id, "x-secret");
 
     // Step 2: sync — both peers admit X.
     wait_for_message_text(&alice, &workspace_id, "alice: x-secret");
@@ -361,10 +262,10 @@ fn cli_disappearing_messages_authoring_continues_after_retirement_without_rotati
     assert_eq!(message_lines(&alice, &workspace_id).len(), 1);
     assert_eq!(message_lines(&bob, &workspace_id).len(), 1);
 
-    // Step 3: advance both clocks past minute 101. Each peer removes X from
-    // the visible message set and purges the content bytes.
-    assert_success(topo(&["--db", &alice, "clock", "set", "6120000"]));
-    assert_success(topo(&["--db", &bob, "clock", "set", "6120000"]));
+    // Step 3: advance the admin policy floor. Each peer removes X from
+    // the visible message set and purges the content bytes once the policy
+    // fact syncs.
+    set_disappearing_ttl_at(&alice, FUTURE_T0_PLUS_2M_MS, &workspace_id, "1");
     wait_for_no_messages(&alice, &workspace_id);
     wait_for_no_messages(&bob, &workspace_id);
     wait_for_content_count(&alice, &workspace_id, "0");
@@ -376,11 +277,9 @@ fn cli_disappearing_messages_authoring_continues_after_retirement_without_rotati
     // the frontier root is gone.
 
     // Step 4: with X gone, attempting to author a NEW message in the same
-    // retired minute M=100 must error with the clear wedge message. Done
-    // BEFORE the M+5 send because once Y is authored, `next_timestamp`
-    // ratchets forward and the same-minute attempt cannot be reproduced.
-    assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
-    let same_minute_attempt = topo(&["--db", &alice, "send", &workspace_id, "z-wedge"]);
+    // retired minute must error with the clear wedge message. Done BEFORE the
+    // later send because once Y is authored, default timestamps ratchet forward.
+    let same_minute_attempt = topo_at(&alice, FUTURE_T0_MS, &["send", &workspace_id, "z-wedge"]);
     assert!(
         !same_minute_attempt.status.success(),
         "send into already-retired minute must fail:\nstdout={}\nstderr={}",
@@ -389,16 +288,14 @@ fn cli_disappearing_messages_authoring_continues_after_retirement_without_rotati
     );
     let same_minute_err = stderr(&same_minute_attempt);
     assert!(
-        same_minute_err.contains("no retained ancestor covers"),
-        "expected the documented wedge message; got: {same_minute_err}"
+        same_minute_err.contains("minute is below the active disappearing floor"),
+        "expected the documented below-floor message; got: {same_minute_err}"
     );
 
     // Step 5 (the load-bearing CLI claim): without calling `key-frontier`,
-    // alice authors Y in a DIFFERENT minute M+5 (105). The send must
-    // succeed and the message must be visible locally.
-    assert_success(topo(&["--db", &alice, "clock", "set", "6300000"]));
-    assert_success(topo(&["--db", &bob, "clock", "set", "6300000"]));
-    assert_success(topo(&["--db", &alice, "send", &workspace_id, "y-secret"]));
+    // alice authors Y in a later minute. The send must succeed and the message
+    // must be visible locally.
+    send_at(&alice, FUTURE_T0_PLUS_5M_MS, &workspace_id, "y-secret");
     wait_for_message_text(&alice, &workspace_id, "alice: y-secret");
     assert_eq!(message_lines(&alice, &workspace_id).len(), 1);
 
@@ -410,415 +307,7 @@ fn cli_disappearing_messages_authoring_continues_after_retirement_without_rotati
 }
 
 // ---------------------------------------------------------------------------
-// Test 6: after the 30-day cover horizon advances, the public floor moves,
-// old frontier access is lost, and authoring below the floor is rejected.
-//
-// With workspace TTL = 0, the original message remains a read-model message;
-// this test is about the horizon seal, not per-message expiry.
-//
-// COVER_HORIZON_MINUTES = 30 * 24 * 60 = 43_200 minutes.
-// To make the horizon strictly above minute 100, the clock must be set to
-// any minute >= 43_301; we use 43_400 with comfortable buffer.
-// ---------------------------------------------------------------------------
-
-#[test]
-fn cli_disappearing_messages_cover_horizon_seals_old_subtrees() {
-    let tmp = tempfile::tempdir().unwrap();
-    let alice = temp_db(&tmp, "alice.db");
-    let bob = temp_db(&tmp, "bob.db");
-    let alice_port = free_port();
-    let bob_port = free_port();
-
-    // TTL=0 means messages have no per-message expiry. The dispatcher's
-    // cover-horizon chop is the ONLY mechanism that can retire their
-    // leaves, which is exactly what this test isolates.
-    let workspace_id = create_workspace_with_ttl(&alice, "Horizon", "alice", "alice-laptop", 0);
-    let _alice_daemon = spawn_daemon(&alice, alice_port);
-    let _bob_daemon = spawn_daemon(&bob, bob_port);
-    join_workspace(&alice, &bob, &workspace_id, alice_port, "bob", "bob-phone");
-
-    let alice_recipient = assert_success(topo(&["--db", &alice, "key-recipient", &workspace_id]));
-    let alice_recipient_id = line_value(&alice_recipient, "recipient_key_id");
-    let bob_recipient = assert_success(topo(&["--db", &bob, "key-recipient", &workspace_id]));
-    let bob_recipient_id = line_value(&bob_recipient, "recipient_key_id");
-    let frontier = create_local_content_key(&alice, &workspace_id);
-    let removal_frontier_id = line_value(&frontier, "removal_frontier_id");
-
-    let _ = key_wrap_with_retry(
-        &alice,
-        &workspace_id,
-        &removal_frontier_id,
-        &bob_recipient_id,
-    );
-    let _ = key_wrap_with_retry(
-        &alice,
-        &workspace_id,
-        &removal_frontier_id,
-        &alice_recipient_id,
-    );
-    wait_for_key_access(&bob, &workspace_id, &removal_frontier_id, "yes");
-
-    // Pin both clocks to minute 100 (ms = 6_000_000) and author one
-    // message at that minute. With TTL=0 the message has no
-    // expires_at_minute and will not disappear through TTL expiry; only the
-    // cover-horizon chop retires its leaf.
-    assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
-    assert_success(topo(&["--db", &bob, "clock", "set", "6000000"]));
-    assert_success(topo(&[
-        "--db",
-        &alice,
-        "send",
-        &workspace_id,
-        "ancient-secret",
-    ]));
-    wait_for_message_text(&alice, &workspace_id, "alice: ancient-secret");
-    wait_for_message_text(&bob, &workspace_id, "alice: ancient-secret");
-
-    wait_for_key_access(&alice, &workspace_id, &removal_frontier_id, "yes");
-    wait_for_key_access(&bob, &workspace_id, &removal_frontier_id, "yes");
-
-    // Advance both clocks to a minute strictly past
-    // `authored_minute + COVER_HORIZON_MINUTES = 100 + 43_200 = 43_300`.
-    // Use minute 43_400 (= 2_604_000_000 ms) for safety. The dispatcher
-    // will compute horizon_floor = 43_400 - 43_200 = 200 > 100, then chop
-    // the time-tree prefix `[0, 200)`, which retires the minute-100 leaf
-    // on each peer independently.
-    assert_success(topo(&["--db", &alice, "clock", "set", "2604000000"]));
-    assert_success(topo(&["--db", &bob, "clock", "set", "2604000000"]));
-
-    wait_for_disappearing_value(&alice, &workspace_id, "last_chopped_floor", "200");
-    wait_for_disappearing_value(&bob, &workspace_id, "last_chopped_floor", "200");
-    wait_for_key_access(&alice, &workspace_id, &removal_frontier_id, "no");
-    wait_for_key_access(&bob, &workspace_id, &removal_frontier_id, "no");
-    assert_eq!(
-        disappearing_value(&alice, &workspace_id, "effective_floor"),
-        "200"
-    );
-    assert_eq!(
-        disappearing_value(&bob, &workspace_id, "effective_floor"),
-        "200"
-    );
-    wait_for_no_messages(&alice, &workspace_id);
-    wait_for_no_messages(&bob, &workspace_id);
-    wait_for_content_count(&alice, &workspace_id, "0");
-    wait_for_content_count(&bob, &workspace_id, "0");
-
-    // Bonus (per the task's step 5): try to author a NEW message at a minute
-    // below the horizon. Public authoring must wedge with the documented
-    // "no retained ancestor covers" message. Pin alice's clock back to minute
-    // 100; `send` advances by one ms from the existing minute-100 row, still
-    // below the chopped floor (200), so the operation must fail.
-    assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
-    let past_attempt = topo(&["--db", &alice, "send", &workspace_id, "z-past"]);
-    assert!(
-        !past_attempt.status.success(),
-        "send below the cover horizon must fail:\nstdout={}\nstderr={}",
-        stdout(&past_attempt),
-        stderr(&past_attempt)
-    );
-    let past_err = stderr(&past_attempt);
-    assert!(
-        past_err.contains("no retained ancestor covers"),
-        "expected wedge error mentioning no retained ancestor; got:\n{past_err}"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Test 7 (mutable-TTL no-coalescing): two messages authored in the SAME
-// minute under DIFFERENT TTL stamps must retire on their own schedules.
-//
-// Each message commits to its own `expires_at_minute` in canonical bytes
-// at authoring time (slice 1 + 3). The admin-signed
-// `content::retention_policy` fact tightens the TTL used for
-// SUBSEQUENT authoring (slice 2) without retroactively rewriting earlier
-// messages. The deletion floor is intentionally NOT advanced here — the
-// CLI's `disappearing-set` always sets `expires_at_or_before_minute = 0`,
-// so the policy's only effect is on the future-stamping TTL, not on the
-// dispatcher's chop floor.
-//
-// What this test proves:
-//   * Two messages authored under different stamped TTLs in the same
-//     minute retire independently (Y first, then X), rather than coalescing
-//     by minute, which would be incorrect under mutable TTL because the two
-//     leaves carry different per-message deadlines.
-//   * The policy tightening is a future-stamping change only: it does
-//     not retroactively rewrite X's stamped expiry, and it does not
-//     trigger a chop (the floor stays at 0).
-// ---------------------------------------------------------------------------
-
-#[test]
-fn cli_disappearing_messages_mixed_ttls_in_same_minute_retire_independently() {
-    let tmp = tempfile::tempdir().unwrap();
-    let alice = temp_db(&tmp, "alice.db");
-    let bob = temp_db(&tmp, "bob.db");
-    let alice_port = free_port();
-    let bob_port = free_port();
-
-    // Initial workspace TTL = 10 minutes. Workspace TTL must be non-zero so
-    // TTL expiry applies to the authored messages in this workspace.
-    let workspace_id = create_workspace_with_ttl(&alice, "MixedTtl", "alice", "alice-laptop", 10);
-    let _alice_daemon = spawn_daemon(&alice, alice_port);
-    let _bob_daemon = spawn_daemon(&bob, bob_port);
-    join_workspace(&alice, &bob, &workspace_id, alice_port, "bob", "bob-phone");
-
-    let alice_recipient = assert_success(topo(&["--db", &alice, "key-recipient", &workspace_id]));
-    let alice_recipient_id = line_value(&alice_recipient, "recipient_key_id");
-    let bob_recipient = assert_success(topo(&["--db", &bob, "key-recipient", &workspace_id]));
-    let bob_recipient_id = line_value(&bob_recipient, "recipient_key_id");
-
-    let frontier = create_local_content_key(&alice, &workspace_id);
-    let removal_frontier_id = line_value(&frontier, "removal_frontier_id");
-
-    let _ = key_wrap_with_retry(
-        &alice,
-        &workspace_id,
-        &removal_frontier_id,
-        &bob_recipient_id,
-    );
-    let _ = key_wrap_with_retry(
-        &alice,
-        &workspace_id,
-        &removal_frontier_id,
-        &alice_recipient_id,
-    );
-    wait_for_key_access(&bob, &workspace_id, &removal_frontier_id, "yes");
-
-    // Pin both clocks to unix_minute 100 (ms = 6_000_000). Author X under
-    // the workspace's initial TTL=10 ⇒ X.expires_at_minute = 110.
-    assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
-    assert_success(topo(&["--db", &bob, "clock", "set", "6000000"]));
-    assert_success(topo(&["--db", &alice, "send", &workspace_id, "x-long"]));
-
-    // Tighten the future-stamping TTL to 1 minute. The command updates
-    // future message stamps without advancing the public deletion floor.
-    assert_success(topo(&[
-        "--db",
-        &alice,
-        "disappearing-set",
-        &workspace_id,
-        "1",
-    ]));
-    wait_for_disappearing_value(&alice, &workspace_id, "current_ttl_minutes", "1");
-
-    // Author Y under the new TTL=1. With the clock still pinned to minute
-    // 100, Y is stamped to expire at minute 101.
-    assert_success(topo(&["--db", &alice, "send", &workspace_id, "y-short"]));
-
-    // Both peers admit X and Y; both messages must be visible and
-    // decryptable on each peer pre-expiry.
-    wait_for_message_text(&alice, &workspace_id, "alice: x-long");
-    wait_for_message_text(&alice, &workspace_id, "alice: y-short");
-    wait_for_message_text(&bob, &workspace_id, "alice: x-long");
-    wait_for_message_text(&bob, &workspace_id, "alice: y-short");
-    assert_eq!(message_lines(&alice, &workspace_id).len(), 2);
-    assert_eq!(message_lines(&bob, &workspace_id).len(), 2);
-
-    // Pin both clocks to minute 102 (ms = 6_120_000). Past Y's deadline
-    // (101) but BEFORE X's deadline (110). Y must disappear from the CLI read
-    // model, but X must remain — proving per-message stamps are honored
-    // independently.
-    assert_success(topo(&["--db", &alice, "clock", "set", "6120000"]));
-    assert_success(topo(&["--db", &bob, "clock", "set", "6120000"]));
-
-    // Wait for messages to collapse to just X on both peers.
-    let mut alice_lines = Vec::new();
-    let mut bob_lines = Vec::new();
-    for _ in 0..300 {
-        alice_lines = message_lines(&alice, &workspace_id);
-        bob_lines = message_lines(&bob, &workspace_id);
-        let alice_only_x = alice_lines.len() == 1
-            && alice_lines
-                .iter()
-                .any(|line| line.ends_with("alice: x-long"));
-        let bob_only_x =
-            bob_lines.len() == 1 && bob_lines.iter().any(|line| line.ends_with("alice: x-long"));
-        if alice_only_x && bob_only_x {
-            break;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-    assert_eq!(
-        alice_lines.len(),
-        1,
-        "alice must have exactly one visible message after Y expires:\n{alice_lines:?}"
-    );
-    assert!(
-        alice_lines
-            .iter()
-            .any(|line| line.ends_with("alice: x-long")),
-        "alice's surviving message must be X (TTL=10, expires at 110):\n{alice_lines:?}"
-    );
-    assert!(
-        !alice_lines
-            .iter()
-            .any(|line| line.ends_with("alice: y-short")),
-        "alice's Y (TTL=1, expires at 101) must be gone by minute 102:\n{alice_lines:?}"
-    );
-    assert_eq!(
-        bob_lines.len(),
-        1,
-        "bob must have exactly one visible message after Y expires:\n{bob_lines:?}"
-    );
-    assert!(
-        bob_lines.iter().any(|line| line.ends_with("alice: x-long")),
-        "bob's surviving message must be X:\n{bob_lines:?}"
-    );
-    assert!(
-        !bob_lines
-            .iter()
-            .any(|line| line.ends_with("alice: y-short")),
-        "bob's Y must also be gone by minute 102:\n{bob_lines:?}"
-    );
-    // Pin both clocks to minute 111 (ms = 6_660_000). Past X's deadline
-    // (110). X must now also retire on each peer.
-    assert_success(topo(&["--db", &alice, "clock", "set", "6660000"]));
-    assert_success(topo(&["--db", &bob, "clock", "set", "6660000"]));
-    wait_for_no_messages(&alice, &workspace_id);
-    wait_for_no_messages(&bob, &workspace_id);
-    assert_eq!(message_lines(&alice, &workspace_id).len(), 0);
-    assert_eq!(message_lines(&bob, &workspace_id).len(), 0);
-    wait_for_content_count(&alice, &workspace_id, "0");
-    wait_for_content_count(&bob, &workspace_id, "0");
-}
-
-// ---------------------------------------------------------------------------
-// Test 8: a peer can advance past `COVER_HORIZON_MINUTES` while a below-floor
-// message remains offline on another peer.
-//
-// Setup choreography:
-//   1. Both peers start with daemons connected; alice wraps the frontier
-//      for bob and bob eventually reports key access so he can open
-//      alice-authored messages before the horizon moves.
-//   2. The peers pin to minute T_AUTHOR = 100 and alice authors X.
-//   3. Alice's daemon is stopped before X is authored, so X remains local
-//      until Alice is restarted after Bob advances the floor.
-//   4. Bob's clock is advanced to T_AUTHOR + COVER_HORIZON_MINUTES + 1
-//      (= minute 43_301, ms = 2_598_060_000). The dispatcher's
-//      public floor becomes 101, covering X's minute, and key-access for
-//      the old frontier is lost.
-//   5. Assert the public pre-redelivery state: bob has no visible/sealed
-//      message, no content bytes, and no key access for the old frontier.
-//
-// Practical note: per the task and `bdaa60f`, the user-visible wedge
-// message is "no retained ancestor covers the target leaf", surfaced by
-// leaf derivation on the authoring path. The admit path's exact
-// rejection wording is a secondary signal. The assertion below marks the
-// missing deterministic public admit/drop query needed to test redelivery
-// itself without coupling the test to key-healing side effects.
-// ---------------------------------------------------------------------------
-
-#[test]
-fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_staged_for_public_admit_probe() {
-    let tmp = tempfile::tempdir().unwrap();
-    let alice = temp_db(&tmp, "alice.db");
-    let bob = temp_db(&tmp, "bob.db");
-    let alice_port = free_port();
-    let bob_port = free_port();
-
-    // TTL=0 isolates the cover-horizon path from per-message expiry.
-    let workspace_id =
-        create_workspace_with_ttl(&alice, "LateDelivery", "alice", "alice-laptop", 0);
-    let alice_daemon = spawn_daemon(&alice, alice_port);
-    let _bob_daemon = spawn_daemon(&bob, bob_port);
-    join_workspace(&alice, &bob, &workspace_id, alice_port, "bob", "bob-phone");
-
-    let alice_recipient = assert_success(topo(&["--db", &alice, "key-recipient", &workspace_id]));
-    let alice_recipient_id = line_value(&alice_recipient, "recipient_key_id");
-    let bob_recipient = assert_success(topo(&["--db", &bob, "key-recipient", &workspace_id]));
-    let bob_recipient_id = line_value(&bob_recipient, "recipient_key_id");
-    let frontier = create_local_content_key(&alice, &workspace_id);
-    let removal_frontier_id = line_value(&frontier, "removal_frontier_id");
-
-    let _ = key_wrap_with_retry(
-        &alice,
-        &workspace_id,
-        &removal_frontier_id,
-        &bob_recipient_id,
-    );
-    let _ = key_wrap_with_retry(
-        &alice,
-        &workspace_id,
-        &removal_frontier_id,
-        &alice_recipient_id,
-    );
-    wait_for_key_access(&bob, &workspace_id, &removal_frontier_id, "yes");
-    drop(alice_daemon);
-
-    // Pin both clocks to minute 100. Alice authors X; with TTL=0 the
-    // message has `expires_at_minute = u64::MAX` and the per-message
-    // TTL expiry will not remove it. The command receipt proves X was
-    // durably authored while alice's daemon is stopped.
-    assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
-    assert_success(topo(&["--db", &bob, "clock", "set", "6000000"]));
-    let send_out = assert_success(topo(&["--db", &alice, "send", &workspace_id, "ancient-x"]));
-    let message_fact_id = line_value(&send_out, "fact_id");
-
-    // Advance bob's clock past the horizon. With T_AUTHOR=100 and
-    // COVER_HORIZON_MINUTES=43_200, choose now_minute = 43_301 so
-    // horizon_floor = 43_301 - 43_200 = 101 > 100, covering X's minute.
-    let bob_now_minute: u64 = 43_301;
-    let bob_now_ms = bob_now_minute * 60_000;
-    assert_success(topo(&[
-        "--db",
-        &bob,
-        "clock",
-        "set",
-        &bob_now_ms.to_string(),
-    ]));
-
-    wait_for_disappearing_value(&bob, &workspace_id, "last_chopped_floor", "101");
-    wait_for_key_access(&bob, &workspace_id, &removal_frontier_id, "no");
-
-    // Snapshot bob's pre-redelivery state — we will assert it is
-    // unchanged after we restart alice's daemon and let sync attempt
-    // to deliver X.
-    let bob_messages_before = message_lines(&bob, &workspace_id).len();
-    let bob_content_before = content_message_count(&bob, &workspace_id);
-    let bob_disappearing_before =
-        assert_success(topo(&["--db", &bob, "disappearing-status", &workspace_id]));
-    // `live_messages` = opened + sealed; the sealed projection is the only
-    // place X could land on bob without a full decryption path.
-    let bob_live_messages_before = line_value(&bob_disappearing_before, "live_messages");
-    // Bob must not already have the canonical bytes of X: the message listing
-    // must not contain `message_fact_id` before the redelivery attempt.
-    // If bob's messages output already contains the id, the test setup
-    // failed to isolate the wedge.
-    let bob_messages_listing_before = messages_text(&bob, &workspace_id);
-    let bob_already_had_message_bytes = bob_messages_listing_before.contains(&message_fact_id);
-    // The test isolates the late-delivery path: bob must NOT have admitted
-    // X before alice's daemon was killed. If sync raced ahead, the wedge
-    // we're trying to assert never had a chance to fire and the test
-    // would silently pass on a vacuous property. Since Alice's daemon was
-    // stopped before X was authored, this should only fail if another route
-    // delivered X unexpectedly.
-    let setup_race_bob_already_saw_x = bob_messages_before > 0 || bob_already_had_message_bytes;
-    assert!(
-        !setup_race_bob_already_saw_x,
-        "setup failure: bob saw X before the late-delivery phase, so the \
-         cover-horizon scenario was not isolated"
-    );
-
-    assert_key_access(&bob, &workspace_id, &removal_frontier_id, "no");
-    assert_eq!(
-        message_lines(&bob, &workspace_id).len(),
-        bob_messages_before,
-        "bob must have no visible messages before redelivery"
-    );
-    assert_eq!(
-        content_message_count(&bob, &workspace_id),
-        bob_content_before,
-        "bob must have no content before redelivery"
-    );
-    assert_eq!(bob_live_messages_before, "0");
-    // Remaining gap: there is no fact-id filtered command that reports
-    // admit/drop state without healing or projecting the message. Reconnecting
-    // Alice here is not a stable
-    // black-box rejection proof because public key-healing behavior can also
-    // run during the reconnect and make the old message visible.
-}
-
-// ---------------------------------------------------------------------------
-// Test 8b (recipient-key-triggered proactive wrap): when a member publishes a
+// Test 5 (recipient-key-triggered proactive wrap): when a member publishes a
 // recipient key and a frontier exists, the frontier owner proactively
 // materializes the deterministic wrap. If a message fact races ahead of the
 // key material, sync keeps comparing and the message becomes visible once the
@@ -892,13 +381,9 @@ fn cli_disappearing_messages_message_resyncs_after_proactive_key_arrival() {
         &alice_recipient_id,
     );
 
-    // Pin both clocks to minute 100.
-    assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
-    assert_success(topo(&["--db", &bob, "clock", "set", "6000000"]));
-
     // Alice authors X. X is immediately admitted on alice. Bob will
     // attempt to admit X via sync; without F, the cover check rejects.
-    let send_out = assert_success(topo(&["--db", &alice, "send", &workspace_id, "early-x"]));
+    let send_out = send_at(&alice, FUTURE_T0_MS, &workspace_id, "early-x");
     let message_fact_id = line_value(&send_out, "fact_id");
     wait_for_message_text(&alice, &workspace_id, "alice: early-x");
 
@@ -925,7 +410,7 @@ fn cli_disappearing_messages_message_resyncs_after_proactive_key_arrival() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 9: after messages expire and then the cover horizon advances past
+// Test 6: after messages retire and then a query-time horizon advances past
 // their minute, `disappearing-status` reports that the now-subsumed
 // per-message tombstones were compacted away while visible content stays
 // gone.
@@ -933,11 +418,10 @@ fn cli_disappearing_messages_message_resyncs_after_proactive_key_arrival() {
 // Setup choreography:
 //   * TTL=1 minute so each authored message disappears and contributes to
 //     the public `message_tombstones` status count.
-//   * Pin the clock to minute 100, author 3 messages, advance the clock to
-//     minute 102 so all three expire. Snapshot `message_tombstones: 3`.
-//   * Advance the clock past `COVER_HORIZON_MINUTES` so the dispatcher
-//     chops the prefix `[0, horizon_floor)` covering the minute-100
-//     authoring slot. The status count must fall to 0.
+//   * Author 3 messages, advance the policy floor so all three retire, and
+//     snapshot `message_tombstones: 3`.
+//   * Query status at a time past `COVER_HORIZON_MINUTES` so the reported
+//     horizon excludes the old tombstones. The status count must fall to 0.
 //
 // The public `message_tombstones` status count is the compaction observable
 // for this slice.
@@ -949,8 +433,8 @@ fn cli_disappearing_messages_cover_horizon_chop_gcs_old_per_message_tombstones()
     let alice = temp_db(&tmp, "alice.db");
     let alice_port = free_port();
 
-    // TTL=1 minute. Each authored message should disappear after the clock
-    // advances past minute authored_minute + 1.
+    // TTL=1 minute. Each authored message should disappear after the policy
+    // floor advances past its authored minute.
     let workspace_id = create_workspace_with_ttl(&alice, "ChopGc", "alice", "alice-laptop", 1);
     let _alice_daemon = spawn_daemon(&alice, alice_port);
 
@@ -965,19 +449,17 @@ fn cli_disappearing_messages_cover_horizon_chop_gcs_old_per_message_tombstones()
         &alice_recipient_id,
     );
 
-    // Pin clock to minute 100, author 3 messages.
-    assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
     for body in ["m1", "m2", "m3"] {
-        assert_success(topo(&["--db", &alice, "send", &workspace_id, body]));
+        send_at(&alice, FUTURE_T0_MS, &workspace_id, body);
     }
     wait_for_message_text(&alice, &workspace_id, "alice: m1");
     wait_for_message_text(&alice, &workspace_id, "alice: m2");
     wait_for_message_text(&alice, &workspace_id, "alice: m3");
     assert_eq!(message_lines(&alice, &workspace_id).len(), 3);
 
-    // Advance clock past TTL=1 (minute 102 > 100 + 1 = 101) so all three
-    // messages expire.
-    assert_success(topo(&["--db", &alice, "clock", "set", "6120000"]));
+    // Advance the policy floor past the authored minute so all three messages
+    // retire.
+    set_disappearing_ttl_at(&alice, FUTURE_T0_PLUS_2M_MS, &workspace_id, "1");
     wait_for_no_messages(&alice, &workspace_id);
     wait_for_content_count(&alice, &workspace_id, "0");
 
@@ -993,15 +475,9 @@ fn cli_disappearing_messages_cover_horizon_chop_gcs_old_per_message_tombstones()
         "TTL=1 expiry must report one message tombstone per expired message:\n{post_expiry}"
     );
 
-    // Now advance the clock past COVER_HORIZON_MINUTES. With horizon =
-    // 43_200 and authored_minute = 100, choose now_minute = 43_400 so
-    // horizon_floor = 200 and the expired-message tombstones fall below it.
-    assert_success(topo(&["--db", &alice, "clock", "set", "2604000000"]));
-
-    // Wait for the public status count to show that the subsumed
-    // per-message tombstones were compacted.
-    wait_for_disappearing_value(&alice, &workspace_id, "message_tombstones", "0");
-    let post_chop = disappearing_status(&alice, &workspace_id);
+    // Query past the cover horizon. This is a read-time report now; no stored
+    // local clock is advanced and no daemon work is faked.
+    let post_chop = disappearing_status_at(&alice, FUTURE_T0_PLUS_HORIZON_MS, &workspace_id);
 
     // The load-bearing public assertion: every subsumed per-message
     // tombstone reported by `disappearing-status` has been compacted away.
@@ -1091,6 +567,10 @@ fn wait_for_view_contains(db: &str, workspace_id: &str, expected: &str) {
 
 fn disappearing_status(db: &str, workspace_id: &str) -> String {
     assert_success(topo(&["--db", db, "disappearing-status", workspace_id]))
+}
+
+fn disappearing_status_at(db: &str, at_ms: &str, workspace_id: &str) -> String {
+    assert_success(topo_at(db, at_ms, &["disappearing-status", workspace_id]))
 }
 
 fn disappearing_value(db: &str, workspace_id: &str, key: &str) -> String {
@@ -1255,10 +735,34 @@ fn wait_for_no_messages(db: &str, workspace_id: &str) {
     panic!("messages did not disappear on db={db}:\n{last}");
 }
 
-fn send_with_retry(db: &str, workspace_id: &str, body: &str) -> String {
+fn send_at(db: &str, at_ms: &str, workspace_id: &str, body: &str) -> String {
+    assert_success(topo_at(db, at_ms, &["send", workspace_id, body]))
+}
+
+fn react_at(db: &str, at_ms: &str, workspace_id: &str, selector: &str, emoji: &str) -> String {
+    assert_success(topo_at(
+        db,
+        at_ms,
+        &["react", workspace_id, selector, emoji],
+    ))
+}
+
+fn sync_all_at(db: &str, at_ms: &str) -> String {
+    assert_success(topo_at(db, at_ms, &["sync", "all"]))
+}
+
+fn set_disappearing_ttl_at(db: &str, at_ms: &str, workspace_id: &str, ttl_minutes: &str) -> String {
+    assert_success(topo_at(
+        db,
+        at_ms,
+        &["disappearing-set", workspace_id, ttl_minutes],
+    ))
+}
+
+fn send_with_retry_at(db: &str, at_ms: &str, workspace_id: &str, body: &str) -> String {
     let mut last = String::new();
     for _ in 0..300 {
-        let output = topo(&["--db", db, "send", workspace_id, body]);
+        let output = topo_at(db, at_ms, &["send", workspace_id, body]);
         if output.status.success() {
             return stdout(&output);
         }

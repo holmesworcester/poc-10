@@ -5,7 +5,6 @@
 //! that the stored coordinate key matches it. They never write, construct facts,
 //! project, or dispatch intents.
 
-use crate::core::clock;
 use crate::core::facts::FactId;
 use crate::core::runtime::Runtime;
 use crate::core::store::{Store, DEFAULT_QUERY_LIMIT};
@@ -149,12 +148,16 @@ pub fn lookup_key_wrap(runtime: &Runtime, query: KeyWrapQuery) -> Result<KeyWrap
     })
 }
 
-pub fn key_access(runtime: &Runtime, query: KeyAccessQuery) -> Result<KeyAccessStatus, String> {
+pub fn key_access(
+    runtime: &Runtime,
+    query: KeyAccessQuery,
+    now_ms: Option<u64>,
+) -> Result<KeyAccessStatus, String> {
     let access = local_key_secret_frontier_exists(
         runtime.store(),
         query.workspace_id,
         query.removal_frontier_id,
-    )? && !workspace_retired_from_access(runtime, query.workspace_id)?;
+    )? && !workspace_retired_from_access(runtime, query.workspace_id, now_ms)?;
     Ok(KeyAccessStatus {
         workspace_id: query.workspace_id,
         removal_frontier_id: query.removal_frontier_id,
@@ -351,13 +354,17 @@ fn removal_frontier_ids(store: &Store, workspace_id: FactId) -> Result<Vec<FactI
         .map_err(|err| format!("decode removal frontier rows: {err}"))
 }
 
-fn workspace_retired_from_access(runtime: &Runtime, workspace_id: FactId) -> Result<bool, String> {
+fn workspace_retired_from_access(
+    runtime: &Runtime,
+    workspace_id: FactId,
+    now_ms: Option<u64>,
+) -> Result<bool, String> {
     if content::message::queries::message_tombstone_count(runtime.store(), workspace_id)? > 0 {
         return Ok(true);
     }
     let live_messages =
         content::message::queries::content_message_rows(runtime.store(), workspace_id)?;
-    let horizon_floor = clock::logical_time(runtime.store())?
+    let horizon_floor = now_ms
         .map(|ms| (ms / 60_000).saturating_sub(30 * 24 * 60))
         .unwrap_or(0);
     if horizon_floor > 0

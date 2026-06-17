@@ -13,6 +13,12 @@ pub fn topo(args: &[&str]) -> Output {
     con_cli(args)
 }
 
+pub fn topo_at(db: &str, at_ms: &str, command: &[&str]) -> Output {
+    let mut args = vec!["--db", db, "--at", at_ms];
+    args.extend_from_slice(command);
+    con_cli(&args)
+}
+
 pub fn con_cli(args: &[&str]) -> Output {
     Command::new(con_bin())
         .args(args)

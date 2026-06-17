@@ -658,6 +658,10 @@ mod tests {
         let fact = fact(workspace_id, 42, 1);
         let input = upsert(workspace_id, &fact, Vec::new());
         let barrier = Arc::new(Barrier::new(2));
+        drop(
+            Store::open_disk_with_schema_sources(&path, &[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("seed store schema"),
+        );
 
         let handles = (0..2)
             .map(|_| {

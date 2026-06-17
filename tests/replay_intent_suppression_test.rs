@@ -230,7 +230,7 @@ fn replay_commits_and_dispatches_handler_followup_intents() {
     drain_projection_for_test(&mut runtime, 4, 32);
 
     let report = runtime
-        .replay(&[], topo::core::replay::ReplayOrder::Canonical)
+        .replay(topo::core::replay::ReplayOrder::Canonical)
         .expect("replay");
 
     assert_eq!(
@@ -251,7 +251,7 @@ fn replay_dispatches_projector_live_work_to_handlers_in_replay_mode() {
     drain_projection_for_test(&mut runtime, 4, 32);
 
     let report = runtime
-        .replay(&[], topo::core::replay::ReplayOrder::Canonical)
+        .replay(topo::core::replay::ReplayOrder::Canonical)
         .expect("replay");
 
     assert_eq!(
@@ -277,7 +277,7 @@ fn replay_projects_retained_facts_with_replay_context() {
     );
 
     let report = runtime
-        .replay(&[], topo::core::replay::ReplayOrder::Canonical)
+        .replay(topo::core::replay::ReplayOrder::Canonical)
         .expect("replay");
 
     assert_eq!(

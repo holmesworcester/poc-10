@@ -29,7 +29,7 @@ use cli_harness::*;
 
 // ---------------------------------------------------------------------------
 // Test 1: `disappearing-set` advances the floor automatically; a second
-// call with the same TTL after a clock advance also advances the floor.
+// call with the same TTL at a later command time also advances the floor.
 // This is the "every set is a floor-advance opportunity" contract.
 // ---------------------------------------------------------------------------
 
@@ -43,30 +43,24 @@ fn cli_disappearing_set_advances_floor_automatically() {
     create_local_content_key(&alice, &workspace_id);
 
     // First set at minute 100, TTL=5: auto floor = max(0, 100 - 5) = 95.
-    assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
-    let first = assert_success(topo(&[
-        "--db",
+    let first = assert_success(topo_at(
         &alice,
-        "disappearing-set",
-        &workspace_id,
-        "5",
-    ]));
+        "6000000",
+        &["disappearing-set", &workspace_id, "5"],
+    ));
     assert_eq!(line_value(&first, "ttl_minutes"), "5");
     assert_eq!(line_value(&first, "previous_floor_minute"), "0");
     assert_eq!(line_value(&first, "new_floor_minute"), "95");
     assert_eq!(line_value(&first, "floor_delta_minutes"), "95");
     wait_for_disappearing_value(&alice, &workspace_id, "current_floor_minute", "95");
 
-    // Advance the clock to minute 200. Re-issue the same TTL: auto floor
+    // Re-issue the same TTL at minute 200: auto floor
     // should be max(95, 200 - 5) = 195. Same TTL; the floor still advances.
-    assert_success(topo(&["--db", &alice, "clock", "set", "12000000"]));
-    let second = assert_success(topo(&[
-        "--db",
+    let second = assert_success(topo_at(
         &alice,
-        "disappearing-set",
-        &workspace_id,
-        "5",
-    ]));
+        "12000000",
+        &["disappearing-set", &workspace_id, "5"],
+    ));
     assert_eq!(line_value(&second, "previous_floor_minute"), "95");
     assert_eq!(line_value(&second, "new_floor_minute"), "195");
     assert_eq!(line_value(&second, "floor_delta_minutes"), "100");
@@ -89,14 +83,11 @@ fn cli_disappearing_set_explicit_floor_below_previous_is_rejected() {
     create_local_content_key(&alice, &workspace_id);
 
     // Establish a previous floor = 95.
-    assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
-    let first = assert_success(topo(&[
-        "--db",
+    let first = assert_success(topo_at(
         &alice,
-        "disappearing-set",
-        &workspace_id,
-        "5",
-    ]));
+        "6000000",
+        &["disappearing-set", &workspace_id, "5"],
+    ));
     assert_eq!(line_value(&first, "new_floor_minute"), "95");
     wait_for_disappearing_value(&alice, &workspace_id, "current_floor_minute", "95");
 
@@ -148,29 +139,33 @@ fn cli_disappearing_status_round_trips_known_setup() {
     let _daemon = spawn_daemon(&alice, free_port());
     create_local_content_key(&alice, &workspace_id);
 
-    // Pin clock to minute 100.
-    assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
-    let set_out = assert_success(topo(&[
-        "--db",
+    // Run the policy command at minute 100.
+    let set_out = assert_success(topo_at(
         &alice,
-        "disappearing-set",
-        &workspace_id,
-        "5",
-    ]));
+        "6000000",
+        &["disappearing-set", &workspace_id, "5"],
+    ));
     let policy_fact_id = line_value(&set_out, "policy_fact_id");
     wait_for_disappearing_value(&alice, &workspace_id, "current_floor_minute", "95");
 
     // Author 2 messages so live_messages == 2.
-    assert_success(topo(&["--db", &alice, "send", &workspace_id, "hello"]));
-    assert_success(topo(&["--db", &alice, "send", &workspace_id, "world"]));
+    assert_success(topo_at(
+        &alice,
+        "4000000000000",
+        &["send", &workspace_id, "hello"],
+    ));
+    assert_success(topo_at(
+        &alice,
+        "4000000000001",
+        &["send", &workspace_id, "world"],
+    ));
     wait_for_message_count(&alice, &workspace_id, 2);
 
-    let status = assert_success(topo(&[
-        "--db",
+    let status = assert_success(topo_at(
         &alice,
-        "disappearing-status",
-        &workspace_id,
-    ]));
+        "6000000",
+        &["disappearing-status", &workspace_id],
+    ));
     assert_eq!(line_value(&status, "workspace"), workspace_id);
     assert_eq!(line_value(&status, "policy_fact_id"), policy_fact_id);
     assert_eq!(line_value(&status, "current_ttl_minutes"), "5");
@@ -205,43 +200,44 @@ fn cli_disappearing_tighten_yes_deletes_pre_floor_messages() {
     let _daemon = spawn_daemon(&alice, alice_port);
     create_local_content_key(&alice, &workspace_id);
 
-    // Pin clock to minute 100. Author 2 messages stamped at minute 100
-    // with TTL=60 (expires_at_minute = 160 — well past the test window).
-    assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
-    assert_success(topo(&["--db", &alice, "send", &workspace_id, "stale-1"]));
-    assert_success(topo(&["--db", &alice, "send", &workspace_id, "stale-2"]));
+    // Author 2 future-stamped messages with TTL=60 so the live daemon's wall
+    // clock does not expire them before the tighten command moves the floor.
+    assert_success(topo_at(
+        &alice,
+        "4000000000000",
+        &["send", &workspace_id, "stale-1"],
+    ));
+    assert_success(topo_at(
+        &alice,
+        "4000000000001",
+        &["send", &workspace_id, "stale-2"],
+    ));
     wait_for_message_count(&alice, &workspace_id, 2);
 
-    // Advance clock to minute 200. Tighten with TTL=5: target floor =
-    // 200 - 5 = 195. Both authored messages are at minute 100 < 195, so
+    // Tighten at a later future minute with TTL=5. Both authored messages are
+    // below the resulting floor, so
     // both fall under the new floor.
-    assert_success(topo(&["--db", &alice, "clock", "set", "12000000"]));
-    let tighten = assert_success(topo(&[
-        "--db",
+    let tighten = assert_success(topo_at(
         &alice,
-        "disappearing-tighten",
-        &workspace_id,
-        "5",
-        "--yes",
-    ]));
+        "4000006000000",
+        &["disappearing-tighten", &workspace_id, "5", "--yes"],
+    ));
     assert_eq!(line_value(&tighten, "ttl_minutes"), "5");
     assert_eq!(line_value(&tighten, "previous_floor_minute"), "0");
-    assert_eq!(line_value(&tighten, "new_floor_minute"), "195");
+    assert_eq!(line_value(&tighten, "new_floor_minute"), "66666761");
     assert_eq!(line_value(&tighten, "messages_below_floor"), "2");
 
-    // Wait for the retention projection to settle. Minute-expiry has likely already
-    // retired the messages (clock = 200 > 100 + 60 = 160), but the
-    // tighten's floor advancement is what we're proving end-to-end:
-    // `disappearing-status::current_floor_minute` jumps to 195.
+    // Wait for the retention projection to settle. The tighten's floor
+    // advancement is what we're proving end-to-end:
+    // `disappearing-status::current_floor_minute` jumps to 66666761.
     let mut last_status = String::new();
     for _ in 0..300 {
-        last_status = assert_success(topo(&[
-            "--db",
+        last_status = assert_success(topo_at(
             &alice,
-            "disappearing-status",
-            &workspace_id,
-        ]));
-        if line_value(&last_status, "current_floor_minute") == "195"
+            "4000006000000",
+            &["disappearing-status", &workspace_id],
+        ));
+        if line_value(&last_status, "current_floor_minute") == "66666761"
             && line_value(&last_status, "live_messages") == "0"
         {
             break;
@@ -250,7 +246,7 @@ fn cli_disappearing_tighten_yes_deletes_pre_floor_messages() {
     }
     assert_eq!(
         line_value(&last_status, "current_floor_minute"),
-        "195",
+        "66666761",
         "tighten must advance the floor:\n{last_status}"
     );
     assert_eq!(
@@ -274,22 +270,16 @@ fn cli_retention_floor_deletes_below_floor_messages_and_retains_above_floor_rows
     let _daemon = spawn_daemon(&alice, free_port());
     create_local_content_key(&alice, &workspace_id);
 
-    assert_success(topo(&["--db", &alice, "clock", "set", "3000000"]));
-    assert_success(topo(&[
-        "--db",
+    assert_success(topo_at(
         &alice,
-        "send",
-        &workspace_id,
-        "below floor",
-    ]));
-    assert_success(topo(&["--db", &alice, "clock", "set", "12000000"]));
-    assert_success(topo(&[
-        "--db",
+        "4000000000000",
+        &["send", &workspace_id, "below floor"],
+    ));
+    assert_success(topo_at(
         &alice,
-        "send",
-        &workspace_id,
-        "above floor",
-    ]));
+        "4000007200000",
+        &["send", &workspace_id, "above floor"],
+    ));
     wait_for_messages_contains(&alice, &workspace_id, "alice: below floor");
     wait_for_messages_contains(&alice, &workspace_id, "alice: above floor");
 
@@ -303,6 +293,7 @@ fn cli_retention_floor_deletes_below_floor_messages_and_retains_above_floor_rows
         "{pre_messages}"
     );
 
+    let floor_value = "66666700";
     let floor = assert_success(topo(&[
         "--db",
         &alice,
@@ -310,11 +301,11 @@ fn cli_retention_floor_deletes_below_floor_messages_and_retains_above_floor_rows
         &workspace_id,
         "1000",
         "--floor",
-        "100",
+        floor_value,
     ]));
     assert_eq!(line_value(&floor, "previous_floor_minute"), "0");
-    assert_eq!(line_value(&floor, "new_floor_minute"), "100");
-    wait_for_disappearing_value(&alice, &workspace_id, "current_floor_minute", "100");
+    assert_eq!(line_value(&floor, "new_floor_minute"), floor_value);
+    wait_for_disappearing_value(&alice, &workspace_id, "current_floor_minute", floor_value);
 
     let status = assert_success(topo(&[
         "--db",
@@ -322,7 +313,7 @@ fn cli_retention_floor_deletes_below_floor_messages_and_retains_above_floor_rows
         "disappearing-status",
         &workspace_id,
     ]));
-    assert_eq!(line_value(&status, "current_floor_minute"), "100");
+    assert_eq!(line_value(&status, "current_floor_minute"), floor_value);
     wait_for_content_count(&alice, &workspace_id, "1");
 
     let post_messages = messages_text(&alice, &workspace_id);
@@ -340,9 +331,7 @@ fn cli_retention_floor_deletes_below_floor_messages_and_retains_above_floor_rows
 
 // ---------------------------------------------------------------------------
 // Test 6: `disappearing-compact` advances the floor without changing
-// the TTL. Live messages stamped under the current policy survive
-// (their `expires_at_minute >= new_floor` by construction); only debris
-// is GC'd.
+// the TTL.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -354,63 +343,58 @@ fn cli_disappearing_compact_advances_floor_without_changing_ttl() {
     let _daemon = spawn_daemon(&alice, free_port());
     create_local_content_key(&alice, &workspace_id);
 
-    // Pin clock to minute 100. Set TTL=30 with the default auto floor
-    // (= 100 - 30 = 70).
-    assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
-    assert_success(topo(&[
-        "--db",
+    // Set TTL=30 at a future command time; the default auto floor is
+    // 66666666 - 30 = 66666636.
+    assert_success(topo_at(
         &alice,
-        "disappearing-set",
-        &workspace_id,
-        "30",
-    ]));
-    wait_for_disappearing_value(&alice, &workspace_id, "current_floor_minute", "70");
-    let pre = assert_success(topo(&[
-        "--db",
+        "4000000000000",
+        &["disappearing-set", &workspace_id, "30"],
+    ));
+    wait_for_disappearing_value(&alice, &workspace_id, "current_floor_minute", "66666636");
+    let pre = assert_success(topo_at(
         &alice,
-        "disappearing-status",
-        &workspace_id,
-    ]));
+        "4000000000000",
+        &["disappearing-status", &workspace_id],
+    ));
     assert_eq!(line_value(&pre, "current_ttl_minutes"), "30");
-    assert_eq!(line_value(&pre, "current_floor_minute"), "70");
+    assert_eq!(line_value(&pre, "current_floor_minute"), "66666636");
 
-    // Author a live message stamped under TTL=30 (expires at minute 130).
-    assert_success(topo(&["--db", &alice, "send", &workspace_id, "live"]));
+    // Author a live message stamped under TTL=30.
+    assert_success(topo_at(
+        &alice,
+        "4000000000001",
+        &["send", &workspace_id, "live"],
+    ));
     wait_for_message_count(&alice, &workspace_id, 1);
 
-    // Advance clock to minute 200 (still past the message's expiry, but
-    // the test author didn't run the daemon so no expiry happens — the
-    // message remains in the live table). Compact pushes the floor to
-    // max(70, 200 - 30) = 170; TTL stays at 30.
-    assert_success(topo(&["--db", &alice, "clock", "set", "12000000"]));
-    let compact = assert_success(topo(&[
-        "--db",
+    // Compact at a later command time. The resulting floor covers the live
+    // message, and TTL stays at 30.
+    let compact = assert_success(topo_at(
         &alice,
-        "disappearing-compact",
-        &workspace_id,
-    ]));
+        "4000012000000",
+        &["disappearing-compact", &workspace_id],
+    ));
     assert_eq!(line_value(&compact, "ttl_minutes"), "30");
-    assert_eq!(line_value(&compact, "previous_floor_minute"), "70");
-    assert_eq!(line_value(&compact, "new_floor_minute"), "170");
-    assert_eq!(line_value(&compact, "floor_delta_minutes"), "100");
-    wait_for_disappearing_value(&alice, &workspace_id, "current_floor_minute", "170");
+    assert_eq!(line_value(&compact, "previous_floor_minute"), "66666636");
+    assert_eq!(line_value(&compact, "new_floor_minute"), "66666836");
+    assert_eq!(line_value(&compact, "floor_delta_minutes"), "200");
+    wait_for_disappearing_value(&alice, &workspace_id, "current_floor_minute", "66666836");
 
     // Active policy reflects the new floor; TTL is unchanged.
-    let post = assert_success(topo(&[
-        "--db",
+    let post = assert_success(topo_at(
         &alice,
-        "disappearing-status",
-        &workspace_id,
-    ]));
+        "4000012000000",
+        &["disappearing-status", &workspace_id],
+    ));
     assert_eq!(line_value(&post, "current_ttl_minutes"), "30");
-    assert_eq!(line_value(&post, "current_floor_minute"), "170");
+    assert_eq!(line_value(&post, "current_floor_minute"), "66666836");
 }
 
 // ---------------------------------------------------------------------------
 // Test 7: `sync-status` after expiry reports a changed root summary.
 //
-// Setup: author messages, then expire them by advancing the clock past
-// the TTL horizon. We then call `sync-status` directly to verify
+// Setup: author messages, then retire them by advancing the policy floor
+// past their authored minute. We then call `sync-status` directly to verify
 // the CLI command succeeds and the root summary reflects the disappeared
 // messages.
 // ---------------------------------------------------------------------------
@@ -425,10 +409,13 @@ fn cli_sync_status_reports_root_after_expiry() {
     let daemon = spawn_daemon(&alice, alice_port);
     create_local_content_key(&alice, &workspace_id);
 
-    // Pin clock to minute 100; author 3 messages.
-    assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
+    // Author 3 future-stamped messages.
     for body in ["a", "b", "c"] {
-        assert_success(topo(&["--db", &alice, "send", &workspace_id, body]));
+        assert_success(topo_at(
+            &alice,
+            "4000000000000",
+            &["send", &workspace_id, body],
+        ));
     }
     wait_for_message_count(&alice, &workspace_id, 3);
     wait_for_sync_root_count_at_least(&alice, 3);
@@ -446,9 +433,13 @@ fn cli_sync_status_reports_root_after_expiry() {
         "indexed facts must include at least the 3 authored messages: {pre_count}"
     );
 
-    // Spawn the daemon to advance the messages through expiry, then stop it
+    // Advance the policy floor through the messages, then stop the daemon
     // before invoking the command explicitly.
-    assert_success(topo(&["--db", &alice, "clock", "set", "6120000"]));
+    assert_success(topo_at(
+        &alice,
+        "4000000120000",
+        &["disappearing-set", &workspace_id, "1"],
+    ));
     wait_for_leaf_count(&alice, &workspace_id, "0");
     wait_for_content_count(&alice, &workspace_id, "0");
     drop(daemon);

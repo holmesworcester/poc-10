@@ -120,14 +120,14 @@ fn schema_sources_execute_declared_ddl_and_allowlisted_row_tables() {
     store
         .insert_table_rows(vec![TableRow {
             table: TableName::new("workspace_rows"),
-            key: b"clock".to_vec(),
+            key: b"sample".to_vec(),
             value: 1u64.to_be_bytes().to_vec(),
         }])
         .expect("insert row into allowlisted row table");
 
     assert_eq!(
         store
-            .table_row(TableName::new("workspace_rows"), b"clock")
+            .table_row(TableName::new("workspace_rows"), b"sample")
             .expect("read row"),
         Some(1u64.to_be_bytes().to_vec())
     );
@@ -464,7 +464,7 @@ fn replay_lifecycle_reset_preserves_protected_tables() {
 }
 
 #[test]
-fn core_replay_preserves_only_retained_fact_store_and_resets_clock() {
+fn core_replay_preserves_only_retained_fact_store_and_resets_runtime_tables() {
     let store =
         Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open core store");
     let protected = store
@@ -480,8 +480,8 @@ fn core_replay_preserves_only_retained_fact_store_and_resets_clock() {
         .map(|table| table.as_str())
         .collect::<Vec<_>>();
     assert!(
-        reset.contains(&"clock"),
-        "store-local clock is local runtime metadata, not replay-preserved fact truth: {reset:?}"
+        !reset.contains(&"clock"),
+        "removed local time table must stay absent: {reset:?}"
     );
 }
 

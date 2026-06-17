@@ -895,7 +895,6 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
         content::message::cli::CONTENT_COUNT_USAGE,
         content_count
     ),
-    cli_command!("clock", crate::core::clock::CLOCK_USAGE, clock),
     cli_command!("count", auth::workspace::cli::COUNT_USAGE, count),
     // Replay diagnostics: rebuild derived state, hash replay-relevant state, and
     // prove replay idempotence/order-independence on scratch copies.

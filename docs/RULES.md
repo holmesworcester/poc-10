@@ -54,7 +54,7 @@ in `src/core` or `src/protocol`.
 
 - `src/core/` contains protocol-neutral mechanics only: facts, context,
   matchers, projection contracts, intents, handler dispatch, store, wire,
-  crypto, network queues, TCP, clock, and schema declarations.
+  crypto, network queues, TCP, command-time authoring, and schema declarations.
 - `src/protocol/<scope>/<fact_family>/` owns one fact family's role files:
   fact shape (`fact.rs`), canonical byte encoding (`encode.rs`), local authoring
   (`author.rs`), typed operations (`api.rs`), projection, schema-backed row
@@ -71,7 +71,7 @@ in `src/core` or `src/protocol`.
 - `src/protocol/<scope>/<verb_object>.rs` owns one deferred effect boundary.
   Handler subdirectories, `driver.rs`, and handler-local `intent.rs` files are
   forbidden.
-- Shared authored-fact and clock primitives live in `src/core/command.rs`.
+- Shared authored-fact and command-time primitives live in `src/core/command.rs`.
   Concrete authoring functions live in the fact module that owns the emitted
   fact, receive `Store` and `CommandClock` directly when they need current
   projected state, and return `AuthoredFacts` instead of driving runtime work.
