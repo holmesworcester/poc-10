@@ -385,7 +385,7 @@ fn handle_intent_with_policy(
     fact_admission: Option<FactAdmissionFn>,
     handler_mode: HandlerMode,
     effect_mode: RuntimeEffectMode,
-) -> Result<IntentDispatchReport, String> {
+) -> Result<WorkStatus, String> {
     let IntentWork { queued, handler } = work;
     let mut status = WorkStatus::idle();
     let context = load_handler_context(store, handler, &queued.intent, handler_mode)?;
@@ -393,10 +393,7 @@ fn handle_intent_with_policy(
         if status.retried && queued.queue == IntentQueue::Local {
             rotate_local_retry_to_tail(store, &queued.intent)?;
         }
-        return Ok(IntentDispatchReport {
-            status,
-            dispatched: false,
-        });
+        return Ok(status);
     };
     validate_runtime_effects_for_admission(&output, allowed_tables, fact_admission)?;
     status.progressed = commit_handler_output(
@@ -407,10 +404,7 @@ fn handle_intent_with_policy(
         fact_admission,
         effect_mode.pending_projection_mode(),
     )?;
-    Ok(IntentDispatchReport {
-        status,
-        dispatched: status.progressed,
-    })
+    Ok(status)
 }
 
 /// Dispatch one queued intent from the selected queue.
@@ -426,10 +420,10 @@ pub(crate) fn dispatch_one_intent(
     fact_admission: Option<FactAdmissionFn>,
     handler_mode: HandlerMode,
     effect_mode: RuntimeEffectMode,
-) -> Result<IntentDispatchReport, String> {
+) -> Result<WorkStatus, String> {
     let kinds = handlers.intent_kinds();
     let Some(work) = next_intent_work_in_queue(store, handlers, queue, &kinds)? else {
-        return Ok(IntentDispatchReport::idle());
+        return Ok(WorkStatus::idle());
     };
     handle_intent_with_policy(
         work,
@@ -576,20 +570,6 @@ pub(crate) struct QueuedIntent {
     /// Queue from which this row was claimed.
     queue: IntentQueue,
     pub(crate) intent: Intent,
-}
-
-pub(crate) struct IntentDispatchReport {
-    pub(crate) status: WorkStatus,
-    pub(crate) dispatched: bool,
-}
-
-impl IntentDispatchReport {
-    fn idle() -> Self {
-        Self {
-            status: WorkStatus::idle(),
-            dispatched: false,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -819,7 +799,7 @@ mod tests {
     ) -> Result<TestIntentProgress, String> {
         let mut progress = TestIntentProgress::default();
         for _ in 0..limit {
-            let report = dispatch_one_intent(
+            let step_status = dispatch_one_intent(
                 store,
                 handlers,
                 queue,
@@ -828,14 +808,14 @@ mod tests {
                 handler_mode,
                 effect_mode,
             )?;
-            if report.status.is_idle() {
+            if step_status.is_idle() {
                 break;
             }
-            if report.dispatched {
+            if step_status.progressed {
                 progress.dispatched += 1;
             }
-            progress.status.merge(report.status);
-            if report.status.retried {
+            progress.status.merge(step_status);
+            if step_status.retried {
                 break;
             }
         }

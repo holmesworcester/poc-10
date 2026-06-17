@@ -59,15 +59,6 @@ use rusqlite::{params, OptionalExtension};
 
 pub(crate) use commit_effects::{commit_runtime_effects_to_db, RuntimeEffectMode};
 
-/// Result from one selected projection queue step.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct ProjectionStep {
-    /// Whether this step changed queue or projected state.
-    pub(crate) status: WorkStatus,
-    /// Whether this step completed a projector run and commit.
-    pub(crate) projected: bool,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PendingProjectionItem {
     fact_id: FactId,
@@ -117,12 +108,12 @@ pub(crate) fn project_one(
     source: ProjectionSource,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
-) -> Result<ProjectionStep, String> {
+) -> Result<WorkStatus, String> {
     let Some(item) = perf::measure_result("projection_queue_load", || {
         next_projection_item(store, source)
     })?
     else {
-        return Ok(ProjectionStep::default());
+        return Ok(WorkStatus::idle());
     };
 
     let fact_id = item.fact_id;
@@ -140,23 +131,17 @@ pub(crate) fn project_one(
                 .map(|_| ())
                 .map_err(|err| format!("purge stale incoming fact: {err}"))?,
         }
-        return Ok(ProjectionStep {
-            status: WorkStatus::progressed(true),
-            projected: false,
-        });
+        return Ok(WorkStatus::progressed(true));
     };
 
-    let projected = process_projection_item(
+    process_projection_item(
         store,
         projector,
         pending_fact,
         allowed_tables,
         fact_admission,
     )?;
-    Ok(ProjectionStep {
-        status: WorkStatus::progressed(true),
-        projected,
-    })
+    Ok(WorkStatus::progressed(true))
 }
 
 fn next_projection_item(
@@ -286,7 +271,7 @@ pub(crate) fn process_projection_item(
     pending_fact: PendingFact,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
-) -> Result<bool, String> {
+) -> Result<(), String> {
     let source = pending_fact.source;
     let fact_id = pending_fact.fact_id;
     let projection = match perf::measure_result("projection_prepare_effects", || {
@@ -303,7 +288,7 @@ pub(crate) fn process_projection_item(
                     .map(|_| ())
                     .map_err(|err| format!("drop rejected incoming fact: {err}"))?,
             }
-            return Ok(false);
+            return Ok(());
         }
     };
     perf::measure_result("projection_commit_effects", || {
@@ -315,7 +300,7 @@ pub(crate) fn process_projection_item(
             })
             .map_err(|err| format!("commit projection effects: {err}"))
     })?;
-    Ok(true)
+    Ok(())
 }
 
 /// Call the protocol projector and normalize the output for SQL commit.
@@ -2818,7 +2803,7 @@ mod contract_tests {
         let progress = drain_projection(&projector, &store, &[], None, 1)
             .expect("drain projection without re-emitting old offer");
 
-        assert_eq!(progress.projected, 1);
+        assert!(progress.status.progressed);
         let context = stored_context_for_owner(&store, &fact.id).expect("stored context");
         assert!(context.needs.is_empty());
         assert_eq!(context.offers, vec![offer]);
@@ -2856,7 +2841,7 @@ mod contract_tests {
         let progress =
             drain_projection(&projector, &store, &[], None, 2).expect("drain projection");
 
-        assert_eq!(progress.projected, 2);
+        assert!(progress.status.progressed);
         assert_eq!(
             intent_payload_for(&store, "ready", &target.id),
             offered.id.to_vec()
@@ -2898,7 +2883,7 @@ mod contract_tests {
         let progress =
             drain_projection(&projector, &store, &[], None, 2).expect("drain projection");
 
-        assert_eq!(progress.projected, 2);
+        assert!(progress.status.progressed);
         assert_eq!(
             intent_payload_for(&store, "ready", &target.id),
             offered.id.to_vec()
@@ -2924,7 +2909,7 @@ mod contract_tests {
         let first = drain_projection(&projector, &store, &[], None, 1)
             .expect("dependent parks on missing offer");
 
-        assert_eq!(first.projected, 1);
+        assert!(first.status.progressed);
         assert_eq!(pending_projection_count(&store, dependent.id), 0);
         let parked_context = stored_context_for_owner(&store, &dependent.id).expect("parked");
         assert_eq!(parked_context.needs.len(), 1);
@@ -2933,7 +2918,7 @@ mod contract_tests {
         let progress =
             drain_projection(&projector, &store, &[], None, 3).expect("drain queued dependency");
 
-        assert_eq!(progress.projected, 2);
+        assert!(progress.status.progressed);
         let payload = intent_payload_for(&store, "queue_ready", &dependent.id);
         assert_eq!(payload, offered.id.to_vec());
         let dependent_context =
@@ -2990,7 +2975,7 @@ mod contract_tests {
         let progress =
             drain_projection(&projector, &store, &[], None, 1).expect("drain projection");
 
-        assert_eq!(progress.projected, 1);
+        assert!(progress.status.progressed);
         assert_eq!(
             intent_payload_for(&store, "queued_context_ready", &target.id),
             offered.id.to_vec()
@@ -3019,14 +3004,14 @@ mod contract_tests {
         let first =
             drain_projection(&projector, &store, &[], None, 1).expect("target parks on first");
 
-        assert_eq!(first.projected, 1);
+        assert!(first.status.progressed);
         assert_eq!(pending_projection_count(&store, target.id), 0);
 
         submit_fact_to_db(&store, first_offer.clone()).expect("submit first offer");
         let second =
             drain_projection(&projector, &store, &[], None, 2).expect("first offer wakes target");
 
-        assert_eq!(second.projected, 2);
+        assert!(second.status.progressed);
         assert!(intent_payload_for_maybe(&store, "multi_stage_ready", &target.id).is_none());
         let staged_context = stored_context_for_owner(&store, &target.id).expect("target context");
         assert_eq!(staged_context.needs.len(), 2);
@@ -3035,7 +3020,7 @@ mod contract_tests {
         let third = drain_projection(&projector, &store, &[], None, 3)
             .expect("second offer wakes target with complete context");
 
-        assert_eq!(third.projected, 2);
+        assert!(third.status.progressed);
         let mut expected = first_offer.id.to_vec();
         expected.extend_from_slice(&second_offer.id);
         assert_eq!(
@@ -3076,7 +3061,7 @@ mod contract_tests {
         .expect("a failed fact must not undo earlier projected items");
 
         // The healthy fact committed — its neighbor's failure did not roll it back.
-        assert_eq!(progress.projected, 1);
+        assert!(progress.status.progressed);
         assert_eq!(pending_projection_count(&store, offered.id), 0);
         assert!(context_edge_count(&store, offered.id) > 0);
 
@@ -3114,7 +3099,7 @@ mod contract_tests {
         )
         .expect("a context-inconsistent fact must not undo earlier projected items");
 
-        assert_eq!(progress.projected, 2);
+        assert!(progress.status.progressed);
         assert_eq!(pending_projection_count(&store, offered.id), 0);
 
         // Projector errors do not let core infer a purge decision. The durable
@@ -3157,7 +3142,7 @@ mod contract_tests {
         let progress =
             drain_projection(&projector, &store, &[], None, 2).expect("drain projection");
 
-        assert_eq!(progress.projected, 2);
+        assert!(progress.status.progressed);
         assert_eq!(
             intent_payload_for(&store, "observed", &target.id),
             b"watched".to_vec()
@@ -3190,7 +3175,7 @@ mod contract_tests {
         )
         .expect("drain projection");
 
-        assert_eq!(progress.projected, 2);
+        assert!(progress.status.progressed);
         assert!(incoming_fact_by_id(&store, &parent.id)
             .expect("load ephemeral")
             .is_none());
@@ -3220,7 +3205,7 @@ mod contract_tests {
         let progress =
             drain_projection(&projector, &store, &[], None, 10).expect("incoming parks on needs");
 
-        assert_eq!(progress.projected, 1);
+        assert!(progress.status.progressed);
         assert!(incoming_fact_by_id(&store, &parent.id)
             .expect("load incoming")
             .is_none());
@@ -3266,7 +3251,7 @@ mod contract_tests {
         let progress =
             drain_projection(&projector, &store, &[], None, 10).expect("drain projection");
 
-        assert_eq!(progress.projected, 2);
+        assert!(progress.status.progressed);
         assert!(incoming_fact_by_id(&store, &parent.id)
             .expect("load incoming")
             .is_none());
@@ -3363,7 +3348,7 @@ mod contract_tests {
         )
         .expect("drain projection");
 
-        assert_eq!(progress.projected, 2);
+        assert!(progress.status.progressed);
         assert!(incoming_fact_by_id(&store, &parent.id)
             .expect("load ephemeral")
             .is_none());
@@ -3398,7 +3383,7 @@ mod contract_tests {
         )
         .expect("child projection rejection is isolated");
 
-        assert_eq!(progress.projected, 1);
+        assert!(progress.status.progressed);
         assert!(incoming_fact_by_id(&store, &parent.id)
             .expect("load ephemeral")
             .is_none());
@@ -3424,7 +3409,7 @@ mod contract_tests {
                 allowed_tables,
                 fact_admission,
             )?;
-            if step.status.is_idle() {
+            if step.is_idle() {
                 step = crate::core::project_fact::project_one(
                     store,
                     projector,
@@ -3433,18 +3418,16 @@ mod contract_tests {
                     fact_admission,
                 )?;
             }
-            if step.status.is_idle() {
+            if step.is_idle() {
                 break;
             }
-            progress.status.merge(step.status);
-            progress.projected += usize::from(step.projected);
+            progress.status.merge(step);
         }
         Ok(progress)
     }
 
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
     struct TestProjectionDrain {
-        projected: usize,
         status: WorkStatus,
     }
 

@@ -223,17 +223,17 @@ impl Runtime {
     ) -> Result<WorkStatus, String> {
         let mut status = WorkStatus::idle();
         for _ in 0..limit {
-            let step = project_fact::project_one(
+            let step_status = project_fact::project_one(
                 &self.db,
                 self.projector.as_ref(),
                 source,
                 self.description.row_mutation_tables,
                 self.description.fact_admission,
             )?;
-            if step.status.is_idle() {
+            if step_status.is_idle() {
                 break;
             }
-            status.merge(step.status);
+            status.merge(step_status);
         }
         Ok(status)
     }
@@ -262,7 +262,7 @@ impl Runtime {
     ) -> Result<WorkStatus, String> {
         let mut status = WorkStatus::idle();
         for _ in 0..limit {
-            let report = dispatch_one_intent(
+            let step_status = dispatch_one_intent(
                 &self.db,
                 &self.handlers,
                 queue,
@@ -271,12 +271,12 @@ impl Runtime {
                 HandlerMode::Live,
                 RuntimeEffectMode::Live,
             )?;
-            if report.status.is_idle() {
+            if step_status.is_idle() {
                 break;
             }
 
-            status.merge(report.status);
-            if report.status.retried {
+            status.merge(step_status);
+            if step_status.retried {
                 break;
             }
         }

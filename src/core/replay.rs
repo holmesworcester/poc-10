@@ -63,7 +63,7 @@ pub enum ReplayOrder {
     Scramble { seed: u64 },
 }
 
-/// Counters from one replay pass, surfaced by the `replay` diagnostic.
+/// State counts from one replay pass, surfaced by the `replay` diagnostic.
 ///
 /// These are deterministic given the same retained facts. `network_rows` must be
 /// zero; a non-zero value is reported as an error by [`run_replay`] rather than
@@ -78,16 +78,12 @@ pub struct ReplayReport {
     pub wiped_tables: usize,
     /// Distinct retained facts marked pending for projection.
     pub retained_facts: usize,
-    /// Total projection runs, including context- and time-driven reprojections.
-    pub projected_facts: usize,
     /// Facts created during replay (for example deterministic key wraps).
     pub emitted_facts: usize,
     /// Facts purged during replay (for example via retirement projection).
     pub purged_facts: usize,
     /// Standing time-wake rows remaining after replay drains.
     pub standing_time_wakes: usize,
-    /// Intents dispatched before the replay barrier.
-    pub replayed_intents: usize,
     /// Standing context edges materialized by replay.
     pub context_edges: usize,
     /// Materialized read-model / sync / connection rows after replay.
@@ -100,7 +96,7 @@ pub struct ReplayReport {
 ///
 /// Steps: count and drop queued intents, wipe derived state, mark retained facts
 /// pending in the requested order, then run replay-mode queue steps until the
-/// replay barrier is idle. Returns counters, or an error if replay produced
+/// replay barrier is idle. Returns state counts, or an error if replay produced
 /// network rows before the barrier.
 pub fn run_replay(
     db: &Db,
@@ -121,47 +117,23 @@ pub fn run_replay(
     report.retained_facts = table_count(db, FACTS)?;
 
     let handlers = HandlerSet::new(routes);
-    let mut counters = ReplayCounters::default();
     match order {
         ReplayOrder::Canonical => {
             enqueue_all_retained_facts_for_replay(db)?;
-            drain_replay_barrier(
-                db,
-                projector,
-                &handlers,
-                allowed_tables,
-                fact_admission,
-                &mut counters,
-            )?;
+            drain_replay_barrier(db, projector, &handlers, allowed_tables, fact_admission)?;
         }
         ReplayOrder::Reverse | ReplayOrder::Scramble { .. } => {
             for fact_id in ordered_fact_ids(db, order)? {
                 enqueue_retained_fact_for_replay(db, fact_id)?;
-                drain_replay_barrier(
-                    db,
-                    projector,
-                    &handlers,
-                    allowed_tables,
-                    fact_admission,
-                    &mut counters,
-                )?;
+                drain_replay_barrier(db, projector, &handlers, allowed_tables, fact_admission)?;
             }
-            drain_replay_barrier(
-                db,
-                projector,
-                &handlers,
-                allowed_tables,
-                fact_admission,
-                &mut counters,
-            )?;
+            drain_replay_barrier(db, projector, &handlers, allowed_tables, fact_admission)?;
         }
     }
 
     let facts_after = fact_id_set(db)?;
     report.emitted_facts = facts_after.difference(&facts_before).count();
     report.purged_facts = facts_before.difference(&facts_after).count();
-    report.projected_facts = counters.projected_facts;
-    report.replayed_intents = counters.replayed_intents;
     report.standing_time_wakes = table_count(db, TIME_WAKES)?;
     report.context_edges = table_count(db, CONTEXT_EDGES)?;
     report.row_mutations = materialized_row_count(db)?;
@@ -202,12 +174,6 @@ pub fn clear_replay_reset_tables(db: &Db) -> Result<usize, String> {
     .map_err(|err| format!("clear replay reset tables: {err}"))
 }
 
-#[derive(Debug, Clone, Default)]
-struct ReplayCounters {
-    projected_facts: usize,
-    replayed_intents: usize,
-}
-
 /// Drain replay work in the same visible queue order as the live runtime loop.
 ///
 /// Each barrier step does bounded durable projection, incoming projection,
@@ -221,7 +187,6 @@ fn drain_replay_barrier(
     handlers: &HandlerSet,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
-    counters: &mut ReplayCounters,
 ) -> Result<(), String> {
     for _ in 0..REPLAY_MAX_DRAIN_STEPS {
         let mut status = WorkStatus::idle();
@@ -231,7 +196,6 @@ fn drain_replay_barrier(
             ProjectionSource::Durable,
             allowed_tables,
             fact_admission,
-            counters,
         )?);
         status.merge(drain_replay_projection_queue(
             db,
@@ -239,7 +203,6 @@ fn drain_replay_barrier(
             ProjectionSource::Incoming,
             allowed_tables,
             fact_admission,
-            counters,
         )?);
 
         status.merge(drain_replay_intent_queue(
@@ -248,7 +211,6 @@ fn drain_replay_barrier(
             IntentQueue::Durable,
             allowed_tables,
             fact_admission,
-            counters,
         )?);
         status.merge(drain_replay_intent_queue(
             db,
@@ -256,7 +218,6 @@ fn drain_replay_barrier(
             IntentQueue::Local,
             allowed_tables,
             fact_admission,
-            counters,
         )?);
 
         if status.is_idle() {
@@ -272,17 +233,15 @@ fn drain_replay_projection_queue(
     source: ProjectionSource,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
-    counters: &mut ReplayCounters,
 ) -> Result<WorkStatus, String> {
     let mut status = WorkStatus::idle();
     for _ in 0..REPLAY_WORK_LIMIT {
-        let step =
+        let step_status =
             project_fact::project_one(db, projector, source, allowed_tables, fact_admission)?;
-        if step.status.is_idle() {
+        if step_status.is_idle() {
             break;
         }
-        counters.projected_facts += usize::from(step.projected);
-        status.merge(step.status);
+        status.merge(step_status);
     }
     Ok(status)
 }
@@ -293,11 +252,10 @@ fn drain_replay_intent_queue(
     queue: IntentQueue,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
-    counters: &mut ReplayCounters,
 ) -> Result<WorkStatus, String> {
     let mut status = WorkStatus::idle();
     for _ in 0..REPLAY_WORK_LIMIT {
-        let report = dispatch_one_intent(
+        let step_status = dispatch_one_intent(
             db,
             handlers,
             queue,
@@ -306,14 +264,11 @@ fn drain_replay_intent_queue(
             HandlerMode::Replay,
             RuntimeEffectMode::Replay,
         )?;
-        if report.status.is_idle() {
+        if step_status.is_idle() {
             break;
         }
-        if report.dispatched {
-            counters.replayed_intents += 1;
-        }
-        status.merge(report.status);
-        if report.status.retried {
+        status.merge(step_status);
+        if step_status.retried {
             break;
         }
     }

@@ -265,14 +265,6 @@ fn replay_is_idempotent_and_rebuilds_derived_state() {
         line_value(&replay, "row_mutations").parse::<u64>().unwrap() > 0,
         "replay should rebuild materialized read-model rows"
     );
-    assert!(
-        line_value(&replay, "replayed_intents")
-            .parse::<u64>()
-            .unwrap()
-            > 0,
-        "replay should recreate sync and key-wrap work through replay dispatch"
-    );
-
     let after = state_hash(&db);
     assert_eq!(before, after, "replay must rebuild byte-identical state");
 
@@ -424,14 +416,6 @@ fn replay_recreates_key_material_idempotently() {
     );
     assert_eq!(line_value(&replay, "purged_facts"), "0");
     assert_eq!(line_value(&replay, "network_rows"), "0");
-    assert!(
-        line_value(&replay, "replayed_intents")
-            .parse::<u64>()
-            .unwrap()
-            > 0,
-        "replay should redispatch key-material work"
-    );
-
     let after = state_hash(&db);
     assert_eq!(before, after, "key material must rebuild identically");
     let summary_after = assert_success(topo(&["--db", &db, "state-summary"]));

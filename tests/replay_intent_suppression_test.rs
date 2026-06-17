@@ -232,14 +232,10 @@ fn replay_commits_and_dispatches_handler_followup_intents() {
     runtime.submit_fact(fact());
     drain_projection_for_test(&mut runtime, 4, 32);
 
-    let report = runtime
+    runtime
         .replay(topo::core::replay::ReplayOrder::Canonical)
         .expect("replay");
 
-    assert_eq!(
-        report.replayed_intents, 2,
-        "the replay handler sees replay mode, emits a follow-up, and replay dispatches that follow-up too"
-    );
     assert_eq!(
         runtime.pending_intent_count(),
         0,
@@ -253,14 +249,10 @@ fn replay_dispatches_projector_live_work_to_handlers_in_replay_mode() {
     runtime.submit_fact(fact());
     drain_projection_for_test(&mut runtime, 4, 32);
 
-    let report = runtime
+    runtime
         .replay(topo::core::replay::ReplayOrder::Canonical)
         .expect("replay");
 
-    assert_eq!(
-        report.replayed_intents, 4,
-        "replay dispatches projector-emitted durable and local intents, and live handlers no-op because they see replay mode"
-    );
     assert_eq!(
         runtime.pending_intent_count(),
         0,
@@ -287,11 +279,6 @@ fn replay_projects_retained_facts_with_replay_context() {
         report.retained_facts, 1,
         "all retained facts are queued for replay"
     );
-    assert_eq!(
-        report.projected_facts, 1,
-        "replay still runs the projector with replay context"
-    );
-    assert_eq!(report.replayed_intents, 0);
     assert_eq!(
         runtime.pending_intent_count(),
         0,
