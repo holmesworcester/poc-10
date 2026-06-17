@@ -12,7 +12,7 @@ The target is a smaller codebase:
 - `core/handle_intent.rs` owns intent queue SQL.
 - `core/network.rs` owns network queue SQL.
 - `core/replay.rs` owns replay wipe, enqueue, and summary SQL.
-- Protocol fact-family roots own projected row schemas and row codecs.
+- Protocol fact-family roots own projected table declarations and row builders.
 - Protocol `queries.rs` modules own bounded SQL reads over projected rows.
 
 Projectors remain pure. They do not execute SQL. They emit row mutations, facts,
@@ -48,7 +48,7 @@ It owns:
 - `SchemaRegistry`
 - replay-retained, replay-reset, and replay-summary table sets
 - table-name validation and quoting
-- row-schema metadata used to validate protocol row mutations
+- table and column metadata used to validate protocol row mutations
 
 Representative shape:
 
@@ -56,13 +56,13 @@ Representative shape:
 pub struct SchemaSource {
     pub owner: &'static str,
     pub sql: &'static str,
-    pub row_schemas: &'static [RowTableSchema],
+    pub projected_tables: &'static [ProjectedTableSchema],
     pub replay_tables: ReplayTables,
 }
 
 pub struct SchemaRegistry {
     sources: Vec<SchemaSource>,
-    row_schemas: BTreeMap<TableName, RowTableSchema>,
+    projected_tables: BTreeMap<TableName, ProjectedTableSchema>,
     replay_retained: BTreeSet<TableName>,
     replay_reset: BTreeSet<TableName>,
     replay_summary: BTreeSet<TableName>,
@@ -70,8 +70,9 @@ pub struct SchemaRegistry {
 
 impl SchemaRegistry {
     pub fn validate_table(&self, table: TableName) -> Result<(), SchemaError>;
-    pub fn validate_row(&self, row: &TableRow) -> Result<(), SchemaError>;
+    pub fn validate_mutation(&self, mutation: &RowMutation) -> Result<(), SchemaError>;
     pub fn quoted_table(&self, table: TableName) -> Result<String, SchemaError>;
+    pub fn quoted_column(&self, table: TableName, column: &str) -> Result<String, SchemaError>;
     pub fn replay_reset_tables(&self) -> impl Iterator<Item = TableName>;
     pub fn replay_summary_tables(&self) -> impl Iterator<Item = TableName>;
 }
@@ -118,26 +119,32 @@ CREATE TABLE IF NOT EXISTS intents (
 );
 ```
 
-Protocol fact-family schema stays with the family:
+Protocol fact-family schema stays with the family. Prefer explicit SQL columns
+over opaque `row_key`/`row_value` packing:
 
 ```rust
 // protocol/auth/recipient_key.rs
 pub const RECIPIENT_KEY_ROWS: TableName = TableName::new("recipient_key_rows");
 
-pub const RECIPIENT_KEY_ROW_SCHEMA: RowTableSchema = RowTableSchema::new(
-    RECIPIENT_KEY_ROWS,
-    &[
-        RowField::bytes32("workspace_id"),
-        RowField::bytes32("recipient_key_id"),
+pub const RECIPIENT_KEY_SCHEMA: ProjectedTableSchema = ProjectedTableSchema {
+    table: RECIPIENT_KEY_ROWS,
+    columns: &[
+        Column::blob("workspace_id"),
+        Column::blob("recipient_key_id"),
+        Column::blob("endpoint_id"),
+        Column::blob("recipient_key"),
+        Column::blob("previous_recipient_key_id"),
+        Column::integer("created_at_ms"),
+        Column::blob("signer_public_key"),
     ],
-    &[
-        RowField::bytes32("endpoint_id"),
-        RowField::bytes32("recipient_key"),
-        RowField::bytes32("previous_recipient_key_id"),
-        RowField::u64be("created_at_ms"),
-        RowField::bytes32("signer_public_key"),
+    primary_key: &["workspace_id", "recipient_key_id"],
+    indexes: &[
+        Index::new(
+            "recipient_key_by_workspace_created",
+            &["workspace_id", "created_at_ms", "recipient_key_id"],
+        ),
     ],
-);
+};
 ```
 
 ## `context.rs`
@@ -188,8 +195,10 @@ context as plain typed data and keep all matching SQL in `project_fact`.
 
 ## `row_schema.rs`
 
-`row_schema.rs` is optional in the direct-SQL target. It currently exists to
-encode and decode opaque protocol row tables shaped like:
+The simplest target is to eliminate `row_schema.rs`.
+
+`row_schema.rs` currently exists to encode and decode opaque protocol row
+tables shaped like:
 
 ```sql
 CREATE TABLE some_family_rows (
@@ -198,16 +207,22 @@ CREATE TABLE some_family_rows (
 );
 ```
 
-If the runtime keeps opaque `row_key`/`row_value` projected tables, then a small
-row-schema helper is useful for row construction, row decoding, and mutation
-validation.
+Keeping that shape forces every useful query to decode blobs or to duplicate
+index tables. Since protocol `queries.rs` should use full SQL, projected tables
+should instead use explicit SQL columns. Then SQLite can filter, order, join,
+count, and page directly on the stored columns.
 
-If the runtime moves projected tables to explicit SQL columns, then
-`row_schema.rs` should disappear or shrink into `schema.rs`. In that model,
-fact-family roots declare SQL columns, and projectors emit typed row mutations
-instead of packed key/value blobs.
+The preferred migration is:
 
-Opaque table mutation:
+1. Give every projected fact-family table explicit SQL columns.
+2. Replace `RowTableSchema` constants with lightweight `ProjectedTableSchema`
+   declarations in the fact-family root.
+3. Replace `TableRow { key, value }` mutations with typed insert/delete
+   mutations that name columns.
+4. Move any remaining validation metadata into `schema.rs`.
+5. Delete `row_schema.rs`.
+
+The old opaque mutation shape should disappear:
 
 ```rust
 RowMutation::Put(TableRow {
@@ -217,7 +232,7 @@ RowMutation::Put(TableRow {
 })
 ```
 
-Typed table mutation:
+Use typed table mutations instead:
 
 ```rust
 RowMutation::Insert {
@@ -243,7 +258,7 @@ RowMutation::Insert {
 }
 ```
 
-`project_fact` can commit the typed mutation directly:
+`project_fact` commits typed mutations directly:
 
 ```sql
 INSERT OR REPLACE INTO recipient_key_rows
@@ -255,8 +270,8 @@ VALUES
 
 Typed tables are probably simpler if queries use full SQL, because query SQL can
 filter, order, join, and count on named columns without decoding row blobs.
-That makes `row_schema.rs` a migration aid, not a permanent architecture
-requirement.
+That makes `row_schema.rs` a migration aid to remove, not a permanent
+architecture component.
 
 ## `db.rs`
 
@@ -269,7 +284,7 @@ It owns:
 - applying schema sources
 - exposing `conn()` for read SQL
 - running write transactions
-- validating table rows through `SchemaRegistry`
+- validating typed row mutations through `SchemaRegistry`
 - exact fact reads
 - bounded fact batch reads
 
@@ -297,12 +312,16 @@ impl Db {
         f: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T, DbError>,
     ) -> Result<T, DbError>;
 
-    pub fn validate_row(&self, row: &TableRow) -> Result<(), DbError> {
-        self.schema.validate_row(row).map_err(DbError::Schema)
+    pub fn validate_mutation(&self, mutation: &RowMutation) -> Result<(), DbError> {
+        self.schema.validate_mutation(mutation).map_err(DbError::Schema)
     }
 
     pub fn quoted_table(&self, table: TableName) -> Result<String, DbError> {
         self.schema.quoted_table(table).map_err(DbError::Schema)
+    }
+
+    pub fn quoted_column(&self, table: TableName, column: &str) -> Result<String, DbError> {
+        self.schema.quoted_column(table, column).map_err(DbError::Schema)
     }
 
     pub fn fact_by_id(&self, id: FactId) -> Result<Option<Fact>, DbError>;
@@ -402,31 +421,53 @@ fn apply_row_mutations(
     allowed_tables: &[TableName],
 ) -> Result<(), Error> {
     for mutation in mutations {
+        db.validate_mutation(&mutation)?;
         match mutation {
-            RowMutation::Put(row) => {
-                require_allowed(row.table, allowed_tables)?;
-                db.validate_row(&row)?;
-                let table = db.quoted_table(row.table)?;
+            RowMutation::Insert(insert) => {
+                require_allowed(insert.table, allowed_tables)?;
+                let table = db.quoted_table(insert.table)?;
+                let columns = insert
+                    .columns
+                    .iter()
+                    .map(|column| db.quoted_column(insert.table, column))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let placeholders = placeholders(insert.values.len());
                 tx.execute(
                     &format!(
-                        "INSERT OR REPLACE INTO {table} (row_key, row_value)
-                         VALUES (?1, ?2)"
+                        "INSERT OR REPLACE INTO {table} ({})
+                         VALUES ({placeholders})",
+                        columns.join(", ")
                     ),
-                    params![row.key, row.value],
+                    params_from_values(&insert.values),
                 )?;
             }
-            RowMutation::Delete { table, key } => {
-                require_allowed(table, allowed_tables)?;
-                let table = db.quoted_table(table)?;
+            RowMutation::DeleteWhere(delete) => {
+                require_allowed(delete.table, allowed_tables)?;
+                let table = db.quoted_table(delete.table)?;
+                let predicate = checked_predicate(db, delete.table, &delete.predicate)?;
                 tx.execute(
-                    &format!("DELETE FROM {table} WHERE row_key = ?1"),
-                    params![key],
+                    &format!("DELETE FROM {table} WHERE {predicate}"),
+                    params_from_values(&delete.values),
                 )?;
             }
         }
     }
     Ok(())
 }
+```
+
+For a recipient key row, the committed SQL is ordinary table SQL:
+
+```sql
+INSERT OR REPLACE INTO recipient_key_rows
+    (workspace_id, recipient_key_id, endpoint_id, recipient_key,
+     previous_recipient_key_id, created_at_ms, signer_public_key)
+VALUES
+    (?1, ?2, ?3, ?4, ?5, ?6, ?7);
+
+DELETE FROM recipient_key_rows
+WHERE workspace_id = ?1
+  AND recipient_key_id = ?2;
 ```
 
 Projection completion:
@@ -621,7 +662,8 @@ pub fn latest_local_key_secret(
     workspace_id: FactId,
 ) -> Result<Option<LocalKeySecretRow>, Error> {
     let mut stmt = db.conn().prepare(
-        "SELECT row_key, row_value
+        "SELECT workspace_id, frontier_id, secret_fact_id, owner_endpoint_id,
+                created_at_ms, key_secret
          FROM local_key_secret_rows
          WHERE workspace_id = ?1
          ORDER BY created_at_ms DESC, frontier_id DESC
