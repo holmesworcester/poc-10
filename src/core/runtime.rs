@@ -7,13 +7,12 @@
 //! sources, projector router, handler registry, and row mutation allowlist that
 //! make those mechanics meaningful.
 //!
-//! The runtime does not interpret protocol bytes. It has five jobs:
+//! The runtime does not interpret protocol bytes. It has four jobs:
 //!
 //! 1. Open a database with core plus protocol schema.
 //! 2. Expose SQL-backed queue/status diagnostics.
 //! 3. Admit command, host, fact, and intent work into core storage.
-//! 4. Drain one bounded queue at a time in the order chosen by daemon/replay.
-//! 5. Snapshot, replay, and compare replay-relevant state.
+//! 4. Drain one bounded queue at a time.
 //!
 //! Command-authored facts commit before command receipts are returned, and
 //! handler output commits only through the dispatch boundary. Those rules make
@@ -23,8 +22,7 @@
 //!
 //! This is the facade a protocol host should use when it wants the whole core
 //! engine. Runtime holds the concrete database, projector, and protocol
-//! description. Daemon and replay choose ordering by calling the named bounded
-//! queue steps.
+//! description. Hosts choose ordering by calling the named bounded queue steps.
 
 use crate::core::command::AuthoredFacts;
 use crate::core::db::{Db, SchemaSource, TableName};
@@ -320,88 +318,6 @@ impl Runtime {
             end_inclusive,
             limit,
         )
-    }
-
-    // -------------------------------------------------------------------------
-    // Replay and Snapshots
-    // -------------------------------------------------------------------------
-
-    /// Run the replay entry point against this runtime's database.
-    ///
-    /// Replay drops queued intents and other schema-declared non-fact runtime
-    /// state, then drains retained facts through replay-mode projection and
-    /// handler context until the replay barrier is idle. Replay must not run
-    /// network IO, recurring schedules, or operational wall-clock decisions.
-    pub fn replay(
-        &mut self,
-        order: crate::core::replay::ReplayOrder,
-    ) -> Result<crate::core::replay::ReplayReport, String> {
-        crate::core::replay::run_replay(
-            &self.db,
-            self.projector.as_ref(),
-            self.description.handlers,
-            self.description.row_mutation_tables,
-            self.description.fact_admission,
-            self.description.storage_requirement_check,
-            order,
-        )
-    }
-
-    /// Compute the canonical, order-independent digest of replay-relevant state.
-    pub fn state_summary(&self) -> Result<crate::core::replay_check::StateSummary, String> {
-        crate::core::replay_check::state_summary(&self.db)
-    }
-
-    /// Write a standalone snapshot of this runtime's database to `path`.
-    pub fn snapshot_to(&self, path: &Path) -> Result<(), String> {
-        self.db.backup_into(path)
-    }
-
-    /// Prove replay idempotence and projection-order independence on scratch
-    /// copies of this runtime's database.
-    ///
-    /// Snapshots the live database, then runs the canonical, idempotent, reverse,
-    /// and scrambled replay plans against independent scratch databases and
-    /// compares their state digests. The live database is never mutated. Scratch
-    /// runtimes are opened here in core so protocol CLI hosts never open a database
-    /// themselves.
-    pub fn replay_check(
-        &self,
-        scratch_dir: &Path,
-    ) -> Result<crate::core::replay_check::ReplayCheckReport, String> {
-        use crate::core::replay::ReplayOrder;
-
-        let snapshot = scratch_dir.join("snapshot.db");
-        self.snapshot_to(&snapshot)?;
-
-        // Each plan is a sequence of replay orders run on one scratch copy.
-        // `idempotent` runs canonical replay twice to prove a second replay over
-        // already-replayed state changes nothing.
-        let plans: &[(&str, &[ReplayOrder])] = &[
-            ("canonical", &[ReplayOrder::Canonical]),
-            (
-                "idempotent",
-                &[ReplayOrder::Canonical, ReplayOrder::Canonical],
-            ),
-            ("reverse", &[ReplayOrder::Reverse]),
-            ("scramble-1", &[ReplayOrder::Scramble { seed: 1 }]),
-            ("scramble-2", &[ReplayOrder::Scramble { seed: 2 }]),
-            ("scramble-7", &[ReplayOrder::Scramble { seed: 7 }]),
-        ];
-
-        let mut summaries = Vec::with_capacity(plans.len());
-        for (name, orders) in plans {
-            let path = scratch_dir.join(format!("{name}.db"));
-            std::fs::copy(&snapshot, &path)
-                .map_err(|err| format!("copy replay-check snapshot for {name}: {err}"))?;
-            let mut runtime = Runtime::open_disk(self.description, &path)?;
-            for order in *orders {
-                runtime.replay(*order)?;
-            }
-            summaries.push(((*name).to_string(), runtime.state_summary()?));
-        }
-
-        Ok(crate::core::replay_check::compare_replay_passes(summaries))
     }
 }
 

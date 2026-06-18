@@ -89,7 +89,7 @@ Protocol code enters core through declarations and effect values:
   facts to admit durably, incoming facts to stage for projection, purges, row
   mutations, durable intents, and local intents.
 - `db::SchemaSource` lets core, network IO, and protocol registry code
-  declare SQL DDL, opaque row-table allowlists, and replay lifecycle for
+  declare SQL DDL, opaque row-table allowlists, and rebuild lifecycle for
   retained fact storage, resettable runtime state, and state-summary tables.
 
 Data leaves core through the same narrow surfaces: commands receive
@@ -241,7 +241,7 @@ use core syntax and contracts, but core must not import their semantic rules.
   local intent, loads only handler-declared fact inputs, calls the registered
   handler, and commits successful handler output atomically with queue-row
   deletion. It also owns handler route metadata, handler sets, recurring intent
-  schedules, and replay-mode dispatch context.
+  schedules, and dispatch context.
 - `perf_profile.rs`: env-gated performance instrumentation. It records coarse
   phase timings in thread-local state only when explicitly enabled, preserving
   normal CLI output by default. It is for runtime profiling, not protocol
@@ -251,11 +251,6 @@ use core syntax and contracts, but core must not import their semantic rules.
   matched context and due time ranges, runs the routed projector, applies source
   rules, purges exact fact-owned state, wakes matched owners, and commits
   emitted effects.
-- `replay.rs`: replay entry point. It resets schema-declared derived state,
-  reprojects retained facts in canonical, reverse, or deterministic scrambled
-  order, and enforces replay constraints such as no network rows.
-- `replay_check.rs`: replay diagnostics. It computes state summaries and
-  compares canonical, idempotent, reverse, and scrambled replay passes.
 - `runtime.rs`: executable engine for one selected protocol description. It
   opens databases, applies declared schemas, submits authored facts, exposes
   bounded projection and intent queue drains, admits due time wakes, and
@@ -264,7 +259,7 @@ use core syntax and contracts, but core must not import their semantic rules.
   admissions, context edges, time wakes, pending projection, incoming facts,
   pending projection matches, the `pending_time_ranges` work table, intent
   queues, local network
-  tables, and replay reset groups. Protocol rows live in protocol schema sources.
+  tables, and rebuild reset groups. Protocol rows live in protocol schema sources.
 - `db.rs`: SQLite substrate below runtime policy. It applies schema batches,
   opens transactions, quotes identifiers, and applies typed row mutations. It
   does not know what a fact tag,
@@ -279,8 +274,8 @@ use core syntax and contracts, but core must not import their semantic rules.
 The runtime contract is split by ownership: `project_fact.rs` keeps the
 protocol-neutral projection contract, route metadata, shared commit/context
 helpers, and fact queue worker; `handle_intent.rs` keeps handler route metadata,
-handler sets, replay dispatch policy, and the intent queue worker. `runtime.rs`
-composes those pieces into command, daemon, and replay turns. Protocol
+handler sets, and the intent queue worker. `runtime.rs`
+composes those pieces into command and daemon turns. Protocol
 projectors own raw decoding, validation, adaptation, and semantic projection;
 core owns queueing, matched context, needs/offers, effect commits, and replay
 mode.
@@ -403,21 +398,21 @@ intent row in place. Durable and local intent admission validates handler
 registry membership before queue insertion; a stale unregistered row that is
 already present is an invariant error, not a successful commit.
 
-### Replay And Time Wakes
+### Rebuild Mode And Time Wakes
 
 A projector can schedule its own fact on a protocol timeline. When the daemon
 advances that timeline, core marks matching fact owners in
 `pending_projection`, stores the due `TimeRange`, and projection context
 exposes that range without allowing projectors to read the clock.
 
-Replay uses the same projection and handler paths with a different runtime
-mode. It preserves only the retained fact storage (`facts` plus
+Rebuild uses the same projection and handler paths with a different runtime
+mode on queued work. It preserves only the retained fact storage (`facts` plus
 `local_fact_admissions`), clears schema-declared resettable runtime state,
 queues retained facts into `pending_projection`, and calls projection with
-`ProjectionContext::is_replay()`. Facts emitted during replay enter the same
-queue and are projected by the replay drain before live work resumes.
-Projectors use replay mode to avoid live-only projection intents. During replay
-dispatch, handlers receive
+`ProjectionContext::is_replay()`. Facts emitted during rebuild enter the same
+queue and are projected by the ordinary drain before later work observes them.
+Projectors use replay mode to avoid live-only projection intents. During
+replay-mode dispatch, handlers receive
 `HandlerContext::is_replay()` and return empty effects at live-only edges.
 Recurring work is represented as recurring intents; the live daemon's in-memory
 cadence is only the scheduling mechanism that enqueues due work.

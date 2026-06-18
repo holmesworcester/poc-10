@@ -9,7 +9,7 @@ Core has three separate surfaces:
 
 - Fact-family APIs read projected state or author facts.
 - The command host commits authored facts atomically.
-- Runtime, daemon, and replay drain queues.
+- Runtime and daemon drain queues.
 
 A CLI command is any user-invoked verb, including read-only verbs such as
 `messages`, `view`, `workspaces`, and `count`. A fact-family API operation is a
@@ -138,11 +138,11 @@ encoding, authoring, projection, and handler use until they need an API:
 ## Test Migration
 
 Black-box protocol tests should use existing command surfaces: CLI commands,
-daemon ticks, `assert eventually`, `replay`, `replay-check`, and
-`state-summary`. Direct tests remain for core primitives such as atomic effect
-commit, bounded queue limits, context matching, schema lifecycle, fact
-encoders/decoders, and projector-local authentication boundaries.
+daemon ticks, `assert eventually`, and `state-summary`. Direct tests remain for
+core primitives such as atomic effect commit, bounded queue limits, context
+matching, schema lifecycle, fact encoders/decoders, and projector-local
+authentication boundaries.
 
 Tests that only preserve old command/runtime orchestration should be deleted or
-rewritten. A command-visible result must become visible through daemon/replay
+rewritten. A command-visible result must become visible through normal daemon
 work, not through hidden command projection.

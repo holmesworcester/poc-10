@@ -3,8 +3,8 @@
 //! `Db` is the lowest runtime layer above SQLite. It opens the connection,
 //! applies schema batches, runs explicit transactions, quotes trusted table and
 //! column identifiers, and applies typed row mutations. It does not own fact
-//! persistence, projection queues, intent queues, replay diagnostics, network
-//! queues, or protocol query SQL; those modules use `Db::conn()` and
+//! persistence, projection queues, intent queues, state-summary diagnostics,
+//! network queues, or protocol query SQL; those modules use `Db::conn()` and
 //! `write_transaction()` to own their table behavior directly.
 //!
 //! All atomicity comes from callers choosing the transaction closure. `Db`
@@ -38,24 +38,24 @@ impl TableName {
     }
 }
 
-/// Replay lifecycle declarations for tables created by one schema source.
+/// Rebuild lifecycle declarations for tables created by one schema source.
 ///
 /// `protected` tables are retained fact-storage tables and are never cleared by
-/// replay. `reset` tables are derived, queued, or local runtime state that
-/// replay can clear before rebuilding. `summary` tables are hashed by
-/// replay-check.
+/// rebuild. `reset` tables are derived, queued, or local runtime state that a
+/// rebuild can clear before replay-mode projection. `summary` tables are
+/// hashed by `state-summary`.
 #[derive(Debug, Clone, Copy)]
 pub struct ReplayTables {
-    /// Retained fact-storage tables that replay reset must not clear.
+    /// Retained fact-storage tables that rebuild reset must not clear.
     pub protected: &'static [TableName],
-    /// Tables cleared by replay reset.
+    /// Tables cleared by rebuild reset.
     pub reset: &'static [TableName],
-    /// Tables included in replay-check state summaries.
+    /// Tables included in state summaries.
     pub summary: &'static [TableName],
 }
 
 impl ReplayTables {
-    /// Empty replay lifecycle declarations for tests and non-replay schemas.
+    /// Empty rebuild lifecycle declarations for tests and non-rebuild schemas.
     pub const EMPTY: Self = Self {
         protected: &[],
         reset: &[],
@@ -63,12 +63,12 @@ impl ReplayTables {
     };
 }
 
-/// One executable schema batch plus replay lifecycle declarations.
+/// One executable schema batch plus rebuild lifecycle declarations.
 #[derive(Debug, Clone, Copy)]
 pub struct SchemaSource {
     /// SQL batch applied when the database opens.
     pub ddl: &'static str,
-    /// Replay reset and summary lifecycle declarations for this source's
+    /// Rebuild reset and summary lifecycle declarations for this source's
     /// tables.
     pub replay: ReplayTables,
 }
@@ -341,37 +341,19 @@ impl Db {
         })
     }
 
-    /// Tables protected from replay reset.
+    /// Tables protected from rebuild reset.
     pub fn replay_protected_tables(&self) -> &[TableName] {
         &self.replay_protected_tables
     }
 
-    /// Tables replay reset is allowed to clear.
+    /// Tables rebuild reset is allowed to clear.
     pub fn replay_reset_tables(&self) -> &[TableName] {
         &self.replay_reset_tables
     }
 
-    /// Tables replay-check hashes as protocol/runtime state.
+    /// Tables state-summary hashes as protocol/runtime state.
     pub fn replay_summary_tables(&self) -> &[TableName] {
         &self.replay_summary_tables
-    }
-
-    /// Write a standalone, consistent copy of this database to `path`.
-    ///
-    /// `VACUUM INTO` produces a single self-contained database file with no WAL
-    /// or SHM sidecar, so callers can copy or open the snapshot independently.
-    /// Used by replay diagnostics to run replay on scratch databases without
-    /// mutating the live database. The path is interpolated as a SQL string literal
-    /// because `VACUUM INTO` does not accept bound parameters; embedded quotes are
-    /// escaped.
-    pub fn backup_into(&self, path: &Path) -> Result<(), String> {
-        let target = path
-            .to_str()
-            .ok_or_else(|| "snapshot path is not valid UTF-8".to_string())?
-            .replace('\'', "''");
-        self.conn
-            .execute_batch(&format!("VACUUM INTO '{target}'"))
-            .map_err(|err| format!("snapshot database: {err}"))
     }
 
     // Critical path: callers put every atomic row mutation

@@ -1106,12 +1106,10 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
         content_count
     ),
     cli_command!("count", auth::workspace::cli::COUNT_USAGE, count),
-    // Update/replay diagnostics: request a local protocol update, hash
-    // replay-relevant state, and prove replay idempotence/order-independence on
-    // scratch copies.
+    // Versioning diagnostics: request a local protocol update and hash
+    // rebuild-relevant state.
     cli_command!("update", command::UPDATE_USAGE, update),
     cli_command!("state-summary", command::STATE_SUMMARY_USAGE, state_summary),
-    cli_command!("replay-check", command::REPLAY_CHECK_USAGE, replay_check),
     cli_command!(
         "intent-registry",
         command::INTENT_REGISTRY_USAGE,
@@ -1282,13 +1280,13 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
     // binary's protocol version with projected local version state and emits a
     // local update fact when a rebuild is needed.
     handler_route!(
-        versioning::update::CHECK_VERSION,
-        versioning::update::CheckVersionHandler,
-        storage = versioning::update::STORAGE_REQUIREMENT,
+        versioning::check_version::CHECK_VERSION,
+        versioning::check_version::CheckVersionHandler,
+        storage = versioning::check_version::STORAGE_REQUIREMENT,
         recurring = RecurringIntentSpec {
             interval_ms: 250,
             initial_delay_ms: 0,
-            build_intent: versioning::update::build_check_version_intent,
+            build_intent: versioning::check_version::build_check_version_intent,
         }
     ),
     // Handshake/sync sends and the response builders are operational IO over a

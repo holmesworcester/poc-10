@@ -2,11 +2,10 @@ use std::collections::BTreeSet;
 
 use rusqlite::{params, Connection};
 use topo::core::db::{Db, ReplayTables, SchemaSource, TableInsert, TableName, Value};
-use topo::core::replay::clear_replay_reset_tables;
-use topo::core::replay_check::replay_summary_table_hashes;
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::protocol::content::{file, reaction};
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
+use topo::protocol::versioning::state_summary::state_summary_table_hashes;
 
 const TYPED_MESSAGES: TableName = TableName::new("typed_messages");
 const REPLAY_PROTECTED_ROWS: TableName = TableName::new("replay_protected_rows");
@@ -352,7 +351,7 @@ fn content_read_model_rows_materialize_into_typed_tables() {
 }
 
 #[test]
-fn replay_lifecycle_reset_preserves_protected_tables() {
+fn rebuild_lifecycle_declares_protected_reset_and_summary_tables() {
     let store =
         Db::open_memory_with_schema_sources(&[REPLAY_LIFECYCLE_SCHEMA]).expect("open lifecycle db");
     store
@@ -376,24 +375,27 @@ fn replay_lifecycle_reset_preserves_protected_tables() {
         ])
         .expect("seed lifecycle rows");
 
-    assert_eq!(
-        clear_replay_reset_tables(&store).expect("clear replay reset"),
-        1
-    );
+    let protected = store
+        .replay_protected_tables()
+        .iter()
+        .map(|table| table.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(protected, vec![REPLAY_PROTECTED_ROWS.as_str()]);
+    let reset = store
+        .replay_reset_tables()
+        .iter()
+        .map(|table| table.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(reset, vec![REPLAY_RESET_ROWS.as_str()]);
+
     assert_eq!(
         store
             .table_row_count(REPLAY_PROTECTED_ROWS)
             .expect("count protected rows"),
         1
     );
-    assert_eq!(
-        store
-            .table_row_count(REPLAY_RESET_ROWS)
-            .expect("count reset rows"),
-        0
-    );
 
-    let summaries = replay_summary_table_hashes(&store).expect("hash replay summary tables");
+    let summaries = state_summary_table_hashes(&store).expect("hash state summary tables");
     assert_eq!(summaries.len(), 2);
     assert_eq!(
         summaries
@@ -409,7 +411,7 @@ fn replay_lifecycle_reset_preserves_protected_tables() {
             .find(|summary| summary.table == REPLAY_RESET_ROWS.as_str())
             .expect("reset summary")
             .count,
-        0
+        1
     );
 }
 
@@ -451,7 +453,7 @@ CREATE TABLE IF NOT EXISTS replay_protected_rows (
     };
 
     let err = match Db::open_memory_with_schema_sources(&[BAD_SCHEMA]) {
-        Ok(_) => panic!("overlapping replay lifecycle declarations must reject"),
+        Ok(_) => panic!("overlapping rebuild lifecycle declarations must reject"),
         Err(err) => err,
     };
     assert!(

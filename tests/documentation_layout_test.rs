@@ -259,21 +259,14 @@ fn poc10_replay_intent_shape_doc_records_current_upgrade_readiness_plan() {
         "author a local protocol update fact",
         "Replay-mode projection of update facts is a no-op",
         "`state-summary`",
-        "print a stable hashable summary of replay-relevant state",
+        "print a stable hashable summary of rebuild-relevant state",
         "include one overall `state_hash` plus per-area hashes and counts",
         "computed from canonical row serialization with deterministic ordering",
-        "`replay-check`",
-        "copy the database to scratch snapshots",
-        "canonical replay, an idempotent replay, reverse-order replay, and several deterministic scrambled-order replay passes",
-        "compare the same state summary `state_hash` for every pass",
-        "per-area hash/count differences",
-        "projection order independence",
-        "replay work interleaving independence",
         "`intent-registry`",
         "`recurring-intents`",
         "`recurring-run KIND --now MS`",
         "`connection-maintenance-status`",
-        "network rows, fires recurring schedulers, or creates maintenance attempts before the replay barrier",
+        "`state-summary` should remain a read-only digest",
         "Registry test: `HandlerRoute` has no replay policy flag",
         "Time-wake test: every daemon `TimeWake` timeline is replayable",
         "Unwrap test: replay dispatch of `unwrap_key_wrap` is idempotent",
@@ -283,10 +276,8 @@ fn poc10_replay_intent_shape_doc_records_current_upgrade_readiness_plan() {
         "Bootstrap test: replay rebuilds accepted bootstrap peer rows from `invite_accepted`",
         "`recurring-run maintain_connections --now MS` creates or retries bootstrap attempts",
         "Recurring-intent test: `recurring-intents` and `intent-registry` show `maintain_connections` as live-only recurring work",
-        "Replay CLI test: `replay-check` reports the same state summary digest",
-        "reverse projection order, and scrambled replay order",
-        "Replay order test: `replay-check` covers reverse and scrambled replay plans",
-        "different projection order and replay work interleavings",
+        "Update CLI test: `update` plus the ordinary daemon loop rebuilds projected rows",
+        "State-summary CLI test: `state-summary` reports a stable digest",
     ] {
         assert!(
             normalized.contains(required),
@@ -439,8 +430,11 @@ fn protocol_versioning_docs_separate_release_marker_from_storage_guards() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let versioning = rust_module_doc_text(&root.join("src/protocol/versioning.rs"));
     let update = rust_module_doc_text(&root.join("src/protocol/versioning/update.rs"));
+    let check_version =
+        rust_module_doc_text(&root.join("src/protocol/versioning/check_version.rs"));
     let normalized_versioning = normalize_whitespace(&versioning);
     let normalized_update = normalize_whitespace(&update);
+    let normalized_check_version = normalize_whitespace(&check_version);
 
     for required in [
         "Keep two version concepts separate",
@@ -471,19 +465,25 @@ fn protocol_versioning_docs_separate_release_marker_from_storage_guards() {
     }
 
     for required in [
-        "Local protocol update facts and recurring release-version checks",
-        "owns the release marker side of protocol versioning",
-        "recurring `check_version` intent compares the stored marker with `CURRENT_PROTOCOL_VERSION`",
-        "A mismatch emits a priority local update fact",
-        "Projecting that update fact requests the generic rebuild effect",
-        "records the new marker as protocol state",
-        "not the same as a projector/query storage requirement",
-        "Per-family projector and query guards are safety contracts",
-        "release marker is only the protocol-owned trigger",
+        "Local protocol update fact family",
+        "Update facts are local control-plane facts",
+        "Live projection of the current update fact requests the generic rebuild effect",
+        "records the release marker row",
+        "Replay projection of old update facts is a no-op",
     ] {
         assert!(
             normalized_update.contains(required),
             "src/protocol/versioning/update.rs is missing update contract detail {required:?}"
+        );
+    }
+
+    for required in [
+        "Recurring intent that emits update facts when the release marker is stale",
+        "check_version",
+    ] {
+        assert!(
+            normalized_check_version.contains(required),
+            "src/protocol/versioning/check_version.rs is missing check-version contract detail {required:?}"
         );
     }
 }
@@ -529,7 +529,7 @@ fn core_readmes_document_runtime_boundaries() {
         "### Runtime Work Sections",
         "### Projection Path And Commit Boundary",
         "### Handler Commit Boundary",
-        "### Replay And Time Wakes",
+        "### Rebuild Mode And Time Wakes",
         "app.rs",
         "generic process runner over a `ProtocolDescription`",
         "cli.rs",
@@ -566,8 +566,6 @@ fn core_readmes_document_runtime_boundaries() {
         "db.rs",
         "SQLite substrate below runtime policy",
         "applies typed row mutations",
-        "replay_check.rs",
-        "replay diagnostics",
         "wire.rs",
         "fixed-layout byte primitive layer",
         "### Runtime Work Sections",
@@ -661,8 +659,6 @@ fn architecture_docs_match_current_module_and_context_names() {
     );
 
     for required in [
-        "`replay.rs`: replay entry point",
-        "`replay_check.rs`: replay diagnostics",
         "`db.rs`: SQLite substrate below runtime policy",
         "applies typed row mutations",
         "`pending_time_ranges` work table",

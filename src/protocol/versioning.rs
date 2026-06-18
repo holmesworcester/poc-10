@@ -35,4 +35,6 @@
 //! authenticate, validate, and project that type. After that release discipline,
 //! the local storage marker plus per-route storage guards cover the rest.
 
+pub mod check_version;
+pub mod state_summary;
 pub mod update;

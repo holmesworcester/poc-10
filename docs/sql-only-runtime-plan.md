@@ -9,16 +9,15 @@ tables, and protocol query modules run bounded SQL over projected tables.
 - `core/db.rs` owns the SQLite connection, schema execution, transactions,
   trusted identifier quoting, and generic typed row mutation mechanics.
 - `core/schema.rs` declares retained fact tables, local fact admission tables,
-  incoming fact tables, queue tables, and replay lifecycle groups.
+  incoming fact tables, queue tables, and rebuild lifecycle groups.
 - `core/project_fact.rs` owns fact lifecycle SQL and projection commit ordering:
   retained and incoming admission, pending queue selection, context
   replacement, due time wakes, exact fact purges, row mutations, emitted facts,
-  intents, and queue deletion.
+  intents, rebuild effect commit, and queue deletion.
 - `core/handle_intent.rs` owns intent queue SQL, handler input fact loading,
   handler dispatch, retry behavior, and atomic commit of handler output.
-- `core/replay.rs` owns replay reset and replay-mode projection/intent driving.
-- `core/replay_check.rs` owns state summaries and replay-check pass diffs.
 - `core/network.rs` owns TCP and memory-local network queue SQL.
+- `protocol/versioning/state_summary.rs` owns state-summary diagnostics.
 - Protocol fact-family roots own projected table names, column order, key
   columns, and typed row builders.
 - Protocol `queries.rs` modules own bounded SQL reads over projected rows.
@@ -35,7 +34,6 @@ then return `ProjectionOutput`. They do not query SQLite.
 - run `write_transaction`
 - apply typed table inserts/deletes for projected rows and seed data
 - count declared tables
-- snapshot the SQLite database for replay diagnostics
 
 There is no generic `(row_key, row_value)` API and no generic read helper layer.
 Table owners write the SQL shape they need directly.
@@ -53,12 +51,12 @@ Queries may use full SQL against projected tables. The guardrails are:
 
 SQLite is the abstraction for reads.
 
-## Replay
+## Rebuild
 
-Replay clears schema-declared derived state, queues retained facts for
+Rebuild clears schema-declared derived state, queues retained facts for
 projection, and rebuilds projected state by running the normal projection and
-intent commit paths in replay mode. Replay does not own protocol-specific
-rebuild logic; projectors decide what their facts materialize in replay mode.
+intent commit paths in replay mode. Rebuild does not own protocol-specific
+logic; projectors decide what their facts materialize in replay mode.
 
-Replay-check is separate diagnostic work. It hashes declared summary tables
-after replay and compares canonical, idempotent, reverse, and scrambled passes.
+State-summary is separate protocol diagnostic work. It hashes declared summary
+tables after ordinary runtime work has drained.

@@ -6,18 +6,19 @@ table's behavior.
 
 ## Current Split
 
-- `core/schema.rs` owns core table names, schema batches, and replay lifecycle
+- `core/schema.rs` owns core table names, schema batches, and rebuild lifecycle
   declarations.
 - `core/db.rs` owns the SQLite connection, schema execution, transactions,
   trusted identifier quoting, and generic typed row mutation mechanics.
 - `core/project_fact.rs` owns retained and incoming fact admission, pending
   projection queue selection, projection commit ordering, exact fact purge
-  cleanup, standing context SQL, due time wake SQL, and row mutation commit.
+  cleanup, standing context SQL, due time wake SQL, rebuild effect commit, and
+  row mutation commit.
 - `core/handle_intent.rs` owns durable and local intent queue SQL plus exact
   handler input fact loading.
 - `core/network.rs` owns network queue SQL.
-- `core/replay.rs` owns replay reset and replay-mode work driving.
-- `core/replay_check.rs` owns diagnostic replay summaries and pass comparison.
+- `protocol/versioning/state_summary.rs` owns state-summary diagnostics over
+  schema-declared summary tables.
 - Protocol fact-family roots own projected table declarations and row builders.
 - Protocol `queries.rs` modules own bounded SQL reads over projected rows.
 
@@ -33,7 +34,7 @@ lifecycle declarations:
   clear.
 - `reset` tables are derived, queued, or local runtime state that replay clears
   before rebuilding.
-- `summary` tables are included in replay-check state digests.
+- `summary` tables are included in state-summary digests.
 
 Schema declarations do not own live database execution. Runtime modules that
 own behavior call `Db::conn()` and `Db::write_transaction()`.
@@ -48,7 +49,6 @@ own behavior call `Db::conn()` and `Db::write_transaction()`.
 - quote trusted table/column identifiers
 - apply typed row mutations
 - count declared tables
-- snapshot the database for diagnostics
 
 `Db` must not grow generic read helpers or queue-specific APIs. If a module
 owns a table, that module writes the SQL shape it needs.
@@ -107,16 +107,16 @@ rules are:
 
 SQLite is the read abstraction.
 
-## Replay
+## Rebuild
 
-Replay rebuilds derived state. It clears schema-declared reset tables, marks
-retained facts pending in replay mode, and drives the normal bounded projection
-and intent workers until the replay barrier is idle.
+Rebuild clears schema-declared reset tables and marks retained facts pending in
+replay mode. That work is requested by a projection effect and then drained by
+the normal bounded projection and intent workers.
 
-Replay must not perform network IO, fire recurring live schedules, or make
-wall-clock decisions. Projectors decide how their fact materializes under
+Rebuild projection must not perform network IO, fire recurring live schedules,
+or make wall-clock decisions. Projectors decide how their fact materializes under
 `ProjectionContext::is_replay()`.
 
-`replay_check.rs` is diagnostic. It may run replay in multiple orders and hash
-summary tables to prove deterministic rebuilds. Whole-table summary scans stay
-there, not in `db.rs`.
+`protocol/versioning/state_summary.rs` is diagnostic. It hashes summary tables
+after ordinary runtime work has drained. Whole-table summary scans stay there,
+not in `db.rs`.

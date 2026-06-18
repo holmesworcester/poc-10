@@ -18,12 +18,11 @@ use crate::core::cli::{decode_hex_32_named as decode_hex_32, encode_hex_32, CliA
 use crate::core::command::{AuthoredFacts, CommandClock};
 use crate::core::daemon;
 use crate::core::db::Db;
-use crate::core::replay_check::StateSummary;
 use crate::core::runtime::Runtime;
 use crate::protocol::connection;
 use crate::protocol::sync;
 use crate::protocol::{auth, content, versioning};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub struct MatchCliContext {
     db: Option<PathBuf>,
@@ -590,22 +589,20 @@ pub(crate) fn content_count(
     Ok(content::message::cli::content_count_output(output))
 }
 
-// Update and replay diagnostics.
+// Update and rebuild diagnostics.
 //
 // `update` authors a local protocol update fact; `state-summary` hashes
-// replay-relevant state; `replay-check` proves replay idempotence and
-// projection-order independence on scratch copies; `intent-registry` lists each
-// handler route's intent kind and recurring policy.
+// rebuild-relevant state; `intent-registry` lists each handler route's intent
+// kind and recurring policy.
 
 pub const UPDATE_USAGE: &str = "update";
 pub const STATE_SUMMARY_USAGE: &str = "state-summary";
-pub const REPLAY_CHECK_USAGE: &str = "replay-check";
 pub const INTENT_REGISTRY_USAGE: &str = "intent-registry";
 
 pub(crate) fn update(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
     args.require_len(0, UPDATE_USAGE)?;
     let clock = FixedClock(ctx.command_timestamp()?);
-    let output = versioning::update::author_update(&clock)?;
+    let output = versioning::update::api::author_update(&clock)?;
     let (receipt, facts) = output.into_parts();
     let mut effects = crate::core::effects::RuntimeEffects::new();
     for fact in facts {
@@ -613,7 +610,7 @@ pub(crate) fn update(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<Cli
     }
     ctx.runtime_mut()
         .submit_runtime_effects(effects, "submit protocol update fact")?;
-    Ok(versioning::update::update_output(
+    Ok(versioning::update::cli::update_output(
         &receipt,
         ctx.runtime().pending_projection_count(),
     ))
@@ -624,22 +621,8 @@ pub(crate) fn state_summary(
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     args.require_len(0, STATE_SUMMARY_USAGE)?;
-    let summary = ctx.runtime().state_summary()?;
+    let summary = versioning::state_summary::state_summary(ctx.runtime().db())?;
     Ok(state_summary_output(&summary))
-}
-
-pub(crate) fn replay_check(
-    ctx: &mut MatchCliContext,
-    args: CliArgs<'_>,
-) -> Result<CliOutput, String> {
-    args.require_len(0, REPLAY_CHECK_USAGE)?;
-    let db = ctx.db_path("replay-check")?.clone();
-    let scratch = scratch_dir_for(&db);
-    std::fs::create_dir_all(&scratch)
-        .map_err(|err| format!("create replay-check scratch dir: {err}"))?;
-    let result = ctx.runtime().replay_check(&scratch);
-    let _ = std::fs::remove_dir_all(&scratch);
-    Ok(replay_check_output(&result?))
 }
 
 pub(crate) fn intent_registry(
@@ -659,22 +642,7 @@ pub(crate) fn intent_registry(
     Ok(CliOutput::lines(lines))
 }
 
-fn replay_check_output(report: &crate::core::replay_check::ReplayCheckReport) -> CliOutput {
-    let mut lines = vec![
-        format!("ok: {}", report.mismatched.is_empty()),
-        format!("passes: {}", report.passes.len()),
-        format!("state_hash: {}", encode_hex_32(&report.canonical_hash)),
-        format!("mismatched_passes: {}", report.mismatched.len()),
-    ];
-    for pass in &report.passes {
-        for diff in &pass.area_diffs {
-            lines.push(format!("diff_{}_{}", pass.name, diff));
-        }
-    }
-    CliOutput::lines(lines)
-}
-
-fn state_summary_output(summary: &StateSummary) -> CliOutput {
+fn state_summary_output(summary: &versioning::state_summary::StateSummary) -> CliOutput {
     let mut lines = vec![
         format!("state_hash: {}", encode_hex_32(&summary.state_hash)),
         format!("areas: {}", summary.areas.len()),
@@ -688,11 +656,6 @@ fn state_summary_output(summary: &StateSummary) -> CliOutput {
         ));
     }
     CliOutput::lines(lines)
-}
-
-fn scratch_dir_for(db: &Path) -> PathBuf {
-    let parent = db.parent().unwrap_or_else(|| Path::new("."));
-    parent.join(format!(".topo-replay-check-{}", std::process::id()))
 }
 
 fn next_cli_timestamp(store: &Db, explicit_at_ms: Option<u64>) -> Result<u64, String> {

@@ -9,7 +9,7 @@ retained facts, and resume operational work without preserving queued intents.
 
 - Retained facts, including retained local facts, are the durable source of
   truth. Core schema marks fact storage and local admission metadata as
-  replay-protected, so replay reset cannot delete them. Queued intents are not
+  rebuild-protected, so rebuild reset cannot delete them. Queued intents are not
   protocol truth.
 - Every poc-10 queued intent is droppable on upgrade. After replay, required
   work is recreated from retained facts, replay-mode projection, context, or
@@ -196,14 +196,14 @@ retained or removed by the normal purge/retirement facts.
 
 ## CLI Test Surface
 
-Add CLI commands that exercise protocol update and replay diagnostics without
-making replay the public upgrade command:
+Add CLI commands that exercise protocol update and rebuild diagnostics without
+making replay a separate public upgrade command:
 
 - `update`: author a local protocol update fact. Its live projection records the
   current protocol version, requests the generic rebuild effect, and leaves the
   retained update fact as audit history. Replay-mode projection of update facts
   is a no-op, so old update facts remain records without re-triggering rebuild.
-- `state-summary`: print a stable hashable summary of replay-relevant state:
+- `state-summary`: print a stable hashable summary of rebuild-relevant state:
   retained facts, materialized rows, context edges, semantic time wakes, sync
   indexes, local key-material rows, and connection-maintenance rows. The output
   should include one overall `state_hash` plus per-area hashes and counts for
@@ -212,13 +212,6 @@ making replay the public upgrade command:
   network queues, and wall-clock timestamps that are not protocol state stay
   out of the summary because their schema sources do not mark them
   summary-visible.
-- `replay-check`: copy the database to scratch snapshots, run canonical replay,
-  an idempotent replay, reverse-order replay, and several deterministic
-  scrambled-order replay passes, then compare the same state summary
-  `state_hash` for every pass. It should prove replay idempotence, projection
-  order independence, replay work interleaving independence, and report the
-  per-area hash/count differences for any table or owned-state area whose
-  replay-derived rows diverge.
 - `intent-registry`: list every handler route with recurrence metadata and
   command exclusion. Replay behavior is visible in handler code through
   `HandlerContext::is_replay()`, not in route metadata.
@@ -232,9 +225,9 @@ making replay the public upgrade command:
   accepted bootstrap peer rows, active attempts, active connections, target
   count, and pending local bootstrap sends.
 
-These commands should make side effects visible. `replay-check` should report
-an error if any diagnostic replay pass leaves network rows, fires recurring
-schedulers, or creates maintenance attempts before the replay barrier.
+These commands should make side effects visible. `state-summary` should remain
+a read-only digest over schema-declared summary tables; update/rebuild behavior
+is exercised through ordinary daemon/runtime projection.
 
 ## Test Plan
 
@@ -268,9 +261,7 @@ schedulers, or creates maintenance attempts before the replay barrier.
 - Recurring-intent test: `recurring-intents` and `intent-registry` show
   `maintain_connections` as live-only recurring work and show no persisted
   recurring job rows.
-- Replay CLI test: `replay-check` reports the same state summary digest for
-  canonical replay, idempotent replay, reverse projection order, and scrambled
-  replay order, with zero network/live-only side effects during every pass.
-- Replay order test: `replay-check` covers reverse and scrambled replay plans
-  that produce the same state summary as canonical replay while exercising
-  different projection order and replay work interleavings.
+- Update CLI test: `update` plus the ordinary daemon loop rebuilds projected
+  rows from retained facts and unblocks guarded queries.
+- State-summary CLI test: `state-summary` reports a stable digest and per-area
+  hashes without mutating live database state.

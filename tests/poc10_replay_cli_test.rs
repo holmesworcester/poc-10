@@ -1,10 +1,8 @@
-//! Black-box CLI tests for protocol updates and deterministic replay
-//! diagnostics.
+//! Black-box CLI tests for protocol updates and deterministic state summaries.
 //!
 //! Setup goes through the real `con` binary: a workspace and content messages
 //! are authored, then protocol `update` rebuilds derived state from retained
-//! facts through the ordinary daemon loop. Replay order checks stay diagnostic
-//! through `replay-check`.
+//! facts through the ordinary daemon loop.
 
 mod cli_harness;
 
@@ -201,13 +199,6 @@ fn wait_for_identity_contains(db: &str, expected: &str) {
         thread::sleep(Duration::from_millis(100));
     }
     panic!("identity never contained {expected}: {last}");
-}
-
-fn state_hash(db: &str) -> String {
-    line_value(
-        &assert_success(topo(&["--db", db, "state-summary"])),
-        "state_hash",
-    )
 }
 
 fn replace_stored_protocol_version(db: &str, version: u32) {
@@ -434,31 +425,6 @@ fn recurring_version_check_repairs_stale_marker_and_replays_pending_fact() {
     let messages = assert_success(topo(&["--db", &db, "messages", &workspace_id]));
     assert!(messages.contains("first message"), "{messages}");
     assert!(messages.contains("second message"), "{messages}");
-}
-
-#[test]
-fn replay_check_reports_identical_digest_across_orders() {
-    let tmp = tempfile::tempdir().unwrap();
-    let db = temp_db(&tmp, "alice.db");
-    seed_workspace_with_content(&db);
-
-    let out = assert_success(topo(&["--db", &db, "replay-check"]));
-    assert_eq!(line_value(&out, "ok"), "true", "{out}");
-    assert_eq!(line_value(&out, "mismatched_passes"), "0", "{out}");
-    assert_eq!(
-        line_value(&out, "passes"),
-        "6",
-        "canonical, idempotent, reverse, and three scrambled passes"
-    );
-
-    // replay-check works on scratch copies and must not mutate the live db.
-    let live_before = state_hash(&db);
-    assert_success(topo(&["--db", &db, "replay-check"]));
-    assert_eq!(
-        state_hash(&db),
-        live_before,
-        "replay-check must not mutate the live database"
-    );
 }
 
 fn area_line(summary: &str, area: &str) -> String {

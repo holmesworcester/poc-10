@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 
 use topo::core::effects::StorageRequirement;
 use topo::protocol::app::{MATCH_PROTOCOL, MATCH_RUNTIME};
-use topo::protocol::versioning::update::{CHECK_VERSION, CURRENT_PROTOCOL_VERSION};
+use topo::protocol::versioning::check_version::CHECK_VERSION;
+use topo::protocol::versioning::update::CURRENT_PROTOCOL_VERSION;
 
 fn rust_files(root: &Path) -> Vec<PathBuf> {
     let mut pending = vec![root.to_path_buf()];
@@ -130,7 +131,7 @@ fn projector_and_handler_owner_modules_declare_storage_requirements() {
         "src/protocol/sync/send_needed_fact_id.rs",
         "src/protocol/sync/send_requested_fact.rs",
         "src/protocol/sync/share_fact_with_sync.rs",
-        "src/protocol/versioning/update.rs",
+        "src/protocol/versioning/check_version.rs",
     ] {
         let text = std::fs::read_to_string(root.join(handler)).expect("read handler module");
         assert!(
