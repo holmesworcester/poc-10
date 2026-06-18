@@ -193,6 +193,10 @@ use super::sync_have_id_row;
 pub const PROJECTOR_INFO: FactProjectorInfo =
     FactProjectorInfo::projector("sync::have_id::project::SyncHaveIdProjector");
 
+pub const STORAGE_VERSION: u32 = crate::protocol::versioning::update::CURRENT_PROTOCOL_VERSION;
+pub const STORAGE_REQUIREMENT: crate::core::effects::StorageRequirement =
+    crate::core::effects::StorageRequirement::Current(STORAGE_VERSION);
+
 #[derive(Debug, Clone, Default)]
 pub struct SyncHaveIdProjector;
 

@@ -888,6 +888,10 @@ pub fn connection_for_request_offer(owner: FactId, request_id: FactId) -> Contex
 pub const PROJECTOR_INFO: FactProjectorInfo =
     FactProjectorInfo::projector("connection::request::project::ConnectionRequestProjector");
 
+pub const STORAGE_VERSION: u32 = crate::protocol::versioning::update::CURRENT_PROTOCOL_VERSION;
+pub const STORAGE_REQUIREMENT: crate::core::effects::StorageRequirement =
+    crate::core::effects::StorageRequirement::Current(STORAGE_VERSION);
+
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionRequestProjector;
 

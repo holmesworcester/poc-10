@@ -7,6 +7,7 @@
 //! release profile.
 
 use topo::core::db::TableName;
+use topo::core::effects::StorageRequirement;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{RowMutation, Value};
 use topo::core::project_fact::{verify_fact_id, FactRoute};
@@ -252,11 +253,13 @@ fn route_metadata_can_describe_deprecated_and_current_fact_versions() {
         FactRoute {
             tag: TYPE_FIXTURE_V1,
             projector: project_fixture_v1,
+            storage_requirement: StorageRequirement::MaintenanceBypass,
             projector_info: FIXTURE_V1_PROJECTOR.projector_info(),
         },
         FactRoute {
             tag: TYPE_FIXTURE_V2,
             projector: project_fixture_v2,
+            storage_requirement: StorageRequirement::MaintenanceBypass,
             projector_info: FIXTURE_V2_PROJECTOR.projector_info(),
         },
     ];

@@ -15,6 +15,10 @@ use crate::protocol::sync::{need_id, shared_fact};
 
 pub const SEND_REQUESTED_FACT: &str = "send_requested_fact";
 
+pub const STORAGE_VERSION: u32 = crate::protocol::versioning::update::CURRENT_PROTOCOL_VERSION;
+pub const STORAGE_REQUIREMENT: crate::core::effects::StorageRequirement =
+    crate::core::effects::StorageRequirement::Current(STORAGE_VERSION);
+
 pub type HandlerId = [u8; 32];
 
 #[derive(Debug, Clone, PartialEq, Eq)]

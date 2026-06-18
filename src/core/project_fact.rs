@@ -52,7 +52,7 @@ use self::context_db::{
 use crate::core::command::AuthoredFacts;
 use crate::core::context::ContextSet;
 use crate::core::db::{quoted_identifier, quoted_table_name, Db, TableName};
-use crate::core::effects::RuntimeEffects;
+use crate::core::effects::{RuntimeEffects, StorageRequirementCheck};
 use crate::core::facts::{
     fact_from_storage_row as validate_fact_query_result, fact_id, Fact, FactId,
 };
@@ -149,6 +149,7 @@ pub(crate) fn project_one(
     source: ProjectionSource,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
+    storage_requirement_check: Option<StorageRequirementCheck>,
 ) -> Result<WorkStatus, String> {
     let load = match load_one_projection_input(store, source)? {
         None => return Ok(WorkStatus::idle()),
@@ -167,7 +168,13 @@ pub(crate) fn project_one(
         }
     };
 
-    commit_projection_outcome(store, &outcome, allowed_tables, fact_admission)?;
+    commit_projection_outcome(
+        store,
+        &outcome,
+        allowed_tables,
+        fact_admission,
+        storage_requirement_check,
+    )?;
     Ok(WorkStatus::progressed(true))
 }
 
@@ -243,12 +250,19 @@ fn commit_projection_outcome(
     outcome: &ProjectionOutcome,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
+    storage_requirement_check: Option<StorageRequirementCheck>,
 ) -> Result<(), String> {
     perf::measure_result("projection_commit_effects", || {
         store
             .write_transaction(|tx| {
                 perf::measure_result("projection_commit_tx_body", || {
-                    commit_projection_outcome_in_tx(tx, outcome, allowed_tables, fact_admission)
+                    commit_projection_outcome_in_tx(
+                        tx,
+                        outcome,
+                        allowed_tables,
+                        fact_admission,
+                        storage_requirement_check,
+                    )
                 })
             })
             .map_err(|err| format!("commit projection effects: {err}"))
@@ -523,6 +537,7 @@ fn commit_projection_outcome_in_tx(
     outcome: &ProjectionOutcome,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
+    storage_requirement_check: Option<StorageRequirementCheck>,
 ) -> rusqlite::Result<()> {
     match outcome {
         ProjectionOutcome::RetireStaleInput { source, fact_id } => {
@@ -531,9 +546,13 @@ fn commit_projection_outcome_in_tx(
         ProjectionOutcome::RetireRejectedInput { source, fact_id } => {
             commit_rejected_projection_input_in_tx(tx, *source, *fact_id)
         }
-        ProjectionOutcome::Accepted(projection) => {
-            commit_projected_fact_in_tx(tx, projection, allowed_tables, fact_admission)
-        }
+        ProjectionOutcome::Accepted(projection) => commit_projected_fact_in_tx(
+            tx,
+            projection,
+            allowed_tables,
+            fact_admission,
+            storage_requirement_check,
+        ),
     }
 }
 
@@ -594,6 +613,7 @@ fn commit_projected_fact_in_tx(
     projection: &PreparedProjection,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
+    storage_requirement_check: Option<StorageRequirementCheck>,
 ) -> rusqlite::Result<()> {
     let fact_id = projection.fact.id;
     let keep_projection_state = projection_keeps_standing_state(projection);
@@ -619,6 +639,7 @@ fn commit_projected_fact_in_tx(
             &projection.runtime_effects,
             allowed_tables,
             fact_admission,
+            storage_requirement_check,
             projection.mode.is_replay(),
             true,
         )
@@ -820,7 +841,7 @@ pub(crate) mod commit_effects {
     //! modules.
 
     use crate::core::db::{Db, TableName};
-    use crate::core::effects::RuntimeEffects;
+    use crate::core::effects::{RuntimeEffects, StorageRequirement, StorageRequirementCheck};
     use crate::core::intents::{Intent, RowMutation};
     use crate::core::schema::{INTENTS, LOCAL_INTENTS};
     use std::collections::BTreeMap;
@@ -977,6 +998,7 @@ pub(crate) mod commit_effects {
         effects: &RuntimeEffects,
         allowed_tables: &[TableName],
         fact_admission: Option<FactAdmissionFn>,
+        storage_requirement_check: Option<StorageRequirementCheck>,
         replay: bool,
         allow_rebuild: bool,
         label: &str,
@@ -989,6 +1011,7 @@ pub(crate) mod commit_effects {
                     effects,
                     allowed_tables,
                     fact_admission,
+                    storage_requirement_check,
                     replay,
                     allow_rebuild,
                 )
@@ -1012,9 +1035,12 @@ pub(crate) mod commit_effects {
         effects: &RuntimeEffects,
         allowed_tables: &[TableName],
         fact_admission: Option<FactAdmissionFn>,
+        storage_requirement_check: Option<StorageRequirementCheck>,
         replay: bool,
         allow_rebuild: bool,
     ) -> rusqlite::Result<RuntimeEffectCounts> {
+        enforce_storage_requirement(tx, effects.storage_requirement, storage_requirement_check)
+            .map_err(sqlite_string_error)?;
         validate_fact_admissions(effects, fact_admission).map_err(sqlite_string_error)?;
         for purged in &effects.purged_facts {
             purge_fact_in_tx(tx, *purged)?;
@@ -1058,6 +1084,25 @@ pub(crate) mod commit_effects {
             intents,
             local_intents,
         })
+    }
+
+    fn enforce_storage_requirement(
+        tx: &Db,
+        requirement: StorageRequirement,
+        check: Option<StorageRequirementCheck>,
+    ) -> Result<(), String> {
+        match requirement {
+            StorageRequirement::MaintenanceBypass => Ok(()),
+            StorageRequirement::Current(_) => {
+                let Some(check) = check else {
+                    return Err(
+                        "runtime effects require storage version but runtime has no checker"
+                            .to_string(),
+                    );
+                };
+                check(tx, requirement)
+            }
+        }
     }
 
     fn insert_intents_in_tx(
@@ -2127,6 +2172,7 @@ pub mod route {
 
     use super::context::ProjectionContext;
     use super::effects::ProjectionOutput;
+    use crate::core::effects::StorageRequirement;
     use crate::core::facts::Fact;
 
     /// Function pointer used by static projector route tables.
@@ -2155,6 +2201,8 @@ pub mod route {
         /// Effective fact tag routed to this projector function.
         pub tag: u8,
         pub projector: ProjectorFn,
+        /// Storage version required by this route's committed effects.
+        pub storage_requirement: StorageRequirement,
         /// Projector metadata for this route.
         pub projector_info: FactProjectorInfo,
     }
@@ -2221,7 +2269,13 @@ pub mod route {
             let Some(route) = self.routes.iter().find(|route| route.tag == tag) else {
                 return Err(format!("no target projector registered for fact tag {tag}"));
             };
-            (route.projector)(fact, context)
+            let output = (route.projector)(fact, context)?;
+            Ok(ProjectionOutput {
+                effects: output
+                    .effects
+                    .with_storage_requirement(route.storage_requirement),
+                ..output
+            })
         }
     }
 }
@@ -2647,6 +2701,7 @@ pub(crate) fn submit_authored_facts_to_db<T>(
         &effects,
         allowed_tables,
         fact_admission,
+        None,
         false,
         false,
         label,
@@ -2811,8 +2866,10 @@ fn u64_column(value: i64, name: &str) -> rusqlite::Result<u64> {
 mod contract_tests {
     use super::*;
     use crate::core::context::{ContextKey, ContextNeed, ContextOffer, ContextSetAdditions, Role};
+    use crate::core::effects::StorageRequirement;
     use crate::core::facts::{FactId, FactScope};
     use crate::core::intents::{Intent, IntentKind};
+    use crate::core::schema::CORE_SCHEMA_SOURCE;
     use rusqlite::OptionalExtension;
     use std::cell::Cell;
 
@@ -2842,6 +2899,56 @@ mod contract_tests {
             ProjectionLoad::Loaded(input) => input,
             ProjectionLoad::Stale { .. } => panic!("expected loaded projection input"),
         }
+    }
+
+    fn storage_requirement_mismatch(
+        _store: &Db,
+        requirement: StorageRequirement,
+    ) -> Result<(), String> {
+        match requirement {
+            StorageRequirement::Current(version) => {
+                Err(format!("test storage version mismatch for {version}"))
+            }
+            StorageRequirement::MaintenanceBypass => Ok(()),
+        }
+    }
+
+    fn version_guard_projector(
+        _fact: &Fact,
+        _context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
+        Ok(ProjectionOutput::new())
+    }
+
+    const VERSION_GUARD_ROUTES: &[FactRoute] = &[FactRoute {
+        tag: 201,
+        projector: version_guard_projector,
+        storage_requirement: StorageRequirement::Current(7),
+        projector_info: FactProjectorInfo::projector("version_guard_projector"),
+    }];
+
+    #[test]
+    fn projection_storage_mismatch_rolls_back_pending_consumption() {
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
+        let fact = Fact::new(FactScope::Global, 1, vec![201]);
+        submit_fact_to_db(&store, fact.clone()).expect("submit pending fact");
+
+        let err = crate::core::project_fact::project_one(
+            &store,
+            &RouterProjector::new(VERSION_GUARD_ROUTES, &[]),
+            ProjectionSource::Durable,
+            &[],
+            None,
+            Some(storage_requirement_mismatch),
+        )
+        .expect_err("storage mismatch should abort projection commit");
+
+        assert!(err.contains("test storage version mismatch for 7"), "{err}");
+        assert_eq!(
+            pending_projection_count(&store, fact.id),
+            1,
+            "failed storage guard must not consume pending projection"
+        );
     }
 
     #[test]
@@ -2954,7 +3061,7 @@ mod contract_tests {
             .expect("load retained fact")
             .is_some());
 
-        commit_projection_outcome(&store, &outcome, &[], None).expect("commit rejection");
+        commit_projection_outcome(&store, &outcome, &[], None, None).expect("commit rejection");
 
         assert_eq!(pending_projection_count(&store, fact.id), 0);
         assert!(retained_fact(&store, &fact.id)
@@ -2992,7 +3099,7 @@ mod contract_tests {
             .expect("load incoming fact")
             .is_some());
 
-        commit_projection_outcome(&store, &outcome, &[], None).expect("commit rejection");
+        commit_projection_outcome(&store, &outcome, &[], None, None).expect("commit rejection");
 
         assert!(incoming_fact_by_id(&store, &fact.id)
             .expect("load incoming fact")
@@ -3722,6 +3829,7 @@ mod contract_tests {
                 ProjectionSource::Durable,
                 allowed_tables,
                 fact_admission,
+                None,
             )?;
             if step.is_idle() {
                 step = crate::core::project_fact::project_one(
@@ -3730,6 +3838,7 @@ mod contract_tests {
                     ProjectionSource::Incoming,
                     allowed_tables,
                     fact_admission,
+                    None,
                 )?;
             }
             if step.is_idle() {
@@ -4152,6 +4261,7 @@ mod contract_tests {
 mod tests {
     use super::*;
     use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
+    use crate::core::effects::StorageRequirement;
     use crate::core::facts::{Fact, FactId, FactScope};
     use crate::core::schema::CORE_SCHEMA_SOURCE;
 
@@ -4245,6 +4355,7 @@ mod tests {
         let route = FactRoute {
             tag: 200,
             projector: model_projector,
+            storage_requirement: StorageRequirement::MaintenanceBypass,
             projector_info: FactProjectorInfo::projector("ModelProjector"),
         };
 

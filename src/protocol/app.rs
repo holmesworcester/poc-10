@@ -33,6 +33,9 @@ pub const MATCH_RUNTIME: RuntimeDescription = RuntimeDescription {
     projector: protocol_projector,
     fact_routes: FACT_ROUTES,
     fact_admission: Some(authenticate_fact_for_admission),
+    storage_requirement_check: Some(
+        crate::protocol::versioning::update::require_storage_requirement,
+    ),
     handlers: HANDLER_ROUTES,
 };
 

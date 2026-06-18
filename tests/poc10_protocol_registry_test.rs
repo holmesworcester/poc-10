@@ -1,7 +1,9 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use topo::core::effects::StorageRequirement;
 use topo::protocol::app::{MATCH_PROTOCOL, MATCH_RUNTIME};
+use topo::protocol::versioning::update::{CHECK_VERSION, CURRENT_PROTOCOL_VERSION};
 
 fn rust_files(root: &Path) -> Vec<PathBuf> {
     let mut pending = vec![root.to_path_buf()];
@@ -60,6 +62,110 @@ fn assert_projector_route(tag: u8, expected_project: &str) {
         .expect("model route");
 
     assert_eq!(route.projector_info.project, expected_project);
+}
+
+#[test]
+fn projector_and_handler_routes_declare_storage_requirements() {
+    for route in MATCH_RUNTIME.fact_routes {
+        let expected = if route.tag == topo::protocol::versioning::update::TYPE_VERSIONING_UPDATE {
+            StorageRequirement::MaintenanceBypass
+        } else {
+            StorageRequirement::Current(CURRENT_PROTOCOL_VERSION)
+        };
+        assert_eq!(
+            route.storage_requirement, expected,
+            "fact route {} should declare its storage requirement",
+            route.projector_info.project
+        );
+    }
+
+    for route in MATCH_RUNTIME.handlers {
+        let expected = if route.intent_kind == CHECK_VERSION {
+            StorageRequirement::MaintenanceBypass
+        } else {
+            StorageRequirement::Current(CURRENT_PROTOCOL_VERSION)
+        };
+        assert_eq!(
+            route.storage_requirement, expected,
+            "handler route {} should declare its storage requirement",
+            route.intent_kind
+        );
+    }
+}
+
+#[test]
+fn projector_and_handler_owner_modules_declare_storage_requirements() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let protocol = root.join("src/protocol");
+    let missing_projectors = rust_files(&protocol)
+        .into_iter()
+        .filter_map(|path| {
+            let text = std::fs::read_to_string(&path).expect("read protocol file");
+            (text.contains("pub const PROJECTOR_INFO")
+                && !text.contains("pub const STORAGE_REQUIREMENT"))
+            .then(|| {
+                path.strip_prefix(root)
+                    .expect("repo-relative projector path")
+                    .display()
+                    .to_string()
+            })
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        missing_projectors.is_empty(),
+        "projector modules must declare STORAGE_REQUIREMENT:\n{}",
+        missing_projectors.join("\n")
+    );
+
+    for handler in [
+        "src/protocol/auth/create_key_wrap.rs",
+        "src/protocol/auth/unwrap_key_wrap.rs",
+        "src/protocol/connection/create_connection.rs",
+        "src/protocol/connection/maintain_connections.rs",
+        "src/protocol/connection/queue_outgoing_frame.rs",
+        "src/protocol/connection/send_facts_on_connection.rs",
+        "src/protocol/sync/maintain_sync.rs",
+        "src/protocol/sync/seed_connection.rs",
+        "src/protocol/sync/send_compare_response.rs",
+        "src/protocol/sync/send_needed_fact_id.rs",
+        "src/protocol/sync/send_requested_fact.rs",
+        "src/protocol/sync/share_fact_with_sync.rs",
+        "src/protocol/versioning/update.rs",
+    ] {
+        let text = std::fs::read_to_string(root.join(handler)).expect("read handler module");
+        assert!(
+            text.contains("pub const STORAGE_REQUIREMENT"),
+            "{handler} must declare STORAGE_REQUIREMENT for its handler route"
+        );
+    }
+}
+
+#[test]
+fn protocol_write_allowlist_does_not_register_old_version_tables() {
+    let offenders = MATCH_RUNTIME
+        .row_mutation_tables
+        .iter()
+        .filter_map(|table| {
+            let name = table.as_str();
+            [
+                "_old",
+                "_legacy",
+                "_previous",
+                "_deprecated",
+                "_v0",
+                "_v1_old",
+            ]
+            .iter()
+            .any(|marker| name.contains(marker))
+            .then_some(name)
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        offenders.is_empty(),
+        "protocol write allowlist must target current tables only:\n{}",
+        offenders.join("\n")
+    );
 }
 
 #[test]

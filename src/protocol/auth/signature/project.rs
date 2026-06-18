@@ -215,6 +215,10 @@ pub const SIGNATURE_PROOF_ROLE: &str = "signature_proof";
 pub const PROJECTOR_INFO: FactProjectorInfo =
     FactProjectorInfo::projector("auth::signature::project::SignatureProjector");
 
+pub const STORAGE_VERSION: u32 = crate::protocol::versioning::update::CURRENT_PROTOCOL_VERSION;
+pub const STORAGE_REQUIREMENT: crate::core::effects::StorageRequirement =
+    crate::core::effects::StorageRequirement::Current(STORAGE_VERSION);
+
 #[derive(Debug, Clone, Default)]
 pub struct SignatureProjector;
 

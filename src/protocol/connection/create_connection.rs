@@ -15,6 +15,10 @@ pub type FactId = [u8; 32];
 
 pub const CREATE_CONNECTION: &str = "create_connection";
 
+pub const STORAGE_VERSION: u32 = crate::protocol::versioning::update::CURRENT_PROTOCOL_VERSION;
+pub const STORAGE_REQUIREMENT: crate::core::effects::StorageRequirement =
+    crate::core::effects::StorageRequirement::Current(STORAGE_VERSION);
+
 const FIELD_BYTES: usize = 32;
 const FIELD_COUNT: usize = 3;
 const PAYLOAD_BYTES: usize = FIELD_BYTES * FIELD_COUNT;

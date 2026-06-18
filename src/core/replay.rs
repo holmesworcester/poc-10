@@ -28,6 +28,7 @@
 //! state, so replay never decides by ad hoc SQLite table enumeration.
 
 use crate::core::db::{quoted_table_name, Db, TableName};
+use crate::core::effects::StorageRequirementCheck;
 use crate::core::facts::FactId;
 use crate::core::handle_intent::{
     dispatch_one_intent, HandlerRoute, HandlerSet, IntentQueue, WorkStatus,
@@ -112,6 +113,7 @@ pub fn run_replay(
     routes: &'static [HandlerRoute],
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
+    storage_requirement_check: Option<StorageRequirementCheck>,
     order: ReplayOrder,
 ) -> Result<ReplayReport, String> {
     let mut report = ReplayReport {
@@ -128,14 +130,35 @@ pub fn run_replay(
     match order {
         ReplayOrder::Canonical => {
             enqueue_all_retained_facts_for_replay(db)?;
-            drain_replay_barrier(db, projector, &handlers, allowed_tables, fact_admission)?;
+            drain_replay_barrier(
+                db,
+                projector,
+                &handlers,
+                allowed_tables,
+                fact_admission,
+                storage_requirement_check,
+            )?;
         }
         ReplayOrder::Reverse | ReplayOrder::Scramble { .. } => {
             for fact_id in ordered_fact_ids(db, order)? {
                 enqueue_retained_fact_for_replay(db, fact_id)?;
-                drain_replay_barrier(db, projector, &handlers, allowed_tables, fact_admission)?;
+                drain_replay_barrier(
+                    db,
+                    projector,
+                    &handlers,
+                    allowed_tables,
+                    fact_admission,
+                    storage_requirement_check,
+                )?;
             }
-            drain_replay_barrier(db, projector, &handlers, allowed_tables, fact_admission)?;
+            drain_replay_barrier(
+                db,
+                projector,
+                &handlers,
+                allowed_tables,
+                fact_admission,
+                storage_requirement_check,
+            )?;
         }
     }
 
@@ -213,6 +236,7 @@ fn drain_replay_barrier(
     handlers: &HandlerSet,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
+    storage_requirement_check: Option<StorageRequirementCheck>,
 ) -> Result<(), String> {
     for _ in 0..REPLAY_MAX_DRAIN_STEPS {
         let mut status = WorkStatus::idle();
@@ -222,6 +246,7 @@ fn drain_replay_barrier(
             ProjectionSource::Durable,
             allowed_tables,
             fact_admission,
+            storage_requirement_check,
         )?);
         status.merge(drain_replay_projection_queue(
             db,
@@ -229,6 +254,7 @@ fn drain_replay_barrier(
             ProjectionSource::Incoming,
             allowed_tables,
             fact_admission,
+            storage_requirement_check,
         )?);
 
         status.merge(drain_replay_intent_queue(
@@ -237,6 +263,7 @@ fn drain_replay_barrier(
             IntentQueue::Durable,
             allowed_tables,
             fact_admission,
+            storage_requirement_check,
         )?);
         status.merge(drain_replay_intent_queue(
             db,
@@ -244,6 +271,7 @@ fn drain_replay_barrier(
             IntentQueue::Local,
             allowed_tables,
             fact_admission,
+            storage_requirement_check,
         )?);
 
         if status.is_idle() {
@@ -259,11 +287,18 @@ fn drain_replay_projection_queue(
     source: ProjectionSource,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
+    storage_requirement_check: Option<StorageRequirementCheck>,
 ) -> Result<WorkStatus, String> {
     let mut status = WorkStatus::idle();
     for _ in 0..REPLAY_WORK_LIMIT {
-        let step_status =
-            project_fact::project_one(db, projector, source, allowed_tables, fact_admission)?;
+        let step_status = project_fact::project_one(
+            db,
+            projector,
+            source,
+            allowed_tables,
+            fact_admission,
+            storage_requirement_check,
+        )?;
         if step_status.is_idle() {
             break;
         }
@@ -278,10 +313,18 @@ fn drain_replay_intent_queue(
     queue: IntentQueue,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
+    storage_requirement_check: Option<StorageRequirementCheck>,
 ) -> Result<WorkStatus, String> {
     let mut status = WorkStatus::idle();
     for _ in 0..REPLAY_WORK_LIMIT {
-        let step_status = dispatch_one_intent(db, handlers, queue, allowed_tables, fact_admission)?;
+        let step_status = dispatch_one_intent(
+            db,
+            handlers,
+            queue,
+            allowed_tables,
+            fact_admission,
+            storage_requirement_check,
+        )?;
         if step_status.is_idle() {
             break;
         }

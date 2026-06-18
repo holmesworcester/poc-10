@@ -28,7 +28,7 @@
 
 use crate::core::command::AuthoredFacts;
 use crate::core::db::{Db, SchemaSource, TableName};
-use crate::core::effects::RuntimeEffects;
+use crate::core::effects::{RuntimeEffects, StorageRequirementCheck};
 use crate::core::facts::Fact;
 use crate::core::handle_intent::{dispatch_one_intent, HandlerSet, IntentQueue};
 use crate::core::intents::Intent;
@@ -64,6 +64,8 @@ pub struct RuntimeDescription {
     pub fact_routes: &'static [FactRoute],
     /// Optional protocol-owned fact admission check run before core stores facts.
     pub fact_admission: Option<FactAdmissionFn>,
+    /// Optional protocol-owned storage requirement check for effect commits.
+    pub storage_requirement_check: Option<StorageRequirementCheck>,
     /// Intent handlers this runtime may dispatch.
     pub handlers: &'static [HandlerRoute],
 }
@@ -215,6 +217,7 @@ impl Runtime {
             &effects,
             self.description.row_mutation_tables,
             self.description.fact_admission,
+            self.description.storage_requirement_check,
             false,
             false,
             label,
@@ -256,6 +259,7 @@ impl Runtime {
                 source,
                 self.description.row_mutation_tables,
                 self.description.fact_admission,
+                self.description.storage_requirement_check,
             )
         })
     }
@@ -289,6 +293,7 @@ impl Runtime {
                 queue,
                 self.description.row_mutation_tables,
                 self.description.fact_admission,
+                self.description.storage_requirement_check,
             )
         })
     }
@@ -333,6 +338,7 @@ impl Runtime {
             self.description.handlers,
             self.description.row_mutation_tables,
             self.description.fact_admission,
+            self.description.storage_requirement_check,
             order,
         )
     }
@@ -426,7 +432,7 @@ fn drain_bounded_work(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::effects::RuntimeEffects;
+    use crate::core::effects::{RuntimeEffects, StorageRequirement};
     use crate::core::facts::{Fact, FactScope};
     use crate::core::intents::{HandlerContext, HandlerResult, IntentHandler, IntentKind};
     use crate::core::project_fact::{ProjectionContext, ProjectionOutput};
@@ -482,12 +488,14 @@ mod tests {
     const COUNTING_HANDLERS: &[HandlerRoute] = &[HandlerRoute {
         intent_kind: "counting",
         factory: counting_handler,
+        storage_requirement: StorageRequirement::MaintenanceBypass,
         recurrence: None,
     }];
 
     const EMIT_FACT_HANDLERS: &[HandlerRoute] = &[HandlerRoute {
         intent_kind: "emit_fact",
         factory: emit_fact_handler,
+        storage_requirement: StorageRequirement::MaintenanceBypass,
         recurrence: None,
     }];
 
@@ -497,6 +505,7 @@ mod tests {
         projector: noop_projector,
         fact_routes: &[],
         fact_admission: None,
+        storage_requirement_check: None,
         handlers: &[],
     };
 
@@ -514,6 +523,7 @@ mod tests {
         projector: noop_projector,
         fact_routes: &[],
         fact_admission: Some(reject_bad_fact),
+        storage_requirement_check: None,
         handlers: &[],
     };
 
@@ -523,6 +533,7 @@ mod tests {
         projector: noop_projector,
         fact_routes: &[],
         fact_admission: None,
+        storage_requirement_check: None,
         handlers: COUNTING_HANDLERS,
     };
 
@@ -532,6 +543,7 @@ mod tests {
         projector: noop_projector,
         fact_routes: &[],
         fact_admission: None,
+        storage_requirement_check: None,
         handlers: EMIT_FACT_HANDLERS,
     };
 

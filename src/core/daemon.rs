@@ -856,6 +856,7 @@ fn print_line_now(line: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::effects::StorageRequirement;
     use crate::core::facts::Fact;
     use crate::core::handle_intent::RecurringIntentSpec;
     use crate::core::intents::{HandlerContext, HandlerResult, Intent, IntentHandler, IntentKind};
@@ -924,12 +925,14 @@ mod tests {
         projector: noop_projector,
         fact_routes: &[],
         fact_admission: None,
+        storage_requirement_check: None,
         handlers: &[],
     };
 
     const RECURRING_HANDLERS: &[HandlerRoute] = &[HandlerRoute {
         intent_kind: "recurring_tick",
         factory: recurring_handler,
+        storage_requirement: StorageRequirement::MaintenanceBypass,
         recurrence: Some(RecurringIntentSpec {
             interval_ms: 60_000,
             initial_delay_ms: 0,
@@ -943,6 +946,7 @@ mod tests {
         projector: noop_projector,
         fact_routes: &[],
         fact_admission: None,
+        storage_requirement_check: None,
         handlers: RECURRING_HANDLERS,
     };
 
@@ -1008,6 +1012,7 @@ mod tests {
         HandlerRoute {
             intent_kind: "version_repair",
             factory: version_repair_handler,
+            storage_requirement: StorageRequirement::MaintenanceBypass,
             recurrence: Some(RecurringIntentSpec {
                 interval_ms: 60_000,
                 initial_delay_ms: 0,
@@ -1017,6 +1022,7 @@ mod tests {
         HandlerRoute {
             intent_kind: "normal_recurring",
             factory: normal_recurring_handler,
+            storage_requirement: StorageRequirement::MaintenanceBypass,
             recurrence: Some(RecurringIntentSpec {
                 interval_ms: 60_000,
                 initial_delay_ms: 0,
@@ -1031,6 +1037,7 @@ mod tests {
         projector: noop_projector,
         fact_routes: &[],
         fact_admission: None,
+        storage_requirement_check: None,
         handlers: VERSION_GATED_HANDLERS,
     };
 

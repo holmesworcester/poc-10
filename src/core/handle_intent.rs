@@ -31,7 +31,7 @@
 //! accepted durably.
 
 use crate::core::db::{quoted_table_name, Db, TableName};
-use crate::core::effects::RuntimeEffects;
+use crate::core::effects::{RuntimeEffects, StorageRequirement, StorageRequirementCheck};
 use crate::core::facts::{fact_from_storage_row, Fact, FactId};
 use crate::core::intents::{
     HandlerContext, HandlerError, HandlerMode, Intent, IntentHandler, IntentWorkRow,
@@ -94,6 +94,8 @@ pub struct HandlerRoute {
     pub intent_kind: &'static str,
     /// Handler factory.
     pub factory: HandlerFactory,
+    /// Storage version required by this handler's committed effects.
+    pub storage_requirement: StorageRequirement,
     /// Live-only recurring schedule installed by the daemon, if any.
     pub recurrence: Option<RecurringIntentSpec>,
 }
@@ -147,6 +149,7 @@ pub(crate) struct HandlerSet {
 struct HandlerEntry {
     intent_kind: &'static str,
     handler: Box<dyn IntentHandler>,
+    storage_requirement: StorageRequirement,
 }
 
 impl HandlerSet {
@@ -158,6 +161,7 @@ impl HandlerSet {
                 .map(|route| HandlerEntry {
                     intent_kind: route.intent_kind,
                     handler: (route.factory)(),
+                    storage_requirement: route.storage_requirement,
                 })
                 .collect(),
         }
@@ -167,11 +171,8 @@ impl HandlerSet {
         self.entries.iter().map(|entry| entry.intent_kind).collect()
     }
 
-    fn handler_for_kind(&self, kind: &str) -> Option<&dyn IntentHandler> {
-        self.entries
-            .iter()
-            .find(|entry| entry.intent_kind == kind)
-            .map(|entry| entry.handler.as_ref())
+    fn handler_for_kind(&self, kind: &str) -> Option<&HandlerEntry> {
+        self.entries.iter().find(|entry| entry.intent_kind == kind)
     }
 }
 
@@ -400,6 +401,7 @@ pub(crate) fn next_queued_intent(
 struct IntentWork<'a> {
     queued: QueuedIntent,
     handler: &'a dyn IntentHandler,
+    storage_requirement: StorageRequirement,
 }
 
 /// Run one claimed intent through its handler.
@@ -412,8 +414,13 @@ fn handle_intent_with_policy(
     store: &Db,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
+    storage_requirement_check: Option<StorageRequirementCheck>,
 ) -> Result<WorkStatus, String> {
-    let IntentWork { queued, handler } = work;
+    let IntentWork {
+        queued,
+        handler,
+        storage_requirement,
+    } = work;
     let mut status = WorkStatus::idle();
     let context = load_handler_context(store, handler, &queued.intent, queued.mode)?;
     let Some(output) = run_handler(handler, &queued.intent, &context, &mut status)? else {
@@ -422,9 +429,16 @@ fn handle_intent_with_policy(
         }
         return Ok(status);
     };
+    let output = output.with_storage_requirement(storage_requirement);
     validate_runtime_effects_for_admission(&output, allowed_tables, fact_admission)?;
-    status.progressed =
-        commit_handler_output(store, &queued, &output, allowed_tables, fact_admission)?;
+    status.progressed = commit_handler_output(
+        store,
+        &queued,
+        &output,
+        allowed_tables,
+        fact_admission,
+        storage_requirement_check,
+    )?;
     Ok(status)
 }
 
@@ -439,12 +453,19 @@ pub(crate) fn dispatch_one_intent(
     queue: IntentQueue,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
+    storage_requirement_check: Option<StorageRequirementCheck>,
 ) -> Result<WorkStatus, String> {
     let kinds = handlers.intent_kinds();
     let Some(work) = next_intent_work_in_queue(store, handlers, queue, &kinds)? else {
         return Ok(WorkStatus::idle());
     };
-    handle_intent_with_policy(work, store, allowed_tables, fact_admission)
+    handle_intent_with_policy(
+        work,
+        store,
+        allowed_tables,
+        fact_admission,
+        storage_requirement_check,
+    )
 }
 
 fn next_intent_work_in_queue<'a>(
@@ -457,10 +478,14 @@ fn next_intent_work_in_queue<'a>(
         return Ok(None);
     };
     let kind = queued.intent.kind.as_str();
-    let handler = handlers
+    let entry = handlers
         .handler_for_kind(kind)
         .ok_or_else(|| format!("no handler registered for intent kind {kind}"))?;
-    Ok(Some(IntentWork { queued, handler }))
+    Ok(Some(IntentWork {
+        queued,
+        handler: entry.handler.as_ref(),
+        storage_requirement: entry.storage_requirement,
+    }))
 }
 
 /// Return the first queued intent matching a declared handler route.
@@ -552,6 +577,7 @@ fn commit_handler_output(
     effects: &RuntimeEffects,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
+    storage_requirement_check: Option<StorageRequirementCheck>,
 ) -> Result<bool, String> {
     store
         .write_transaction(|tx| {
@@ -569,6 +595,7 @@ fn commit_handler_output(
                 effects,
                 allowed_tables,
                 fact_admission,
+                storage_requirement_check,
                 queued.mode.is_replay(),
                 false,
             )?;
@@ -599,7 +626,7 @@ pub(crate) struct QueuedIntent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::effects::RuntimeEffects;
+    use crate::core::effects::{RuntimeEffects, StorageRequirement};
     use crate::core::facts::{Fact, FactScope};
     use crate::core::intents::{retry_intent, HandlerResult, IntentKind};
     use crate::core::schema::{CORE_SCHEMA_SOURCE, INCOMING_FACTS, PENDING_PROJECTION};
@@ -816,7 +843,7 @@ mod tests {
         let mut progress = TestIntentProgress::default();
         for _ in 0..limit {
             let step_status =
-                dispatch_one_intent(store, handlers, queue, allowed_tables, fact_admission)?;
+                dispatch_one_intent(store, handlers, queue, allowed_tables, fact_admission, None)?;
             if step_status.is_idle() {
                 break;
             }
@@ -842,12 +869,14 @@ mod tests {
     const NOOP_ROUTES: &[HandlerRoute] = &[HandlerRoute {
         intent_kind: "handled",
         factory: noop_handler,
+        storage_requirement: StorageRequirement::MaintenanceBypass,
         recurrence: None,
     }];
 
     const RETRY_ROUTES: &[HandlerRoute] = &[HandlerRoute {
         intent_kind: "retrying",
         factory: retry_handler,
+        storage_requirement: StorageRequirement::MaintenanceBypass,
         recurrence: None,
     }];
 
@@ -855,14 +884,23 @@ mod tests {
         HandlerRoute {
             intent_kind: "emit_fact",
             factory: emit_fact_handler,
+            storage_requirement: StorageRequirement::MaintenanceBypass,
             recurrence: None,
         },
         HandlerRoute {
             intent_kind: "zz_after_fact",
             factory: after_fact_handler,
+            storage_requirement: StorageRequirement::MaintenanceBypass,
             recurrence: None,
         },
     ];
+
+    const VERSION_GUARD_ROUTES: &[HandlerRoute] = &[HandlerRoute {
+        intent_kind: "handled",
+        factory: noop_handler,
+        storage_requirement: StorageRequirement::Current(7),
+        recurrence: None,
+    }];
 
     impl IntentHandler for NoopHandler {
         fn handle(&self, _intent: &Intent, _context: &HandlerContext<'_>) -> HandlerResult {
@@ -922,5 +960,41 @@ mod tests {
 
     fn emitted_fact() -> Fact {
         Fact::new(FactScope::Global, 42, b"handler-emitted-fact".to_vec())
+    }
+
+    fn storage_requirement_mismatch(
+        _store: &Db,
+        requirement: StorageRequirement,
+    ) -> Result<(), String> {
+        match requirement {
+            StorageRequirement::Current(version) => {
+                Err(format!("test storage version mismatch for {version}"))
+            }
+            StorageRequirement::MaintenanceBypass => Ok(()),
+        }
+    }
+
+    #[test]
+    fn intent_storage_mismatch_rolls_back_queue_consumption() {
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
+        submit_intent_to_table(&store, INTENTS, test_intent("handled", b"guarded"))
+            .expect("submit guarded intent");
+
+        let err = dispatch_one_intent(
+            &store,
+            &HandlerSet::new(VERSION_GUARD_ROUTES),
+            IntentQueue::Durable,
+            &[],
+            None,
+            Some(storage_requirement_mismatch),
+        )
+        .expect_err("storage mismatch should abort intent commit");
+
+        assert!(err.contains("test storage version mismatch for 7"), "{err}");
+        assert_eq!(
+            store.table_row_count(INTENTS).expect("durable count"),
+            1,
+            "failed storage guard must not consume the handled intent"
+        );
     }
 }

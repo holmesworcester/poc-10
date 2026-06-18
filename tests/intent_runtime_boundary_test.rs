@@ -31,6 +31,7 @@ fn intent_runtime_output_boundary_is_facts_and_followup_intents_only() {
         .expect("handler output");
 
     let RuntimeEffects {
+        storage_requirement,
         facts,
         priority_facts,
         incoming_facts,
@@ -41,6 +42,10 @@ fn intent_runtime_output_boundary_is_facts_and_followup_intents_only() {
         rebuild_derived_state,
     } = output;
 
+    assert_eq!(
+        storage_requirement,
+        topo::core::effects::StorageRequirement::MaintenanceBypass
+    );
     assert_eq!(facts.len(), 1);
     assert!(priority_facts.is_empty());
     assert!(incoming_facts.is_empty());

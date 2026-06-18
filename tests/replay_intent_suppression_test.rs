@@ -5,7 +5,7 @@
 //! passes replay mode to handlers, and handlers own replay-time no-ops.
 
 use topo::core::db::SchemaSource;
-use topo::core::effects::RuntimeEffects;
+use topo::core::effects::{RuntimeEffects, StorageRequirement};
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{HandlerContext, HandlerResult, Intent, IntentHandler, IntentKind};
 use topo::core::project_fact::{ProjectionContext, ProjectionOutput, Projector};
@@ -143,21 +143,25 @@ const HANDLERS: &[HandlerRoute] = &[
     HandlerRoute {
         intent_kind: REPLAY_OK,
         factory: replay_handler,
+        storage_requirement: StorageRequirement::MaintenanceBypass,
         recurrence: None,
     },
     HandlerRoute {
         intent_kind: LIVE_ONLY,
         factory: live_handler,
+        storage_requirement: StorageRequirement::MaintenanceBypass,
         recurrence: None,
     },
     HandlerRoute {
         intent_kind: LIVE_LOCAL,
         factory: live_handler,
+        storage_requirement: StorageRequirement::MaintenanceBypass,
         recurrence: None,
     },
     HandlerRoute {
         intent_kind: LIVE_FROM_HANDLER,
         factory: live_handler,
+        storage_requirement: StorageRequirement::MaintenanceBypass,
         recurrence: None,
     },
 ];
@@ -172,6 +176,7 @@ const RUNTIME: RuntimeDescription = RuntimeDescription {
     projector: test_projector,
     fact_routes: &[],
     fact_admission: None,
+    storage_requirement_check: None,
     handlers: HANDLERS,
 };
 
@@ -181,6 +186,7 @@ const RUNTIME_REPLAY_AWARE: RuntimeDescription = RuntimeDescription {
     projector: replay_context_projector,
     fact_routes: &[],
     fact_admission: None,
+    storage_requirement_check: None,
     handlers: HANDLERS,
 };
 
@@ -190,6 +196,7 @@ const RUNTIME_REPLAY_NOOP: RuntimeDescription = RuntimeDescription {
     projector: replay_noop_projector,
     fact_routes: &[],
     fact_admission: None,
+    storage_requirement_check: None,
     handlers: HANDLERS,
 };
 

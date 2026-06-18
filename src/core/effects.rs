@@ -12,11 +12,37 @@
 //! to validate and write it. If it is only display data for a command, keep it
 //! in that command's receipt instead.
 
+use crate::core::db::Db;
 use crate::core::facts::{Fact, FactId};
 use crate::core::intents::{Intent, RowMutation};
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Storage version contract carried by one effect batch.
+///
+/// Normal protocol projectors and handlers declare the storage shape they were
+/// written to touch. Maintenance work, such as the update fact that repairs an
+/// old database, must explicitly bypass this guard so it can run while storage
+/// is stale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageRequirement {
+    /// The runtime storage marker must match this version before commit.
+    Current(u32),
+    /// Maintenance work that is allowed to commit while storage is stale.
+    MaintenanceBypass,
+}
+
+impl Default for StorageRequirement {
+    fn default() -> Self {
+        Self::MaintenanceBypass
+    }
+}
+
+/// Protocol-owned storage requirement check used by core commit boundaries.
+pub type StorageRequirementCheck = fn(&Db, StorageRequirement) -> Result<(), String>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeEffects {
+    /// Storage precondition checked before this batch commits.
+    pub storage_requirement: StorageRequirement,
     /// New facts to admit and mark pending for projection.
     pub facts: Vec<Fact>,
     /// Control-plane facts that must project before ordinary pending facts.
@@ -35,6 +61,22 @@ pub struct RuntimeEffects {
     pub rebuild_derived_state: bool,
 }
 
+impl Default for RuntimeEffects {
+    fn default() -> Self {
+        Self {
+            storage_requirement: StorageRequirement::default(),
+            facts: Vec::new(),
+            priority_facts: Vec::new(),
+            incoming_facts: Vec::new(),
+            purged_facts: Vec::new(),
+            row_mutations: Vec::new(),
+            intents: Vec::new(),
+            local_intents: Vec::new(),
+            rebuild_derived_state: false,
+        }
+    }
+}
+
 impl RuntimeEffects {
     pub fn new() -> Self {
         Self::default()
@@ -49,6 +91,11 @@ impl RuntimeEffects {
             && self.intents.is_empty()
             && self.local_intents.is_empty()
             && !self.rebuild_derived_state
+    }
+
+    pub fn with_storage_requirement(mut self, requirement: StorageRequirement) -> Self {
+        self.storage_requirement = requirement;
+        self
     }
 
     pub fn fact(mut self, fact: Fact) -> Self {

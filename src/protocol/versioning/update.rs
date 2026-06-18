@@ -16,7 +16,7 @@
 use crate::core::cli::{encode_hex_32, CliOutput};
 use crate::core::command::{AuthoredFacts, CommandClock};
 use crate::core::db::{Db, TableInsert, TableName, TypedTableSchema, Value};
-use crate::core::effects::RuntimeEffects;
+use crate::core::effects::{RuntimeEffects, StorageRequirement};
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::{HandlerContext, HandlerResult, Intent, IntentHandler, IntentKind};
 use crate::core::project_fact::{
@@ -63,6 +63,8 @@ pub struct UpdateReceipt {
 
 pub const PROJECTOR_INFO: FactProjectorInfo =
     FactProjectorInfo::projector("versioning::update::UpdateProjector");
+
+pub const STORAGE_REQUIREMENT: StorageRequirement = StorageRequirement::MaintenanceBypass;
 
 #[derive(Debug, Default)]
 pub struct UpdateProjector;
@@ -158,6 +160,29 @@ pub fn ensure_storage_ready(store: &Db) -> Result<(), String> {
     Err(format!(
         "protocol update required: stored_version={stored} current_version={CURRENT_PROTOCOL_VERSION}; start the daemon or run `update` and let projection drain"
     ))
+}
+
+pub fn require_storage_requirement(
+    store: &Db,
+    requirement: StorageRequirement,
+) -> Result<(), String> {
+    match requirement {
+        StorageRequirement::Current(version) => require_storage_version(store, version),
+        StorageRequirement::MaintenanceBypass => Ok(()),
+    }
+}
+
+pub fn require_storage_version(store: &Db, expected: u32) -> Result<(), String> {
+    match current_version(store)? {
+        Some(row) if row.protocol_version == expected => Ok(()),
+        Some(row) => Err(format!(
+            "storage version mismatch: required_version={expected} stored_version={}",
+            row.protocol_version
+        )),
+        None => Err(format!(
+            "storage version mismatch: required_version={expected} stored_version=missing"
+        )),
+    }
 }
 
 pub fn build_check_version_intent(
@@ -324,6 +349,22 @@ mod tests {
     use crate::core::intents::IntentHandler;
     use crate::core::runtime::Runtime;
     use crate::protocol::app::MATCH_RUNTIME;
+    use rusqlite::params;
+
+    fn replace_stored_version_for_test(store: &Db, protocol_version: u32) {
+        store
+            .write_transaction(|tx| {
+                tx.conn().execute("DELETE FROM protocol_version_rows", [])?;
+                tx.conn().execute(
+                    "INSERT INTO protocol_version_rows
+                        (update_fact_id, protocol_version, applied_at_ms)
+                     VALUES (?1, ?2, ?3)",
+                    params![vec![1_u8; 32], i64::from(protocol_version), 1_i64],
+                )?;
+                Ok(())
+            })
+            .expect("replace stored protocol version");
+    }
 
     #[test]
     fn update_fact_roundtrips_fixed_width() {
@@ -376,9 +417,10 @@ mod tests {
         let mut runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
         assert!(
             storage_ready(runtime.db()).expect("empty db guard"),
-            "empty databases are bootstrappable before the first version record"
+            "fresh databases seed the current version marker"
         );
 
+        replace_stored_version_for_test(runtime.db(), CURRENT_PROTOCOL_VERSION - 1);
         let update = update_fact(UpdateFact {
             protocol_version: CURRENT_PROTOCOL_VERSION,
             applied_at_ms: 44,
@@ -386,8 +428,8 @@ mod tests {
         .expect("update fact");
         runtime.submit_fact(update);
         assert!(
-            !storage_ready(runtime.db()).expect("retained fact without version"),
-            "retained facts without a projected version row require update"
+            !storage_ready(runtime.db()).expect("stale version marker"),
+            "stale storage requires update"
         );
 
         runtime
@@ -417,6 +459,7 @@ mod tests {
     #[test]
     fn check_version_handler_emits_priority_update_fact() {
         let runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
+        replace_stored_version_for_test(runtime.db(), CURRENT_PROTOCOL_VERSION - 1);
         let intent = check_version_intent(55);
         let context = HandlerContext::new().with_db(runtime.db());
         let output = CheckVersionHandler::new()
