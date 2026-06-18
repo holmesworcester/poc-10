@@ -4,28 +4,27 @@ GitHub-renderable Mermaid flowcharts for the Context runtime. They are a visual
 companion to `README.md`, `src/core/README.md`, `docs/RULES.md`, and the scope
 READMEs; the Rust modules remain the source of truth.
 
-## The One Idea
+## Runtime Queue Model
 
-The whole runtime is a small set of **queues** plus a little protocol-supplied
-logic that core pumps between them. Two functions do the steady-state work of
-the loop:
+The runtime is a queue-driven system. Core owns queue storage, scheduling, and
+commit boundaries. Protocol code supplies the two callbacks that transform
+queued work:
 
 - a **fact projector** turns one fact into standing context, rows, time wakes,
-  intents, and follow-up facts, and
+  intents, durable facts, and incoming facts, and
 - an **intent handler** performs one bounded stateful action (IO, sealing,
-  responding) and returns more facts.
+  responding) and returns a `RuntimeEffects` batch.
 
-Protocol code also has thinner hooks at the edges — it authors facts for a
-command, classifies inbound network bytes into incoming facts, and validates a
-fact on admission — but those only feed the queues; the projector and handler
-are where queued work is transformed.
+Protocol code also supplies edge hooks: command authoring, inbound byte
+classification, and fact admission validation. Those hooks feed queues; they do
+not drain queues or decide runtime ordering.
 
 Core never interprets a fact. It only admits facts, matches context ranges,
 schedules wakes, and pumps these queues through the protocol functions. Most
 queues are durable SQLite tables that survive restart; `incoming_facts` and
 `local_intents` are `CREATE TEMP TABLE`, so they last as long as the SQLite
-connection — the whole daemon session, or one CLI command — and a restart
-rebuilds them empty. The daemon drains them each tick on its own long-lived
+connection - the whole daemon session, or one CLI command - and a restart
+recreates them empty. The daemon drains them each tick on its own long-lived
 connection. A normal CLI command or query turn does not drain runtime queues. It
 reads currently projected rows or commits authored facts to durable pending
 projection. Because temp tables are connection-local and a CLI command runs on a
@@ -42,20 +41,24 @@ pending_projection_matches        offers that matched a parked need
 time_wakes                        facts scheduled to reproject at a time
 intents (+ local_intents)         bounded work waiting for a handler (local is temp)
 network_outgoing                  sealed bytes waiting for the TCP pump
-<scope>_rows                      materialized state — read by queries and handlers, never by projectors
+<scope>_rows                      materialized state, read by queries and handlers, never by projectors
 ```
 
-Each diagram below is one zoom level on that loop.
+The sections below isolate the main queue transitions and runtime boundaries.
 
 ## 1) The Runtime Loop
 
-A fact lands in `pending_projection` and the projector runs. Its output fans
-into the other queues; core matches new offers against parked needs, re-queues
-the woken owners, and dispatches intents to handlers, whose facts re-enter the
-loop. Materialized rows are read-model and planning state, not part of the
-projection→match cycle: projectors and context matching never read them.
-Queries read rows, and handlers may read them when planning work (for example,
-sync computing range summaries).
+A durable fact reaches projection through `pending_projection`. A network fact
+reaches projection through `incoming_facts`. Projector output can add context,
+rows, time wakes, intents, emitted durable facts, emitted incoming facts, or a
+decision to retain the incoming input. Core matches new offers against parked
+needs, re-queues woken owners, and dispatches intents to handlers; handler
+output re-enters the same queues.
+
+Materialized rows are read-model and planning state, not part of the projection
+and context-match cycle. Projectors and context matching never read them.
+Queries read rows, and handlers may read rows when planning bounded work, such
+as sync range summaries.
 
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 300}} }%%
@@ -85,10 +88,11 @@ flowchart TD
 
     PROJECTOR -->|needs + offers| CONTEXT
     PROJECTOR -->|time wakes| WAKES
+    PROJECTOR -->|emitted durable facts| FACTS
+    PROJECTOR -->|emitted incoming facts| INCOMING
     PROJECTOR -->|intents| INTENTS
-    PROJECTOR -->|follow-up facts| FACTS
     PROJECTOR -.may retain incoming fact.-> FACTS
-    PROJECTOR -.parked or follow-up work.-> PENDING
+    PROJECTOR -.context needs keep owner pending.-> PENDING
     PROJECTOR -->|rows| ROWS
 
     CONTEXT -->|core matches range overlap| MATCHES
@@ -105,19 +109,19 @@ flowchart TD
     ROWS -.read for planning.-> HANDLER
 ```
 
-Core owns every arrow and the atomic commit behind it; the rounded boxes are the
-only protocol code on the diagram. The inbound classifier turns opaque network
-bytes into typed incoming facts but does not run projection or decide
-durability. The projector is pure derivation (it may park on missing context but
-never does IO); the handler is the only place *protocol* code does bounded
-stateful work. Core still does mechanical IO of its own — the TCP listener reads
-frames, the raw incoming queue holds them until classification, and the pump
-writes `network_outgoing`, deferring targets whose sockets are not ready — but
-it moves opaque bytes and never interprets a fact.
+Core owns every queue transition and the atomic commit behind it; the rounded
+boxes are the protocol callbacks. The inbound classifier turns network bytes
+into typed incoming facts, but it does not run projection or decide durability.
+Projectors are deterministic derivation: they may park on missing context, but
+they do not perform IO. Intent handlers are the protocol-owned boundary for
+bounded stateful work. Core still performs mechanical IO of its own: the TCP
+listener reads frames, the raw incoming queue holds them until classification,
+and the pump writes `network_outgoing`, deferring targets whose sockets are not
+ready. That IO moves length-prefixed bytes and never interprets facts.
 
 ## 2) Project One Fact
 
-Projection is a one-item worker. `Runtime::drain_durable_projection` and
+Projection is a single-item queue drain. `Runtime::drain_durable_projection` and
 `Runtime::drain_incoming_projection` call `project_one` repeatedly. Each call
 handles one durable pending owner or one volatile incoming fact. Everything
 before the commit is calculation. The commit consumes the selected work and
@@ -163,9 +167,10 @@ flowchart TD
 Durable projection drains from `pending_projection`; incoming projection drains
 from process-local `incoming_facts`. Incoming rows project once. The projector
 may retain the incoming fact as durable evidence, retain it while parked on
-context, or drop it after opening it into incoming child facts. Follow-up facts
-are not projected inline: effect commit admits them to the appropriate queue,
-and a later projection item handles them.
+context, or drop it after opening it into incoming child facts. Emitted facts
+are not projected inline: durable emitted facts go to `facts` and
+`pending_projection`, incoming emitted facts go to `incoming_facts`, and a later
+projection item handles each one.
 
 ## 3) Serialized Turns And Locks
 
@@ -370,20 +375,19 @@ flowchart LR
     EFFECTS_OUT --> QUEUES
 ```
 
-The important property is that queue commits, not call-stack nesting, carry the
-chain forward. A handler that emits facts does not project them before returning;
-a projector that emits intents does not run their handlers before committing.
+The contract is that queue commits, not call-stack nesting, carry the chain
+forward. A handler that emits facts does not project them before returning; a
+projector that emits intents does not run their handlers before committing.
 
 ## 7) Daemon Network Flow
 
-The daemon owns background network progress. Another peer is abstracted here as
-one node. Incoming network bytes are accepted by core into `network_incoming`,
-then drained through the protocol inbound classifier into `incoming_facts`.
-Projection opens those incoming facts with standing context plus incoming
-metadata. Projectors emit durable observation or receipt facts for replay-safe
-receive metadata, and established frame projectors stage contained facts back
-into incoming projection. Outgoing bytes are produced by protocol handlers and
-written by the core TCP pump.
+The daemon owns background network progress. Incoming bytes are accepted by core
+into `network_incoming`, then drained through the protocol inbound classifier
+into `incoming_facts`. Projection opens those incoming facts with standing
+context plus incoming metadata. Projectors emit durable observation or receipt
+facts when receive metadata must survive replay, and established frame
+projectors stage contained facts back into incoming projection. Outgoing bytes
+are produced by protocol handlers and written by the core TCP pump.
 
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 300}} }%%
@@ -397,10 +401,14 @@ flowchart LR
         INTAKE --> FRAME_FACT["incoming request, connection, or frame fact"]
         RAW_IN -.origin and receive-time metadata.-> PROJECT_FRAME["drain incoming projection: project frame fact"]
         FRAME_FACT --> PROJECT_FRAME
-        PROJECT_FRAME --> FOLLOWUP_FACTS["incoming child facts + durable receipt/observation facts"]
-        FOLLOWUP_FACTS --> DURABLE_PROJECT["later projection"]
+        PROJECT_FRAME --> CHILD_FACTS["opened child facts"]
+        CHILD_FACTS --> CHILD_INCOMING[("incoming_facts")]
+        PROJECT_FRAME --> RECEIVE_FACTS["receipt or observation facts"]
+        RECEIVE_FACTS --> RETAINED_FACTS[("facts -> pending_projection")]
+        CHILD_INCOMING --> LATER_PROJECT["later projection"]
+        RETAINED_FACTS --> LATER_PROJECT
 
-        DURABLE_PROJECT --> FOLLOWUP_INTENTS["sync or connection follow-up intents"]
+        LATER_PROJECT --> FOLLOWUP_INTENTS["sync or connection follow-up intents"]
         FOLLOWUP_INTENTS --> SEND_FACTS["send_facts_on_connection handler"]
         FOLLOWUP_INTENTS --> QUEUE_FRAME["queue_outgoing_frame handler"]
         SEND_FACTS --> OUTBOUND_ROWS["network_outgoing rows"]
@@ -412,21 +420,19 @@ flowchart LR
 ```
 
 `receive_network_frame_facts` does not unseal established frames or run a
-handler. It chooses the incoming fact family from opaque frame bytes and lets
-that fact's projector decide whether to retain or drop the fact. Origin and
+handler. It chooses the incoming fact family from frame bytes and lets that
+fact's projector decide whether to retain or drop the fact. Origin and
 receive-time metadata stay on the incoming queue/context path; projectors use
 that metadata only when emitting durable observation or receipt facts.
 
 ## 8) Sync: The Convergence Loop
 
-The previous sections describe the loop running on one node. Sync is what makes
-two nodes' loops converge, and it is best read as a back-and-forth over time
-rather than a flowchart. The crucial point is that the network adds no new
-runtime machinery: every message on the wire is an ordinary fact, so each step
-is the same `admit -> project (writes a row) -> emit intent -> handler emits the
-next message` cycle, just alternating between peers. The summaries exchanged are
-negentropy range summaries (a `count` and a `fingerprint`) over each peer's
-durable share/leaf/node index.
+The previous sections describe one node's loop. Sync is the same loop
+alternating between peers over time. The network adds no separate runtime
+machinery: every message on the wire is an ordinary fact, so each step is the
+same `admit -> project (writes a row) -> emit intent -> handler emits the next
+message` cycle. The summaries exchanged are negentropy range summaries (a
+`count` and a `fingerprint`) over each peer's durable share/leaf/node index.
 
 ```mermaid
 sequenceDiagram
@@ -473,13 +479,13 @@ summary with nothing to send, or a no-op because the peer already has the fact,
 or it is missing, unshareable, or rejected on projection — so convergence is
 eventual, not guaranteed per round.
 
-Two divisions of labor keep this small. **Sync vs connection:** sync only
-chooses fact ids and their dependency closure; connection decides how to batch,
-seal, address, and write the bytes, and records a `connection_fact_receipt` so
-live-tail can skip the origin peer. **Core vs protocol:** core pumps opaque
-length-prefixed bytes and never parses a frame — the recurring drivers
-(`maintain_connections`, `maintain_sync`) are just handlers emitting ordinary
-facts. The handshake that brings a connection live (request, connection,
+Two boundaries define the exchange. **Sync vs connection:** sync chooses fact
+ids and their dependency closure; connection decides how to batch, seal,
+address, and write the bytes, and records a `connection_fact_receipt` so
+live-tail can skip the origin peer. **Core vs protocol:** core pumps
+length-prefixed bytes and never parses a frame; recurring drivers
+(`maintain_connections`, `maintain_sync`) are handlers emitting ordinary facts.
+The handshake that brings a connection live (request, connection,
 ephemeral-secret context), the established frame types (`frame_small`,
 `frame_file_slice`, `frame_bundle`), and the exact compare/have/need fact
 layouts are detailed in `src/protocol/connection/README.md` and
