@@ -809,9 +809,12 @@ impl Projector for ConnectionProjector {
                 let semantic = adapt::adapt(authenticated)?;
                 self.project_semantic(fact, semantic, context)
             }
-            authenticate::Authentication::NeedsContext(needs) => Ok(needs
-                .into_iter()
-                .fold(ProjectionOutput::new(), |output, need| output.need(need))),
+            authenticate::Authentication::NeedsContext(needs) => {
+                let output = needs
+                    .into_iter()
+                    .fold(ProjectionOutput::new(), |output, need| output.need(need));
+                attach_connection_observation_if_available(fact, context, output)
+            }
         }
     }
 }
@@ -903,38 +906,121 @@ fn project_initiator_connection(
     context: &ProjectionContext,
     needs: ConnectionNeeds,
 ) -> Result<ProjectionOutput, String> {
-    let observation_need = exact_need(
-        fact.id,
-        "connection_frame_observation",
-        FactScope::Local,
-        fact.id,
-    );
-    let needs = needs.with_observation(observation_need.clone());
-    let Some(observation_fact) = context.payload_for(&observation_need) else {
-        return Ok(needs.apply_to(ProjectionOutput::new()));
+    let observation = connection_observation(fact, context)?;
+    let (observation_output, observed) = match observation {
+        ObservationResolution::Observed { output, origin } => (output, origin),
+        ObservationResolution::Missing { output: next } => {
+            return Ok(merge_projection_output(
+                needs.apply_to(ProjectionOutput::new()),
+                next,
+            ));
+        }
     };
-    let observation = frame_observation::project::decode::decode_fact(observation_fact.body())
-        .map_err(|_| "connection observation context is malformed".to_string())?;
-    if observation.frame_fact_id != fact.id {
-        return Err("connection observation targets another fact".to_string());
-    }
+    let output = merge_projection_output(
+        needs.apply_to(materialized_output(fact, connection)),
+        observation_output,
+    );
     let receipt = connection_fact_receipt_for_path(ReceiptPathInput {
         received_fact_id: fact.id,
-        origin_addr: observation.origin_addr.bytes(),
+        origin_addr: &observed.origin_addr,
         local_endpoint_id: connection.to_endpoint,
         sender_endpoint_id: connection.from_endpoint,
         receive_path: RECEIVE_PATH_CONNECTION,
         connection_id: Some(fact.id),
         request_id: Some(connection.request_id),
         frame_hash: crypto::hash(fact.body()),
-        received_at_local_ms: observation.received_at_local_ms,
+        received_at_local_ms: observed.received_at_local_ms,
     })?;
-    Ok(needs
-        .apply_to(materialized_output(fact, connection))
+    Ok(output
         .fact(receipt)
         .intent(seed_connection_sync_intent(SeedConnectionSync {
             connection_id: fact.id,
         })))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ObservedOrigin {
+    origin_addr: Vec<u8>,
+    received_at_local_ms: u64,
+}
+
+enum ObservationResolution {
+    Observed {
+        output: ProjectionOutput,
+        origin: ObservedOrigin,
+    },
+    Missing {
+        output: ProjectionOutput,
+    },
+}
+
+fn attach_connection_observation_if_available(
+    fact: &Fact,
+    context: &ProjectionContext,
+    output: ProjectionOutput,
+) -> Result<ProjectionOutput, String> {
+    let need = frame_observation::project::connection_frame_observation_need(fact.id, fact.id);
+    if context.incoming_metadata().is_none() && context.payload_for(&need).is_none() {
+        return Ok(output);
+    }
+    let observation = connection_observation(fact, context)?;
+    let addition = match observation {
+        ObservationResolution::Observed { output, .. }
+        | ObservationResolution::Missing { output } => output,
+    };
+    Ok(merge_projection_output(output, addition))
+}
+
+fn connection_observation(
+    fact: &Fact,
+    context: &ProjectionContext,
+) -> Result<ObservationResolution, String> {
+    let need = frame_observation::project::connection_frame_observation_need(fact.id, fact.id);
+    let output = ProjectionOutput::new().need(need.clone());
+    if let Some(metadata) = context.incoming_metadata() {
+        let observation = frame_observation::project::connection_frame_observation_fact(
+            fact.id,
+            &metadata.origin_addr,
+            metadata.received_at_local_ms,
+        )?;
+        return Ok(ObservationResolution::Observed {
+            output: output.fact(observation),
+            origin: ObservedOrigin {
+                origin_addr: metadata.origin_addr.clone(),
+                received_at_local_ms: metadata.received_at_local_ms,
+            },
+        });
+    }
+
+    let Some(observation_fact) = context.payload_for(&need) else {
+        return Ok(ObservationResolution::Missing { output });
+    };
+    if observation_fact.scope != FactScope::Local {
+        return Err("connection observation context must be local".to_string());
+    }
+    let observed = frame_observation::project::decode::decode_fact(observation_fact.body())
+        .map_err(|_| "connection observation context is malformed".to_string())?;
+    if observed.frame_fact_id != fact.id {
+        return Err("connection observation does not bind connection".to_string());
+    }
+    Ok(ObservationResolution::Observed {
+        output,
+        origin: ObservedOrigin {
+            origin_addr: observed.origin_addr.bytes().to_vec(),
+            received_at_local_ms: observed.received_at_local_ms,
+        },
+    })
+}
+
+fn merge_projection_output(
+    mut output: ProjectionOutput,
+    addition: ProjectionOutput,
+) -> ProjectionOutput {
+    output.needs.extend(addition.needs);
+    output.offers.extend(addition.offers);
+    output.time_wakes.extend(addition.time_wakes);
+    output.effects.facts.extend(addition.effects.facts);
+    output
 }
 
 fn materialized_output(fact: &Fact, connection: &ConnectionFact) -> ProjectionOutput {
@@ -956,10 +1042,6 @@ fn materialized_output(fact: &Fact, connection: &ConnectionFact) -> ProjectionOu
         ))
 }
 
-fn exact_need(owner: FactId, role: &'static str, scope: FactScope, key: FactId) -> ContextNeed {
-    authenticate::exact_need(owner, role, scope, key)
-}
-
 #[derive(Debug, Clone)]
 struct ConnectionNeeds {
     close: ContextNeed,
@@ -968,7 +1050,6 @@ struct ConnectionNeeds {
     responder_secret: Option<ContextNeed>,
     endpoint: Option<ContextNeed>,
     initiator: Option<ContextNeed>,
-    observation: Option<ContextNeed>,
     invite: Option<ContextNeed>,
 }
 
@@ -987,7 +1068,6 @@ impl ConnectionNeeds {
             responder_secret: Some(responder_secret),
             endpoint: None,
             initiator: None,
-            observation: None,
             invite,
         }
     }
@@ -1007,14 +1087,8 @@ impl ConnectionNeeds {
             responder_secret: None,
             endpoint: Some(endpoint),
             initiator: Some(initiator),
-            observation: None,
             invite,
         }
-    }
-
-    fn with_observation(mut self, observation: ContextNeed) -> Self {
-        self.observation = Some(observation);
-        self
     }
 
     fn apply_to(&self, output: ProjectionOutput) -> ProjectionOutput {
@@ -1026,7 +1100,6 @@ impl ConnectionNeeds {
             &self.responder_secret,
             &self.endpoint,
             &self.initiator,
-            &self.observation,
             &self.invite,
         ]
         .into_iter()
@@ -1041,7 +1114,7 @@ impl ConnectionNeeds {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::project_fact::ProjectionMode;
+    use crate::core::project_fact::{IncomingMetadata, MatchedContext, ProjectionMode};
     use crate::protocol::connection::queue_outgoing_frame::QUEUE_OUTGOING_FRAME;
     use crate::protocol::sync::seed_connection::SEED_CONNECTION_SYNC;
 
@@ -1057,6 +1130,44 @@ mod tests {
             responder_ephemeral_public_key: [6; 32],
             handshake_hash: [7; 32],
             connection_secret: [8; 32],
+        }
+    }
+
+    fn initiator_semantic(fact_id: FactId, connection: ConnectionFact) -> AuthenticatedConnection {
+        AuthenticatedConnection::Initiator {
+            request_need: request::project::connection_request_need(fact_id, connection.request_id),
+            request_opener_need: authenticate::all_ephemeral_secret_need(fact_id),
+            endpoint_need: authenticate::all_local_endpoint_need(fact_id),
+            initiator_need: authenticate::exact_need(
+                fact_id,
+                "connection_ephemeral_secret",
+                FactScope::Local,
+                connection.initiator_ephemeral_secret_fact_id,
+            ),
+            invite_need: None,
+            connection,
+        }
+    }
+
+    fn frame_observation_match(
+        owner: FactId,
+        origin_addr: &[u8],
+        received_at: u64,
+    ) -> MatchedContext {
+        let need = frame_observation::project::connection_frame_observation_need(owner, owner);
+        let observation = frame_observation::project::connection_frame_observation_fact(
+            owner,
+            origin_addr,
+            received_at,
+        )
+        .expect("connection observation fact");
+        MatchedContext {
+            need,
+            offer: frame_observation::project::connection_frame_observation_offer(
+                observation.id,
+                owner,
+            ),
+            payload: observation,
         }
     }
 
@@ -1125,5 +1236,102 @@ mod tests {
         assert!(output.effects.row_mutations.is_empty());
         assert!(output.effects.intents.is_empty());
         assert!(output.effects.local_intents.is_empty());
+    }
+
+    #[test]
+    fn initiator_projection_parks_without_origin_observation() {
+        let fact = Fact::new(FactScope::Local, 10, vec![49, 1, 2, 3]);
+        let output = ConnectionProjector::new()
+            .project_semantic(
+                &fact,
+                initiator_semantic(fact.id, connection_fact()),
+                &ProjectionContext::default(),
+            )
+            .expect("project initiator connection");
+
+        assert!(output
+            .needs
+            .iter()
+            .any(|need| need.role.as_str() == "connection_frame_observation"));
+        assert!(output.offers.is_empty());
+        assert!(output.effects.is_empty());
+    }
+
+    #[test]
+    fn initiator_projection_uses_durable_observation_for_receipt() {
+        let fact = Fact::new(FactScope::Local, 10, vec![49, 1, 2, 3]);
+        let origin = b"127.0.0.1:41044";
+        let received_at = 1_700_000_444;
+        let connection = connection_fact();
+        let context = ProjectionContext::from_matches(vec![frame_observation_match(
+            fact.id,
+            origin,
+            received_at,
+        )]);
+
+        let output = ConnectionProjector::new()
+            .project_semantic(
+                &fact,
+                initiator_semantic(fact.id, connection.clone()),
+                &context,
+            )
+            .expect("project initiator connection");
+
+        assert!(output
+            .offers
+            .iter()
+            .any(|offer| offer.role.as_str() == "connection"));
+        assert_eq!(output.effects.facts.len(), 1);
+        let receipt = crate::protocol::connection::fact_receipt::project::decode::decode_fact(
+            output.effects.facts[0].body(),
+        )
+        .expect("decode receipt");
+        assert_eq!(receipt.received_fact_id, fact.id);
+        assert_eq!(receipt.origin_addr.bytes(), origin);
+        assert_eq!(receipt.local_endpoint_id, connection.to_endpoint);
+        assert_eq!(receipt.sender_endpoint_id, connection.from_endpoint);
+        assert_eq!(receipt.connection_id, Some(fact.id));
+        assert_eq!(receipt.request_id, Some(connection.request_id));
+        assert_eq!(receipt.received_at_local_ms, received_at);
+    }
+
+    #[test]
+    fn initiator_projection_records_observation_from_incoming_metadata() {
+        let fact = Fact::new(FactScope::Local, 10, vec![49, 1, 2, 3]);
+        let owner_id = fact.id;
+        let origin = b"127.0.0.1:41055";
+        let received_at = 1_700_000_555;
+        let context = ProjectionContext::default().with_incoming_metadata(IncomingMetadata {
+            origin_addr: origin.to_vec(),
+            received_at_local_ms: received_at,
+        });
+
+        let output = ConnectionProjector::new()
+            .project_semantic(
+                &fact,
+                initiator_semantic(fact.id, connection_fact()),
+                &context,
+            )
+            .expect("project initiator connection");
+
+        assert_eq!(output.effects.facts.len(), 2);
+        assert!(output.effects.facts.iter().any(|emitted| {
+            frame_observation::project::decode::decode_fact(emitted.body())
+                .map(|observed| {
+                    observed.frame_fact_id == owner_id
+                        && observed.origin_addr.bytes() == origin
+                        && observed.received_at_local_ms == received_at
+                })
+                .unwrap_or(false)
+        }));
+        assert!(output.effects.facts.iter().any(|emitted| {
+            crate::protocol::connection::fact_receipt::project::decode::decode_fact(emitted.body())
+                .map(|receipt| {
+                    receipt.received_fact_id == owner_id
+                        && receipt.origin_addr.bytes() == origin
+                        && receipt.received_at_local_ms == received_at
+                })
+                .unwrap_or(false)
+        }));
     }
 }

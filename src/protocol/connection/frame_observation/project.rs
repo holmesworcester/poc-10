@@ -114,11 +114,10 @@ pub mod authenticate {
     mod tests {
         use crate::core::facts::Fact;
         use crate::core::project_fact::ProjectionContext;
-        use crate::protocol::connection::frame_observation::author::fact_from_observation;
         use crate::protocol::connection::frame_observation::fact::ConnectionFrameObservationFact;
 
         fn canonical_fact() -> Fact {
-            fact_from_observation([1; 32], b"127.0.0.1:41001", 100)
+            super::super::connection_frame_observation_fact([1; 32], b"127.0.0.1:41001", 100)
                 .expect("connection_frame_observation fact")
         }
 
@@ -189,23 +188,66 @@ pub mod adapt {
     }
 }
 
-// Connection-frame observation projector.
+// Connection receive-observation projector.
 //
 // POLICY. A `connection_frame_observation` fact is admitted iff:
 //   1. STRUCTURAL. The fact is local-only and its payload names one frame fact
 //      plus canonical receive metadata.
 //   2. CONTEXT. No external authority is loaded; the matching frame projector
-//      validates and opens the frame bytes.
+//      validates and opens the request, connection, or established-frame bytes.
 //   3. MATERIALIZE. Publish local `connection_frame_observation` context keyed
-//      by the observed frame fact id.
+//      by the observed wire fact id.
 
-use crate::core::context::ContextOffer;
-use crate::core::facts::{Fact, FactScope};
+use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
+use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::project_fact::{
     FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
 };
+use crate::protocol::connection::fact_receipt::fact::{normalize_origin_addr_bytes, OriginAddr};
 
+use super::encode;
 use super::fact::ConnectionFrameObservationFact;
+
+pub const CONNECTION_FRAME_OBSERVATION_ROLE: &str = "connection_frame_observation";
+
+pub fn connection_frame_observation_need(owner: FactId, frame_fact_id: FactId) -> ContextNeed {
+    ContextNeed {
+        owner,
+        role: Role::expect(CONNECTION_FRAME_OBSERVATION_ROLE),
+        scope: FactScope::Local,
+        start_key: ContextKey::from_bytes(frame_fact_id),
+        end_key: ContextKey::from_bytes(frame_fact_id),
+    }
+}
+
+pub fn connection_frame_observation_offer(owner: FactId, frame_fact_id: FactId) -> ContextOffer {
+    ContextOffer {
+        owner,
+        role: Role::expect(CONNECTION_FRAME_OBSERVATION_ROLE),
+        scope: FactScope::Local,
+        start_key: ContextKey::from_bytes(frame_fact_id),
+        end_key: ContextKey::from_bytes(frame_fact_id),
+    }
+}
+
+pub fn connection_frame_observation_fact(
+    frame_fact_id: FactId,
+    origin_addr: &[u8],
+    received_at_local_ms: u64,
+) -> Result<Fact, String> {
+    let origin_addr = normalize_origin_addr_bytes(origin_addr)?;
+    let observation = ConnectionFrameObservationFact {
+        frame_fact_id,
+        origin_addr: OriginAddr::new(&origin_addr)
+            .map_err(|err| format!("connection frame observation origin addr: {err}"))?,
+        received_at_local_ms,
+    };
+    Ok(Fact::new(
+        FactScope::Local,
+        received_at_local_ms,
+        encode::encode_fact(&observation)?,
+    ))
+}
 
 /// Projector route metadata for the frame_observation fact.
 pub const PROJECTOR_INFO: FactProjectorInfo = FactProjectorInfo::projector(
@@ -252,12 +294,11 @@ impl ConnectionFrameObservationProjector {
 
         // 2. Context.
         // 3. Materialize.
-        Ok(ProjectionOutput::new().offer(ContextOffer::range(
-            fact.id,
-            "connection_frame_observation",
-            FactScope::Local,
-            observed.frame_fact_id,
-            observed.frame_fact_id,
-        )))
+        Ok(
+            ProjectionOutput::new().offer(connection_frame_observation_offer(
+                fact.id,
+                observed.frame_fact_id,
+            )),
+        )
     }
 }

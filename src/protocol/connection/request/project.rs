@@ -690,7 +690,6 @@ pub mod authenticate {
         use crate::core::facts::{Fact, FactScope};
         use crate::core::project_fact::ProjectionContext;
         use crate::protocol::auth::endpoint::fact::EndpointFact;
-        use crate::protocol::connection::request::author::sign_request;
         use crate::protocol::connection::request::encode;
         use crate::protocol::connection::request::fact::{
             ConnectionRequestFact, REQUEST_MODE_MEMBERSHIP,
@@ -727,10 +726,20 @@ pub mod authenticate {
                 signing_public_key: crypto::ed25519_public_key(&SIGNING_SECRET),
                 signing_secret: SIGNING_SECRET,
             };
-            sign_request(&mut request, &endpoint).expect("sign membership connection request");
+            sign_membership_request_for_test(&mut request, &endpoint);
             let bytes = encode::seal_fact(&request, &initiator_ephemeral_private_key)
                 .expect("seal connection_request fact");
             Fact::new(FactScope::Global, 100, bytes)
+        }
+
+        fn sign_membership_request_for_test(
+            request: &mut ConnectionRequestFact,
+            endpoint: &EndpointFact,
+        ) {
+            request.endpoint_signature = crypto::ed25519_sign(
+                &endpoint.signing_secret,
+                &encode::endpoint_signature_bytes(request).expect("signature bytes"),
+            );
         }
 
         fn authenticate(fact: &Fact) -> Result<super::Authentication, String> {
@@ -913,9 +922,12 @@ impl Projector for ConnectionRequestProjector {
                 let semantic = adapt::adapt(authenticated)?;
                 self.project_semantic(fact, semantic, context)
             }
-            authenticate::Authentication::NeedsContext(needs) => Ok(needs
-                .into_iter()
-                .fold(ProjectionOutput::new(), |output, need| output.need(need))),
+            authenticate::Authentication::NeedsContext(needs) => {
+                let output = needs
+                    .into_iter()
+                    .fold(ProjectionOutput::new(), |output, need| output.need(need));
+                attach_request_observation_if_available(fact, context, output)
+            }
         }
     }
 }
@@ -1009,15 +1021,20 @@ fn project_receiver_request(
     context: &ProjectionContext,
     base_need: ContextNeed,
 ) -> Result<ProjectionOutput, String> {
-    let observation_need = exact_need(
-        fact.id,
-        "connection_frame_observation",
-        FactScope::Local,
-        fact.id,
-    );
-    let mut output = ProjectionOutput::new()
-        .need(base_need)
-        .need(observation_need.clone());
+    let mut output = ProjectionOutput::new().need(base_need);
+    let observed = match request_observation(fact, context)? {
+        ObservationResolution::Observed {
+            output: next,
+            origin,
+        } => {
+            output = merge_projection_output(output, next);
+            Some(origin)
+        }
+        ObservationResolution::Missing { output: next } => {
+            output = merge_projection_output(output, next);
+            None
+        }
+    };
     let authority_id = match request.mode {
         REQUEST_MODE_BOOTSTRAP => {
             let invite_need = invite_secret_need(fact.id, request.invite_secret_fact_id);
@@ -1072,20 +1089,12 @@ fn project_receiver_request(
         _ => unreachable!("validated request mode"),
     };
 
-    let Some(observation_fact) = context.payload_for(&observation_need) else {
+    let Some(observed) = observed else {
         return Ok(output);
     };
-    if observation_fact.scope != FactScope::Local {
-        return Err("connection request observation context must be local".to_string());
-    }
-    let observation = frame_observation::project::decode::decode_fact(observation_fact.body())
-        .map_err(|_| "connection request observation context is malformed".to_string())?;
-    if observation.frame_fact_id != fact.id {
-        return Err("connection request observation targets another fact".to_string());
-    }
     let receipt = connection_fact_receipt_for_path(ReceiptPathInput {
         received_fact_id: fact.id,
-        origin_addr: observation.origin_addr.bytes(),
+        origin_addr: &observed.origin_addr,
         local_endpoint_id: request.to_endpoint,
         sender_endpoint_id: request.from_endpoint,
         receive_path:
@@ -1093,7 +1102,7 @@ fn project_receiver_request(
         connection_id: None,
         request_id: Some(fact.id),
         frame_hash: crypto::hash(fact.body()),
-        received_at_local_ms: observation.received_at_local_ms,
+        received_at_local_ms: observed.received_at_local_ms,
     })?;
     let receive_id = receipt.id;
     Ok(output
@@ -1104,6 +1113,91 @@ fn project_receiver_request(
             initiator_endpoint_shared_id: authority_id,
             receive_id,
         })))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ObservedOrigin {
+    origin_addr: Vec<u8>,
+    received_at_local_ms: u64,
+}
+
+enum ObservationResolution {
+    Observed {
+        output: ProjectionOutput,
+        origin: ObservedOrigin,
+    },
+    Missing {
+        output: ProjectionOutput,
+    },
+}
+
+fn attach_request_observation_if_available(
+    fact: &Fact,
+    context: &ProjectionContext,
+    output: ProjectionOutput,
+) -> Result<ProjectionOutput, String> {
+    let need = frame_observation::project::connection_frame_observation_need(fact.id, fact.id);
+    if context.incoming_metadata().is_none() && context.payload_for(&need).is_none() {
+        return Ok(output);
+    }
+    let observation = request_observation(fact, context)?;
+    let addition = match observation {
+        ObservationResolution::Observed { output, .. }
+        | ObservationResolution::Missing { output } => output,
+    };
+    Ok(merge_projection_output(output, addition))
+}
+
+fn request_observation(
+    fact: &Fact,
+    context: &ProjectionContext,
+) -> Result<ObservationResolution, String> {
+    let need = frame_observation::project::connection_frame_observation_need(fact.id, fact.id);
+    let output = ProjectionOutput::new().need(need.clone());
+    if let Some(metadata) = context.incoming_metadata() {
+        let observation = frame_observation::project::connection_frame_observation_fact(
+            fact.id,
+            &metadata.origin_addr,
+            metadata.received_at_local_ms,
+        )?;
+        return Ok(ObservationResolution::Observed {
+            output: output.fact(observation),
+            origin: ObservedOrigin {
+                origin_addr: metadata.origin_addr.clone(),
+                received_at_local_ms: metadata.received_at_local_ms,
+            },
+        });
+    }
+
+    let Some(observation_fact) = context.payload_for(&need) else {
+        return Ok(ObservationResolution::Missing { output });
+    };
+    if observation_fact.scope != FactScope::Local {
+        return Err("connection request observation context must be local".to_string());
+    }
+    let observed = frame_observation::project::decode::decode_fact(observation_fact.body())
+        .map_err(|_| "connection request observation context is malformed".to_string())?;
+    if observed.frame_fact_id != fact.id {
+        return Err("connection request observation does not bind request".to_string());
+    }
+    Ok(ObservationResolution::Observed {
+        output,
+        origin: ObservedOrigin {
+            origin_addr: observed.origin_addr.bytes().to_vec(),
+            received_at_local_ms: observed.received_at_local_ms,
+        },
+    })
+}
+
+fn merge_projection_output(
+    mut output: ProjectionOutput,
+    addition: ProjectionOutput,
+) -> ProjectionOutput {
+    output.needs.extend(addition.needs);
+    output.offers.extend(addition.offers);
+    output.time_wakes.extend(addition.time_wakes);
+    output.effects.facts.extend(addition.effects.facts);
+    output
 }
 
 #[cfg(test)]
@@ -1134,23 +1228,20 @@ fn content_signer_need(owner: FactId, workspace_id: FactId, endpoint_id: FactId)
     )
 }
 
-fn exact_need(owner: FactId, role: &'static str, scope: FactScope, key: FactId) -> ContextNeed {
-    authenticate::exact_need(owner, role, scope, key)
-}
-
 #[cfg(test)]
 mod tests {
     use crate::core::crypto;
     use crate::core::facts::{Fact, FactScope};
     use crate::core::intents::RowMutation;
-    use crate::core::project_fact::{MatchedContext, ProjectionContext, ProjectionMode, Projector};
+    use crate::core::project_fact::{
+        IncomingMetadata, MatchedContext, ProjectionContext, ProjectionMode, Projector,
+    };
+    use crate::protocol::auth::endpoint::encode as endpoint_encode;
     use crate::protocol::auth::endpoint::fact::EndpointFact;
     use crate::protocol::auth::invite_secret::{encode as invite_encode, fact::InviteSecretFact};
     use crate::protocol::connection::ephemeral_secret::{
         encode as ephemeral_encode, fact::ConnectionEphemeralSecretFact,
     };
-    use crate::protocol::connection::frame_observation;
-    use crate::protocol::connection::request::author;
     use crate::protocol::connection::request::fact::REQUEST_MODE_BOOTSTRAP;
     use crate::protocol::connection::request::CONNECTION_REQUEST_ROWS;
 
@@ -1201,13 +1292,88 @@ mod tests {
             initiator_ephemeral_secret_fact_id: ephemeral_fact.id,
             initiator_ephemeral_public_key: ephemeral.ephemeral_public_key,
         };
-        author::sign_bootstrap_request(&mut request, &invite_secret).expect("sign request");
+        sign_bootstrap_request_for_test(&mut request, &invite_secret);
         let request_fact = Fact::new(
             FactScope::Global,
             12,
             encode::seal_fact(&request, &ephemeral_private_key).expect("seal request"),
         );
         (invite_fact, ephemeral_fact, request_fact)
+    }
+
+    fn sign_bootstrap_request_for_test(
+        request: &mut ConnectionRequestFact,
+        invite_secret: &InviteSecretFact,
+    ) {
+        request.invite_signature = crypto::ed25519_sign(
+            &invite_secret.bootstrap_secret,
+            &encode::bootstrap_signature_bytes(request).expect("signature bytes"),
+        );
+    }
+
+    fn receiver_context_matches(
+        request_fact: &Fact,
+        invite_fact: &Fact,
+        responder: EndpointFact,
+    ) -> Vec<MatchedContext> {
+        let endpoint_fact = Fact::new(
+            FactScope::Local,
+            11,
+            endpoint_encode::encode_fact(&responder).expect("endpoint fact"),
+        );
+        vec![
+            MatchedContext {
+                need: all_local_endpoint_need(request_fact.id),
+                offer: ContextOffer::range(
+                    endpoint_fact.id,
+                    "auth_local_endpoint",
+                    FactScope::Local,
+                    responder.endpoint,
+                    responder.endpoint,
+                ),
+                payload: endpoint_fact,
+            },
+            MatchedContext {
+                need: ContextNeed::range(
+                    request_fact.id,
+                    "connection_invite_secret",
+                    FactScope::Local,
+                    invite_fact.id,
+                    invite_fact.id,
+                ),
+                offer: ContextOffer::range(
+                    invite_fact.id,
+                    "connection_invite_secret",
+                    FactScope::Local,
+                    invite_fact.id,
+                    invite_fact.id,
+                ),
+                payload: invite_fact.clone(),
+            },
+        ]
+    }
+
+    fn request_observation_match(
+        request_fact: &Fact,
+        metadata: &IncomingMetadata,
+    ) -> MatchedContext {
+        let observation = frame_observation::project::connection_frame_observation_fact(
+            request_fact.id,
+            &metadata.origin_addr,
+            metadata.received_at_local_ms,
+        )
+        .expect("request observation fact");
+        MatchedContext {
+            need: frame_observation::project::connection_frame_observation_need(
+                request_fact.id,
+                request_fact.id,
+            ),
+            offer: frame_observation::project::connection_frame_observation_offer(
+                observation.id,
+                request_fact.id,
+            ),
+            payload: observation,
+        }
     }
 
     #[test]
@@ -1277,62 +1443,123 @@ mod tests {
         let initiator = endpoint([1; 32], [2; 32]);
         let responder = endpoint([3; 32], [4; 32]);
         let (invite_fact, _, request_fact) = bootstrap_facts(initiator, responder.endpoint);
-        let endpoint_fact = crate::protocol::auth::endpoint::author::endpoint_fact(11, responder)
-            .expect("endpoint fact");
-        let observation_fact = frame_observation::author::fact_from_observation(
-            request_fact.id,
-            b"127.0.0.1:41010",
-            12,
-        )
-        .expect("observation");
+        let metadata = IncomingMetadata {
+            origin_addr: b"127.0.0.1:41010".to_vec(),
+            received_at_local_ms: 12,
+        };
 
-        let context = ProjectionContext::from_matches(vec![
-            MatchedContext {
-                need: all_local_endpoint_need(request_fact.id),
-                offer: ContextOffer::range(
-                    endpoint_fact.id,
-                    "auth_local_endpoint",
-                    FactScope::Local,
-                    responder.endpoint,
-                    responder.endpoint,
-                ),
-                payload: endpoint_fact,
-            },
-            MatchedContext {
-                need: ContextNeed::range(
-                    request_fact.id,
-                    "connection_invite_secret",
-                    FactScope::Local,
-                    invite_fact.id,
-                    invite_fact.id,
-                ),
-                offer: ContextOffer::range(
-                    invite_fact.id,
-                    "connection_invite_secret",
-                    FactScope::Local,
-                    invite_fact.id,
-                    invite_fact.id,
-                ),
-                payload: invite_fact,
-            },
-            MatchedContext {
-                need: ContextNeed::range(
-                    request_fact.id,
-                    "connection_frame_observation",
-                    FactScope::Local,
-                    request_fact.id,
-                    request_fact.id,
-                ),
-                offer: ContextOffer::range(
-                    observation_fact.id,
-                    "connection_frame_observation",
-                    FactScope::Local,
-                    request_fact.id,
-                    request_fact.id,
-                ),
-                payload: observation_fact,
-            },
-        ]);
+        let context = ProjectionContext::from_matches(receiver_context_matches(
+            &request_fact,
+            &invite_fact,
+            responder,
+        ))
+        .with_incoming_metadata(metadata.clone());
+
+        let projected = ConnectionRequestProjector::new()
+            .project(&request_fact, &context)
+            .expect("project request");
+
+        assert_eq!(projected.effects.facts.len(), 2);
+        assert_eq!(projected.effects.intents.len(), 1);
+        let observation = projected
+            .effects
+            .facts
+            .iter()
+            .find_map(|fact| frame_observation::project::decode::decode_fact(fact.body()).ok())
+            .expect("decode observation");
+        assert_eq!(observation.frame_fact_id, request_fact.id);
+        assert_eq!(
+            observation.origin_addr.bytes(),
+            metadata.origin_addr.as_slice()
+        );
+        let receipt = projected
+            .effects
+            .facts
+            .iter()
+            .find_map(|fact| {
+                crate::protocol::connection::fact_receipt::project::decode::decode_fact(fact.body())
+                    .ok()
+            })
+            .expect("decode receipt");
+        assert_eq!(receipt.origin_addr.bytes(), metadata.origin_addr.as_slice());
+        assert_eq!(receipt.received_at_local_ms, metadata.received_at_local_ms);
+    }
+
+    #[test]
+    fn incoming_request_records_observation_before_endpoint_context() {
+        let initiator = endpoint([1; 32], [2; 32]);
+        let responder = endpoint([3; 32], [4; 32]);
+        let (_, _, request_fact) = bootstrap_facts(initiator, responder.endpoint);
+        let metadata = IncomingMetadata {
+            origin_addr: b"127.0.0.1:41030".to_vec(),
+            received_at_local_ms: 30,
+        };
+        let context = ProjectionContext::default().with_incoming_metadata(metadata.clone());
+
+        let projected = ConnectionRequestProjector::new()
+            .project(&request_fact, &context)
+            .expect("project request before endpoint context");
+
+        assert!(projected
+            .needs
+            .iter()
+            .any(|need| need.role.as_str() == "auth_local_endpoint"));
+        assert!(projected
+            .needs
+            .iter()
+            .any(|need| need.role.as_str() == "connection_frame_observation"));
+        assert!(projected.offers.is_empty());
+        assert!(projected.effects.intents.is_empty());
+        assert_eq!(projected.effects.facts.len(), 1);
+        let observation =
+            frame_observation::project::decode::decode_fact(projected.effects.facts[0].body())
+                .expect("decode observation");
+        assert_eq!(observation.frame_fact_id, request_fact.id);
+        assert_eq!(
+            observation.origin_addr.bytes(),
+            metadata.origin_addr.as_slice()
+        );
+        assert_eq!(
+            observation.received_at_local_ms,
+            metadata.received_at_local_ms
+        );
+    }
+
+    #[test]
+    fn receiver_request_projection_parks_without_origin_observation() {
+        let initiator = endpoint([1; 32], [2; 32]);
+        let responder = endpoint([3; 32], [4; 32]);
+        let (invite_fact, _, request_fact) = bootstrap_facts(initiator, responder.endpoint);
+        let context = ProjectionContext::from_matches(receiver_context_matches(
+            &request_fact,
+            &invite_fact,
+            responder,
+        ));
+
+        let projected = ConnectionRequestProjector::new()
+            .project(&request_fact, &context)
+            .expect("project request");
+
+        assert!(projected
+            .needs
+            .iter()
+            .any(|need| need.role.as_str() == "connection_frame_observation"));
+        assert!(projected.offers.is_empty());
+        assert!(projected.effects.is_empty());
+    }
+
+    #[test]
+    fn receiver_request_projection_uses_durable_observation_for_receipt() {
+        let initiator = endpoint([1; 32], [2; 32]);
+        let responder = endpoint([3; 32], [4; 32]);
+        let (invite_fact, _, request_fact) = bootstrap_facts(initiator, responder.endpoint);
+        let metadata = IncomingMetadata {
+            origin_addr: b"127.0.0.1:41020".to_vec(),
+            received_at_local_ms: 20,
+        };
+        let mut matches = receiver_context_matches(&request_fact, &invite_fact, responder);
+        matches.push(request_observation_match(&request_fact, &metadata));
+        let context = ProjectionContext::from_matches(matches);
 
         let projected = ConnectionRequestProjector::new()
             .project(&request_fact, &context)
@@ -1340,5 +1567,12 @@ mod tests {
 
         assert_eq!(projected.effects.facts.len(), 1);
         assert_eq!(projected.effects.intents.len(), 1);
+        let receipt = crate::protocol::connection::fact_receipt::project::decode::decode_fact(
+            projected.effects.facts[0].body(),
+        )
+        .expect("decode receipt");
+        assert_eq!(receipt.received_fact_id, request_fact.id);
+        assert_eq!(receipt.origin_addr.bytes(), metadata.origin_addr.as_slice());
+        assert_eq!(receipt.received_at_local_ms, metadata.received_at_local_ms);
     }
 }

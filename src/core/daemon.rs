@@ -5,16 +5,16 @@
 //! stop/reset, and run a bounded tick from the selected protocol's declarative
 //! daemon description. The tick is protocol-agnostic: give the first recurring
 //! schedule a chance to repair storage readiness, block live IO until any
-//! declared readiness check passes, then accept network bytes, commit
-//! protocol-classified incoming effects, process declared time wakes with a high
+//! declared readiness check passes, then accept network bytes, stage and drain
+//! protocol-classified incoming facts, process declared time wakes with a high
 //! local budget, drain projection and intents, and pump queued outgoing network
 //! bytes.
 //!
 //! The daemon is the host for work that should keep happening without a user
 //! command on the stack. It does not decode connection frames or choose protocol
-//! actions itself. The protocol declaration turns inbound bytes into runtime
-//! effects, declares which time-wake timelines should be admitted, and supplies
-//! the runtime handlers that consume queued work.
+//! actions itself. The protocol declaration classifies inbound bytes as
+//! incoming facts, declares which time-wake timelines should be admitted, and
+//! supplies the runtime handlers that consume queued work.
 //!
 //! The order inside `tick` is part of the runtime contract. The first due
 //! recurring intent runs before other recurring schedules and before all live
@@ -29,10 +29,10 @@
 
 use crate::core::cli::{CliArgs, CliOutput};
 use crate::core::db::Db;
-use crate::core::effects::RuntimeEffects;
+use crate::core::facts::Fact;
 use crate::core::handle_intent::{HandlerRoute, RecurringIntentBuilder, RecurringIntentContext};
 use crate::core::network;
-use crate::core::project_fact::Timeline;
+use crate::core::project_fact::{IncomingMetadata, Timeline};
 use crate::core::runtime::Runtime;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -71,7 +71,7 @@ pub struct StartOptions {
 /// Protocol declarations needed by the generic daemon tick.
 #[derive(Clone, Copy)]
 pub struct DaemonDescription {
-    /// Converter from inbound network bytes to protocol-owned runtime effects.
+    /// Classifier from inbound network bytes to protocol-owned incoming facts.
     pub inbound_network_intake: Option<InboundNetworkIntake>,
     /// Time-wake schedules the daemon should admit each tick.
     pub time_wakes: &'static [DaemonTimeWake],
@@ -79,8 +79,8 @@ pub struct DaemonDescription {
     pub storage_ready: Option<StorageReadyCheck>,
 }
 
-/// Function that turns an inbound frame into facts, rows, or follow-up work.
-pub type InboundNetworkIntake = fn(InboundNetworkFrame) -> Result<RuntimeEffects, String>;
+/// Function that turns an inbound frame into incoming projection inputs.
+pub type InboundNetworkIntake = fn(InboundNetworkFrame) -> Result<Vec<Fact>, String>;
 
 /// Protocol-owned check that decides whether normal daemon work may run.
 pub type StorageReadyCheck = fn(&Db) -> Result<bool, String>;
@@ -89,7 +89,6 @@ pub type StorageReadyCheck = fn(&Db) -> Result<bool, String>;
 #[derive(Debug, Clone)]
 pub struct InboundNetworkFrame {
     pub frame: Vec<u8>,
-    pub origin_addr: SocketAddr,
     pub received_at_local_ms: u64,
 }
 
@@ -148,6 +147,7 @@ pub fn tick(
     }
 
     active |= drain_inbound_listener(description, runtime, listener, work_limit)?;
+    active |= drain_inbound_network_queue(description, runtime, work_limit)?;
     active |= drain_time_wakes(description, runtime, local_derivation_limit)?;
     active |= runtime.drain_durable_projection(local_derivation_limit)?;
     active |= runtime.drain_incoming_projection(local_derivation_limit)?;
@@ -244,23 +244,44 @@ fn drain_inbound_listener(
     listener: &network::Listener,
     work_limit: usize,
 ) -> Result<bool, String> {
-    let Some(intake) = description.inbound_network_intake else {
+    if description.inbound_network_intake.is_none() {
         return Ok(false);
-    };
+    }
     let accepted = listener.accept_available(work_limit, |source, frame| {
-        let effects = intake(InboundNetworkFrame {
-            frame,
-            origin_addr: source.addr(),
-            received_at_local_ms: now_ms(),
-        })?;
-        if !effects.is_empty() {
-            runtime.submit_runtime_effects(effects, "commit inbound network frame")?;
-        }
-        Ok(())
+        let row = network::IncomingNetworkRow::new(source, now_ms(), frame);
+        network::enqueue_incoming(runtime.db(), std::slice::from_ref(&row)).map(|_| ())
     })?;
     Ok(accepted.accepted_connections > 0
         || accepted.value.sent_frames > 0
         || accepted.value.received_frames > 0)
+}
+
+fn drain_inbound_network_queue(
+    description: DaemonDescription,
+    runtime: &mut Runtime,
+    work_limit: usize,
+) -> Result<bool, String> {
+    let Some(intake) = description.inbound_network_intake else {
+        return Ok(false);
+    };
+    let rows = network::claim_incoming(runtime.db(), work_limit)?;
+    for row in &rows {
+        let facts = intake(InboundNetworkFrame {
+            frame: row.bytes.clone(),
+            received_at_local_ms: row.received_at_ms,
+        })?;
+        let metadata = IncomingMetadata {
+            origin_addr: row.source.addr().to_string().into_bytes(),
+            received_at_local_ms: row.received_at_ms,
+        };
+        runtime.submit_network_incoming_facts(
+            &facts,
+            &metadata,
+            "stage inbound network incoming facts",
+        )?;
+        network::delete_incoming(runtime.db(), std::slice::from_ref(row))?;
+    }
+    Ok(!rows.is_empty())
 }
 
 fn drain_time_wakes(
@@ -845,7 +866,7 @@ fn print_line_now(line: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::effects::StorageRequirement;
+    use crate::core::effects::{RuntimeEffects, StorageRequirement};
     use crate::core::facts::Fact;
     use crate::core::handle_intent::RecurringIntentSpec;
     use crate::core::intents::{HandlerContext, HandlerResult, Intent, IntentHandler, IntentKind};

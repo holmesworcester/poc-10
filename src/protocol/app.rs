@@ -12,13 +12,13 @@
 //! `MATCH_RUNTIME` or `MATCH_PROTOCOL` constants here.
 //!
 //! Keep executable protocol policy out of this file. The conversion from a TCP
-//! frame to receive effects is a small adapter; connection receive admission
+//! frame to incoming facts is a small adapter; connection receive admission
 //! and frame interpretation live in connection fact and intake modules.
 
 use crate::core::app::ProtocolDescription;
 use crate::core::daemon::{DaemonDescription, DaemonTimeWake, InboundNetworkFrame};
 use crate::core::db::Db;
-use crate::core::effects::RuntimeEffects;
+use crate::core::facts::Fact;
 use crate::core::runtime::RuntimeDescription;
 use crate::protocol::registry::{
     authenticate_fact_for_admission, protocol_projector, FACT_ROUTES, HANDLER_ROUTES,
@@ -41,7 +41,7 @@ pub const MATCH_PROTOCOL: ProtocolDescription<MatchCliContext> = ProtocolDescrip
     command_name: "con",
     runtime: MATCH_RUNTIME,
     daemon: DaemonDescription {
-        inbound_network_intake: Some(receive_network_frame_effects),
+        inbound_network_intake: Some(receive_network_frame_facts),
         time_wakes: MATCH_DAEMON_TIME_WAKES,
         storage_ready: Some(crate::protocol::versioning::check_version::storage_ready),
     },
@@ -59,13 +59,10 @@ const MATCH_DAEMON_TIME_WAKES: &[DaemonTimeWake] = &[DaemonTimeWake {
     end_inclusive: current_message_expiration_minute,
 }];
 
-fn receive_network_frame_effects(input: InboundNetworkFrame) -> Result<RuntimeEffects, String> {
-    connection::receive_network_frame::receive_network_frame_effects(
+fn receive_network_frame_facts(input: InboundNetworkFrame) -> Result<Vec<Fact>, String> {
+    connection::receive_network_frame::receive_network_frame_facts(
         connection::receive_network_frame::ReceiveNetworkFrame {
             frame: input.frame,
-            origin_addr: connection::fact_receipt::fact::canonical_origin_addr_bytes(
-                input.origin_addr,
-            ),
             received_at_local_ms: input.received_at_local_ms,
         },
     )

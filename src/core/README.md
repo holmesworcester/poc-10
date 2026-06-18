@@ -51,10 +51,10 @@ calls the registered handler, and commits successful handler output atomically
 with queue consumption. Errors leave the row queued without committing output.
 
 The daemon runs the same mechanics without a user command on the stack. Each
-tick fires due recurring intents, accepts network frames, lets the protocol
-intake hook convert recognized bytes into `RuntimeEffects`, admits due
-time-wake ranges as pending projection, drains durable projection, drains
-incoming projection, drains durable intents, drains local intents, and leaves
+tick fires due recurring intents, accepts network frames into `network_incoming`,
+drains those raw rows through the protocol classifier into `incoming_facts`,
+admits due time-wake ranges as pending projection, drains durable projection,
+drains incoming projection, drains durable intents, drains local intents, and leaves
 any handler-emitted facts queued for later projection work. The runtime lock
 ensures this daemon work cannot race with a CLI command that is admitting new
 facts into the same database.
@@ -96,7 +96,7 @@ Protocol code enters core through declarations and effect values:
 
 Data leaves core through the same narrow surfaces: commands receive
 `CliOutput`, protocol queries read schema-owned rows through `Db`, daemon
-inbound intake receives length-prefixed frame bytes, and network sends consume
+network drains receive length-prefixed frame bytes, and network sends consume
 opaque outgoing rows from `network`.
 
 ## Data Flow
@@ -122,13 +122,13 @@ rows, time wakes, and follow-up work. Runtime work can stage incoming facts in
 `local_intents`, and mark facts whose scheduled wake-up time has arrived as
 pending projection work.
 
-Network bytes enter through the TCP listener and are handed to the protocol
-inbound intake hook with origin and receive-time metadata. Recognized frame
-bytes commit as temporary `incoming_facts` plus local observation facts through
-`RuntimeEffects`. The owning projector decides whether each incoming frame fact
-is retained while it waits on observation, connection, or key context, or
-dropped after the one-shot projection succeeds. Outgoing bytes are produced by
-protocol handlers, staged as
+Network bytes enter through the TCP listener and are first staged in the
+temporary `network_incoming` queue with origin and receive-time metadata.
+Recognized frame bytes then become temporary `incoming_facts`; the incoming
+metadata is attached to `ProjectionContext`. The owning projector decides
+whether each incoming frame fact is retained while it waits on connection or key
+context, becomes durable evidence, or is dropped after one-shot projection
+succeeds. Outgoing bytes are produced by protocol handlers, staged as
 per-target `network_outgoing` frame rows, and written by core's TCP pump without
 parsing frame payloads. A separate `network_outgoing_targets` index names active
 addresses so the pump schedules peers without scanning frame payloads. The pump
@@ -242,8 +242,8 @@ use core syntax and contracts, but core must not import their semantic rules.
   declarations, handler errors, and the rule that handlers return
   `RuntimeEffects` instead of mutating runtime state directly.
 - `network.rs`: opaque network IO boundary. It owns listener setup, inbound
-  length-prefixed frame reading, direct delivery to the daemon intake callback,
-  memory-local `network_outgoing` frame rows, the `network_outgoing_targets` active-peer
+  length-prefixed frame reading into memory-local `network_incoming`, memory-local
+  `network_outgoing` frame rows, the `network_outgoing_targets` active-peer
   index, deterministic route+bytes row keys, bounded TCP writes, and sent-row
   cleanup. It does not classify bootstrap frames, connection frames, auth facts,
   sync facts, or content facts.
@@ -318,7 +318,7 @@ mode.
 - `runtime.rs`: bounded work ordering. It admits facts and due time wakes,
   selects durable and incoming projection items through `project_fact.rs`,
   dispatches queued intents through `handle_intent.rs`, and lets context wakes
-  or emitted child facts re-enter the queue explicitly.
+  or emitted follow-up facts re-enter the queue explicitly.
 
 ### Storage Version Commit Guards
 
