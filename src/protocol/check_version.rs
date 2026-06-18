@@ -10,7 +10,9 @@ use crate::core::intents::{HandlerContext, HandlerResult, Intent, IntentHandler,
 use crate::core::runtime::RecurringIntentContext;
 use crate::core::wire;
 
-use super::update::{current_version, update_fact, UpdateFact, CURRENT_PROTOCOL_VERSION};
+use crate::protocol::versioning::{
+    current_version, update_fact, UpdateFact, CURRENT_PROTOCOL_VERSION,
+};
 
 pub const CHECK_VERSION: &str = "check_version";
 pub const STORAGE_REQUIREMENT: StorageRequirement = StorageRequirement::MaintenanceBypass;
@@ -94,7 +96,7 @@ mod tests {
     use crate::core::intents::IntentHandler;
     use crate::core::runtime::Runtime;
     use crate::protocol::app::MATCH_RUNTIME;
-    use crate::protocol::versioning::update::decode_update_fact;
+    use crate::protocol::versioning::decode_update_fact;
     use rusqlite::params;
 
     fn replace_stored_version_for_test(store: &crate::core::db::Db, protocol_version: u32) {

@@ -207,7 +207,7 @@ use super::{fact::LocalKeySecretFact, LOCAL_KEY_SECRET_ROWS};
 pub const PROJECTOR_INFO: FactProjectorInfo =
     FactProjectorInfo::projector("auth::local_key_secret::project::LocalKeySecretProjector");
 
-pub const STORAGE_VERSION: u32 = crate::protocol::versioning::update::CURRENT_PROTOCOL_VERSION;
+pub const STORAGE_VERSION: u32 = crate::protocol::versioning::CURRENT_PROTOCOL_VERSION;
 pub const STORAGE_REQUIREMENT: crate::core::effects::StorageRequirement =
     crate::core::effects::StorageRequirement::Current(STORAGE_VERSION);
 

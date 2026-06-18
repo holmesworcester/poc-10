@@ -1,4 +1,8 @@
 //! Projection for local protocol update facts.
+//!
+//! Live projection calls `rebuild_derived_state` and records the release marker
+//! row. Replay projection exits on `context.is_replay()` so old update facts
+//! remain audit history without rerunning rebuild.
 
 use crate::core::db::{TableInsert, Value};
 use crate::core::effects::StorageRequirement;
@@ -12,7 +16,7 @@ use super::fact::UpdateFact;
 use super::PROTOCOL_VERSION_TABLE;
 
 pub const PROJECTOR_INFO: FactProjectorInfo =
-    FactProjectorInfo::projector("versioning::update::UpdateProjector");
+    FactProjectorInfo::projector("versioning::project::UpdateProjector");
 
 pub const STORAGE_REQUIREMENT: StorageRequirement = StorageRequirement::MaintenanceBypass;
 
@@ -68,7 +72,7 @@ pub fn version_row(update_fact_id: FactId, update: UpdateFact) -> TableInsert {
 mod tests {
     use super::*;
     use crate::core::command::FnClock;
-    use crate::protocol::versioning::update::api::author_update;
+    use crate::protocol::versioning::api::author_update;
 
     #[test]
     fn projector_records_version_and_requests_rebuild_only_live() {

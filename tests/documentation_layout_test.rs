@@ -357,7 +357,7 @@ fn fact_authenticator_research_docs_record_authentication_boundary() {
         "Commands, projectors, handlers, and queries declare the storage version they expect",
         "The recurring version check emits a local update fact",
         "wipes resettable derived state, queues retained facts in replay mode, and records the current release marker",
-        "`src/protocol/versioning/update.rs` owns `CURRENT_PROTOCOL_VERSION`",
+        "`src/protocol/versioning.rs` owns `CURRENT_PROTOCOL_VERSION`",
         "`StorageRequirement::MaintenanceBypass`",
         "Projection commit is the only path that may request it",
         "The release marker is stored protocol state",
@@ -429,14 +429,18 @@ fn repo_instructions_point_at_live_documentation_style_rules() {
 fn protocol_versioning_docs_separate_release_marker_from_storage_guards() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let versioning = rust_module_doc_text(&root.join("src/protocol/versioning.rs"));
-    let update = rust_module_doc_text(&root.join("src/protocol/versioning/update.rs"));
-    let check_version =
-        rust_module_doc_text(&root.join("src/protocol/versioning/check_version.rs"));
+    let project = rust_module_doc_text(&root.join("src/protocol/versioning/project.rs"));
+    let check_version = rust_module_doc_text(&root.join("src/protocol/check_version.rs"));
     let normalized_versioning = normalize_whitespace(&versioning);
-    let normalized_update = normalize_whitespace(&update);
+    let normalized_project = normalize_whitespace(&project);
     let normalized_check_version = normalize_whitespace(&check_version);
 
     for required in [
+        "Protocol versioning fact family",
+        "owns the local update fact",
+        "projected release marker row",
+        "state-summary query diagnostics",
+        "Recurring release checks are protocol intents outside this fact family",
         "Keep two version concepts separate",
         "The release marker is stored protocol state",
         "The recurring `check_version` intent reads that marker",
@@ -465,15 +469,14 @@ fn protocol_versioning_docs_separate_release_marker_from_storage_guards() {
     }
 
     for required in [
-        "Local protocol update fact family",
-        "Update facts are local control-plane facts",
-        "Live projection of the current update fact requests the generic rebuild effect",
+        "Projection for local protocol update facts",
+        "rebuild_derived_state",
         "records the release marker row",
-        "Replay projection of old update facts is a no-op",
+        "context.is_replay()",
     ] {
         assert!(
-            normalized_update.contains(required),
-            "src/protocol/versioning/update.rs is missing update contract detail {required:?}"
+            normalized_project.contains(required),
+            "src/protocol/versioning/project.rs is missing update projection contract detail {required:?}"
         );
     }
 
@@ -483,7 +486,7 @@ fn protocol_versioning_docs_separate_release_marker_from_storage_guards() {
     ] {
         assert!(
             normalized_check_version.contains(required),
-            "src/protocol/versioning/check_version.rs is missing check-version contract detail {required:?}"
+            "src/protocol/check_version.rs is missing check-version contract detail {required:?}"
         );
     }
 }

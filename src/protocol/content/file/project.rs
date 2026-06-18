@@ -315,7 +315,7 @@ use super::{FILE_KEY_COLUMNS, FILE_ROWS};
 pub const PROJECTOR_INFO: FactProjectorInfo =
     FactProjectorInfo::projector("content::file::project::ContentFileProjector");
 
-pub const STORAGE_VERSION: u32 = crate::protocol::versioning::update::CURRENT_PROTOCOL_VERSION;
+pub const STORAGE_VERSION: u32 = crate::protocol::versioning::CURRENT_PROTOCOL_VERSION;
 pub const STORAGE_REQUIREMENT: crate::core::effects::StorageRequirement =
     crate::core::effects::StorageRequirement::Current(STORAGE_VERSION);
 

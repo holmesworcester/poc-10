@@ -194,7 +194,7 @@ use super::{fact::RemovalFrontierFact, REMOVAL_FRONTIER_ROWS};
 pub const PROJECTOR_INFO: FactProjectorInfo =
     FactProjectorInfo::projector("auth::removal_frontier::project::RemovalFrontierProjector");
 
-pub const STORAGE_VERSION: u32 = crate::protocol::versioning::update::CURRENT_PROTOCOL_VERSION;
+pub const STORAGE_VERSION: u32 = crate::protocol::versioning::CURRENT_PROTOCOL_VERSION;
 pub const STORAGE_REQUIREMENT: crate::core::effects::StorageRequirement =
     crate::core::effects::StorageRequirement::Current(STORAGE_VERSION);
 

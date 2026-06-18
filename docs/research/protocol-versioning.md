@@ -24,9 +24,11 @@ projector asks for it.
 
 - `src/protocol/versioning.rs` documents the split between the stored release
   marker and per-projector/query storage requirements.
-- `src/protocol/versioning/update.rs` owns `CURRENT_PROTOCOL_VERSION`, the
-  local update fact, the `check_version` recurring intent, the protocol version
-  row, and the storage readiness helpers used by CLI and daemon hosting.
+- `src/protocol/versioning.rs` owns `CURRENT_PROTOCOL_VERSION`, the local update
+  fact family, the protocol version row, storage guards, update command
+  helpers, and state-summary diagnostics.
+- `src/protocol/check_version.rs` owns the recurring `check_version` intent
+  that authors update facts when the stored release marker is stale.
 - Protocol projectors and handlers register `StorageRequirement::Current` for
   ordinary work. The versioning update projector and handler use
   `StorageRequirement::MaintenanceBypass` so repair can run while storage is

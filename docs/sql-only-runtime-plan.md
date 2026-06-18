@@ -17,7 +17,7 @@ tables, and protocol query modules run bounded SQL over projected tables.
 - `core/handle_intent.rs` owns intent queue SQL, handler input fact loading,
   handler dispatch, retry behavior, and atomic commit of handler output.
 - `core/network.rs` owns TCP and memory-local network queue SQL.
-- `protocol/versioning/state_summary.rs` owns state-summary diagnostics.
+- `protocol/versioning/queries.rs` owns state-summary diagnostics.
 - Protocol fact-family roots own projected table names, column order, key
   columns, and typed row builders.
 - Protocol `queries.rs` modules own bounded SQL reads over projected rows.

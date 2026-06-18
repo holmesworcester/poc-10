@@ -16,7 +16,7 @@ use crate::protocol::sync::{have_id, need_id, shared_fact};
 
 pub const SEND_NEEDED_FACT_ID: &str = "send_needed_fact_id";
 
-pub const STORAGE_VERSION: u32 = crate::protocol::versioning::update::CURRENT_PROTOCOL_VERSION;
+pub const STORAGE_VERSION: u32 = crate::protocol::versioning::CURRENT_PROTOCOL_VERSION;
 pub const STORAGE_REQUIREMENT: crate::core::effects::StorageRequirement =
     crate::core::effects::StorageRequirement::Current(STORAGE_VERSION);
 

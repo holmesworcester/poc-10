@@ -299,7 +299,7 @@ pub const PROJECTOR_INFO: FactProjectorInfo = FactProjectorInfo::projector(
     "connection::frame_bundle::project::ConnectionFrameBundleProjector",
 );
 
-pub const STORAGE_VERSION: u32 = crate::protocol::versioning::update::CURRENT_PROTOCOL_VERSION;
+pub const STORAGE_VERSION: u32 = crate::protocol::versioning::CURRENT_PROTOCOL_VERSION;
 pub const STORAGE_REQUIREMENT: crate::core::effects::StorageRequirement =
     crate::core::effects::StorageRequirement::Current(STORAGE_VERSION);
 

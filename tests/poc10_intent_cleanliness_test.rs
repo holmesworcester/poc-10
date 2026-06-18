@@ -167,6 +167,7 @@ fn test_text(text: &str) -> &str {
 /// handler files, replacing the old `src/protocol/facts` and
 /// `src/protocol/intents` layer roots.
 const SCOPES: [&str; 4] = ["auth", "connection", "content", "sync"];
+const ROOT_FACT_FAMILIES: [&str; 1] = ["versioning"];
 
 fn scope_dirs(root: &Path) -> Vec<PathBuf> {
     SCOPES
@@ -179,6 +180,13 @@ fn scope_manifests(root: &Path) -> Vec<PathBuf> {
     SCOPES
         .into_iter()
         .map(|scope| root.join("src/protocol").join(format!("{scope}.rs")))
+        .collect()
+}
+
+fn root_fact_family_dirs(root: &Path) -> Vec<PathBuf> {
+    ROOT_FACT_FAMILIES
+        .into_iter()
+        .map(|family| root.join("src/protocol").join(family))
         .collect()
 }
 
@@ -1339,6 +1347,11 @@ fn target_manifests_match_their_filesystem_modules() {
         let module_root = root.join("src/protocol").join(scope);
         check_manifest_tree(root, &manifest, &module_root, &mut offenders);
     }
+    for family in ROOT_FACT_FAMILIES {
+        let manifest = root.join("src/protocol").join(format!("{family}.rs"));
+        let module_root = root.join("src/protocol").join(family);
+        check_manifest_tree(root, &manifest, &module_root, &mut offenders);
+    }
 
     assert!(
         offenders.is_empty(),
@@ -1414,6 +1427,9 @@ fn fact_family_directories_contain_only_standard_role_files() {
             }
         }
     }
+    for family_dir in root_fact_family_dirs(root) {
+        check_standard_fact_family_dir(root, &family_dir, &mut offenders);
+    }
 
     assert!(
         offenders.is_empty(),
@@ -1422,6 +1438,24 @@ fn fact_family_directories_contain_only_standard_role_files() {
          a role file:\n{}",
         offenders.join("\n")
     );
+}
+
+fn check_standard_fact_family_dir(root: &Path, family_dir: &Path, offenders: &mut Vec<String>) {
+    for nested in immediate_subdirs(family_dir) {
+        offenders.push(format!(
+            "{} is a nested directory; a fact family is flat",
+            nested.strip_prefix(root).unwrap().display()
+        ));
+    }
+    for file in immediate_rust_files(family_dir) {
+        let name = file.file_name().unwrap().to_str().unwrap();
+        if !STANDARD_FAMILY_FILES.contains(&name) {
+            offenders.push(format!(
+                "{} is not a standard role file",
+                file.strip_prefix(root).unwrap().display()
+            ));
+        }
+    }
 }
 
 #[test]
@@ -1925,6 +1959,32 @@ fn fact_like_family_directories_are_registered_normal_fact_modules() {
             }
         }
     }
+    for family_dir in root_fact_family_dirs(root) {
+        let family = family_dir.file_name().unwrap().to_str().unwrap();
+        let has_fact = family_dir.join("fact.rs").is_file();
+        let has_layout =
+            family_dir.join("layout.rs").is_file() || family_dir.join("encode.rs").is_file();
+        if !has_fact && !has_layout {
+            continue;
+        }
+
+        let relative = family_dir.strip_prefix(root).unwrap().display();
+        let has_project = family_dir.join("project.rs").is_file();
+        if !has_fact || !has_layout || !has_project {
+            offenders.push(format!(
+                "{relative} is fact-like but does not have fact.rs, layout.rs or encode.rs, and project.rs"
+            ));
+            continue;
+        }
+
+        let layout_route = format!("{family}::");
+        let project_route = format!("{family}::project::");
+        if !registry.contains(&layout_route) || !registry.contains(&project_route) {
+            offenders.push(format!(
+                "{relative} is fact-like but is not registered in FACT_ROUTES"
+            ));
+        }
+    }
 
     assert!(
         offenders.is_empty(),
@@ -1982,6 +2042,42 @@ fn fact_like_family_directories_are_single_flat_fact_shapes() {
             if route_count != 1 {
                 offenders.push(format!("{relative} has {route_count} projector routes"));
             }
+        }
+    }
+    for family_dir in root_fact_family_dirs(root) {
+        let family = family_dir.file_name().unwrap().to_str().unwrap();
+        let fact_path = family_dir.join("fact.rs");
+        let layout_path = family_dir.join("layout.rs");
+        let split_layout = family_dir.join("encode.rs").is_file();
+        if !fact_path.is_file() && !layout_path.is_file() && !split_layout {
+            continue;
+        }
+
+        let relative = family_dir.strip_prefix(root).unwrap().display();
+        if fact_path.is_file() {
+            let fact_text = source_text(&fact_path);
+            let fact_structs = fact_text
+                .lines()
+                .filter(|line| line.trim_start().starts_with("pub struct "))
+                .filter(|line| line.contains("Fact"))
+                .count();
+            if fact_structs != 1 {
+                offenders.push(format!(
+                    "{relative} declares {fact_structs} public fact structs"
+                ));
+            }
+        }
+
+        let route_marker = format!(", {family}::project::");
+        let route_count = registry
+            .lines()
+            .filter(|line| {
+                let line = line.trim();
+                line.starts_with("project_") && line.contains("=>") && line.contains(&route_marker)
+            })
+            .count();
+        if route_count != 1 {
+            offenders.push(format!("{relative} has {route_count} projector routes"));
         }
     }
 

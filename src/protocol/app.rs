@@ -33,9 +33,7 @@ pub const MATCH_RUNTIME: RuntimeDescription = RuntimeDescription {
     projector: protocol_projector,
     fact_routes: FACT_ROUTES,
     fact_admission: Some(authenticate_fact_for_admission),
-    storage_requirement_check: Some(
-        crate::protocol::versioning::update::require_storage_requirement,
-    ),
+    storage_requirement_check: Some(crate::protocol::versioning::require_storage_requirement),
     handlers: HANDLER_ROUTES,
 };
 
@@ -46,7 +44,7 @@ pub const MATCH_PROTOCOL: ProtocolDescription<MatchCliContext> = ProtocolDescrip
     daemon: DaemonDescription {
         inbound_network_intake: Some(receive_network_frame_effects),
         time_wakes: MATCH_DAEMON_TIME_WAKES,
-        storage_ready: Some(crate::protocol::versioning::update::storage_ready),
+        storage_ready: Some(crate::protocol::versioning::storage_ready),
     },
     commands: MATCH_COMMANDS,
     context: MatchCliContext::new,

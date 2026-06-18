@@ -89,7 +89,7 @@ impl MatchCliContext {
     }
 
     fn ensure_storage_ready(&self) -> Result<(), String> {
-        versioning::update::ensure_storage_ready(self.runtime.db())
+        versioning::ensure_storage_ready(self.runtime.db())
     }
 }
 
@@ -595,14 +595,12 @@ pub(crate) fn content_count(
 // rebuild-relevant state; `intent-registry` lists each handler route's intent
 // kind and recurring policy.
 
-pub const UPDATE_USAGE: &str = "update";
-pub const STATE_SUMMARY_USAGE: &str = "state-summary";
 pub const INTENT_REGISTRY_USAGE: &str = "intent-registry";
 
 pub(crate) fn update(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    args.require_len(0, UPDATE_USAGE)?;
+    args.require_len(0, versioning::cli::UPDATE_USAGE)?;
     let clock = FixedClock(ctx.command_timestamp()?);
-    let output = versioning::update::api::author_update(&clock)?;
+    let output = versioning::api::author_update(&clock)?;
     let (receipt, facts) = output.into_parts();
     let mut effects = crate::core::effects::RuntimeEffects::new();
     for fact in facts {
@@ -610,7 +608,7 @@ pub(crate) fn update(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<Cli
     }
     ctx.runtime_mut()
         .submit_runtime_effects(effects, "submit protocol update fact")?;
-    Ok(versioning::update::cli::update_output(
+    Ok(versioning::cli::update_output(
         &receipt,
         ctx.runtime().pending_projection_count(),
     ))
@@ -620,9 +618,9 @@ pub(crate) fn state_summary(
     ctx: &mut MatchCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
-    args.require_len(0, STATE_SUMMARY_USAGE)?;
-    let summary = versioning::state_summary::state_summary(ctx.runtime().db())?;
-    Ok(state_summary_output(&summary))
+    args.require_len(0, versioning::cli::STATE_SUMMARY_USAGE)?;
+    let summary = versioning::queries::state_summary(ctx.runtime().db())?;
+    Ok(versioning::cli::state_summary_output(&summary))
 }
 
 pub(crate) fn intent_registry(
@@ -640,22 +638,6 @@ pub(crate) fn intent_registry(
         ));
     }
     Ok(CliOutput::lines(lines))
-}
-
-fn state_summary_output(summary: &versioning::state_summary::StateSummary) -> CliOutput {
-    let mut lines = vec![
-        format!("state_hash: {}", encode_hex_32(&summary.state_hash)),
-        format!("areas: {}", summary.areas.len()),
-    ];
-    for area in &summary.areas {
-        lines.push(format!(
-            "area_{}: {} {}",
-            area.area,
-            area.count,
-            encode_hex_32(&area.hash)
-        ));
-    }
-    CliOutput::lines(lines)
 }
 
 fn next_cli_timestamp(store: &Db, explicit_at_ms: Option<u64>) -> Result<u64, String> {

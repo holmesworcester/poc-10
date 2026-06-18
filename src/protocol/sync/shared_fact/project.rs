@@ -185,7 +185,7 @@ use crate::protocol::sync::share_fact_with_sync as share_sync;
 pub const PROJECTOR_INFO: FactProjectorInfo =
     FactProjectorInfo::projector("sync::shared_fact::project::SyncSharedFactProjector");
 
-pub const STORAGE_VERSION: u32 = crate::protocol::versioning::update::CURRENT_PROTOCOL_VERSION;
+pub const STORAGE_VERSION: u32 = crate::protocol::versioning::CURRENT_PROTOCOL_VERSION;
 pub const STORAGE_REQUIREMENT: crate::core::effects::StorageRequirement =
     crate::core::effects::StorageRequirement::Current(STORAGE_VERSION);
 

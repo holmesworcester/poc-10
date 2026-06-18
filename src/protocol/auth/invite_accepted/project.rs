@@ -272,7 +272,7 @@ use super::{derived_invite_secret_fact_id, invite_accepted_row};
 pub const PROJECTOR_INFO: FactProjectorInfo =
     FactProjectorInfo::projector("auth::invite_accepted::project::InviteAcceptedProjector");
 
-pub const STORAGE_VERSION: u32 = crate::protocol::versioning::update::CURRENT_PROTOCOL_VERSION;
+pub const STORAGE_VERSION: u32 = crate::protocol::versioning::CURRENT_PROTOCOL_VERSION;
 pub const STORAGE_REQUIREMENT: crate::core::effects::StorageRequirement =
     crate::core::effects::StorageRequirement::Current(STORAGE_VERSION);
 

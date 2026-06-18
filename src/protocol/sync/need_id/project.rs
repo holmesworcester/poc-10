@@ -197,7 +197,7 @@ use super::sync_need_id_row;
 pub const PROJECTOR_INFO: FactProjectorInfo =
     FactProjectorInfo::projector("sync::need_id::project::SyncNeedIdProjector");
 
-pub const STORAGE_VERSION: u32 = crate::protocol::versioning::update::CURRENT_PROTOCOL_VERSION;
+pub const STORAGE_VERSION: u32 = crate::protocol::versioning::CURRENT_PROTOCOL_VERSION;
 pub const STORAGE_REQUIREMENT: crate::core::effects::StorageRequirement =
     crate::core::effects::StorageRequirement::Current(STORAGE_VERSION);
 

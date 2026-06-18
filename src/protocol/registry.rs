@@ -29,7 +29,7 @@ use crate::core::project_fact::{
 };
 use crate::core::runtime::{HandlerRoute, RecurringIntentSpec};
 use crate::protocol::cli as command;
-use crate::protocol::{auth, connection, content, sync, versioning};
+use crate::protocol::{auth, check_version, connection, content, sync, versioning};
 
 pub use crate::protocol::cli::MatchCliContext;
 
@@ -392,10 +392,10 @@ pub(crate) fn authenticate_fact_for_admission(fact: &Fact) -> Result<(), String>
             sync::local_setting::decode_fact_payload,
             sync::local_setting::authenticate
         ),
-        versioning::update::TYPE_VERSIONING_UPDATE => authenticate_admission_arm!(
+        versioning::encode::TYPE_VERSIONING_UPDATE => authenticate_admission_arm!(
             fact,
-            versioning::update::decode_update_fact,
-            versioning::update::authenticate
+            versioning::encode::decode_update_fact,
+            versioning::project::authenticate
         ),
         connection::frame_small::encode::TYPE_CONNECTION_FRAME_SMALL => {
             authenticate_admission_arm!(
@@ -488,7 +488,7 @@ const FACT_REPLAY_TABLES: &[TableName] = &[
     content::retention_policy::RETENTION_POLICY_ROWS,
 ];
 
-const FACT_REPLAY_PROTECTED_TABLES: &[TableName] = &[versioning::update::PROTOCOL_VERSION_ROWS];
+const FACT_REPLAY_PROTECTED_TABLES: &[TableName] = &[versioning::PROTOCOL_VERSION_ROWS];
 
 pub const FACTS_SCHEMA_SOURCE: SchemaSource = SchemaSource {
     ddl: r#"
@@ -919,7 +919,7 @@ CREATE TABLE IF NOT EXISTS retention_policy_rows (
         protected: FACT_REPLAY_PROTECTED_TABLES,
         reset: FACT_REPLAY_TABLES,
         summary: &[
-            versioning::update::PROTOCOL_VERSION_ROWS,
+            versioning::PROTOCOL_VERSION_ROWS,
             read_models::OPENED_MESSAGE_ROWS,
             read_models::MESSAGE_TOMBSTONE_ROWS,
             read_models::FILE_SLICE_ROWS,
@@ -1108,8 +1108,12 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
     cli_command!("count", auth::workspace::cli::COUNT_USAGE, count),
     // Versioning diagnostics: request a local protocol update and hash
     // rebuild-relevant state.
-    cli_command!("update", command::UPDATE_USAGE, update),
-    cli_command!("state-summary", command::STATE_SUMMARY_USAGE, state_summary),
+    cli_command!("update", versioning::cli::UPDATE_USAGE, update),
+    cli_command!(
+        "state-summary",
+        versioning::cli::STATE_SUMMARY_USAGE,
+        state_summary
+    ),
     cli_command!(
         "intent-registry",
         command::INTENT_REGISTRY_USAGE,
@@ -1155,7 +1159,7 @@ pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
     sync::have_id::SYNC_HAVE_ID_ROWS,
     sync::need_id::SYNC_NEED_ID_ROWS,
     sync::local_setting::SYNC_LOCAL_SETTING_ROWS,
-    versioning::update::PROTOCOL_VERSION_ROWS,
+    versioning::PROTOCOL_VERSION_ROWS,
 ];
 
 pub(crate) fn protocol_projector() -> Box<dyn Projector> {
@@ -1242,7 +1246,7 @@ projector_routes! {
     project_sync_have_id => sync::have_id::encode::TYPE_SYNC_HAVE_ID, sync::have_id::project::SyncHaveIdProjector, sync::have_id::project::PROJECTOR_INFO, sync::have_id::project::STORAGE_REQUIREMENT;
     project_sync_need_id => sync::need_id::encode::TYPE_SYNC_NEED_ID, sync::need_id::project::SyncNeedIdProjector, sync::need_id::project::PROJECTOR_INFO, sync::need_id::project::STORAGE_REQUIREMENT;
     project_sync_local_setting => sync::local_setting::TYPE_SYNC_LOCAL_SETTING, sync::local_setting::SyncLocalSettingProjector, sync::local_setting::PROJECTOR_INFO, sync::local_setting::STORAGE_REQUIREMENT;
-    project_versioning_update => versioning::update::TYPE_VERSIONING_UPDATE, versioning::update::UpdateProjector, versioning::update::PROJECTOR_INFO, versioning::update::STORAGE_REQUIREMENT;
+    project_versioning => versioning::encode::TYPE_VERSIONING_UPDATE, versioning::project::UpdateProjector, versioning::project::PROJECTOR_INFO, versioning::project::STORAGE_REQUIREMENT;
     project_connection_frame_small => connection::frame_small::encode::TYPE_CONNECTION_FRAME_SMALL, connection::frame_small::project::ConnectionFrameSmallProjector, connection::frame_small::project::PROJECTOR_INFO, connection::frame_small::project::STORAGE_REQUIREMENT;
     project_connection_frame_file_slice => connection::frame_file_slice::encode::TYPE_CONNECTION_FRAME_FILE_SLICE, connection::frame_file_slice::project::ConnectionFrameFileSliceProjector, connection::frame_file_slice::project::PROJECTOR_INFO, connection::frame_file_slice::project::STORAGE_REQUIREMENT;
     project_connection_frame_bundle => connection::frame_bundle::encode::TYPE_CONNECTION_FRAME_BUNDLE, connection::frame_bundle::project::ConnectionFrameBundleProjector, connection::frame_bundle::project::PROJECTOR_INFO, connection::frame_bundle::project::STORAGE_REQUIREMENT;
@@ -1280,13 +1284,13 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
     // binary's protocol version with projected local version state and emits a
     // local update fact when a rebuild is needed.
     handler_route!(
-        versioning::check_version::CHECK_VERSION,
-        versioning::check_version::CheckVersionHandler,
-        storage = versioning::check_version::STORAGE_REQUIREMENT,
+        check_version::CHECK_VERSION,
+        check_version::CheckVersionHandler,
+        storage = check_version::STORAGE_REQUIREMENT,
         recurring = RecurringIntentSpec {
             interval_ms: 250,
             initial_delay_ms: 0,
-            build_intent: versioning::check_version::build_check_version_intent,
+            build_intent: check_version::build_check_version_intent,
         }
     ),
     // Handshake/sync sends and the response builders are operational IO over a

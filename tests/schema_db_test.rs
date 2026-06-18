@@ -5,7 +5,7 @@ use topo::core::db::{Db, ReplayTables, SchemaSource, TableInsert, TableName, Val
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::protocol::content::{file, reaction};
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
-use topo::protocol::versioning::state_summary::state_summary_table_hashes;
+use topo::protocol::versioning::queries::state_summary_table_hashes;
 
 const TYPED_MESSAGES: TableName = TableName::new("typed_messages");
 const REPLAY_PROTECTED_ROWS: TableName = TableName::new("replay_protected_rows");

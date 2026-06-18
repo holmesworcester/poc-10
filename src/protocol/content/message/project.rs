@@ -279,7 +279,7 @@ use super::fact::{AuthorId, ContentMessageFact, SignerId, WorkspaceId, UNIX_MINU
 pub const PROJECTOR_INFO: FactProjectorInfo =
     FactProjectorInfo::projector("content::message::project::ContentMessageProjector");
 
-pub const STORAGE_VERSION: u32 = crate::protocol::versioning::update::CURRENT_PROTOCOL_VERSION;
+pub const STORAGE_VERSION: u32 = crate::protocol::versioning::CURRENT_PROTOCOL_VERSION;
 pub const STORAGE_REQUIREMENT: crate::core::effects::StorageRequirement =
     crate::core::effects::StorageRequirement::Current(STORAGE_VERSION);
 
