@@ -130,6 +130,15 @@ mod tests {
             .expect("replace stored protocol version");
     }
 
+    fn delete_stored_version_for_test(store: &crate::core::db::Db) {
+        store
+            .write_transaction(|tx| {
+                tx.conn().execute("DELETE FROM protocol_version_rows", [])?;
+                Ok(())
+            })
+            .expect("delete stored protocol version");
+    }
+
     #[test]
     fn check_version_handler_emits_priority_update_fact() {
         let runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
@@ -140,6 +149,36 @@ mod tests {
             .handle(&intent, &context)
             .expect("handle check_version");
         assert!(output.facts.is_empty());
+        assert_eq!(output.priority_facts.len(), 1);
+        assert_eq!(
+            decode_update_fact(output.priority_facts[0].body())
+                .expect("decode update")
+                .protocol_version,
+            CURRENT_PROTOCOL_VERSION
+        );
+    }
+
+    #[test]
+    fn missing_storage_marker_queues_and_emits_update_fact() {
+        let runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
+        delete_stored_version_for_test(runtime.db());
+
+        assert!(build_check_version_intent(
+            runtime.db(),
+            RecurringIntentContext {
+                now_ms: 77,
+                local_addr: None,
+            },
+        )
+        .expect("build check_version")
+        .is_some());
+
+        let intent = check_version_intent(77);
+        let context = HandlerContext::new().with_db(runtime.db());
+        let output = CheckVersionHandler::new()
+            .handle(&intent, &context)
+            .expect("handle missing marker");
+
         assert_eq!(output.priority_facts.len(), 1);
         assert_eq!(
             decode_update_fact(output.priority_facts[0].body())

@@ -19,20 +19,7 @@ runtime contract.
    expect before they touch materialized state.
 5. If code advances past the stored database marker, normal queries fail and
    normal effect commits roll back instead of consuming queued work.
-6. Version repair is driven by the daemon-installed recurring `check_version`
-   intent.
-   - The recurring path checks the schema-declared protocol marker against
-     `CURRENT_PROTOCOL_VERSION`.
-   - If the marker is current, it emits no work. If it is stale, the handler
-     creates a priority local update fact.
-   - Live projection of that update fact commits the rebuild boundary: it
-     records protocol-visible update history, advances the schema-declared
-     protocol marker, clears schema-declared resettable derived/runtime state
-     while preserving retained facts and other replay-protected tables, and
-     queues all retained facts in `pending_projection` with replay mode set.
-   - After that commit, the daemon drains the replay projection and replay
-     intent work like normal queued work. The storage-requirement guards above
-     keep ordinary work from consuming stale materialized state in the meantime.
+6. Version repair is the recurring update loop described below.
 
 ## Layout
 
@@ -59,18 +46,43 @@ The update loop is protocol responsibility. It answers one question: has this
 database already projected retained facts into the materialized shape expected
 by this checkout?
 
-The recurring `check_version` intent compares the schema-declared protocol
-marker with `CURRENT_PROTOCOL_VERSION`. If they match, it emits no work. If
-they do not match, it emits a priority local update fact. The update fact is
-retained as history, but its projector does rebuild work only during live
-projection; replay projection of an old update fact is a no-op so previous
-updates do not rerun.
+`CURRENT_PROTOCOL_VERSION` is the compile-time release constant in
+`src/protocol/versioning.rs`. It is the target version for the materialized
+storage shape this binary expects. It is not read from the database.
 
-The update fact projection requests the rebuild effect, writes
-protocol-visible update history, and advances the schema-declared protocol
-marker in the same projection commit. The rebuild effect clears
-schema-declared resettable state and marks retained facts pending in replay
-mode.
+The schema-declared protocol marker is the stored version core reads from the
+protocol schema's `StorageVersionSource`:
+`protocol_version_rows.protocol_version`, ordered by `applied_at_ms` and
+`update_fact_id` so the latest marker row wins. That row is projected state.
+After an update, it is the latest projected `local_update` fact. On a fresh
+database, schema setup creates the bootstrap marker row before any daemon work
+runs. If the marker row is missing, core reads the marker as missing, which is
+treated as stale.
+
+The recurring update path is concrete:
+
+1. The daemon installs the recurring `check_version` intent from the handler
+   registry and fires it on its in-memory cadence.
+2. The recurring builder reads the schema-declared marker and compares it with
+   `CURRENT_PROTOCOL_VERSION`. If they match, it queues no intent. If the
+   marker is stale or missing, it queues `check_version`.
+3. The `check_version` handler repeats the same check before committing effects.
+   If the marker is now current, it emits no work. If it is still stale or
+   missing, it creates a priority local update fact for `CURRENT_PROTOCOL_VERSION`.
+4. Live projection of that update fact requests the rebuild effect and commits
+   the rebuild boundary. In that same projection commit, it records
+   protocol-visible update history, advances the schema-declared marker by
+   inserting a `protocol_version_rows` row, clears schema-declared resettable
+   derived/runtime state, preserves retained facts and other replay-protected
+   tables, and queues all retained facts in `pending_projection` with replay
+   mode set.
+5. After that commit, the daemon drains replay projection and replay intent work
+   like normal queued work. The storage-requirement guards above keep ordinary
+   work from consuming stale materialized state while repair is pending.
+
+The update fact is retained as history, but its projector does rebuild work only
+during live projection. Replay projection of an old update fact is a no-op, so
+previous updates do not rerun.
 
 ## Storage Requirements
 

@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use topo::core::effects::StorageRequirement;
+use topo::core::runtime::Runtime;
 use topo::protocol::app::{MATCH_PROTOCOL, MATCH_RUNTIME};
 use topo::protocol::versioning::check_version::CHECK_VERSION;
 use topo::protocol::versioning::CURRENT_PROTOCOL_VERSION;
@@ -41,6 +42,19 @@ fn executable_protocol_tables_name_the_target_surfaces() {
         .iter()
         .any(|command| command.name == "assert"));
     assert!(MATCH_PROTOCOL.daemon.inbound_network_intake.is_some());
+}
+
+#[test]
+fn fresh_runtime_seeds_schema_declared_protocol_marker() {
+    let runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
+
+    assert_eq!(
+        runtime
+            .db()
+            .current_storage_version()
+            .expect("read storage version marker"),
+        Some(CURRENT_PROTOCOL_VERSION)
+    );
 }
 
 #[test]
