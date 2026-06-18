@@ -133,7 +133,7 @@ fn explicit_at_sets_generated_fact_timestamps() {
 }
 
 #[test]
-fn generate_cli_requires_current_storage_before_authoring() {
+fn generate_cli_repairs_stale_storage_before_authoring() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "stale-generate.db");
     let workspace_id = create_workspace(&db);
@@ -145,14 +145,13 @@ fn generate_cli_requires_current_storage_before_authoring() {
 
     let output = topo(&["--db", &db, "generate", &workspace_id, "2", "64"]);
     assert!(
-        !output.status.success(),
-        "generate should fail before reading stale command state"
+        output.status.success(),
+        "generate should repair stale storage before reading command state\nstdout={}\nstderr={}",
+        stdout(&output),
+        stderr(&output)
     );
-    let err = stderr(&output);
-    assert!(
-        err.contains("protocol update required"),
-        "generate should fail with the storage guard: {err}"
-    );
+    assert_eq!(stored_storage_version(&db), current_storage_version);
+    assert!(stdout(&output).contains("generated_facts: 2"));
 }
 
 #[test]

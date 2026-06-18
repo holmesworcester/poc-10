@@ -285,26 +285,25 @@ pub type RecurringIntentBuilder = fn(&Db, RecurringIntentContext) -> Result<Opti
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RecurringIntentContext {
-    /// Wall-clock time captured by the live daemon tick that fired this intent.
+    /// Wall-clock time captured by the runtime turn that offered this recurring work.
     pub now_ms: u64,
-    /// Current process listen address, when this recurring run came from a daemon.
+    /// Current process listen address, when this runtime turn has one.
     pub local_addr: Option<SocketAddr>,
 }
 
-/// In-memory schedule for a live-only recurring operational intent.
+/// In-memory declaration for recurring operational intent opportunities.
 ///
-/// Recurring intents are not durable state. The daemon installs these schedules
-/// at startup, after replay has finished, and fires them on a fixed cadence
-/// while the process runs. There is nothing to wipe on upgrade and nothing to
-/// replay: operational repetition belongs here, not in durable time wakes or
-/// projectors.
+/// Recurring intents are not durable state. Each runtime turn gives declared
+/// recurring builders a chance to inspect current state and enqueue bounded
+/// local work. There is nothing to wipe on upgrade and nothing to replay:
+/// operational repetition belongs here, not in durable time wakes or projectors.
 #[derive(Debug, Clone, Copy)]
 pub struct RecurringIntentSpec {
-    /// Cadence between successive fires once the loop is running.
+    /// Legacy registry cadence hint; builders still self-gate from state.
     pub interval_ms: u64,
-    /// Delay from daemon startup before the first fire.
+    /// Legacy initial-delay hint; builders still self-gate from state.
     pub initial_delay_ms: u64,
-    /// Build this tick's intent from current database state, or `None` to skip.
+    /// Build this turn's intent from current database state, or `None` to skip.
     pub build_intent: RecurringIntentBuilder,
 }
 

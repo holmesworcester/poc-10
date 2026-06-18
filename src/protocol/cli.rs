@@ -96,7 +96,7 @@ impl MatchCliContext {
             .map(|version| version.to_string())
             .unwrap_or_else(|| "missing".to_string());
         Err(format!(
-            "protocol update required: stored_version={stored} current_version={}; start the daemon or run `update` and let projection drain",
+            "protocol update required: stored_version={stored} current_version={}; runtime turn did not finish repair, retry after queued work drains",
             versioning::CURRENT_PROTOCOL_VERSION
         ))
     }

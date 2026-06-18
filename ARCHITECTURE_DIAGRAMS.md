@@ -242,14 +242,14 @@ separate runtime phases.
 
 ## 3) Serialized Turns And Locks
 
-Commands, queries, and the daemon turn all acquire `<db>.runtime.lock`, but they
-do not all drive the runtime loop. A normal write command verifies storage
-readiness, reads currently projected state, authors facts, commits them to
-durable pending projection, and returns a receipt. A normal query verifies
-storage readiness and reads currently projected rows. Maintenance commands such
-as protocol update and replay diagnostics may bypass readiness, but they still
-do not run daemon queue drains. The daemon turn (the recurring scheduler plus
-`daemon::tick`) is the live loop that advances queues.
+Commands, queries, and the daemon turn all acquire `<db>.runtime.lock` and run
+the same bounded runtime turn before host-specific work. A normal write command
+first gives recurring repair and queued work a chance to run, then verifies
+storage readiness, reads currently projected state, authors facts, commits them
+to durable pending projection, and returns a receipt. A normal query runs the
+same preflight turn before it verifies storage readiness and reads projected
+rows. The daemon loops the same turn with network host adapters, so it also
+accepts inbound bytes and pumps outgoing frames.
 
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 300}} }%%
@@ -257,29 +257,34 @@ flowchart TD
     LOCK["acquire <db>.runtime.lock"]
 
     LOCK --> CMD["ordinary write command turn"]
-    CMD --> CMD_READY["require storage_ready"]
+    CMD --> CMD_PREFLIGHT["run one bounded runtime turn (no network adapters)"]
+    CMD_PREFLIGHT --> CMD_READY["require storage_ready"]
     CMD_READY --> READ_INPUTS["read current projected rows"]
     READ_INPUTS --> AUTHOR["author facts"]
     AUTHOR --> COMMIT_FACTS["commit authored facts -> pending_projection"]
     COMMIT_FACTS --> RECEIPT["return receipt"]
 
     LOCK --> Q["ordinary query turn"]
-    Q --> Q_READY["require storage_ready"]
+    Q --> Q_PREFLIGHT["run one bounded runtime turn (no network adapters)"]
+    Q_PREFLIGHT --> Q_READY["require storage_ready"]
     Q_READY --> READ["read materialized rows"]
 
     LOCK --> MAINT["maintenance or diagnostic command"]
-    MAINT --> MAINT_WORK["read diagnostics or submit priority update effects"]
+    MAINT --> MAINT_PREFLIGHT["run one bounded runtime turn (no network adapters)"]
+    MAINT_PREFLIGHT --> MAINT_WORK["read diagnostics or submit priority update effects"]
     MAINT_WORK --> MAINT_RETURN["return output"]
 
     LOCK --> TICK["daemon turn"]
-    TICK --> DAEMON_TICK["run daemon::tick"]
+    TICK --> DAEMON_TICK["run bounded runtime turn with network adapters"]
 ```
 
-The difference between turns is whether they drain queues at all. Queries and
-commands do not drain projection, incoming facts, time wakes, recurring work, or
-handlers; they observe already projected state and may enqueue authored facts for
-the daemon. Handler-emitted facts are committed atomically with intent dispatch
-and remain queued for a later durable projection batch.
+The difference between turns is the host environment. Commands and queries do
+not supply durable handler dispatch, a listener, or an outgoing network pump, so
+network-capable handler work, network intake, and send are no-ops. They still
+give recurring builders, projection, time wakes, and local intent handlers a
+bounded chance to advance before the command reads or writes domain state.
+Handler-emitted facts are committed atomically with intent dispatch and remain
+queued for a later durable projection batch.
 
 ```mermaid
 sequenceDiagram
@@ -315,18 +320,20 @@ The lock is an OS `flock`. A CLI process that arrives while the daemon is in a
 turn waits in the kernel until the daemon releases the file lock. There is no
 shared in-process command slot inside the daemon tick.
 
-## 4) Daemon Tick Queue Order
+## 4) Runtime Turn Queue Order
 
-Inside one daemon tick, recurring schedules get a pre-readiness pass that stops
+Inside one runtime turn, recurring builders get a pre-readiness pass that stops
 after the first queued local intent. Protocols can put a readiness repair route
-first, giving that work a chance to run before live IO. If storage is ready, the
-daemon runs the live queues in an explicit order. The full `project one fact`
-path above is represented here as a single node.
+first, giving that work a chance to run before host IO. If storage is ready, the
+turn runs the live queues in an explicit order. Network accept and outgoing pump
+run only when the host supplies a listener; durable handler dispatch is gated the
+same way because those handlers may emit network rows. The full `project one
+fact` path above is represented here as a single node.
 
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 300}} }%%
 flowchart TD
-    START["daemon::tick"] --> FIRST["fire due recurring schedules until one intent queues"]
+    START["runtime_turn"] --> FIRST["offer recurring builders until one intent queues"]
     FIRST --> FIRST_DRAIN{"queued an early local intent?"}
     FIRST_DRAIN -- yes --> LOCAL_ONE["drain one local intent"]
     LOCAL_ONE --> DURABLE_REPAIR["drain durable projection after early intent"]
@@ -335,20 +342,26 @@ flowchart TD
     READY_ONE -- no --> REPAIR["drain repair queues only"]
     REPAIR --> RETURN_REPAIR["return from tick"]
 
-    READY_ONE -- yes --> RECUR["fire remaining due recurring intents"]
+    READY_ONE -- yes --> RECUR["offer remaining recurring builders"]
     RECUR --> LOCAL["drain local intents"]
     LOCAL --> DURABLE_PRE["drain durable projection"]
     DURABLE_PRE --> READY_TWO{"storage_ready?"}
     READY_TWO -- no --> REPAIR
-    READY_TWO -- yes --> INBOUND["accept frames into network_incoming"]
+    READY_TWO -- yes --> HAS_NET{"host supplied listener?"}
+    HAS_NET -- yes --> INBOUND["accept frames into network_incoming"]
+    HAS_NET -- no --> TIME["admit due time_wakes"]
     INBOUND --> CLASSIFY_IN["drain network_incoming into incoming_facts"]
     CLASSIFY_IN --> TIME["admit due time_wakes"]
     TIME --> DURABLE["drain durable projection"]
     DURABLE --> INCOMING["drain incoming projection"]
-    INCOMING --> DURABLE_INTENTS["drain durable intents"]
-    DURABLE_INTENTS --> LOCAL_INTENTS["drain local intents"]
-    LOCAL_INTENTS --> OUTGOING["pump network_outgoing"]
-    OUTGOING --> DONE["return active flag"]
+    INCOMING --> HAS_DURABLE_HOST{"host supplied listener?"}
+    HAS_DURABLE_HOST -- yes --> DURABLE_INTENTS["drain durable intents"]
+    HAS_DURABLE_HOST -- no --> LOCAL_INTENTS["drain local intents"]
+    DURABLE_INTENTS --> LOCAL_INTENTS
+    LOCAL_INTENTS --> OUTGOING{"host supplied listener?"}
+    OUTGOING -- yes --> PUMP["pump network_outgoing"]
+    OUTGOING -- no --> DONE["return active flag"]
+    PUMP --> DONE
 
     DURABLE --> PROJECT_ONE["project one durable pending fact"]
     INCOMING --> PROJECT_INCOMING["project one incoming fact"]
@@ -356,13 +369,14 @@ flowchart TD
     LOCAL_INTENTS --> HANDLER_LOCAL["dispatch one local intent"]
 ```
 
-The recurring steps are daemon-only and are the source of all periodic work.
+The recurring steps are turn-local and are the source of all periodic work.
 Recurring intents are not durable state: an in-memory `RecurringScheduler`,
-installed once from the handler registry at daemon start, fires due operational
-loops during `daemon::tick` and enqueues ordinary local intents. The pre-readiness
-recurring pass gives the first queued local intent a special repair chance before
-live IO; if storage is not ready, the daemon drains only repair queues and skips
-normal network and wall-clock work. The live daemon's cadence is only the
+installed from the handler registry for a host runtime, offers operational loops
+during `runtime_turn` and enqueues ordinary local intents when builders decide
+work is due. The pre-readiness recurring pass gives the first queued local
+intent a special repair chance before host IO; if storage is not ready, the turn
+drains only repair queues and skips normal network and wall-clock work. The
+host's turn cadence is only the
 scheduling mechanism; the work itself is plain facts and handlers.
 
 ## 5) Needs And Offers

@@ -510,8 +510,6 @@ CREATE TABLE IF NOT EXISTS protocol_version_rows (
     protocol_version INTEGER NOT NULL,
     applied_at_ms INTEGER NOT NULL
 );
-INSERT OR IGNORE INTO protocol_version_rows (update_fact_id, protocol_version, applied_at_ms)
-    VALUES (zeroblob(32), 1, 0);
 CREATE INDEX IF NOT EXISTS protocol_version_rows_by_version
     ON protocol_version_rows (protocol_version, applied_at_ms);
 
@@ -743,6 +741,10 @@ CREATE TABLE IF NOT EXISTS connection_request_rows (
     peer_addr BLOB NOT NULL,
     sealed_request_bytes BLOB NOT NULL
 );
+CREATE TEMP TABLE IF NOT EXISTS connection_maintenance_rows (
+    kind TEXT PRIMARY KEY NOT NULL,
+    last_run_ms INTEGER NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS connection_rows (
     connection_id BLOB PRIMARY KEY NOT NULL,
@@ -873,6 +875,10 @@ CREATE TABLE IF NOT EXISTS sync_local_setting_rows (
 );
 CREATE INDEX IF NOT EXISTS sync_local_setting_rows_by_effective
     ON sync_local_setting_rows (effective_at_ms, setting_fact_id);
+CREATE TEMP TABLE IF NOT EXISTS sync_maintenance_rows (
+    kind TEXT PRIMARY KEY NOT NULL,
+    last_run_ms INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS connection_fact_receipt_rows (
     received_fact_id BLOB NOT NULL,
     receipt_fact_id BLOB NOT NULL,
@@ -1268,8 +1274,9 @@ projector_routes! {
 
 // Every route names one intent kind and its handler. Replay behavior belongs at
 // the handler edge through `HandlerContext::is_replay()`. `recurring =
-// <RecurringIntentSpec>` marks a live-only operational loop the daemon installs
-// as an in-memory schedule after replay.
+// <RecurringIntentSpec>` marks a live operational loop that each runtime turn
+// offers as in-memory local work; the builder decides whether current state
+// actually needs a queued intent.
 macro_rules! handler_route {
     ($intent_kind:path, $handler:path, storage = $storage_requirement:path) => {
         HandlerRoute {
@@ -1339,8 +1346,8 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
         sync::seed_connection::SeedConnectionSyncHandler,
         storage = sync::seed_connection::STORAGE_REQUIREMENT
     ),
-    // Sync maintenance is a live-only recurring operational loop. User-facing
-    // sync settings affect it through projected local state.
+    // Sync maintenance is a live recurring operational loop. User-facing sync
+    // settings affect it through projected local state.
     handler_route!(
         sync::maintain_sync::MAINTAIN_SYNC,
         sync::maintain_sync::MaintainSyncHandler,
@@ -1351,10 +1358,10 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
             build_intent: sync::maintain_sync::build_maintain_sync_intent,
         }
     ),
-    // Connection maintenance is a live-only recurring operational loop. The
-    // daemon installs it as an in-memory schedule and fires it on a fixed
-    // cadence; it re-sends unanswered local outbound requests and never runs
-    // during replay. This replaces the wall-clock connection_peer_retry wake.
+    // Connection maintenance is a live recurring operational loop. Runtime
+    // turns offer it in-memory; it re-sends unanswered local outbound requests
+    // and never runs during replay. This replaces the wall-clock
+    // connection_peer_retry wake.
     handler_route!(
         connection::maintain_connections::MAINTAIN_CONNECTIONS,
         connection::maintain_connections::MaintainConnectionsHandler,

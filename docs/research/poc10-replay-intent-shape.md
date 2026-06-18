@@ -31,8 +31,9 @@ retained facts, and resume operational work without preserving queued intents.
 - Local secrets are local facts until ordinary purge or retirement facts remove
   them. Upgrade replay uses the same purge and retirement rules as an endpoint
   that was offline and later catches up.
-- Recurring operational work is not durable state. The daemon installs it from
-  the existing intent registry while the process is online.
+- Recurring operational work is not durable state. Each runtime turn offers
+  recurring builders from the existing intent registry; builders decide from
+  current state whether to enqueue bounded local work.
 
 ## Runtime Changes
 
@@ -55,8 +56,9 @@ Add an explicit replay entry point to core runtime:
    Each pass may create facts, rows, context, semantic time wakes, or more
    queued intents.
 8. Finish all replay work before network activity resumes.
-9. Start the daemon, install recurring intents from the handler registry, and
-   resume normal dispatch.
+9. Resume normal runtime turns. Daemon turns supply durable handler and network
+   adapters; command and query turns run the same scheduler without those
+   adapters.
 
 Replay is allowed to use wall-clock context only through replayable semantic
 time-wake timelines. It must not run connection maintenance, bootstrap retry,
@@ -261,7 +263,7 @@ is exercised through ordinary daemon/runtime projection.
 - Recurring-intent test: `recurring-intents` and `intent-registry` show
   `maintain_connections` as live-only recurring work and show no persisted
   recurring job rows.
-- Update CLI test: `update` plus the ordinary daemon loop rebuilds projected
+- Update CLI test: `update` plus the ordinary runtime turn rebuilds projected
   rows from retained facts and unblocks guarded queries.
 - State-summary CLI test: `state-summary` reports a stable digest and per-area
   hashes without mutating live database state.

@@ -11,9 +11,10 @@ use std::cell::Cell;
 
 use topo::core::command::{CommandClock, WorkspaceId};
 use topo::core::crypto;
+use topo::core::daemon::{self, RuntimeTurnHost};
 use topo::core::db::Db;
 use topo::core::runtime::Runtime;
-use topo::protocol::app::MATCH_RUNTIME;
+use topo::protocol::app::{MATCH_PROTOCOL, MATCH_RUNTIME};
 use topo::protocol::auth::key_wrap::api::{create_key_frontier, CreateKeyFrontier};
 use topo::protocol::auth::workspace::api::{create_workspace_with_identity, BootstrapIdentity};
 use topo::protocol::content::message::api::{local_encryption_capability, send_message};
@@ -57,12 +58,25 @@ fn drain_runtime_work_for_test(runtime: &mut Runtime, max_rounds: usize, limit: 
     panic!("runtime work did not become idle within {max_rounds} rounds");
 }
 
+fn initialize_runtime_for_test(runtime: &mut Runtime) {
+    let mut scheduler = daemon::RecurringScheduler::install(MATCH_RUNTIME.handlers, 0);
+    daemon::runtime_turn(
+        MATCH_PROTOCOL.daemon,
+        runtime,
+        RuntimeTurnHost::local(),
+        &mut scheduler,
+        4096,
+    )
+    .expect("initialize runtime through local turn");
+}
+
 fn open_store() -> Db {
     Db::open_memory().expect("open memory store")
 }
 
 fn runtime_with_workspace_and_key() -> (Runtime, WorkspaceId) {
     let mut runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
+    initialize_runtime_for_test(&mut runtime);
     let workspace_clock = FixedClock::new(1_000);
     let workspace = create_workspace_with_identity(
         runtime.db(),

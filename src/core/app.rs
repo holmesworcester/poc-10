@@ -2,14 +2,16 @@
 //!
 //! Core can launch any protocol that exports a `ProtocolDescription`: the
 //! description names its runtime declaration, daemon declarations, and command
-//! table. Core owns the fixed daemon cycle through `core::daemon`: fire
-//! recurring intents, accept network bytes, classify them into incoming facts,
+//! table. Core owns the fixed runtime turn through `core::daemon`: give
+//! recurring builders a chance to enqueue local work, optionally accept network
+//! bytes when the host supplies a listener, classify them into incoming facts,
 //! process declared time wakes, drain durable projection, drain incoming
-//! projection, drain durable intents, drain local intents, then pump outgoing
-//! network rows.
+//! projection, optionally drain durable intents when the host supplies a
+//! listener, drain local intents, then optionally pump outgoing network rows.
 //!
 //! Core still does not know command semantics. For non-daemon commands it opens
-//! the declared runtime, constructs the protocol-owned context, calls the
+//! the declared runtime, runs one bounded turn without network host adapters or
+//! durable handler dispatch, constructs the protocol-owned context, calls the
 //! registered function, and prints the returned `CliOutput`. The generic
 //! `assert eventually` wrapper repeats that same command path and compares only
 //! scalar `field: value` output lines.
@@ -240,7 +242,16 @@ fn run_protocol_command<C: 'static>(
         .clone()
         .ok_or_else(|| format!("{command_name} requires --db PATH"))?;
     let _turn = daemon::RuntimeTurnLock::acquire(&db)?;
-    let runtime = Runtime::open_disk(&description.runtime, &db)?;
+    let mut runtime = Runtime::open_disk(&description.runtime, &db)?;
+    let mut scheduler =
+        daemon::RecurringScheduler::install(description.runtime.handlers, daemon::now_ms());
+    daemon::runtime_turn(
+        description.daemon,
+        &mut runtime,
+        daemon::RuntimeTurnHost::local(),
+        &mut scheduler,
+        daemon::DEFAULT_WORK_LIMIT,
+    )?;
     let mut context = (description.context)(runtime, parsed.db, parsed.at);
     cli::run(
         description.command_name,

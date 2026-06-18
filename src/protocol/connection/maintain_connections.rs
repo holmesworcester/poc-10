@@ -2,8 +2,12 @@
 //!
 //! `maintain_connections` keeps the local endpoint connected to peers known
 //! from retained facts. It is a live-only recurring intent: replay rebuilds the
-//! accepted bootstrap peers from `invite_accepted`, then the daemon fires this
-//! loop after the replay barrier to create or retry live connection requests.
+//! accepted bootstrap peers from `invite_accepted`, then each runtime turn gives
+//! this builder a chance to create or retry bounded live connection work. The
+//! builder queues only when the host supplied a listener address and its
+//! process-local retry marker says the retry window is due; command/query turns
+//! still offer the recurring entry, but they cannot create reachable connection
+//! attempts.
 
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
@@ -28,8 +32,11 @@ use crate::protocol::connection::request::queries::{
     BootstrapConnectionAttemptRow,
 };
 use crate::protocol::connection::request::{self, encode::ADDR_BLOCK_BYTES};
+use rusqlite::{params, OptionalExtension};
 
 pub const MAINTAIN_CONNECTIONS: &str = "maintain_connections";
+const MAINTAIN_CONNECTIONS_MARKER: &str = "retry";
+const MAINTAIN_CONNECTIONS_MIN_INTERVAL_MS: u64 = 100;
 
 pub const STORAGE_VERSION: u32 = crate::protocol::versioning::CURRENT_PROTOCOL_VERSION;
 pub const STORAGE_REQUIREMENT: crate::core::effects::StorageRequirement =
@@ -46,6 +53,12 @@ pub fn build_maintain_connections_intent(
     store: &Db,
     context: RecurringIntentContext,
 ) -> Result<Option<Intent>, String> {
+    if context.local_addr.is_none() {
+        return Ok(None);
+    }
+    if !maintenance_due(store, context.now_ms)? {
+        return Ok(None);
+    }
     if !pending_connection_requests(store)?.is_empty()
         || !bootstrap_peers_needing_attempt(store)?.is_empty()
     {
@@ -104,6 +117,43 @@ fn decode_maintain_connections(intent: &Intent) -> Result<MaintainConnections, S
     Ok(input)
 }
 
+fn maintenance_due(store: &Db, now_ms: u64) -> Result<bool, String> {
+    let last = store
+        .conn()
+        .query_row(
+            "SELECT last_run_ms
+             FROM connection_maintenance_rows
+             WHERE kind = ?1
+             LIMIT 1",
+            params![MAINTAIN_CONNECTIONS_MARKER],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|err| format!("read connection maintenance marker: {err}"))?
+        .map(|value| {
+            u64::try_from(value)
+                .map_err(|_| "connection maintenance marker timestamp is negative".to_string())
+        })
+        .transpose()?;
+    Ok(last.is_none_or(|last| now_ms.saturating_sub(last) >= MAINTAIN_CONNECTIONS_MIN_INTERVAL_MS))
+}
+
+fn record_maintenance_run(store: &Db, run_at_ms: u64) -> Result<(), String> {
+    let run_at_ms = i64::try_from(run_at_ms)
+        .map_err(|_| "connection maintenance timestamp exceeds SQLite integer range".to_string())?;
+    store
+        .write_transaction(|tx| {
+            tx.conn().execute(
+                "INSERT INTO connection_maintenance_rows (kind, last_run_ms)
+                 VALUES (?1, ?2)
+                 ON CONFLICT(kind) DO UPDATE SET last_run_ms = excluded.last_run_ms",
+                params![MAINTAIN_CONNECTIONS_MARKER, run_at_ms],
+            )?;
+            Ok(())
+        })
+        .map_err(|err| format!("record connection maintenance marker: {err}"))
+}
+
 fn maintain_connections_key(input: &MaintainConnections) -> Vec<u8> {
     let mut hash = blake3::Hasher::new();
     hash.update(b"topo:maintain-connections:v2:");
@@ -134,6 +184,7 @@ impl IntentHandler for MaintainConnectionsHandler {
             return Ok(RuntimeEffects::new());
         }
         let store = context.db()?;
+        record_maintenance_run(store, input.created_at_ms).map_err(HandlerError::fatal)?;
         let mut effects = RuntimeEffects::new();
 
         for pending in pending_connection_requests(store)? {
@@ -270,7 +321,7 @@ mod tests {
             &store,
             RecurringIntentContext {
                 now_ms: 123,
-                local_addr: None,
+                local_addr: Some("127.0.0.1:41001".parse().unwrap()),
             },
         )
         .expect("build")
@@ -288,6 +339,75 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![sealed]
         );
+    }
+
+    #[test]
+    fn recurring_builder_skips_without_host_listener_address() {
+        let store = Db::open_memory_with_schema_sources(&[
+            CORE_SCHEMA_SOURCE,
+            network::SCHEMA_SOURCE,
+            FACTS_SCHEMA_SOURCE,
+        ])
+        .expect("store");
+        let peer_addr = "127.0.0.1:41000".parse().unwrap();
+        let sealed = vec![7; request::encode::SEALED_FACT_BYTES];
+        let row =
+            request::connection_request_row([1; 32], [2; 32], [3; 32], Some(peer_addr), &sealed)
+                .expect("connection request row");
+        store
+            .write_transaction(|tx| tx.insert_values_in_tx(&row).map(|_| ()))
+            .expect("seed pending request row");
+
+        let intent = build_maintain_connections_intent(
+            &store,
+            RecurringIntentContext {
+                now_ms: 123,
+                local_addr: None,
+            },
+        )
+        .expect("build");
+
+        assert!(intent.is_none());
+    }
+
+    #[test]
+    fn recurring_builder_waits_for_retry_window() {
+        let store = Db::open_memory_with_schema_sources(&[
+            CORE_SCHEMA_SOURCE,
+            network::SCHEMA_SOURCE,
+            FACTS_SCHEMA_SOURCE,
+        ])
+        .expect("store");
+        let peer_addr = "127.0.0.1:41000".parse().unwrap();
+        let sealed = vec![7; request::encode::SEALED_FACT_BYTES];
+        let row =
+            request::connection_request_row([1; 32], [2; 32], [3; 32], Some(peer_addr), &sealed)
+                .expect("connection request row");
+        store
+            .write_transaction(|tx| tx.insert_values_in_tx(&row).map(|_| ()))
+            .expect("seed pending request row");
+        record_maintenance_run(&store, 1_000).expect("record marker");
+
+        assert_eq!(
+            build_maintain_connections_intent(
+                &store,
+                RecurringIntentContext {
+                    now_ms: 1_050,
+                    local_addr: Some("127.0.0.1:41001".parse().unwrap()),
+                }
+            )
+            .expect("build"),
+            None
+        );
+        assert!(build_maintain_connections_intent(
+            &store,
+            RecurringIntentContext {
+                now_ms: 1_100,
+                local_addr: Some("127.0.0.1:41001".parse().unwrap()),
+            }
+        )
+        .expect("build")
+        .is_some());
     }
 
     #[test]
