@@ -199,7 +199,7 @@ fn load_handler_context<'a>(
 ) -> Result<HandlerContext<'a>, String> {
     let mut facts = Vec::new();
     for id in handler.input_fact_ids(intent)? {
-        if let Some(fact) = retained_fact(store, &id)? {
+        if let Some(fact) = load_retained_fact(store, &id)? {
             facts.push(fact);
         }
     }
@@ -207,7 +207,7 @@ fn load_handler_context<'a>(
     Ok(context.with_db(store))
 }
 
-fn retained_fact(store: &Db, id: &FactId) -> Result<Option<Fact>, String> {
+fn load_retained_fact(store: &Db, id: &FactId) -> Result<Option<Fact>, String> {
     store
         .conn()
         .query_row(
@@ -787,7 +787,7 @@ mod tests {
             "intent drains should keep draining the selected queue after queuing projection work"
         );
         assert_eq!(
-            retained_fact(&store, &emitted.id).expect("load emitted fact"),
+            load_retained_fact(&store, &emitted.id).expect("load emitted fact"),
             Some(emitted),
             "intent-created fact should be retained immediately"
         );
