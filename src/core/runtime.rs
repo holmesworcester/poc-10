@@ -26,7 +26,7 @@
 
 use crate::core::command::AuthoredFacts;
 use crate::core::db::{Db, SchemaSource, TableName};
-use crate::core::effects::{RuntimeEffects, StorageRequirementCheck};
+use crate::core::effects::RuntimeEffects;
 use crate::core::facts::Fact;
 use crate::core::handle_intent::{dispatch_one_intent, HandlerSet, IntentQueue};
 use crate::core::intents::Intent;
@@ -62,8 +62,6 @@ pub struct RuntimeDescription {
     pub fact_routes: &'static [FactRoute],
     /// Optional protocol-owned fact admission check run before core stores facts.
     pub fact_admission: Option<FactAdmissionFn>,
-    /// Optional protocol-owned storage requirement check for effect commits.
-    pub storage_requirement_check: Option<StorageRequirementCheck>,
     /// Intent handlers this runtime may dispatch.
     pub handlers: &'static [HandlerRoute],
 }
@@ -224,7 +222,6 @@ impl Runtime {
             self.description.row_mutation_tables,
             self.handlers.intent_kinds(),
             self.description.fact_admission,
-            self.description.storage_requirement_check,
             false,
             false,
             label,
@@ -267,7 +264,6 @@ impl Runtime {
                 self.description.row_mutation_tables,
                 self.handlers.intent_kinds(),
                 self.description.fact_admission,
-                self.description.storage_requirement_check,
             )
         })
     }
@@ -295,7 +291,6 @@ impl Runtime {
                 queue,
                 self.description.row_mutation_tables,
                 self.description.fact_admission,
-                self.description.storage_requirement_check,
             )
         })
     }
@@ -418,7 +413,6 @@ mod tests {
         projector: noop_projector,
         fact_routes: &[],
         fact_admission: None,
-        storage_requirement_check: None,
         handlers: &[],
     };
 
@@ -436,7 +430,6 @@ mod tests {
         projector: noop_projector,
         fact_routes: &[],
         fact_admission: Some(reject_bad_fact),
-        storage_requirement_check: None,
         handlers: &[],
     };
 
@@ -446,7 +439,6 @@ mod tests {
         projector: noop_projector,
         fact_routes: &[],
         fact_admission: None,
-        storage_requirement_check: None,
         handlers: COUNTING_HANDLERS,
     };
 
@@ -456,7 +448,6 @@ mod tests {
         projector: noop_projector,
         fact_routes: &[],
         fact_admission: None,
-        storage_requirement_check: None,
         handlers: EMIT_FACT_HANDLERS,
     };
 

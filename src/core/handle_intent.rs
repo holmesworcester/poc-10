@@ -34,7 +34,7 @@
 //! accepted durably.
 
 use crate::core::db::{quoted_table_name, Db, TableName};
-use crate::core::effects::{RuntimeEffects, StorageRequirement, StorageRequirementCheck};
+use crate::core::effects::{RuntimeEffects, StorageRequirement};
 use crate::core::facts::{fact_from_storage_row, Fact, FactId};
 use crate::core::intents::{HandlerContext, HandlerMode, Intent, IntentHandler, IntentWorkRow};
 use crate::core::schema::{INTENTS, LOCAL_INTENTS};
@@ -84,7 +84,6 @@ pub(crate) fn dispatch_one_intent(
     queue: IntentQueue,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
-    storage_requirement_check: Option<StorageRequirementCheck>,
 ) -> Result<bool, String> {
     let input = match load_one_intent_input(store, handlers, queue)? {
         None => return Ok(false),
@@ -103,7 +102,6 @@ pub(crate) fn dispatch_one_intent(
         allowed_tables,
         handlers.intent_kinds(),
         fact_admission,
-        storage_requirement_check,
     )
 }
 
@@ -245,7 +243,6 @@ fn commit_handler_output(
     allowed_tables: &[TableName],
     registered_intent_kinds: &[&str],
     fact_admission: Option<FactAdmissionFn>,
-    storage_requirement_check: Option<StorageRequirementCheck>,
 ) -> Result<bool, String> {
     store
         .write_transaction(|tx| {
@@ -264,7 +261,6 @@ fn commit_handler_output(
                 allowed_tables,
                 registered_intent_kinds,
                 fact_admission,
-                storage_requirement_check,
                 queued.mode.is_replay(),
                 false,
             )?;
@@ -661,7 +657,6 @@ mod tests {
             IntentQueue::Durable,
             &[],
             None,
-            None,
         )
         .expect_err("fatal handler error should escape dispatch");
 
@@ -690,7 +685,6 @@ mod tests {
             IntentQueue::Durable,
             &[],
             None,
-            None,
         )
         .expect_err("unregistered queued intent should be an invariant error");
 
@@ -712,7 +706,6 @@ mod tests {
             &HandlerSet::new(INVALID_OUTPUT_ROUTES),
             IntentQueue::Durable,
             &[],
-            None,
             None,
         )
         .expect_err("invalid handler output should fail before commit");
@@ -744,7 +737,6 @@ mod tests {
             &HandlerSet::new(EMIT_UNKNOWN_ROUTES),
             IntentQueue::Durable,
             &[],
-            None,
             None,
         )
         .expect_err("unregistered follow-up intent should fail validation");
@@ -886,7 +878,7 @@ mod tests {
         let mut dispatched = 0;
         for _ in 0..limit {
             let consumed =
-                dispatch_one_intent(store, handlers, queue, allowed_tables, fact_admission, None)?;
+                dispatch_one_intent(store, handlers, queue, allowed_tables, fact_admission)?;
             if !consumed {
                 break;
             }
@@ -1035,18 +1027,6 @@ mod tests {
         Fact::new(FactScope::Global, 42, b"handler-emitted-fact".to_vec())
     }
 
-    fn storage_requirement_mismatch(
-        _store: &Db,
-        requirement: StorageRequirement,
-    ) -> Result<(), String> {
-        match requirement {
-            StorageRequirement::Current(version) => {
-                Err(format!("test storage version mismatch for {version}"))
-            }
-            StorageRequirement::MaintenanceBypass => Ok(()),
-        }
-    }
-
     #[test]
     fn intent_storage_mismatch_rolls_back_queue_consumption() {
         let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
@@ -1059,11 +1039,13 @@ mod tests {
             IntentQueue::Durable,
             &[],
             None,
-            Some(storage_requirement_mismatch),
         )
         .expect_err("storage mismatch should abort intent commit");
 
-        assert!(err.contains("test storage version mismatch for 7"), "{err}");
+        assert!(
+            err.contains("required_version=7 stored_version=missing"),
+            "{err}"
+        );
         assert_eq!(
             store.table_row_count(INTENTS).expect("durable count"),
             1,

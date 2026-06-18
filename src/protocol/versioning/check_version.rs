@@ -1,28 +1,39 @@
-//! Recurring intent that emits update facts when the release marker is stale.
+//! Recurring intent that emits update facts when the schema-declared protocol marker is stale.
 //!
-//! The recurring `check_version` intent compares projected protocol version
-//! state with `CURRENT_PROTOCOL_VERSION`. A mismatch emits a priority local
-//! update fact; projecting that fact records the new marker and requests the
-//! generic rebuild effect.
+//! The recurring `check_version` intent compares the schema-declared protocol marker with
+//! `CURRENT_PROTOCOL_VERSION`. A mismatch emits a priority local update fact;
+//! projecting that fact records protocol-visible update history, requests the
+//! generic rebuild effect, and advances the schema-declared protocol marker.
 
 use crate::core::effects::{RuntimeEffects, StorageRequirement};
 use crate::core::intents::{HandlerContext, HandlerResult, Intent, IntentHandler, IntentKind};
 use crate::core::runtime::RecurringIntentContext;
 
 use crate::protocol::versioning::{
-    queries::current_version,
-    update::{author::update_fact, fact::UpdateFact},
+    local_update::{author::update_fact, fact::UpdateFact},
     CURRENT_PROTOCOL_VERSION,
 };
 
 pub const CHECK_VERSION: &str = "check_version";
 pub const STORAGE_REQUIREMENT: StorageRequirement = StorageRequirement::MaintenanceBypass;
 
+pub fn stored_storage_version(store: &crate::core::db::Db) -> Result<Option<u32>, String> {
+    store
+        .current_storage_version()
+        .map_err(|err| format!("read storage version marker: {err}"))
+}
+
+pub fn storage_ready(store: &crate::core::db::Db) -> Result<bool, String> {
+    store
+        .storage_version_is(CURRENT_PROTOCOL_VERSION)
+        .map_err(|err| format!("read storage version marker: {err}"))
+}
+
 pub fn build_check_version_intent(
     store: &crate::core::db::Db,
     context: RecurringIntentContext,
 ) -> Result<Option<Intent>, String> {
-    if current_version(store)?.is_some_and(|row| row.protocol_version == CURRENT_PROTOCOL_VERSION) {
+    if storage_ready(store)? {
         return Ok(None);
     }
     Ok(Some(check_version_intent(context.now_ms)))
@@ -88,9 +99,7 @@ impl IntentHandler for CheckVersionHandler {
         if context.is_replay() {
             return Ok(RuntimeEffects::new());
         }
-        if current_version(context.db()?)?
-            .is_some_and(|row| row.protocol_version == CURRENT_PROTOCOL_VERSION)
-        {
+        if storage_ready(context.db()?)? {
             return Ok(RuntimeEffects::new());
         }
         Ok(RuntimeEffects::new().priority_fact(update_fact(update)?))
@@ -103,7 +112,7 @@ mod tests {
     use crate::core::intents::IntentHandler;
     use crate::core::runtime::Runtime;
     use crate::protocol::app::MATCH_RUNTIME;
-    use crate::protocol::versioning::update::encode::decode_update_fact;
+    use crate::protocol::versioning::local_update::encode::decode_update_fact;
     use rusqlite::params;
 
     fn replace_stored_version_for_test(store: &crate::core::db::Db, protocol_version: u32) {

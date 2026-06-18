@@ -5,7 +5,7 @@ use topo::core::db::{Db, ReplayTables, SchemaSource, TableInsert, TableName, Val
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::protocol::content::{file, reaction};
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
-use topo::protocol::versioning::queries::state_summary_table_hashes;
+use topo::protocol::versioning::local_update::queries::state_summary_table_hashes;
 
 const TYPED_MESSAGES: TableName = TableName::new("typed_messages");
 const REPLAY_PROTECTED_ROWS: TableName = TableName::new("replay_protected_rows");
@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS typed_messages (
 CREATE INDEX IF NOT EXISTS typed_messages_by_workspace_created
     ON typed_messages (workspace_id, created_at_ms);
 "#,
+    storage_version: None,
     replay: ReplayTables::EMPTY,
 };
 
@@ -38,6 +39,7 @@ CREATE TABLE IF NOT EXISTS replay_reset_rows (
     payload BLOB NOT NULL
 );
 "#,
+    storage_version: None,
     replay: ReplayTables {
         protected: &[REPLAY_PROTECTED_ROWS],
         reset: &[REPLAY_RESET_ROWS],
@@ -445,6 +447,7 @@ CREATE TABLE IF NOT EXISTS replay_protected_rows (
     payload BLOB NOT NULL
 );
 "#,
+        storage_version: None,
         replay: ReplayTables {
             protected: &[REPLAY_PROTECTED_ROWS],
             reset: &[REPLAY_PROTECTED_ROWS],

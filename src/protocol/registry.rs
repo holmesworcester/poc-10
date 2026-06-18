@@ -20,7 +20,7 @@
 //! module that owns the policy and keep this file declarative.
 
 use crate::core::cli::CliCommand;
-use crate::core::db::{ReplayTables, SchemaSource, TableName};
+use crate::core::db::{ReplayTables, SchemaSource, StorageVersionSource, TableName};
 use crate::core::facts::Fact;
 use crate::core::intents::TypedTableSchema;
 use crate::core::network;
@@ -392,10 +392,10 @@ pub(crate) fn authenticate_fact_for_admission(fact: &Fact) -> Result<(), String>
             sync::local_setting::decode_fact_payload,
             sync::local_setting::authenticate
         ),
-        versioning::update::encode::TYPE_VERSIONING_UPDATE => authenticate_admission_arm!(
+        versioning::local_update::encode::TYPE_VERSIONING_UPDATE => authenticate_admission_arm!(
             fact,
-            versioning::update::encode::decode_update_fact,
-            versioning::update::project::authenticate
+            versioning::local_update::encode::decode_update_fact,
+            versioning::local_update::project::authenticate
         ),
         connection::frame_small::encode::TYPE_CONNECTION_FRAME_SMALL => {
             authenticate_admission_arm!(
@@ -488,7 +488,8 @@ const FACT_REPLAY_TABLES: &[TableName] = &[
     content::retention_policy::RETENTION_POLICY_ROWS,
 ];
 
-const FACT_REPLAY_PROTECTED_TABLES: &[TableName] = &[versioning::update::PROTOCOL_VERSION_ROWS];
+const FACT_REPLAY_PROTECTED_TABLES: &[TableName] =
+    &[versioning::local_update::PROTOCOL_VERSION_ROWS];
 
 pub const FACTS_SCHEMA_SOURCE: SchemaSource = SchemaSource {
     ddl: r#"
@@ -915,11 +916,16 @@ CREATE TABLE IF NOT EXISTS retention_policy_rows (
     PRIMARY KEY (workspace_id, scope_kind, scope_id, policy_id)
 );
 "#,
+    storage_version: Some(StorageVersionSource {
+        table: versioning::local_update::PROTOCOL_VERSION_ROWS,
+        version_column: "protocol_version",
+        order_by_columns: &["applied_at_ms", "update_fact_id"],
+    }),
     replay: ReplayTables {
         protected: FACT_REPLAY_PROTECTED_TABLES,
         reset: FACT_REPLAY_TABLES,
         summary: &[
-            versioning::update::PROTOCOL_VERSION_ROWS,
+            versioning::local_update::PROTOCOL_VERSION_ROWS,
             read_models::OPENED_MESSAGE_ROWS,
             read_models::MESSAGE_TOMBSTONE_ROWS,
             read_models::FILE_SLICE_ROWS,
@@ -1108,10 +1114,14 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
     cli_command!("count", auth::workspace::cli::COUNT_USAGE, count),
     // Versioning diagnostics: request a local protocol update and hash
     // rebuild-relevant state.
-    cli_command!("update", versioning::update::cli::UPDATE_USAGE, update),
+    cli_command!(
+        "update",
+        versioning::local_update::cli::UPDATE_USAGE,
+        update
+    ),
     cli_command!(
         "state-summary",
-        versioning::cli::STATE_SUMMARY_USAGE,
+        versioning::local_update::cli::STATE_SUMMARY_USAGE,
         state_summary
     ),
     cli_command!(
@@ -1159,7 +1169,7 @@ pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
     sync::have_id::SYNC_HAVE_ID_ROWS,
     sync::need_id::SYNC_NEED_ID_ROWS,
     sync::local_setting::SYNC_LOCAL_SETTING_ROWS,
-    versioning::update::PROTOCOL_VERSION_ROWS,
+    versioning::local_update::PROTOCOL_VERSION_ROWS,
 ];
 
 pub(crate) fn protocol_projector() -> Box<dyn Projector> {
@@ -1246,7 +1256,7 @@ projector_routes! {
     project_sync_have_id => sync::have_id::encode::TYPE_SYNC_HAVE_ID, sync::have_id::project::SyncHaveIdProjector, sync::have_id::project::PROJECTOR_INFO, sync::have_id::project::STORAGE_REQUIREMENT;
     project_sync_need_id => sync::need_id::encode::TYPE_SYNC_NEED_ID, sync::need_id::project::SyncNeedIdProjector, sync::need_id::project::PROJECTOR_INFO, sync::need_id::project::STORAGE_REQUIREMENT;
     project_sync_local_setting => sync::local_setting::TYPE_SYNC_LOCAL_SETTING, sync::local_setting::SyncLocalSettingProjector, sync::local_setting::PROJECTOR_INFO, sync::local_setting::STORAGE_REQUIREMENT;
-    project_versioning_update => versioning::update::encode::TYPE_VERSIONING_UPDATE, versioning::update::project::UpdateProjector, versioning::update::project::PROJECTOR_INFO, versioning::update::project::STORAGE_REQUIREMENT;
+    project_versioning_local_update => versioning::local_update::encode::TYPE_VERSIONING_UPDATE, versioning::local_update::project::UpdateProjector, versioning::local_update::project::PROJECTOR_INFO, versioning::local_update::project::STORAGE_REQUIREMENT;
     project_connection_frame_small => connection::frame_small::encode::TYPE_CONNECTION_FRAME_SMALL, connection::frame_small::project::ConnectionFrameSmallProjector, connection::frame_small::project::PROJECTOR_INFO, connection::frame_small::project::STORAGE_REQUIREMENT;
     project_connection_frame_file_slice => connection::frame_file_slice::encode::TYPE_CONNECTION_FRAME_FILE_SLICE, connection::frame_file_slice::project::ConnectionFrameFileSliceProjector, connection::frame_file_slice::project::PROJECTOR_INFO, connection::frame_file_slice::project::STORAGE_REQUIREMENT;
     project_connection_frame_bundle => connection::frame_bundle::encode::TYPE_CONNECTION_FRAME_BUNDLE, connection::frame_bundle::project::ConnectionFrameBundleProjector, connection::frame_bundle::project::PROJECTOR_INFO, connection::frame_bundle::project::STORAGE_REQUIREMENT;

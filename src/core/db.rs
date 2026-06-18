@@ -1,10 +1,11 @@
 //! SQLite connection and generic row-mutation plumbing.
 //!
 //! `Db` is the lowest runtime layer above SQLite. It opens the connection,
-//! applies schema batches, runs explicit transactions, quotes trusted table and
-//! column identifiers, and applies typed row mutations. It does not own fact
-//! persistence, projection queues, intent queues, state-summary diagnostics,
-//! network queues, or protocol query SQL; those modules use `Db::conn()` and
+//! applies schema batches, records how to read the storage-version marker
+//! declared by those schema batches, runs explicit transactions, quotes trusted
+//! table and column identifiers, and applies typed row mutations. It does not
+//! own fact persistence, projection queues, intent queues, state-summary
+//! diagnostics, network queues, or protocol query SQL; those modules use `Db::conn()` and
 //! `write_transaction()` to own their table behavior directly.
 //!
 //! All atomicity comes from callers choosing the transaction closure. `Db`
@@ -63,11 +64,27 @@ impl ReplayTables {
     };
 }
 
+/// Trusted declaration for the protocol-owned storage-version marker.
+///
+/// Core uses this only to compare a commit's required version with the latest
+/// marker row. The table and columns are still protocol-owned projected state.
+#[derive(Debug, Clone, Copy)]
+pub struct StorageVersionSource {
+    /// Table that stores projected version marker rows.
+    pub table: TableName,
+    /// Column containing the storage version.
+    pub version_column: &'static str,
+    /// Columns ordered descending to select the latest marker row.
+    pub order_by_columns: &'static [&'static str],
+}
+
 /// One executable schema batch plus rebuild lifecycle declarations.
 #[derive(Debug, Clone, Copy)]
 pub struct SchemaSource {
     /// SQL batch applied when the database opens.
     pub ddl: &'static str,
+    /// Protocol-owned storage-version marker declaration, when this source owns one.
+    pub storage_version: Option<StorageVersionSource>,
     /// Rebuild reset and summary lifecycle declarations for this source's
     /// tables.
     pub replay: ReplayTables,
@@ -245,6 +262,35 @@ fn validate_replay_lifecycle(protected: &[TableName], reset: &[TableName]) -> ru
     Ok(())
 }
 
+fn declared_storage_version_source(
+    sources: &[SchemaSource],
+) -> rusqlite::Result<Option<StorageVersionSource>> {
+    let mut declared = None;
+    for source in sources {
+        let Some(version_source) = source.storage_version else {
+            continue;
+        };
+        match declared {
+            Some(existing) if !same_storage_version_source(existing, version_source) => {
+                return Err(db_error(format!(
+                    "conflicting storage version sources declared: {} and {}",
+                    existing.table.as_str(),
+                    version_source.table.as_str()
+                )));
+            }
+            Some(_) => {}
+            None => declared = Some(version_source),
+        }
+    }
+    Ok(declared)
+}
+
+fn same_storage_version_source(left: StorageVersionSource, right: StorageVersionSource) -> bool {
+    left.table == right.table
+        && left.version_column == right.version_column
+        && left.order_by_columns == right.order_by_columns
+}
+
 /// The only durable substrate core offers protocol code.
 ///
 /// Durable and memory tables are both ordinary SQLite tables on this one
@@ -252,6 +298,7 @@ fn validate_replay_lifecycle(protected: &[TableName], reset: &[TableName]) -> ru
 /// single SQL path, and `write_transaction` rollback covers both classes.
 pub struct Db {
     conn: SqliteConnection,
+    storage_version_source: Option<StorageVersionSource>,
     replay_protected_tables: Vec<TableName>,
     replay_reset_tables: Vec<TableName>,
     replay_summary_tables: Vec<TableName>,
@@ -309,9 +356,11 @@ impl Db {
                 .iter()
                 .flat_map(|source| source.replay.summary.iter().copied()),
         );
+        let storage_version_source = declared_storage_version_source(sources)?;
         validate_replay_lifecycle(&replay_protected_tables, &replay_reset_tables)?;
         let db = Self::from_connection_parts(
             conn,
+            storage_version_source,
             replay_protected_tables,
             replay_reset_tables,
             replay_summary_tables,
@@ -324,6 +373,7 @@ impl Db {
 
     fn from_connection_parts(
         conn: SqliteConnection,
+        storage_version_source: Option<StorageVersionSource>,
         replay_protected_tables: Vec<TableName>,
         replay_reset_tables: Vec<TableName>,
         replay_summary_tables: Vec<TableName>,
@@ -335,6 +385,7 @@ impl Db {
         )?;
         Ok(Self {
             conn,
+            storage_version_source,
             replay_protected_tables,
             replay_reset_tables,
             replay_summary_tables,
@@ -354,6 +405,47 @@ impl Db {
     /// Tables state-summary hashes as protocol/runtime state.
     pub fn replay_summary_tables(&self) -> &[TableName] {
         &self.replay_summary_tables
+    }
+
+    /// Return the current core storage-version marker, if the database has one.
+    pub fn current_storage_version(&self) -> rusqlite::Result<Option<u32>> {
+        let Some(source) = self.storage_version_source else {
+            return Ok(None);
+        };
+        let table = quoted_table_name(source.table)?;
+        let version_column = quoted_identifier(source.version_column)?;
+        let order_by = storage_version_order_by(source.order_by_columns)?;
+        self.conn
+            .query_row(
+                &format!("SELECT {version_column} FROM {table}{order_by} LIMIT 1"),
+                [],
+                |row| {
+                    let version = row.get::<_, i64>(0)?;
+                    u32::try_from(version)
+                        .map_err(|_| db_error("stored storage version is outside u32 range"))
+                },
+            )
+            .optional()
+    }
+
+    /// Return true when the stored marker matches the expected table version.
+    pub fn storage_version_is(&self, expected: u32) -> rusqlite::Result<bool> {
+        self.current_storage_version()
+            .map(|stored| stored == Some(expected))
+    }
+
+    /// Enforce the storage-version precondition for a commit boundary.
+    pub(crate) fn require_storage_version(&self, expected: u32) -> Result<(), String> {
+        match self.current_storage_version() {
+            Ok(Some(stored)) if stored == expected => Ok(()),
+            Ok(Some(stored)) => Err(format!(
+                "storage version mismatch: required_version={expected} stored_version={stored}"
+            )),
+            Ok(None) => Err(format!(
+                "storage version mismatch: required_version={expected} stored_version=missing"
+            )),
+            Err(err) => Err(format!("read storage version marker: {err}")),
+        }
     }
 
     // Critical path: callers put every atomic row mutation
@@ -505,6 +597,17 @@ fn where_clause(columns: &[&str]) -> rusqlite::Result<String> {
         .map(|(index, column)| Ok(format!("{} = ?{}", quoted_identifier(column)?, index + 1)))
         .collect::<rusqlite::Result<Vec<_>>>()
         .map(|columns| columns.join(" AND "))
+}
+
+fn storage_version_order_by(columns: &[&str]) -> rusqlite::Result<String> {
+    if columns.is_empty() {
+        return Ok(String::new());
+    }
+    let columns = columns
+        .iter()
+        .map(|column| Ok(format!("{} DESC", quoted_identifier(column)?)))
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(format!(" ORDER BY {}", columns.join(", ")))
 }
 
 fn placeholders(count: usize) -> String {

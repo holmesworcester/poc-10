@@ -68,11 +68,12 @@ fn assert_projector_route(tag: u8, expected_project: &str) {
 #[test]
 fn projector_and_handler_routes_declare_storage_requirements() {
     for route in MATCH_RUNTIME.fact_routes {
-        let expected = if route.tag == topo::protocol::versioning::update::TYPE_VERSIONING_UPDATE {
-            StorageRequirement::MaintenanceBypass
-        } else {
-            StorageRequirement::Current(CURRENT_PROTOCOL_VERSION)
-        };
+        let expected =
+            if route.tag == topo::protocol::versioning::local_update::TYPE_VERSIONING_UPDATE {
+                StorageRequirement::MaintenanceBypass
+            } else {
+                StorageRequirement::Current(CURRENT_PROTOCOL_VERSION)
+            };
         assert_eq!(
             route.storage_requirement, expected,
             "fact route {} should declare its storage requirement",

@@ -52,7 +52,7 @@ use self::context_db::{
 use crate::core::command::AuthoredFacts;
 use crate::core::context::ContextSet;
 use crate::core::db::{quoted_identifier, quoted_table_name, Db, TableName};
-use crate::core::effects::{RuntimeEffects, StorageRequirementCheck};
+use crate::core::effects::RuntimeEffects;
 use crate::core::facts::{
     fact_from_storage_row as validate_fact_query_result, fact_id, Fact, FactId,
 };
@@ -149,7 +149,6 @@ pub(crate) fn project_one(
     allowed_tables: &[TableName],
     registered_intent_kinds: &[&str],
     fact_admission: Option<FactAdmissionFn>,
-    storage_requirement_check: Option<StorageRequirementCheck>,
 ) -> Result<bool, String> {
     let load = match load_one_projection_input(store, source)? {
         None => return Ok(false),
@@ -178,7 +177,6 @@ pub(crate) fn project_one(
         allowed_tables,
         registered_intent_kinds,
         fact_admission,
-        storage_requirement_check,
     )?;
     Ok(true)
 }
@@ -263,7 +261,6 @@ fn commit_projection_outcome(
     allowed_tables: &[TableName],
     registered_intent_kinds: &[&str],
     fact_admission: Option<FactAdmissionFn>,
-    storage_requirement_check: Option<StorageRequirementCheck>,
 ) -> Result<(), String> {
     perf::measure_result("projection_commit_effects", || {
         store
@@ -275,7 +272,6 @@ fn commit_projection_outcome(
                         allowed_tables,
                         registered_intent_kinds,
                         fact_admission,
-                        storage_requirement_check,
                     )
                 })
             })
@@ -558,7 +554,6 @@ fn commit_projection_outcome_in_tx(
     allowed_tables: &[TableName],
     registered_intent_kinds: &[&str],
     fact_admission: Option<FactAdmissionFn>,
-    storage_requirement_check: Option<StorageRequirementCheck>,
 ) -> rusqlite::Result<()> {
     match outcome {
         ProjectionOutcome::RetireStaleInput { source, fact_id } => {
@@ -573,7 +568,6 @@ fn commit_projection_outcome_in_tx(
             allowed_tables,
             registered_intent_kinds,
             fact_admission,
-            storage_requirement_check,
         ),
     }
 }
@@ -636,7 +630,6 @@ fn commit_projected_fact_in_tx(
     allowed_tables: &[TableName],
     registered_intent_kinds: &[&str],
     fact_admission: Option<FactAdmissionFn>,
-    storage_requirement_check: Option<StorageRequirementCheck>,
 ) -> rusqlite::Result<()> {
     let fact_id = projection.fact.id;
     let keep_projection_state = projection_keeps_standing_state(projection);
@@ -663,7 +656,6 @@ fn commit_projected_fact_in_tx(
             allowed_tables,
             registered_intent_kinds,
             fact_admission,
-            storage_requirement_check,
             projection.mode.is_replay(),
             true,
         )
@@ -865,7 +857,7 @@ pub(crate) mod commit_effects {
     //! modules.
 
     use crate::core::db::{Db, TableName};
-    use crate::core::effects::{RuntimeEffects, StorageRequirement, StorageRequirementCheck};
+    use crate::core::effects::{RuntimeEffects, StorageRequirement};
     use crate::core::intents::{Intent, RowMutation};
     use crate::core::schema::{INTENTS, LOCAL_INTENTS};
     use std::collections::BTreeMap;
@@ -1032,7 +1024,6 @@ pub(crate) mod commit_effects {
         allowed_tables: &[TableName],
         registered_intent_kinds: &[&str],
         fact_admission: Option<FactAdmissionFn>,
-        storage_requirement_check: Option<StorageRequirementCheck>,
         replay: bool,
         allow_rebuild: bool,
         label: &str,
@@ -1051,7 +1042,6 @@ pub(crate) mod commit_effects {
                     allowed_tables,
                     registered_intent_kinds,
                     fact_admission,
-                    storage_requirement_check,
                     replay,
                     allow_rebuild,
                 )
@@ -1076,13 +1066,12 @@ pub(crate) mod commit_effects {
         allowed_tables: &[TableName],
         registered_intent_kinds: &[&str],
         fact_admission: Option<FactAdmissionFn>,
-        storage_requirement_check: Option<StorageRequirementCheck>,
         replay: bool,
         allow_rebuild: bool,
     ) -> rusqlite::Result<RuntimeEffectCounts> {
         validate_runtime_effects(effects, allowed_tables, registered_intent_kinds)
             .map_err(sqlite_string_error)?;
-        enforce_storage_requirement(tx, effects.storage_requirement, storage_requirement_check)
+        enforce_storage_requirement(tx, effects.storage_requirement)
             .map_err(sqlite_string_error)?;
         validate_fact_admissions(effects, fact_admission).map_err(sqlite_string_error)?;
         for purged in &effects.purged_facts {
@@ -1157,22 +1146,10 @@ pub(crate) mod commit_effects {
         Ok(())
     }
 
-    fn enforce_storage_requirement(
-        tx: &Db,
-        requirement: StorageRequirement,
-        check: Option<StorageRequirementCheck>,
-    ) -> Result<(), String> {
+    fn enforce_storage_requirement(tx: &Db, requirement: StorageRequirement) -> Result<(), String> {
         match requirement {
             StorageRequirement::MaintenanceBypass => Ok(()),
-            StorageRequirement::Current(_) => {
-                let Some(check) = check else {
-                    return Err(
-                        "runtime effects require storage version but runtime has no checker"
-                            .to_string(),
-                    );
-                };
-                check(tx, requirement)
-            }
+            StorageRequirement::Current(version) => tx.require_storage_version(version),
         }
     }
 
@@ -2773,7 +2750,6 @@ pub(crate) fn submit_authored_facts_to_db<T>(
         allowed_tables,
         &[],
         fact_admission,
-        None,
         false,
         false,
         label,
@@ -3001,18 +2977,6 @@ mod contract_tests {
         }
     }
 
-    fn storage_requirement_mismatch(
-        _store: &Db,
-        requirement: StorageRequirement,
-    ) -> Result<(), String> {
-        match requirement {
-            StorageRequirement::Current(version) => {
-                Err(format!("test storage version mismatch for {version}"))
-            }
-            StorageRequirement::MaintenanceBypass => Ok(()),
-        }
-    }
-
     fn version_guard_projector(
         _fact: &Fact,
         _context: &ProjectionContext,
@@ -3040,11 +3004,13 @@ mod contract_tests {
             &[],
             &[],
             None,
-            Some(storage_requirement_mismatch),
         )
         .expect_err("storage mismatch should abort projection commit");
 
-        assert!(err.contains("test storage version mismatch for 7"), "{err}");
+        assert!(
+            err.contains("required_version=7 stored_version=missing"),
+            "{err}"
+        );
         assert_eq!(
             pending_projection_count(&store, fact.id),
             1,
@@ -3162,8 +3128,7 @@ mod contract_tests {
             .expect("load retained fact")
             .is_some());
 
-        commit_projection_outcome(&store, &outcome, &[], &[], None, None)
-            .expect("commit rejection");
+        commit_projection_outcome(&store, &outcome, &[], &[], None).expect("commit rejection");
 
         assert_eq!(pending_projection_count(&store, fact.id), 0);
         assert!(retained_fact(&store, &fact.id)
@@ -3201,8 +3166,7 @@ mod contract_tests {
             .expect("load incoming fact")
             .is_some());
 
-        commit_projection_outcome(&store, &outcome, &[], &[], None, None)
-            .expect("commit rejection");
+        commit_projection_outcome(&store, &outcome, &[], &[], None).expect("commit rejection");
 
         assert!(incoming_fact_by_id(&store, &fact.id)
             .expect("load incoming fact")
@@ -3959,7 +3923,6 @@ mod contract_tests {
                 allowed_tables,
                 TEST_REGISTERED_INTENT_KINDS,
                 fact_admission,
-                None,
             )?;
             if !step {
                 step = crate::core::project_fact::project_one(
@@ -3969,7 +3932,6 @@ mod contract_tests {
                     allowed_tables,
                     TEST_REGISTERED_INTENT_KINDS,
                     fact_admission,
-                    None,
                 )?;
             }
             if !step {

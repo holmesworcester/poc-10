@@ -17,7 +17,7 @@ table's behavior.
 - `core/handle_intent.rs` owns durable and local intent queue SQL plus exact
   handler input fact loading.
 - `core/network.rs` owns network queue SQL.
-- `protocol/versioning/queries.rs` owns state-summary diagnostics over
+- `protocol/versioning/local_update/queries.rs` owns state-summary diagnostics over
   schema-declared summary tables.
 - Protocol fact-family roots own projected table declarations and row builders.
 - Protocol `queries.rs` modules own bounded SQL reads over projected rows.
@@ -117,6 +117,6 @@ Rebuild projection must not perform network IO, fire recurring live schedules,
 or make wall-clock decisions. Projectors decide how their fact materializes under
 `ProjectionContext::is_replay()`.
 
-`protocol/versioning/queries.rs` is diagnostic. It hashes summary tables
+`protocol/versioning/local_update/queries.rs` is diagnostic. It hashes summary tables
 after ordinary runtime work has drained. Whole-table summary scans stay there,
 not in `db.rs`.

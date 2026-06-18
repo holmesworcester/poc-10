@@ -1,9 +1,10 @@
 //! Local protocol update fact family.
 //!
 //! Update facts are local control-plane facts. Live projection of the current
-//! update fact requests the generic rebuild effect and records the release
-//! marker row. Replay projection of old update facts is a no-op so past updates
-//! remain history without rerunning rebuild.
+//! update fact requests the generic rebuild effect, records protocol-visible
+//! update history, and advances the schema-declared protocol marker. Replay projection of
+//! old update facts is a no-op so past updates remain history without rerunning
+//! rebuild.
 
 pub mod api;
 pub mod author;
@@ -11,6 +12,7 @@ pub mod cli;
 pub mod encode;
 pub mod fact;
 pub mod project;
+pub mod queries;
 
 use crate::core::db::{TableInsert, TableName, TypedTableSchema, Value};
 use crate::core::facts::FactId;

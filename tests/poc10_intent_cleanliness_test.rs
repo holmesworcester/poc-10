@@ -168,7 +168,7 @@ fn test_text(text: &str) -> &str {
 /// `src/protocol/intents` layer roots.
 const SCOPES: [&str; 4] = ["auth", "connection", "content", "sync"];
 const EXTRA_SCOPE_ROOTS: [&str; 1] = ["versioning"];
-const EXTRA_FACT_FAMILIES: [(&str, &str); 1] = [("versioning", "update")];
+const EXTRA_FACT_FAMILIES: [(&str, &str); 1] = [("versioning", "local_update")];
 
 fn scope_dirs(root: &Path) -> Vec<PathBuf> {
     SCOPES
@@ -1455,27 +1455,29 @@ fn fact_family_directories_contain_only_standard_role_files() {
 }
 
 #[test]
-fn versioning_scope_root_keeps_fact_family_roles_under_update() {
+fn versioning_scope_root_keeps_fact_family_roles_under_local_update() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let scope = root.join("src/protocol/versioning");
     let mut offenders = Vec::new();
 
-    for forbidden in ["api.rs", "author.rs", "encode.rs", "fact.rs", "project.rs"] {
+    for forbidden in [
+        "api.rs",
+        "author.rs",
+        "cli.rs",
+        "encode.rs",
+        "fact.rs",
+        "project.rs",
+        "queries.rs",
+    ] {
         let path = scope.join(forbidden);
         if path.exists() {
             offenders.push(format!(
-                "{} is a fact-family role file; put it under versioning/update/",
+                "{} is a local-update role file; put it under versioning/local_update/",
                 path.strip_prefix(root).unwrap().display()
             ));
         }
     }
-    for required in [
-        "README.md",
-        "check_version.rs",
-        "cli.rs",
-        "queries.rs",
-        "update",
-    ] {
+    for required in ["README.md", "check_version.rs", "local_update"] {
         let path = scope.join(required);
         if !path.exists() {
             offenders.push(format!(
@@ -1487,7 +1489,7 @@ fn versioning_scope_root_keeps_fact_family_roles_under_update() {
 
     assert!(
         offenders.is_empty(),
-        "versioning is a scope; only versioning/update is the fact family:\n{}",
+        "versioning is a scope; only versioning/local_update is the fact family:\n{}",
         offenders.join("\n")
     );
 }

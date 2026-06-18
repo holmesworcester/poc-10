@@ -140,8 +140,8 @@ fn generate_cli_requires_current_storage_before_authoring() {
     let _daemon = spawn_daemon(&db, free_port());
     create_local_content_key(&db, &workspace_id);
 
-    let current_protocol_version = stored_protocol_version(&db);
-    replace_stored_protocol_version(&db, current_protocol_version - 1);
+    let current_storage_version = stored_storage_version(&db);
+    replace_stored_storage_version(&db, current_storage_version - 1);
 
     let output = topo(&["--db", &db, "generate", &workspace_id, "2", "64"]);
     assert!(
@@ -320,7 +320,7 @@ fn wait_for_identity_contains(db: &str, expected: &str) {
     panic!("identity never contained {expected}: {last}");
 }
 
-fn replace_stored_protocol_version(db: &str, version: u32) {
+fn replace_stored_storage_version(db: &str, version: u32) {
     let conn = Connection::open(db).expect("open fixture db");
     conn.execute("DELETE FROM protocol_version_rows", [])
         .expect("clear protocol version marker");
@@ -332,7 +332,7 @@ fn replace_stored_protocol_version(db: &str, version: u32) {
     .expect("write stale protocol version marker");
 }
 
-fn stored_protocol_version(db: &str) -> u32 {
+fn stored_storage_version(db: &str) -> u32 {
     let conn = Connection::open(db).expect("open fixture db");
     conn.query_row(
         "SELECT protocol_version

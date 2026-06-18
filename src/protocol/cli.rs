@@ -89,11 +89,11 @@ impl MatchCliContext {
     }
 
     fn require_current_storage_for_user_command(&self) -> Result<(), String> {
-        if versioning::queries::storage_ready(self.runtime.db())? {
+        if versioning::check_version::storage_ready(self.runtime.db())? {
             return Ok(());
         }
-        let stored = versioning::queries::current_version(self.runtime.db())?
-            .map(|row| row.protocol_version.to_string())
+        let stored = versioning::check_version::stored_storage_version(self.runtime.db())?
+            .map(|version| version.to_string())
             .unwrap_or_else(|| "missing".to_string());
         Err(format!(
             "protocol update required: stored_version={stored} current_version={}; start the daemon or run `update` and let projection drain",
@@ -610,9 +610,9 @@ pub(crate) fn content_count(
 pub const INTENT_REGISTRY_USAGE: &str = "intent-registry";
 
 pub(crate) fn update(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    args.require_len(0, versioning::update::cli::UPDATE_USAGE)?;
+    args.require_len(0, versioning::local_update::cli::UPDATE_USAGE)?;
     let clock = FixedClock(ctx.command_timestamp()?);
-    let output = versioning::update::api::author_update(&clock)?;
+    let output = versioning::local_update::api::author_update(&clock)?;
     let (receipt, facts) = output.into_parts();
     let mut effects = crate::core::effects::RuntimeEffects::new();
     for fact in facts {
@@ -620,7 +620,7 @@ pub(crate) fn update(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<Cli
     }
     ctx.runtime_mut()
         .submit_runtime_effects(effects, "submit protocol update fact")?;
-    Ok(versioning::update::cli::update_output(
+    Ok(versioning::local_update::cli::update_output(
         &receipt,
         ctx.runtime().pending_projection_count(),
     ))
@@ -630,9 +630,11 @@ pub(crate) fn state_summary(
     ctx: &mut MatchCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
-    args.require_len(0, versioning::cli::STATE_SUMMARY_USAGE)?;
-    let summary = versioning::queries::state_summary(ctx.runtime().db())?;
-    Ok(versioning::cli::state_summary_output(&summary))
+    args.require_len(0, versioning::local_update::cli::STATE_SUMMARY_USAGE)?;
+    let summary = versioning::local_update::queries::state_summary(ctx.runtime().db())?;
+    Ok(versioning::local_update::cli::state_summary_output(
+        &summary,
+    ))
 }
 
 pub(crate) fn intent_registry(

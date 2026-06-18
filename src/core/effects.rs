@@ -12,7 +12,6 @@
 //! to validate and write it. If it is only display data for a command, keep it
 //! in that command's receipt instead.
 
-use crate::core::db::Db;
 use crate::core::facts::{Fact, FactId};
 use crate::core::intents::{Intent, RowMutation};
 
@@ -35,9 +34,6 @@ impl Default for StorageRequirement {
         Self::MaintenanceBypass
     }
 }
-
-/// Protocol-owned storage requirement check used by core commit boundaries.
-pub type StorageRequirementCheck = fn(&Db, StorageRequirement) -> Result<(), String>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeEffects {

@@ -908,7 +908,6 @@ mod tests {
         projector: noop_projector,
         fact_routes: &[],
         fact_admission: None,
-        storage_requirement_check: None,
         handlers: &[],
     };
 
@@ -929,7 +928,6 @@ mod tests {
         projector: noop_projector,
         fact_routes: &[],
         fact_admission: None,
-        storage_requirement_check: None,
         handlers: RECURRING_HANDLERS,
     };
 
@@ -1020,7 +1018,6 @@ mod tests {
         projector: noop_projector,
         fact_routes: &[],
         fact_admission: None,
-        storage_requirement_check: None,
         handlers: VERSION_GATED_HANDLERS,
     };
 

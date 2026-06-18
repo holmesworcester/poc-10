@@ -62,6 +62,7 @@ CREATE TEMP TABLE IF NOT EXISTS network_outgoing_targets (
     target_addr TEXT PRIMARY KEY NOT NULL
 );
 "#,
+    storage_version: None,
     replay: ReplayTables {
         protected: &[],
         reset: &[OUTGOING_TABLE, OUTGOING_TARGETS_TABLE],

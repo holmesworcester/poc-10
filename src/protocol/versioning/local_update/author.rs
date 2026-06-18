@@ -16,7 +16,7 @@ pub fn update_fact(update: UpdateFact) -> Result<Fact, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::versioning::update::encode::decode_update_fact;
+    use crate::protocol::versioning::local_update::encode::decode_update_fact;
 
     #[test]
     fn update_fact_creates_local_fact() {

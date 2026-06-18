@@ -356,20 +356,20 @@ fn fact_authenticator_research_docs_record_authentication_boundary() {
         "New projectors and queries must not write old materialized table shapes",
         "Commands, projectors, handlers, and queries declare the storage version they expect",
         "The recurring version check emits a local update fact",
-        "wipes resettable derived state, queues retained facts in replay mode, and records the current release marker",
+        "wipes resettable derived state, queues retained facts in replay mode, records protocol-visible update history, and advances the schema-declared protocol marker",
         "`src/protocol/versioning.rs` owns `CURRENT_PROTOCOL_VERSION`",
-        "`src/protocol/versioning/update.rs` owns the local update fact family",
+        "`src/protocol/versioning/local_update.rs` owns the local update fact family",
         "`StorageRequirement::MaintenanceBypass`",
         "Projection commit is the only path that may request it",
-        "The release marker is stored protocol state",
+        "The update loop is protocol responsibility",
         "Projector and handler effects carry a required storage version",
         "Core enforces that requirement inside the same SQL transaction",
         "On mismatch, SQLite rolls the whole transaction back",
-        "Queries call the protocol-owned guard",
-        "The update fact projection requests the rebuild effect and writes the new marker row in the same projection commit",
+        "Queries check the same schema-declared protocol marker",
+        "The update fact projection requests the rebuild effect, writes protocol-visible update history, and advances the schema-declared protocol marker in the same projection commit",
         "Replay mode is carried by work rows",
         "Retained facts are the source of truth",
-        "Core does not know release policy, fact-family compatibility, version numbers, or table meaning",
+        "Core does not know release policy, fact-family compatibility, or table meaning",
         "Incoming is volatile intake",
         "Fact storage happens only after admission and projection",
         "release review must enforce the read-before-write rule",
@@ -430,8 +430,9 @@ fn repo_instructions_point_at_live_documentation_style_rules() {
 fn protocol_versioning_docs_separate_release_marker_from_storage_guards() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let versioning = rust_module_doc_text(&root.join("src/protocol/versioning.rs"));
-    let update = rust_module_doc_text(&root.join("src/protocol/versioning/update.rs"));
-    let project = rust_module_doc_text(&root.join("src/protocol/versioning/update/project.rs"));
+    let update = rust_module_doc_text(&root.join("src/protocol/versioning/local_update.rs"));
+    let project =
+        rust_module_doc_text(&root.join("src/protocol/versioning/local_update/project.rs"));
     let check_version =
         rust_module_doc_text(&root.join("src/protocol/versioning/check_version.rs"));
     let normalized_versioning = normalize_whitespace(&versioning);
@@ -442,17 +443,19 @@ fn protocol_versioning_docs_separate_release_marker_from_storage_guards() {
     for required in [
         "Protocol versioning scope",
         "Versioning is a protocol scope, not a fact family",
-        "diagnostic commands such as `state-summary`",
-        "lifecycle intents such as `check_version`",
-        "The fact family in this scope is `update`",
+        "recurring check that compares the schema-declared protocol marker",
+        "local update fact that repairs stale derived state",
+        "The fact family in this scope is `local_update`",
         "Keep fact-family role files",
-        "under `versioning/update/`, not in this scope root",
+        "under `versioning/local_update/`, not in this scope root",
         "Keep two version concepts separate",
-        "The release marker is stored protocol state",
-        "The recurring `check_version` intent reads that marker",
+        "The recurring version check is protocol responsibility",
+        "It reads the schema-declared protocol marker",
         "compares it with the one `CURRENT_PROTOCOL_VERSION` compiled into this release",
         "emits a local update fact when the database needs a rebuild",
         "The update fact is the repair trigger",
+        "records protocol-visible update history",
+        "advances the schema-declared protocol marker through a normal commit effect",
         "A projector or query storage requirement is a local safety contract",
         "usually next to `PROJECTOR_INFO` in `project.rs`",
         "query modules import that same constant before reading materialized rows",
@@ -464,9 +467,10 @@ fn protocol_versioning_docs_separate_release_marker_from_storage_guards() {
         "must write only the current release's declared tables and effects",
         "never old database tables",
         "Core should remain mechanical here",
-        "protocol modules own the version numbers, the release marker, the recurring check, the update fact, and the per-family compatibility rules",
+        "Core should remain mechanical here. It enforces declared storage requirements",
+        "protocol modules own the marker table, version number, recurring check, update fact, and per-family compatibility rules",
         "do not ship code that authors a new durable fact type until every non-deprecated release can decode, authenticate, validate, and project that type",
-        "the local storage marker plus per-route storage guards cover the rest",
+        "the schema-declared protocol marker plus per-route storage guards cover the rest",
     ] {
         assert!(
             normalized_versioning.contains(required),
@@ -477,29 +481,31 @@ fn protocol_versioning_docs_separate_release_marker_from_storage_guards() {
     for required in [
         "Local protocol update fact family",
         "Update facts are local control-plane facts",
-        "records the release marker row",
+        "records protocol-visible update history",
+        "advances the schema-declared protocol marker",
         "Replay projection of old update facts is a no-op",
     ] {
         assert!(
             normalized_update.contains(required),
-            "src/protocol/versioning/update.rs is missing update fact-family contract detail {required:?}"
+            "src/protocol/versioning/local_update.rs is missing local-update fact-family contract detail {required:?}"
         );
     }
 
     for required in [
         "Projection for local protocol update facts",
         "rebuild_derived_state",
-        "records the release marker row",
+        "records protocol-visible update history",
+        "advances the schema-declared protocol marker",
         "context.is_replay()",
     ] {
         assert!(
             normalized_project.contains(required),
-            "src/protocol/versioning/update/project.rs is missing update projection contract detail {required:?}"
+            "src/protocol/versioning/local_update/project.rs is missing local-update projection contract detail {required:?}"
         );
     }
 
     for required in [
-        "Recurring intent that emits update facts when the release marker is stale",
+        "Recurring intent that emits update facts when the schema-declared protocol marker is stale",
         "check_version",
     ] {
         assert!(

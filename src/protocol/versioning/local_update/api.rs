@@ -36,7 +36,7 @@ mod tests {
     use super::*;
     use crate::core::command::FnClock;
     use crate::core::facts::FactScope;
-    use crate::protocol::versioning::update::encode::decode_update_fact;
+    use crate::protocol::versioning::local_update::encode::decode_update_fact;
 
     #[test]
     fn author_update_creates_local_fact() {

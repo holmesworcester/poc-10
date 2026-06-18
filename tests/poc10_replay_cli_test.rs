@@ -201,7 +201,7 @@ fn wait_for_identity_contains(db: &str, expected: &str) {
     panic!("identity never contained {expected}: {last}");
 }
 
-fn replace_stored_protocol_version(db: &str, version: u32) {
+fn replace_stored_storage_version(db: &str, version: u32) {
     let conn = Connection::open(db).expect("open fixture db");
     conn.execute("DELETE FROM protocol_version_rows", [])
         .expect("clear protocol version marker");
@@ -213,7 +213,7 @@ fn replace_stored_protocol_version(db: &str, version: u32) {
     .expect("write stale protocol version marker");
 }
 
-fn stored_protocol_version(db: &str) -> u32 {
+fn stored_storage_version(db: &str) -> u32 {
     let conn = Connection::open(db).expect("open fixture db");
     conn.query_row(
         "SELECT protocol_version
@@ -330,15 +330,15 @@ fn stale_version_marker_blocks_cli_queries_before_materialized_reads() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "alice.db");
     let workspace_id = seed_workspace_with_content(&db);
-    let current_protocol_version = stored_protocol_version(&db);
+    let current_storage_version = stored_storage_version(&db);
     assert!(
-        current_protocol_version > 0,
+        current_storage_version > 0,
         "fixture version must be positive"
     );
     let poison = "poisoned row from stale materialized storage";
 
     insert_poison_opened_message_row(&db, &workspace_id, poison);
-    replace_stored_protocol_version(&db, current_protocol_version - 1);
+    replace_stored_storage_version(&db, current_storage_version - 1);
 
     let output = topo(&["--db", &db, "messages", &workspace_id]);
     assert!(
@@ -363,9 +363,9 @@ fn recurring_version_check_repairs_stale_marker_and_replays_pending_fact() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "alice.db");
     let workspace_id = seed_workspace_with_content(&db);
-    let current_protocol_version = stored_protocol_version(&db);
+    let current_storage_version = stored_storage_version(&db);
     assert!(
-        current_protocol_version > 0,
+        current_storage_version > 0,
         "fixture version must be positive"
     );
 
@@ -393,7 +393,7 @@ fn recurring_version_check_repairs_stale_marker_and_replays_pending_fact() {
         "sync setting fact should still be pending before daemon repair:\n{pending}"
     );
 
-    replace_stored_protocol_version(&db, current_protocol_version - 1);
+    replace_stored_storage_version(&db, current_storage_version - 1);
     let stale_query = topo(&["--db", &db, "sync", "show"]);
     assert!(
         !stale_query.status.success(),
@@ -412,8 +412,8 @@ fn recurring_version_check_repairs_stale_marker_and_replays_pending_fact() {
         "recurring check should have authored a local update fact:\nbefore={pending}\nafter={repaired}"
     );
     assert_eq!(
-        stored_protocol_version(&db),
-        current_protocol_version,
+        stored_storage_version(&db),
+        current_storage_version,
         "recurring update projection should store the current version marker"
     );
 
