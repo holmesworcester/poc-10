@@ -77,18 +77,18 @@ pub(crate) enum ProjectionSource {
 }
 
 /// A loaded fact plus the already materialized inputs for this projection run.
-pub(crate) struct LoadedProjectionInput {
+pub(crate) struct ProjectionInput {
     source: ProjectionSource,
     fact: Fact,
     pending_inputs: ProjectionContext,
 }
 
-enum ProjectionInput {
+enum ProjectionLoad {
     Stale {
         source: ProjectionSource,
         fact_id: FactId,
     },
-    Loaded(LoadedProjectionInput),
+    Loaded(ProjectionInput),
 }
 
 /// A projector result plus the projection-input metadata needed to commit it.
@@ -112,6 +112,32 @@ enum ProjectionOutcome {
         fact_id: FactId,
     },
     Accepted(PreparedProjection),
+}
+
+// =============================================================================
+// Runtime Entry Point
+// =============================================================================
+
+/// Runtime-facing entry point for one projection worker step.
+///
+/// The caller owns source order and batching. This wrapper delegates to the
+/// central procedure below so the projection algorithm has one place to read.
+pub(crate) fn project_one(
+    store: &Db,
+    projector: &(impl Projector + ?Sized),
+    source: ProjectionSource,
+    mode: ProjectionMode,
+    allowed_tables: &[TableName],
+    fact_admission: Option<FactAdmissionFn>,
+) -> Result<WorkStatus, String> {
+    project_one_fact(
+        store,
+        projector,
+        source,
+        mode,
+        allowed_tables,
+        fact_admission,
+    )
 }
 
 // =============================================================================
@@ -141,40 +167,20 @@ fn project_one_fact(
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
 ) -> Result<WorkStatus, String> {
-    let input = match load_one_projection_input(store, source, mode)? {
+    let load = match load_one_projection_input(store, source, mode)? {
         None => return Ok(WorkStatus::idle()),
-        Some(input) => input,
+        Some(load) => load,
     };
 
-    let outcome = evaluate_projection_input(projector, input, allowed_tables, fact_admission)?;
+    let outcome = match load {
+        ProjectionLoad::Stale { source, fact_id } => ProjectionOutcome::Stale { source, fact_id },
+        ProjectionLoad::Loaded(input) => {
+            evaluate_loaded_projection_input(projector, input, allowed_tables, fact_admission)?
+        }
+    };
 
     commit_projection_outcome(store, &outcome, allowed_tables, fact_admission)?;
     Ok(WorkStatus::progressed(true))
-}
-
-/// Runtime-facing wrapper for the central projection procedure.
-///
-/// The caller owns queue order and batching. This function owns the mechanics
-/// for one selected queue item: load the queued fact and context, run its
-/// projector, and commit the result as one SQL transaction. Missing stale work
-/// and rejected projection both count as progress because the queued item is
-/// consumed or cleaned up.
-pub(crate) fn project_one(
-    store: &Db,
-    projector: &(impl Projector + ?Sized),
-    source: ProjectionSource,
-    mode: ProjectionMode,
-    allowed_tables: &[TableName],
-    fact_admission: Option<FactAdmissionFn>,
-) -> Result<WorkStatus, String> {
-    project_one_fact(
-        store,
-        projector,
-        source,
-        mode,
-        allowed_tables,
-        fact_admission,
-    )
 }
 
 // =============================================================================
@@ -191,7 +197,7 @@ fn load_one_projection_input(
     store: &Db,
     source: ProjectionSource,
     mode: ProjectionMode,
-) -> Result<Option<ProjectionInput>, String> {
+) -> Result<Option<ProjectionLoad>, String> {
     let Some(fact_id) =
         perf::measure_result("projection_queue_load", || source.next_pending_owner(store))?
     else {
@@ -202,41 +208,34 @@ fn load_one_projection_input(
         load_pending_fact(store, source, fact_id, mode)
     })?
     else {
-        return Ok(Some(ProjectionInput::Stale { source, fact_id }));
+        return Ok(Some(ProjectionLoad::Stale { source, fact_id }));
     };
 
-    Ok(Some(ProjectionInput::Loaded(input)))
+    Ok(Some(ProjectionLoad::Loaded(input)))
 }
 
 /// Stage 2: run the protocol projector and validate its uncommitted output.
 ///
 /// This stage is pure with respect to SQL. It never clears a queue row, deletes
 /// incoming intake, publishes context, or commits runtime effects. It only turns
-/// an in-memory input into an in-memory terminal outcome.
-fn evaluate_projection_input(
+/// a loaded in-memory input into an accepted or rejected outcome.
+fn evaluate_loaded_projection_input(
     projector: &(impl Projector + ?Sized),
     input: ProjectionInput,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
 ) -> Result<ProjectionOutcome, String> {
-    match input {
-        ProjectionInput::Stale { source, fact_id } => {
-            Ok(ProjectionOutcome::Stale { source, fact_id })
+    let source = input.source;
+    let fact_id = input.fact.id;
+    let projection = match perf::measure_result("projection_prepare_effects", || {
+        prepare_projection(projector, input, allowed_tables, fact_admission)
+    }) {
+        Ok(projection) => projection,
+        Err(_rejection) => {
+            return Ok(ProjectionOutcome::Rejected { source, fact_id });
         }
-        ProjectionInput::Loaded(input) => {
-            let source = input.source;
-            let fact_id = input.fact.id;
-            let projection = match perf::measure_result("projection_prepare_effects", || {
-                prepare_projection(projector, input, allowed_tables, fact_admission)
-            }) {
-                Ok(projection) => projection,
-                Err(_rejection) => {
-                    return Ok(ProjectionOutcome::Rejected { source, fact_id });
-                }
-            };
-            Ok(ProjectionOutcome::Accepted(projection))
-        }
-    }
+    };
+    Ok(ProjectionOutcome::Accepted(projection))
 }
 
 /// Stage 3: commit one projection outcome as a single durable boundary.
@@ -395,13 +394,13 @@ pub(crate) fn load_pending_fact(
     source: ProjectionSource,
     fact_id: FactId,
     mode: ProjectionMode,
-) -> Result<Option<LoadedProjectionInput>, String> {
+) -> Result<Option<ProjectionInput>, String> {
     let fact = perf::measure_result("projection_load_fact", || source.load_fact(store, fact_id))?;
     let Some(fact) = fact else {
         return Ok(None);
     };
     let pending_inputs = source.load_pending_inputs(store, fact_id, mode)?;
-    Ok(Some(LoadedProjectionInput {
+    Ok(Some(ProjectionInput {
         source,
         fact,
         pending_inputs,
@@ -420,11 +419,11 @@ pub(crate) fn load_pending_fact(
 /// later inside the commit transaction.
 fn prepare_projection(
     projector: &(impl Projector + ?Sized),
-    input: LoadedProjectionInput,
+    input: ProjectionInput,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
 ) -> Result<PreparedProjection, String> {
-    let LoadedProjectionInput {
+    let ProjectionInput {
         source,
         fact,
         pending_inputs,
@@ -2618,7 +2617,7 @@ mod contract_tests {
     ) -> Result<PreparedProjection, String> {
         prepare_projection(
             projector,
-            LoadedProjectionInput {
+            ProjectionInput {
                 source: ProjectionSource::Durable,
                 fact: fact.clone(),
                 pending_inputs,
@@ -2626,6 +2625,13 @@ mod contract_tests {
             &[],
             None,
         )
+    }
+
+    fn expect_loaded(load: Option<ProjectionLoad>) -> ProjectionInput {
+        match load.expect("queued input") {
+            ProjectionLoad::Loaded(input) => input,
+            ProjectionLoad::Stale { .. } => panic!("expected loaded projection input"),
+        }
     }
 
     #[test]
@@ -2719,12 +2725,12 @@ mod contract_tests {
             Err("projector rejected durable fact".to_string())
         });
 
-        let input =
+        let input = expect_loaded(
             load_one_projection_input(&store, ProjectionSource::Durable, ProjectionMode::Normal)
-                .expect("load projection input")
-                .expect("queued input");
-        let outcome =
-            evaluate_projection_input(&projector, input, &[], None).expect("evaluate projection");
+                .expect("load projection input"),
+        );
+        let outcome = evaluate_loaded_projection_input(&projector, input, &[], None)
+            .expect("evaluate projection");
 
         assert!(matches!(
             outcome,
@@ -2758,12 +2764,12 @@ mod contract_tests {
             Err("projector rejected incoming fact".to_string())
         });
 
-        let input =
+        let input = expect_loaded(
             load_one_projection_input(&store, ProjectionSource::Incoming, ProjectionMode::Normal)
-                .expect("load projection input")
-                .expect("queued input");
-        let outcome =
-            evaluate_projection_input(&projector, input, &[], None).expect("evaluate projection");
+                .expect("load projection input"),
+        );
+        let outcome = evaluate_loaded_projection_input(&projector, input, &[], None)
+            .expect("evaluate projection");
 
         assert!(matches!(
             outcome,
