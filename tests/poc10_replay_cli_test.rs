@@ -14,6 +14,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use cli_harness::*;
+use rusqlite::{params, Connection};
 
 fn create_workspace(db: &str, name: &str, username: &str, device_name: &str) -> String {
     let out = assert_success(topo(&[
@@ -209,6 +210,61 @@ fn state_hash(db: &str) -> String {
     )
 }
 
+fn replace_stored_protocol_version(db: &str, version: u32) {
+    let conn = Connection::open(db).expect("open fixture db");
+    conn.execute("DELETE FROM protocol_version_rows", [])
+        .expect("clear protocol version marker");
+    conn.execute(
+        "INSERT INTO protocol_version_rows (update_fact_id, protocol_version, applied_at_ms)
+         VALUES (?1, ?2, ?3)",
+        params![vec![0x55_u8; 32], i64::from(version), 1_i64],
+    )
+    .expect("write stale protocol version marker");
+}
+
+fn stored_protocol_version(db: &str) -> u32 {
+    let conn = Connection::open(db).expect("open fixture db");
+    conn.query_row(
+        "SELECT protocol_version
+         FROM protocol_version_rows
+         ORDER BY applied_at_ms DESC, update_fact_id DESC
+         LIMIT 1",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .expect("read protocol version marker") as u32
+}
+
+fn insert_poison_opened_message_row(db: &str, workspace_id_hex: &str, text: &str) {
+    let conn = Connection::open(db).expect("open fixture db");
+    let workspace_id = decode_hex_32(workspace_id_hex);
+    let fake_id = vec![0x42_u8; 32];
+    conn.execute(
+        "INSERT OR REPLACE INTO opened_message_rows
+            (workspace_id, message_id, created_at_ms, author_user_id, signer_id, text)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            workspace_id,
+            fake_id,
+            9_999_999_i64,
+            vec![0x43_u8; 32],
+            vec![0x44_u8; 32],
+            text.as_bytes().to_vec(),
+        ],
+    )
+    .expect("insert poison opened message row");
+}
+
+fn decode_hex_32(value: &str) -> Vec<u8> {
+    assert_eq!(value.len(), 64, "expected 32-byte hex id");
+    (0..value.len())
+        .step_by(2)
+        .map(|index| {
+            u8::from_str_radix(&value[index..index + 2], 16).expect("fixture hex id should decode")
+        })
+        .collect()
+}
+
 struct RunningDaemon {
     child: Child,
 }
@@ -273,6 +329,108 @@ fn update_rebuilds_derived_state_and_unblocks_queries() {
     wait_for_runtime_idle(&db);
 
     // The rebuilt read model still answers content queries.
+    let messages = assert_success(topo(&["--db", &db, "messages", &workspace_id]));
+    assert!(messages.contains("first message"), "{messages}");
+    assert!(messages.contains("second message"), "{messages}");
+}
+
+#[test]
+fn stale_version_marker_blocks_cli_queries_before_materialized_reads() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = temp_db(&tmp, "alice.db");
+    let workspace_id = seed_workspace_with_content(&db);
+    let current_protocol_version = stored_protocol_version(&db);
+    assert!(
+        current_protocol_version > 0,
+        "fixture version must be positive"
+    );
+    let poison = "poisoned row from stale materialized storage";
+
+    insert_poison_opened_message_row(&db, &workspace_id, poison);
+    replace_stored_protocol_version(&db, current_protocol_version - 1);
+
+    let output = topo(&["--db", &db, "messages", &workspace_id]);
+    assert!(
+        !output.status.success(),
+        "stale storage should block queries before they read materialized rows:\n{}",
+        stdout(&output)
+    );
+    let err = stderr(&output);
+    assert!(
+        err.contains("protocol update required"),
+        "query should fail with the version guard, not by reading stale rows:\n{err}"
+    );
+    assert!(
+        !stdout(&output).contains(poison) && !err.contains(poison),
+        "query leaked data from stale materialized rows\nstdout={}\nstderr={err}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn recurring_version_check_repairs_stale_marker_and_replays_pending_fact() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = temp_db(&tmp, "alice.db");
+    let workspace_id = seed_workspace_with_content(&db);
+    let current_protocol_version = stored_protocol_version(&db);
+    assert!(
+        current_protocol_version > 0,
+        "fixture version must be positive"
+    );
+
+    let sync_setting = assert_success(topo(&[
+        "--db",
+        &db,
+        "sync",
+        "range",
+        "--start-ms",
+        "100",
+        "--end-ms",
+        "200",
+    ]));
+    assert_eq!(line_value(&sync_setting, "mode"), "range", "{sync_setting}");
+
+    let pending = assert_success(topo(&["--db", &db, "count"]));
+    let facts_before_repair: u64 = line_value(&pending, "facts")
+        .parse()
+        .expect("facts before repair");
+    let applied_before_repair: u64 = line_value(&pending, "applied_facts")
+        .parse()
+        .expect("applied before repair");
+    assert!(
+        applied_before_repair < facts_before_repair,
+        "sync setting fact should still be pending before daemon repair:\n{pending}"
+    );
+
+    replace_stored_protocol_version(&db, current_protocol_version - 1);
+    let stale_query = topo(&["--db", &db, "sync", "show"]);
+    assert!(
+        !stale_query.status.success(),
+        "stale marker should block query commands before daemon repair"
+    );
+
+    let _daemon = spawn_worker_daemon(&db);
+    wait_for_runtime_idle(&db);
+
+    let repaired = assert_success(topo(&["--db", &db, "count"]));
+    let facts_after_repair: u64 = line_value(&repaired, "facts")
+        .parse()
+        .expect("facts after repair");
+    assert!(
+        facts_after_repair > facts_before_repair,
+        "recurring check should have authored a local update fact:\nbefore={pending}\nafter={repaired}"
+    );
+    assert_eq!(
+        stored_protocol_version(&db),
+        current_protocol_version,
+        "recurring update projection should store the current version marker"
+    );
+
+    let sync_show = assert_success(topo(&["--db", &db, "sync", "show"]));
+    assert_eq!(line_value(&sync_show, "mode"), "range", "{sync_show}");
+    assert_eq!(line_value(&sync_show, "start_ms"), "100", "{sync_show}");
+    assert_eq!(line_value(&sync_show, "end_ms"), "200", "{sync_show}");
+
     let messages = assert_success(topo(&["--db", &db, "messages", &workspace_id]));
     assert!(messages.contains("first message"), "{messages}");
     assert!(messages.contains("second message"), "{messages}");
