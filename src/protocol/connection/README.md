@@ -37,13 +37,13 @@ context offers such as `connection_ephemeral_secret`, `connection_request`,
 durable intents for connection creation, sync seeding, fact batching,
 maintenance, and route-resolved outgoing queueing.
 
-Core owns fact storage, local-intent retry/removal, direct inbound frame
-delivery to the protocol intake callback, volatile outgoing frame rows,
-active-address scheduling through `network_outgoing_targets`, TCP writes, and
-transaction boundaries. Connection owns packet classification, route resolution
-from requests or connections to socket addresses, handshake transcript checks,
-connection secret use, frame sealing/opening, and which child facts may be
-emitted from received bytes.
+Core owns fact storage, local-intent removal on successful handler output,
+direct inbound frame delivery to the protocol intake callback, volatile outgoing
+frame rows, active-address scheduling through `network_outgoing_targets`, TCP
+writes, and transaction boundaries. Connection owns packet classification, route
+resolution from requests or connections to socket addresses, handshake
+transcript checks, connection secret use, frame sealing/opening, and which child
+facts may be emitted from received bytes.
 
 ## Managed Row State
 
@@ -171,8 +171,8 @@ directly into core's `network_outgoing` table.
 `queue_outgoing_frame` is the route-resolving bridge used when projection has
 sealed bytes but cannot mutate the core network queue directly. It resolves a
 connection row to a peer address, validates frame size, and stages opaque bytes
-in the core `network_outgoing` frame queue. Route failures retry the intent. TCP
-reachability and backpressure are core concerns: the daemon pump
+in the core `network_outgoing` frame queue. Missing route state drops the stale
+local send attempt with no effects. TCP reachability and backpressure are core concerns: the daemon pump
 schedules active addresses from `network_outgoing_targets`, drains per-target frame
 rows, and leaves rows queued when a target cannot accept bytes.
 

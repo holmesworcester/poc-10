@@ -29,9 +29,7 @@
 
 use crate::core::db::{quoted_table_name, Db, TableName};
 use crate::core::facts::FactId;
-use crate::core::handle_intent::{
-    dispatch_one_intent, HandlerRoute, HandlerSet, IntentQueue, WorkStatus,
-};
+use crate::core::handle_intent::{dispatch_one_intent, HandlerRoute, HandlerSet, IntentQueue};
 use crate::core::intents::HandlerMode;
 use crate::core::network::OUTGOING_TABLE;
 use crate::core::project_fact::{
@@ -189,38 +187,38 @@ fn drain_replay_barrier(
     fact_admission: Option<FactAdmissionFn>,
 ) -> Result<(), String> {
     for _ in 0..REPLAY_MAX_DRAIN_STEPS {
-        let mut status = WorkStatus::idle();
-        status.merge(drain_replay_projection_queue(
+        let mut active = false;
+        active |= drain_replay_projection_queue(
             db,
             projector,
             ProjectionSource::Durable,
             allowed_tables,
             fact_admission,
-        )?);
-        status.merge(drain_replay_projection_queue(
+        )?;
+        active |= drain_replay_projection_queue(
             db,
             projector,
             ProjectionSource::Incoming,
             allowed_tables,
             fact_admission,
-        )?);
+        )?;
 
-        status.merge(drain_replay_intent_queue(
+        active |= drain_replay_intent_queue(
             db,
             handlers,
             IntentQueue::Durable,
             allowed_tables,
             fact_admission,
-        )?);
-        status.merge(drain_replay_intent_queue(
+        )?;
+        active |= drain_replay_intent_queue(
             db,
             handlers,
             IntentQueue::Local,
             allowed_tables,
             fact_admission,
-        )?);
+        )?;
 
-        if status.is_idle() {
+        if !active {
             return Ok(());
         }
     }
@@ -233,23 +231,22 @@ fn drain_replay_projection_queue(
     source: ProjectionSource,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
-) -> Result<WorkStatus, String> {
-    let mut status = WorkStatus::idle();
+) -> Result<bool, String> {
+    let mut active = false;
     for _ in 0..REPLAY_WORK_LIMIT {
-        let step_status = project_fact::project_one(
+        if !project_fact::project_one(
             db,
             projector,
             source,
             ProjectionMode::Replay,
             allowed_tables,
             fact_admission,
-        )?;
-        if step_status.is_idle() {
+        )? {
             break;
         }
-        status.merge(step_status);
+        active = true;
     }
-    Ok(status)
+    Ok(active)
 }
 
 fn drain_replay_intent_queue(
@@ -258,26 +255,22 @@ fn drain_replay_intent_queue(
     queue: IntentQueue,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
-) -> Result<WorkStatus, String> {
-    let mut status = WorkStatus::idle();
+) -> Result<bool, String> {
+    let mut active = false;
     for _ in 0..REPLAY_WORK_LIMIT {
-        let step_status = dispatch_one_intent(
+        if !dispatch_one_intent(
             db,
             handlers,
             queue,
             allowed_tables,
             fact_admission,
             HandlerMode::Replay,
-        )?;
-        if step_status.is_idle() {
+        )? {
             break;
         }
-        status.merge(step_status);
-        if step_status.retried {
-            break;
-        }
+        active = true;
     }
-    Ok(status)
+    Ok(active)
 }
 
 /// Mark every retained fact as replay pending in one SQL statement.

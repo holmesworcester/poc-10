@@ -273,7 +273,7 @@ claim/read one item
 load inputs
 run Rust logic outside the write transaction where possible
 commit effects in one transaction
-return WorkStatus
+return true if the queue item was committed, false if the queue was empty
 ```
 
 This applies to projection, time wake, and intent dispatch. The single-threaded

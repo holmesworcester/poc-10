@@ -28,9 +28,7 @@
 use crate::core::cli::{CliArgs, CliOutput};
 use crate::core::db::Db;
 use crate::core::effects::RuntimeEffects;
-use crate::core::handle_intent::{
-    HandlerRoute, RecurringIntentBuilder, RecurringIntentContext, WorkStatus,
-};
+use crate::core::handle_intent::{HandlerRoute, RecurringIntentBuilder, RecurringIntentContext};
 use crate::core::network;
 use crate::core::project_fact::Timeline;
 use crate::core::runtime::Runtime;
@@ -113,27 +111,18 @@ pub fn tick(
     listener: &network::Listener,
     scheduler: &mut RecurringScheduler,
     work_limit: usize,
-) -> Result<WorkStatus, String> {
-    let mut status = WorkStatus::idle();
+) -> Result<bool, String> {
+    let mut active = false;
     let local_derivation_limit = local_derivation_work_limit(work_limit);
-    status.merge(fire_recurring_intents(runtime, scheduler, listener)?);
-    status.merge(drain_inbound_listener(
-        description,
-        runtime,
-        listener,
-        work_limit,
-    )?);
-    status.merge(drain_time_wakes(
-        description,
-        runtime,
-        local_derivation_limit,
-    )?);
-    status.merge(runtime.drain_durable_projection(local_derivation_limit)?);
-    status.merge(runtime.drain_incoming_projection(local_derivation_limit)?);
-    status.merge(runtime.drain_durable_intents(work_limit)?);
-    status.merge(runtime.drain_local_intents(work_limit)?);
-    status.merge(drain_outgoing_network(runtime, work_limit)?);
-    Ok(status)
+    active |= fire_recurring_intents(runtime, scheduler, listener)?;
+    active |= drain_inbound_listener(description, runtime, listener, work_limit)?;
+    active |= drain_time_wakes(description, runtime, local_derivation_limit)?;
+    active |= runtime.drain_durable_projection(local_derivation_limit)?;
+    active |= runtime.drain_incoming_projection(local_derivation_limit)?;
+    active |= runtime.drain_durable_intents(work_limit)?;
+    active |= runtime.drain_local_intents(work_limit)?;
+    active |= drain_outgoing_network(runtime, work_limit)?;
+    Ok(active)
 }
 
 fn local_derivation_work_limit(work_limit: usize) -> usize {
@@ -146,9 +135,9 @@ fn fire_recurring_intents(
     runtime: &mut Runtime,
     scheduler: &mut RecurringScheduler,
     listener: &network::Listener,
-) -> Result<WorkStatus, String> {
+) -> Result<bool, String> {
     let fired = scheduler.fire_due(runtime, now_ms(), Some(listener.local_addr()))?;
-    Ok(WorkStatus::progressed(fired > 0))
+    Ok(fired > 0)
 }
 
 fn drain_inbound_listener(
@@ -156,9 +145,9 @@ fn drain_inbound_listener(
     runtime: &mut Runtime,
     listener: &network::Listener,
     work_limit: usize,
-) -> Result<WorkStatus, String> {
+) -> Result<bool, String> {
     let Some(intake) = description.inbound_network_intake else {
-        return Ok(WorkStatus::idle());
+        return Ok(false);
     };
     let accepted = listener.accept_available(work_limit, |source, frame| {
         let effects = intake(InboundNetworkFrame {
@@ -171,18 +160,16 @@ fn drain_inbound_listener(
         }
         Ok(())
     })?;
-    Ok(WorkStatus::progressed(
-        accepted.accepted_connections > 0
-            || accepted.value.sent_frames > 0
-            || accepted.value.received_frames > 0,
-    ))
+    Ok(accepted.accepted_connections > 0
+        || accepted.value.sent_frames > 0
+        || accepted.value.received_frames > 0)
 }
 
 fn drain_time_wakes(
     description: DaemonDescription,
     runtime: &mut Runtime,
     limit: usize,
-) -> Result<WorkStatus, String> {
+) -> Result<bool, String> {
     let mut due = 0;
     let mut remaining = limit;
     for wake in description.time_wakes {
@@ -197,12 +184,12 @@ fn drain_time_wakes(
         due += admitted;
         remaining = remaining.saturating_sub(admitted);
     }
-    Ok(WorkStatus::progressed(due > 0))
+    Ok(due > 0)
 }
 
-fn drain_outgoing_network(runtime: &mut Runtime, work_limit: usize) -> Result<WorkStatus, String> {
+fn drain_outgoing_network(runtime: &mut Runtime, work_limit: usize) -> Result<bool, String> {
     let report = network::pump_outgoing(runtime.db(), work_limit, work_limit)?;
-    Ok(WorkStatus::progressed(report.sent_frames > 0))
+    Ok(report.sent_frames > 0)
 }
 
 pub(crate) fn now_ms() -> u64 {
@@ -313,7 +300,7 @@ impl DaemonReport {
 pub fn start(
     db_path: &Path,
     args: CliArgs<'_>,
-    mut tick: impl FnMut(&network::Listener, usize) -> Result<WorkStatus, String>,
+    mut tick: impl FnMut(&network::Listener, usize) -> Result<bool, String>,
 ) -> Result<CliOutput, String> {
     let options = parse_start_options(args)?;
     SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
@@ -421,8 +408,8 @@ fn parse_start_options(args: CliArgs<'_>) -> Result<StartOptions, String> {
     })
 }
 
-fn sleep_after_tick(options: &StartOptions, status: WorkStatus) -> Option<Duration> {
-    (!status.progressed).then(|| Duration::from_millis(options.quiet_ms))
+fn sleep_after_tick(options: &StartOptions, active: bool) -> Option<Duration> {
+    (!active).then(|| Duration::from_millis(options.quiet_ms))
 }
 
 fn parse_positive_u64(value: Option<&str>) -> Result<u64, String> {
@@ -870,24 +857,10 @@ mod tests {
             quiet_ms: 200,
             work_limit: 1,
         };
-        let active = WorkStatus {
-            progressed: true,
-            retried: false,
-        };
 
-        assert_eq!(sleep_after_tick(&options, active), None);
+        assert_eq!(sleep_after_tick(&options, true), None);
         assert_eq!(
-            sleep_after_tick(&options, WorkStatus::idle()),
-            Some(Duration::from_millis(200))
-        );
-        assert_eq!(
-            sleep_after_tick(
-                &options,
-                WorkStatus {
-                    progressed: false,
-                    retried: true,
-                },
-            ),
+            sleep_after_tick(&options, false),
             Some(Duration::from_millis(200))
         );
     }
@@ -913,7 +886,7 @@ mod tests {
         .expect("queue outgoing frame");
         let mut scheduler = RecurringScheduler::install(TEST_RUNTIME.handlers, now_ms());
 
-        let status = tick(
+        let active = tick(
             DaemonDescription {
                 inbound_network_intake: None,
                 time_wakes: &[],
@@ -925,7 +898,7 @@ mod tests {
         )
         .expect("daemon tick");
 
-        assert!(status.progressed);
+        assert!(active);
         assert_eq!(reader.join().expect("reader thread"), b"tick queued frame");
         assert!(network::claim_outgoing_for_target(
             runtime.db(),
@@ -980,7 +953,7 @@ mod tests {
         let mut runtime = Runtime::open_memory(&RECURRING_RUNTIME).expect("runtime");
         let mut scheduler = RecurringScheduler::install(RECURRING_RUNTIME.handlers, 0);
 
-        let status = tick(
+        let active = tick(
             DaemonDescription {
                 inbound_network_intake: None,
                 time_wakes: &[],
@@ -992,7 +965,7 @@ mod tests {
         )
         .expect("daemon tick");
 
-        assert!(status.progressed);
+        assert!(active);
         assert_eq!(RECURRING_HANDLER_CALLS.load(Ordering::SeqCst), 1);
         assert_eq!(
             runtime.pending_intent_count(),

@@ -340,7 +340,7 @@ fn daemon_tick_admits_wire_frame_without_inbound_rows_or_receive_intents() {
     .expect("daemon tick");
     writer.join().expect("writer thread");
 
-    assert!(status.progressed);
+    assert!(status);
     let expected_frame =
         frame_small_author::fact_from_wire(&frame, RECEIVED_AT).expect("expected frame fact");
     let received_frame_bytes = retained_fact_bytes(&db_path, &expected_frame.id)

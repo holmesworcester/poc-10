@@ -256,8 +256,9 @@ Patterns to avoid in projector files:
 - Intent type determines whether work is atomic or deferred.
 - Row mutations are bounded read-model mutations and are applied by
   the core projection worker during projection drain.
-- Deferred handlers must be retry-safe: if required inputs or external effects
-  are unavailable, return an error so the intent remains queued.
+- Deferred handlers must receive exact committed inputs. If required inputs are
+  unavailable, return an error so the intent remains queued; local stale IO
+  attempts should return empty effects and be consumed.
 - Handlers must not construct shared fact wire layouts inline. If a handler
   needs to create a protocol fact, the owning fact-family module provides an
   `author.rs` helper. Fact construction, signing, encryption, and assembly stay
@@ -271,9 +272,9 @@ Patterns to avoid in projector files:
 Handlers are the only place for bounded stateful protocol work. A handler
 decodes its own intent payload, asks core for exact input fact ids through
 `input_fact_ids`, reads those facts through `HandlerContext`, performs one
-bounded effect, and returns `RuntimeEffects`. It must be retry-safe: transient
-absence of required input or external IO returns `retry_intent`, leaving the
-queue row in place.
+bounded effect, and returns `RuntimeEffects`. Missing declared inputs are
+handler errors; local stale IO attempts should return empty effects so dispatch
+can consume the ephemeral row.
 
 Handlers may call deterministic `author.rs` constructors owned by the fact
 module they are emitting. They must not inline shared fact wire layouts, mutate

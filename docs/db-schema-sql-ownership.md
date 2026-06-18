@@ -88,10 +88,10 @@ Projectors supply data. `project_fact.rs` supplies SQL and ordering.
 
 ## Intents
 
-`handle_intent.rs` owns queue selection, retry rotation, handler context
-loading, and the transaction that deletes handled work while committing handler
-output. Durable intent rows are replayable; local intent rows are connection
-local and disappear on restart.
+`handle_intent.rs` owns queue selection, handler context loading, and the
+transaction that deletes handled work while committing handler output. Durable
+intent rows are replayable; local intent rows are connection local and
+disappear on restart.
 
 ## Queries
 

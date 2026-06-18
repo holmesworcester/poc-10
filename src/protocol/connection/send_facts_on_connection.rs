@@ -11,7 +11,7 @@
 //! queueing. Each frame fact family owns sealing.
 
 use crate::core::intents::{
-    retry_intent, HandlerContext, HandlerError, HandlerFactId, HandlerResult, IntentHandler,
+    HandlerContext, HandlerError, HandlerFactId, HandlerResult, IntentHandler,
 };
 use crate::core::intents::{Intent, IntentKind};
 use crate::core::network::{self, NetworkTarget, OutgoingNetworkRow};
@@ -282,9 +282,7 @@ impl IntentHandler for SendFactsOnConnectionHandler {
             == connection.from_endpoint
         {
             let Some(addr) = connection.initiator_addr else {
-                return Err(retry_intent(
-                    "send_facts_on_connection route: missing initiator address",
-                ));
+                return Ok(RuntimeEffects::new());
             };
             (
                 connection.from_endpoint,
@@ -293,9 +291,7 @@ impl IntentHandler for SendFactsOnConnectionHandler {
             )
         } else if local_endpoint.endpoint == connection.to_endpoint {
             let Some(addr) = connection.responder_addr else {
-                return Err(retry_intent(
-                    "send_facts_on_connection route: missing responder address",
-                ));
+                return Ok(RuntimeEffects::new());
             };
             (
                 connection.to_endpoint,

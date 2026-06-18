@@ -19,13 +19,13 @@
 //! intents are connection-local work, useful for inbound frames and other
 //! process-scoped signals that should disappear on restart. If the same durable
 //! identity is handled, dispatch removes the matching ephemeral duplicate so
-//! the local retry does not repeat accepted work.
+//! local work does not repeat accepted durable work.
 //!
 //! Handlers are reactive runtime code, not user-facing commands. They may ask
 //! core to load specific facts and may use query helpers through `Db`, then
-//! return `RuntimeEffects` for runtime workers to commit atomically. If a handler
-//! needs to wait for missing input, return `retry_intent`; if it observes a
-//! semantic violation that should not be retried, return a fatal error.
+//! return `RuntimeEffects` for runtime workers to commit atomically. Missing
+//! declared inputs or semantic violations are handler errors: dispatch does not
+//! commit output or consume the queue row.
 
 use crate::core::db::Db;
 use crate::core::effects::RuntimeEffects;
@@ -67,7 +67,7 @@ impl IntentKind {
 ///
 /// `(kind, key)` is the queue identity. Re-emitting the same payload is a
 /// no-op; re-emitting a different payload for the same identity is rejected by
-/// runtime effect validation because it would make retries ambiguous.
+/// runtime effect validation because it would make repeated dispatch ambiguous.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Intent {
     /// Handler routing key.
@@ -132,36 +132,23 @@ impl Intent {
 /// Fact ids requested by a handler before it runs.
 pub type HandlerFactId = FactId;
 
-/// Handler failure mode.
+/// Handler failure before dispatch commits effects.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HandlerError {
-    /// Transient failure. Dispatch leaves the intent queued for another pass.
-    Retry(String),
-    /// Permanent failure. Dispatch reports the error and does not commit output.
-    Fatal(String),
-}
+pub struct HandlerError(String);
 
 impl HandlerError {
     pub fn fatal(reason: impl Into<String>) -> Self {
-        Self::Fatal(reason.into())
-    }
-
-    pub fn retry(reason: impl Into<String>) -> Self {
-        Self::Retry(reason.into())
+        Self(reason.into())
     }
 
     pub fn contains(&self, needle: &str) -> bool {
-        self.to_string().contains(needle)
+        self.0.contains(needle)
     }
 }
 
 impl fmt::Display for HandlerError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            HandlerError::Retry(reason) | HandlerError::Fatal(reason) => {
-                formatter.write_str(reason)
-            }
-        }
+        formatter.write_str(&self.0)
     }
 }
 
@@ -169,31 +156,18 @@ impl std::error::Error for HandlerError {}
 
 impl From<String> for HandlerError {
     fn from(value: String) -> Self {
-        Self::Fatal(value)
+        Self(value)
     }
 }
 
 impl From<&str> for HandlerError {
     fn from(value: &str) -> Self {
-        Self::Fatal(value.to_string())
+        Self(value.to_string())
     }
 }
 
 /// Result returned by an intent handler before core commits its effects.
 pub type HandlerResult = Result<RuntimeEffects, HandlerError>;
-
-/// Mark a handler failure as transient so dispatch leaves the intent queued.
-pub fn retry_intent(reason: impl Into<String>) -> HandlerError {
-    HandlerError::retry(reason)
-}
-
-/// Extract the retry reason when a handler asked dispatch to keep the row queued.
-pub fn retry_intent_reason(err: &HandlerError) -> Option<&str> {
-    match err {
-        HandlerError::Retry(reason) => Some(reason),
-        HandlerError::Fatal(_) => None,
-    }
-}
 
 /// Runtime mode visible to intent handlers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -294,10 +268,10 @@ impl<'a> HandlerContext<'a> {
         self.facts.values()
     }
 
-    /// Require a preloaded fact, marking absence as retryable.
+    /// Require a preloaded fact.
     pub fn require_fact(&self, id: &FactId) -> Result<&Fact, HandlerError> {
         self.fact(id)
-            .ok_or_else(|| HandlerError::retry(format!("handler context missing fact {id:?}")))
+            .ok_or_else(|| HandlerError::fatal(format!("handler context missing fact {id:?}")))
     }
 
     /// Require non-local fact bytes for outbound or sync-visible work.
@@ -319,9 +293,9 @@ impl<'a> HandlerContext<'a> {
 pub trait IntentHandler {
     /// Fact ids core should load before calling `handle`.
     ///
-    /// Missing facts do not fail dispatch here; the handler can call
-    /// `require_fact` and return `Retry` if the missing input is expected to
-    /// arrive later.
+    /// Missing facts do not fail dispatch here; a handler that requires a
+    /// missing declared fact returns a handler error and dispatch leaves the row
+    /// queued without committing output.
     fn input_fact_ids(&self, _intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
         Ok(Vec::new())
     }
