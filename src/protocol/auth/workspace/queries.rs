@@ -187,7 +187,7 @@ pub fn runtime_count_report(runtime: &Runtime) -> Result<RuntimeCountReport, Str
         .table_row_count(FACTS)
         .map_err(|err| format!("count retained facts: {err}"))?;
     let sync_facts = shared_fact::sync_status(runtime.db())?.indexed_facts;
-    let applied_facts = facts.saturating_sub(runtime.pending_fact_count());
+    let applied_facts = facts.saturating_sub(runtime.pending_projection_count());
     let pending_intents = runtime.pending_intent_count();
     let connections = runtime
         .db()

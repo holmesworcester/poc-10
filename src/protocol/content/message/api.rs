@@ -369,7 +369,7 @@ mod tests {
             runtime
                 .drain_local_intents(limit)
                 .expect("drain local intent batch");
-            if runtime.pending_fact_count() == 0 && runtime.pending_intent_count() == 0 {
+            if runtime.pending_projection_count() == 0 && runtime.pending_intent_count() == 0 {
                 return;
             }
         }

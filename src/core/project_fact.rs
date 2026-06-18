@@ -2378,7 +2378,7 @@ fn delete_owner_rows_from_tables(
     Ok(deleted)
 }
 
-pub(crate) fn pending_fact_count(store: &Db) -> usize {
+pub(crate) fn pending_projection_input_count(store: &Db) -> usize {
     store
         .table_row_count(PENDING_PROJECTION)
         .expect("pending projection count should load from database")

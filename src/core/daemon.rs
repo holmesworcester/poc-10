@@ -966,7 +966,7 @@ mod tests {
         .expect("daemon tick");
 
         assert_eq!(
-            runtime.pending_fact_count(),
+            runtime.pending_projection_count(),
             0,
             "projection should use the high local-derivation budget, not the base side-effect limit"
         );

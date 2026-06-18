@@ -38,7 +38,7 @@ fn drain_projection_for_test(runtime: &mut Runtime, max_rounds: usize, limit: us
             .drain_incoming_projection(limit)
             .expect("drain incoming projection batch");
         progressed |= status.progressed;
-        if runtime.pending_fact_count() == 0 {
+        if runtime.pending_projection_count() == 0 {
             return progressed;
         }
     }

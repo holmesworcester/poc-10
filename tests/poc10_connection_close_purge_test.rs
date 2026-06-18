@@ -45,7 +45,7 @@ fn drain_projection_for_test(runtime: &mut Runtime, max_rounds: usize, limit: us
         runtime
             .drain_incoming_projection(limit)
             .expect("drain incoming projection batch");
-        if runtime.pending_fact_count() == 0 {
+        if runtime.pending_projection_count() == 0 {
             return;
         }
     }
@@ -66,7 +66,7 @@ fn drain_runtime_work_for_test(runtime: &mut Runtime, max_rounds: usize, limit: 
         runtime
             .drain_local_intents(limit)
             .expect("drain local intent batch");
-        if runtime.pending_fact_count() == 0 && runtime.pending_intent_count() == 0 {
+        if runtime.pending_projection_count() == 0 && runtime.pending_intent_count() == 0 {
             return;
         }
     }
@@ -198,7 +198,7 @@ fn closing_connection_purges_connection_fact_and_row() {
             .expect("connection rows after close"),
         0
     );
-    assert_eq!(runtime.pending_fact_count(), 0);
+    assert_eq!(runtime.pending_projection_count(), 0);
     assert_eq!(runtime.pending_intent_count(), 0);
 
     assert!(

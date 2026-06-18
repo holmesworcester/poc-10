@@ -7,13 +7,19 @@
 //! sources, projector router, handler registry, and row mutation allowlist that
 //! make those mechanics meaningful.
 //!
-//! The runtime does not interpret protocol bytes. It wires protocol registries
-//! into bounded queue steps: durable projection, incoming projection, durable
-//! intents, and local intents. Command-authored facts commit before command
-//! receipts are returned, and handler output commits only through the dispatch
-//! boundary. Those rules make facts, context, rows, and queued work visible in a
-//! predictable order regardless of whether work came from a CLI command, a
-//! daemon tick, sync, or a protocol handler.
+//! The runtime does not interpret protocol bytes. It has five jobs:
+//!
+//! 1. Open a database with core plus protocol schema.
+//! 2. Expose SQL-backed queue/status diagnostics.
+//! 3. Admit command, host, fact, and intent work into core storage.
+//! 4. Drain one bounded queue at a time in the order chosen by daemon/replay.
+//! 5. Snapshot, replay, and compare replay-relevant state.
+//!
+//! Command-authored facts commit before command receipts are returned, and
+//! handler output commits only through the dispatch boundary. Those rules make
+//! facts, context, rows, and queued work visible in a predictable order
+//! regardless of whether work came from a CLI command, a daemon tick, sync, or a
+//! protocol handler.
 //!
 //! This is the facade a protocol host should use when it wants the whole core
 //! engine. Runtime holds the concrete database, projector, and protocol
@@ -76,6 +82,10 @@ pub struct Runtime {
 }
 
 impl Runtime {
+    // -------------------------------------------------------------------------
+    // Construction
+    // -------------------------------------------------------------------------
+
     /// Open an in-memory runtime with core and protocol schema sources applied.
     pub fn open_memory(description: &'static RuntimeDescription) -> Result<Self, String> {
         let schema_sources = runtime_schema_sources(description);
@@ -104,6 +114,10 @@ impl Runtime {
         })
     }
 
+    // -------------------------------------------------------------------------
+    // SQL-Backed Runtime State
+    // -------------------------------------------------------------------------
+
     /// Borrow the runtime's database handle.
     ///
     /// This exposes the concrete SQLite-backed database for query helpers and
@@ -114,9 +128,13 @@ impl Runtime {
         &self.db
     }
 
-    /// Count facts currently queued for projection.
-    pub fn pending_fact_count(&self) -> usize {
-        project_fact::pending_fact_count(&self.db)
+    /// Count projection inputs still waiting in SQL.
+    ///
+    /// This is queue depth, not fact storage. It includes durable
+    /// `pending_projection` rows and volatile `incoming_facts` rows because both
+    /// are inputs to fact projection.
+    pub fn pending_projection_count(&self) -> usize {
+        project_fact::pending_projection_input_count(&self.db)
     }
 
     /// Count durable plus ephemeral queued intents.
@@ -136,6 +154,10 @@ impl Runtime {
     pub fn handler_routes(&self) -> &'static [HandlerRoute] {
         self.description.handlers
     }
+
+    // -------------------------------------------------------------------------
+    // Work Admission
+    // -------------------------------------------------------------------------
 
     /// Admit one fact and mark it pending for projection.
     pub fn submit_fact(&mut self, fact: Fact) -> bool {
@@ -198,6 +220,10 @@ impl Runtime {
         .map(|_| ())
     }
 
+    // -------------------------------------------------------------------------
+    // Bounded Queue Drains
+    // -------------------------------------------------------------------------
+
     /// Drain at most `limit` durable projection items.
     ///
     /// Runtime owns the bounded loop; `project_fact` owns the one-item
@@ -221,22 +247,16 @@ impl Runtime {
         source: ProjectionSource,
         limit: usize,
     ) -> Result<WorkStatus, String> {
-        let mut status = WorkStatus::idle();
-        for _ in 0..limit {
-            let step_status = project_fact::project_one(
+        drain_bounded_work(limit, || {
+            project_fact::project_one(
                 &self.db,
                 self.projector.as_ref(),
                 source,
                 ProjectionMode::Normal,
                 self.description.row_mutation_tables,
                 self.description.fact_admission,
-            )?;
-            if step_status.is_idle() {
-                break;
-            }
-            status.merge(step_status);
-        }
-        Ok(status)
+            )
+        })
     }
 
     /// Drain at most `limit` durable intents using the live handler set.
@@ -261,28 +281,22 @@ impl Runtime {
         queue: IntentQueue,
         limit: usize,
     ) -> Result<WorkStatus, String> {
-        let mut status = WorkStatus::idle();
-        for _ in 0..limit {
-            let step_status = dispatch_one_intent(
+        drain_bounded_work(limit, || {
+            dispatch_one_intent(
                 &self.db,
                 &self.handlers,
                 queue,
                 self.description.row_mutation_tables,
                 self.description.fact_admission,
                 HandlerMode::Live,
-            )?;
-            if step_status.is_idle() {
-                break;
-            }
-
-            status.merge(step_status);
-            if step_status.retried {
-                break;
-            }
-        }
-        Ok(status)
+            )
+        })
     }
 
+    /// Admit due time wakes as pending projection inputs for one timeline interval.
+    ///
+    /// Time wake admission is SQL work, but not a projector or handler drain by
+    /// itself. The queued owners are projected by a later durable projection pass.
     pub fn process_due_time_range(
         &mut self,
         timeline: Timeline,
@@ -298,6 +312,10 @@ impl Runtime {
             limit,
         )
     }
+
+    // -------------------------------------------------------------------------
+    // Replay and Snapshots
+    // -------------------------------------------------------------------------
 
     /// Run the replay entry point against this runtime's database.
     ///
@@ -382,6 +400,27 @@ fn runtime_schema_sources(description: &RuntimeDescription) -> Vec<SchemaSource>
     sources.push(CORE_SCHEMA_SOURCE);
     sources.extend_from_slice(description.schema_sources);
     sources
+}
+
+fn drain_bounded_work(
+    limit: usize,
+    mut step: impl FnMut() -> Result<WorkStatus, String>,
+) -> Result<WorkStatus, String> {
+    // Each runtime drain is a bounded loop over a one-item worker. Idle means the
+    // selected queue is empty; retry means a local handler deliberately yielded.
+    let mut status = WorkStatus::idle();
+    for _ in 0..limit {
+        let step_status = step()?;
+        if step_status.is_idle() {
+            break;
+        }
+
+        status.merge(step_status);
+        if step_status.retried {
+            break;
+        }
+    }
+    Ok(status)
 }
 
 #[cfg(test)]
@@ -497,7 +536,7 @@ mod tests {
     };
 
     #[test]
-    fn runtime_counts_store_backed_facts_from_sqlite() {
+    fn db_handle_reads_store_backed_fact_counts_from_sqlite() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("runtime.db");
         let runtime = Runtime::open_disk(&TEST_RUNTIME, &path).expect("runtime");
@@ -513,6 +552,27 @@ mod tests {
                 .expect("fact count"),
             1,
             "fact counts should read externally committed facts from SQLite"
+        );
+    }
+
+    #[test]
+    fn pending_projection_count_reports_durable_queue_and_incoming_intake() {
+        let mut runtime = Runtime::open_memory(&TEST_RUNTIME).expect("runtime");
+        let durable = Fact::new(FactScope::Global, 7, b"durable queued".to_vec());
+        let incoming = Fact::new(FactScope::Local, 8, b"incoming queued".to_vec());
+
+        assert!(runtime.submit_fact(durable));
+        runtime
+            .submit_runtime_effects(
+                RuntimeEffects::new().incoming_fact(incoming),
+                "stage incoming test fact",
+            )
+            .expect("stage incoming fact");
+
+        assert_eq!(
+            runtime.pending_projection_count(),
+            2,
+            "pending projection count should include durable queue rows and volatile incoming intake"
         );
     }
 
@@ -534,7 +594,7 @@ mod tests {
             "command-authored fact should be retained immediately"
         );
         assert_eq!(
-            runtime.pending_fact_count(),
+            runtime.pending_projection_count(),
             1,
             "command-authored fact should be queued for projection"
         );
@@ -563,7 +623,7 @@ mod tests {
             .drain_durable_projection(1)
             .expect("drain one projection");
         assert_eq!(
-            projection_runtime.pending_fact_count(),
+            projection_runtime.pending_projection_count(),
             1,
             "one projection batch should process at most its limit"
         );
@@ -612,7 +672,7 @@ mod tests {
             "the intent should be consumed when its handler output commits"
         );
         assert_eq!(
-            runtime.pending_fact_count(),
+            runtime.pending_projection_count(),
             1,
             "handler-emitted facts should stay queued for a later projection pass"
         );
@@ -623,7 +683,7 @@ mod tests {
 
         assert!(second.progressed);
         assert_eq!(
-            runtime.pending_fact_count(),
+            runtime.pending_projection_count(),
             0,
             "the later projection batch should project the previously emitted fact"
         );
