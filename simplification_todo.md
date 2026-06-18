@@ -15,7 +15,11 @@ fact admission -> pending_projection
 projection -> context_edges, row mutations, intents, time wakes
 time wakes -> pending_projection
 intent dispatch -> facts, purges, row mutations, follow-up intents
-incoming frames / commands -> facts and intents
+commands -> facts and intents
+inbound TCP frames -> network_in
+network_in -> receive_network_frame local intent
+receive_network_frame -> durable facts, receipt facts, or ephemeral_projection_inputs
+ephemeral_projection_inputs -> opened durable facts and receipt facts
 ```
 
 Keep the scheduler single threaded for now. Parallel workers should wait until
@@ -53,10 +57,10 @@ Accountable criteria:
    the context/time-wake rows owned by its `fact_id`, applies protocol
    `RowMutation`s through `PipelineEffects`, and is idempotent when inputs are
    unchanged.
-7. Commands, incoming frames, projection, and handlers all reduce committed
-   side effects through `PipelineEffects` or an equally small successor shape.
-   There must not be a second ad hoc effect path for row writes or emitted
-   intents.
+7. Commands, receive-network-frame handlers, projection, and handlers all
+   reduce committed side effects through `PipelineEffects` or an equally small
+   successor shape. There must not be a second ad hoc effect path for row writes
+   or emitted intents.
 8. Runtime remains single threaded until queues have explicit claim/lease
    columns. The code should nevertheless read as independent workers whose
    outputs enqueue each other.

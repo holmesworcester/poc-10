@@ -451,6 +451,7 @@ pending_projection
 pending_time_ranges
 intents
 local_intents
+ephemeral_projection_inputs
 clock
 ```
 

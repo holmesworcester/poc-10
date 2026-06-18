@@ -13,7 +13,11 @@ fact admission -> pending_projection
 projection -> context_edges, time_wakes, row mutations, intents
 time wakes -> pending_projection
 intent dispatch -> facts, purges, row mutations, follow-up intents
-commands / incoming frames -> facts and intents
+commands -> facts and intents
+inbound TCP frames -> network_in
+network_in -> receive_network_frame local intent
+receive_network_frame -> durable facts, receipt facts, or ephemeral_projection_inputs
+ephemeral_projection_inputs -> opened durable facts and receipt facts
 ```
 
 The scheduler remains single threaded. The code is shaped as independent queue
