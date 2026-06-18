@@ -26,12 +26,11 @@ queues are durable SQLite tables that survive restart; `incoming_facts` and
 `local_intents` are `CREATE TEMP TABLE`, so they last as long as the SQLite
 connection — the whole daemon session, or one CLI command — and a restart
 rebuilds them empty. The daemon drains them each tick on its own long-lived
-connection. A CLI command or query turn does not drain runtime queues. It reads
-currently projected rows or commits authored facts to durable pending
+connection. A normal CLI command or query turn does not drain runtime queues. It
+reads currently projected rows or commits authored facts to durable pending
 projection. Because temp tables are connection-local and a CLI command runs on a
-separate connection from the daemon, any temp rows such a turn stages are
-dropped when its connection closes — they are not handed to the daemon (see
-diagram 2):
+separate connection from the daemon, temp rows from one turn are not handed to
+another turn (see diagram 3):
 
 ```text
 facts (+ local_fact_admissions)   immutable fact store
@@ -81,7 +80,6 @@ flowchart TD
     INTAKE --> EFFECTS
     EFFECTS -->|incoming facts| INCOMING
     EFFECTS -->|retained facts| FACTS
-    EFFECTS -->|intents| INTENTS
     FACTS -->|admit| PENDING
     INCOMING --> PROJECTOR
     PENDING --> PROJECTOR
@@ -117,13 +115,67 @@ mechanical IO of its own — the TCP listener reads frames and the pump writes
 `network_outgoing`, deferring targets whose sockets are not ready — but it moves
 opaque bytes and never interprets a fact.
 
-## 2) One Serialized Turn
+## 2) Project One Fact
+
+Projection is a one-item worker. `Runtime::drain_durable_projection` and
+`Runtime::drain_incoming_projection` call `project_one` repeatedly. Each call
+handles one durable pending owner or one volatile incoming fact. Everything
+before the commit is calculation. The commit consumes the selected work and
+publishes replacement context, time wakes, rows, facts, and intents as one SQL
+boundary.
+
+```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 300}} }%%
+flowchart TD
+    SOURCE["chosen source: durable pending_projection or incoming_facts"] --> LOAD["load one projection input"]
+    LOAD --> FOUND{"backing fact bytes found?"}
+    FOUND -- no --> STALE["retire stale input in commit"]
+    FOUND -- yes --> CONTEXT["attach pending matches and time ranges"]
+    CONTEXT --> RUN["run protocol projector"]
+    RUN --> VALIDATE["validate owner, rows, effects, and admission"]
+    VALIDATE --> ACCEPTED{"projector accepted input?"}
+    ACCEPTED -- no --> REJECT["retire rejected work in commit"]
+    ACCEPTED -- yes --> PREPARED["PreparedProjection"]
+
+    STALE --> CLEANUP["cleanup stale selected work"]
+    REJECT --> CLEANUP_REJECT["retire rejected selected work"]
+    CLEANUP --> END_CLEANUP["commit cleanup transaction"]
+    CLEANUP_REJECT --> END_CLEANUP
+
+    PREPARED --> COMMIT["commit accepted projection transaction"]
+    COMMIT --> SOURCE_BOUNDARY["consume source marker or incoming row"]
+    SOURCE_BOUNDARY --> KEEP_STATE{"keeps standing projection state?"}
+    KEEP_STATE -- yes --> CONTEXT_STATE["replace needs, append offers"]
+    CONTEXT_STATE --> WAKE["wake newly matched dependent owners"]
+    KEEP_STATE -- yes --> TIME_STATE["replace owner time wakes"]
+    KEEP_STATE -- no --> DROP["drop volatile or self-purged state"]
+    WAKE --> EFFECTS["commit RuntimeEffects"]
+    TIME_STATE --> EFFECTS
+    DROP --> EFFECTS
+
+    EFFECTS --> FACTS["admit facts and priority facts"]
+    EFFECTS --> INCOMING["stage incoming facts"]
+    EFFECTS --> ROWS["apply row mutations"]
+    EFFECTS --> INTENTS["record durable and local intents"]
+    EFFECTS --> PURGES["purge allowed exact facts"]
+```
+
+Durable projection drains from `pending_projection`; incoming projection drains
+from process-local `incoming_facts`. Incoming rows project once. The projector
+may retain the incoming fact as durable evidence, retain it while parked on
+context, or drop it after opening it into recovered child facts. Child facts are
+not projected inline: effect commit admits them to the appropriate queue, and a
+later projection item handles them.
+
+## 3) Serialized Turns And Locks
 
 Commands, queries, and the daemon turn all acquire `<db>.runtime.lock`, but they
-do not all drive the runtime loop. A command verifies storage readiness, reads
-currently projected state, authors facts, commits them to durable pending
-projection, and returns a receipt. A query verifies storage readiness and reads
-currently projected rows. The daemon turn (the recurring scheduler plus
+do not all drive the runtime loop. A normal write command verifies storage
+readiness, reads currently projected state, authors facts, commits them to
+durable pending projection, and returns a receipt. A normal query verifies
+storage readiness and reads currently projected rows. Maintenance commands such
+as protocol update and replay diagnostics may bypass readiness, but they still
+do not run daemon queue drains. The daemon turn (the recurring scheduler plus
 `daemon::tick`) is the live loop that advances queues.
 
 ```mermaid
@@ -131,39 +183,23 @@ currently projected rows. The daemon turn (the recurring scheduler plus
 flowchart TD
     LOCK["acquire <db>.runtime.lock"]
 
-    LOCK --> CMD["command turn"]
+    LOCK --> CMD["ordinary write command turn"]
     CMD --> CMD_READY["require storage_ready"]
     CMD_READY --> READ_INPUTS["read current projected rows"]
     READ_INPUTS --> AUTHOR["author facts"]
     AUTHOR --> COMMIT_FACTS["commit authored facts -> pending_projection"]
     COMMIT_FACTS --> RECEIPT["return receipt"]
 
-    LOCK --> Q["query turn"]
+    LOCK --> Q["ordinary query turn"]
     Q --> Q_READY["require storage_ready"]
     Q_READY --> READ["read materialized rows"]
 
-    LOCK --> TICK["daemon turn"]
-    TICK --> R0["1. fire first due recurring intent"]
-    R0 --> R1["if queued: drain one local intent, then durable projection"]
-    R1 --> READY1{"storage_ready?"}
-    READY1 -- no --> REPAIR["drain repair queues only"]
-    REPAIR --> RETURN1["return from tick"]
-    READY1 -- yes --> T0["2. fire remaining due recurring intents"]
-    T0 --> T1["3. drain local intents"]
-    T1 --> T2["4. drain durable projection"]
-    T2 --> READY2{"storage_ready?"}
-    READY2 -- no --> REPAIR
-    READY2 -- yes --> T3["5. accept frames and commit inbound RuntimeEffects"]
-    T3 --> T4["6. admit due time_wakes -> pending_projection"]
-    T4 --> T5["7. drain durable projection"]
-    T5 --> T6["8. drain incoming projection"]
-    T6 --> T7["9. drain durable intents"]
-    T7 --> T8["10. drain local intents"]
-    T8 --> T9["11. pump network_outgoing"]
+    LOCK --> MAINT["maintenance or diagnostic command"]
+    MAINT --> MAINT_WORK["read diagnostics or submit priority update effects"]
+    MAINT_WORK --> MAINT_RETURN["return output"]
 
-    T0 -.enqueued local intents drained at.-> T1
-    T3 -.incoming facts projected at.-> T6
-    T4 -.woken durable owners projected at.-> T5
+    LOCK --> TICK["daemon turn"]
+    TICK --> DAEMON_TICK["run daemon::tick"]
 ```
 
 The difference between turns is whether they drain queues at all. Queries and
@@ -172,16 +208,90 @@ handlers; they observe already projected state and may enqueue authored facts fo
 the daemon. Handler-emitted facts are committed atomically with intent dispatch
 and remain queued for a later durable projection batch.
 
+```mermaid
+sequenceDiagram
+    participant D as daemon process
+    participant L as RuntimeTurnLock
+    participant C as CLI process
+    participant R as Runtime
+
+    D->>L: acquire for daemon tick
+    L-->>D: granted
+    D->>R: run daemon tick
+    C->>L: acquire for CLI command
+    Note over C,L: OS blocks while daemon holds flock
+    D->>L: release
+    L-->>C: granted
+    C->>R: open runtime
+    C->>R: run registered protocol CLI command
+    alt ordinary query
+        C->>R: require storage_ready
+        C->>R: read projected state
+    else ordinary write command
+        C->>R: require storage_ready
+        C->>R: read projected state
+        C->>R: submit AuthoredFacts
+    else maintenance command
+        C->>R: run diagnostic or submit update effects
+    end
+    C->>L: release
+    D->>L: acquire for next daemon tick
+```
+
+The lock is an OS `flock`. A CLI process that arrives while the daemon is in a
+turn waits in the kernel until the daemon releases the file lock. There is no
+shared in-process command slot inside the daemon tick.
+
+## 4) Daemon Tick Queue Order
+
+Inside one daemon tick, recurring schedules get a pre-readiness pass that stops
+after the first queued local intent. Protocols can put a readiness repair route
+first, giving that work a chance to run before live IO. If storage is ready, the
+daemon runs the live queues in an explicit order. The full `project one fact`
+path above is represented here as a single node.
+
+```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 300}} }%%
+flowchart TD
+    START["daemon::tick"] --> FIRST["fire due recurring schedules until one intent queues"]
+    FIRST --> FIRST_DRAIN{"queued an early local intent?"}
+    FIRST_DRAIN -- yes --> LOCAL_ONE["drain one local intent"]
+    LOCAL_ONE --> DURABLE_REPAIR["drain durable projection after early intent"]
+    FIRST_DRAIN -- no --> READY_ONE{"storage_ready?"}
+    DURABLE_REPAIR --> READY_ONE
+    READY_ONE -- no --> REPAIR["drain repair queues only"]
+    REPAIR --> RETURN_REPAIR["return from tick"]
+
+    READY_ONE -- yes --> RECUR["fire remaining due recurring intents"]
+    RECUR --> LOCAL["drain local intents"]
+    LOCAL --> DURABLE_PRE["drain durable projection"]
+    DURABLE_PRE --> READY_TWO{"storage_ready?"}
+    READY_TWO -- no --> REPAIR
+    READY_TWO -- yes --> INBOUND["accept frames and commit inbound RuntimeEffects"]
+    INBOUND --> TIME["admit due time_wakes"]
+    TIME --> DURABLE["drain durable projection"]
+    DURABLE --> INCOMING["drain incoming projection"]
+    INCOMING --> DURABLE_INTENTS["drain durable intents"]
+    DURABLE_INTENTS --> LOCAL_INTENTS["drain local intents"]
+    LOCAL_INTENTS --> OUTGOING["pump network_outgoing"]
+    OUTGOING --> DONE["return active flag"]
+
+    DURABLE --> PROJECT_ONE["project one durable pending fact"]
+    INCOMING --> PROJECT_INCOMING["project one incoming fact"]
+    DURABLE_INTENTS --> HANDLER_DURABLE["dispatch one durable intent"]
+    LOCAL_INTENTS --> HANDLER_LOCAL["dispatch one local intent"]
+```
+
 The recurring steps are daemon-only and are the source of all periodic work.
 Recurring intents are not durable state: an in-memory `RecurringScheduler`,
 installed once from the handler registry at daemon start, fires due operational
-loops during `daemon::tick` and enqueues ordinary local intents. The first due
-recurring loop gets a special readiness-repair chance before live IO; if storage
-is not ready, the daemon drains only repair queues and skips normal network and
-wall-clock work. The live daemon's cadence is only the scheduling mechanism; the
-work itself is plain facts and handlers.
+loops during `daemon::tick` and enqueues ordinary local intents. The pre-readiness
+recurring pass gives the first queued local intent a special repair chance before
+live IO; if storage is not ready, the daemon drains only repair queues and skips
+normal network and wall-clock work. The live daemon's cadence is only the
+scheduling mechanism; the work itself is plain facts and handlers.
 
-## 3) Needs And Offers
+## 5) Needs And Offers
 
 Context matching is the one mechanism that lets facts wake each other without
 core understanding them. A projector that lacks proof emits a **need** and
@@ -219,16 +329,101 @@ replace the prior set) while offers are append-only evidence until the owner
 fact is purged. The concrete role/range catalog lives beside each scope's
 projector docs, not here.
 
-## 4) Sync: The Convergence Loop
+## 6) Queued Cause Chain
 
-The previous three diagrams are the loop running on one node. Sync is what makes
+A runtime turn is one exclusive period under `RuntimeTurnLock`, but a causal
+chain can span many turns. Entry points first commit queued work. Later daemon
+or replay drains project one fact or dispatch one intent. Projection and
+handlers can both emit more queued work, so the same chain moves forward without
+nesting projection or handlers inline.
+
+```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 300}} }%%
+flowchart LR
+    subgraph ENTRY["turn N: entry point"]
+        CMD["CLI command"] --> AUTHORED["commit AuthoredFacts"]
+        NET["inbound intake"] --> INCOMING["commit incoming_facts"]
+        TIME["due time_wake"] --> WOKEN["mark owner pending_projection"]
+        HANDLER_OUT["handler output"] --> EFFECTS_IN["commit RuntimeEffects"]
+    end
+
+    AUTHORED --> QUEUES[("pending_projection, incoming_facts, intents")]
+    INCOMING --> QUEUES
+    WOKEN --> QUEUES
+    EFFECTS_IN --> QUEUES
+
+    subgraph DRAIN["same or later daemon/replay queue step"]
+        QUEUES --> PROJECT["project one fact"]
+        PROJECT --> NEEDS["standing needs"]
+        PROJECT --> OFFERS["standing offers"]
+        NEEDS --> MATCH["context overlap match"]
+        OFFERS --> MATCH
+        MATCH --> WAKE["wake dependent owner"]
+        PROJECT --> INTENT["emit intent"]
+        QUEUES --> HANDLER["dispatch one intent"]
+        HANDLER --> EFFECTS_OUT["commit RuntimeEffects"]
+    end
+
+    WAKE --> QUEUES
+    INTENT --> QUEUES
+    EFFECTS_OUT --> QUEUES
+```
+
+The important property is that queue commits, not call-stack nesting, carry the
+chain forward. A handler that emits facts does not project them before returning;
+a projector that emits intents does not run their handlers before committing.
+
+## 7) Daemon Network Flow
+
+The daemon owns background network progress. Another peer is abstracted here as
+one node. Incoming network bytes are accepted by core and passed to the protocol
+inbound intake hook. The hook commits `RuntimeEffects`: a retained receive
+observation fact plus a temporary incoming frame fact for recognized frames.
+Projection opens that incoming fact with standing context and emits recovered
+protocol facts. Outgoing bytes are produced by protocol handlers and written by
+the core TCP pump.
+
+```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 300}} }%%
+flowchart LR
+    PEER["another peer"] --> TCP_IN["TCP listener"]
+
+    subgraph DAEMON["local daemon tick"]
+        TCP_IN --> ACCEPT["accept_available"]
+        ACCEPT --> INTAKE["receive_network_frame_effects"]
+        INTAKE --> OBSERVATION["retained frame_observation fact"]
+        INTAKE --> FRAME_FACT["incoming request, connection, or frame fact"]
+        OBSERVATION -.origin and receive-time context.-> PROJECT_FRAME["drain incoming projection: project frame fact"]
+        FRAME_FACT --> PROJECT_FRAME
+        PROJECT_FRAME --> RECOVERED["recovered protocol facts"]
+        RECOVERED --> DURABLE_PROJECT["later durable projection"]
+
+        DURABLE_PROJECT --> FOLLOWUP_INTENTS["sync or connection follow-up intents"]
+        FOLLOWUP_INTENTS --> SEND_FACTS["send_facts_on_connection handler"]
+        FOLLOWUP_INTENTS --> QUEUE_FRAME["queue_outgoing_frame handler"]
+        SEND_FACTS --> OUTBOUND_ROWS["network_outgoing rows"]
+        QUEUE_FRAME --> OUTBOUND_ROWS
+        OUTBOUND_ROWS --> TCP_OUT["TCP pump"]
+    end
+
+    TCP_OUT --> PEER
+```
+
+`receive_network_frame_effects` does not unseal established frames or run a
+handler. It chooses the incoming fact family from opaque frame bytes and lets
+that fact's projector open the payload once the needed observation, connection,
+endpoint, or secret context is available.
+
+## 8) Sync: The Convergence Loop
+
+The previous sections describe the loop running on one node. Sync is what makes
 two nodes' loops converge, and it is best read as a back-and-forth over time
 rather than a flowchart. The crucial point is that the network adds no new
-machinery: every message on the wire is an ordinary fact, so each step is the
-same `admit -> project (writes a row) -> emit intent -> handler emits the next
-message` cycle from diagrams 1-3, just alternating between peers. The summaries
-exchanged are negentropy range summaries (a `count` and a `fingerprint`) over
-each peer's durable share/leaf/node index.
+runtime machinery: every message on the wire is an ordinary fact, so each step
+is the same `admit -> project (writes a row) -> emit intent -> handler emits the
+next message` cycle, just alternating between peers. The summaries exchanged are
+negentropy range summaries (a `count` and a `fingerprint`) over each peer's
+durable share/leaf/node index.
 
 ```mermaid
 sequenceDiagram
