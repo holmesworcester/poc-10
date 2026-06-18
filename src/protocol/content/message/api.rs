@@ -352,8 +352,9 @@ fn content_message_retention(
 mod tests {
     use super::*;
     use crate::core::command::FnClock;
+    use crate::core::daemon::{self, RuntimeTurnHost};
     use crate::core::runtime::Runtime;
-    use crate::protocol::app::MATCH_RUNTIME;
+    use crate::protocol::app::{MATCH_PROTOCOL, MATCH_RUNTIME};
 
     fn drain_runtime_work_for_test(runtime: &mut Runtime, max_rounds: usize, limit: usize) {
         for _ in 0..max_rounds {
@@ -376,9 +377,22 @@ mod tests {
         panic!("runtime work did not become idle within {max_rounds} rounds");
     }
 
+    fn initialize_runtime_for_test(runtime: &mut Runtime) {
+        let mut scheduler = daemon::RecurringScheduler::install(MATCH_RUNTIME.handlers, 0);
+        daemon::runtime_turn(
+            MATCH_PROTOCOL.daemon,
+            runtime,
+            RuntimeTurnHost::local(),
+            &mut scheduler,
+            512,
+        )
+        .expect("runtime turn");
+    }
+
     #[test]
     fn generate_messages_reuses_store_queried_authoring_snapshot() {
         let mut runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
+        initialize_runtime_for_test(&mut runtime);
         let workspace_clock = FnClock(|| 1_000);
         let workspace = crate::protocol::auth::workspace::api::create_workspace_with_identity(
             runtime.db(),

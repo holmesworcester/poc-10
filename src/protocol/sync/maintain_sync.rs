@@ -1,17 +1,21 @@
 //! Recurring sync maintenance.
 //!
-//! The daemon runs this live-only intent on its recurring schedule. It reads the
-//! current local sync setting and existing connection rows, then seeds one
-//! compare per connection. User commands influence this through projected local
-//! state, not by queueing sync work directly.
+//! Each runtime turn offers this live-only recurring intent. The builder queues
+//! only in daemon-host context when there is sync state to maintain and its
+//! process-local maintenance marker says the periodic retry window is due. User
+//! commands influence this through projected local state, not by queueing sync
+//! work directly.
 
 use crate::core::db::Db;
 use crate::core::effects::RuntimeEffects;
 use crate::core::intents::{HandlerContext, HandlerResult, Intent, IntentHandler, IntentKind};
 use crate::core::runtime::RecurringIntentContext;
 use crate::protocol::{connection, sync};
+use rusqlite::{params, OptionalExtension};
 
 pub const MAINTAIN_SYNC: &str = "maintain_sync";
+const MAINTAIN_SYNC_MARKER: &str = "root_compare";
+const MAINTAIN_SYNC_MIN_INTERVAL_MS: u64 = 100;
 
 pub const STORAGE_VERSION: u32 = crate::protocol::versioning::CURRENT_PROTOCOL_VERSION;
 pub const STORAGE_REQUIREMENT: crate::core::effects::StorageRequirement =
@@ -19,30 +23,93 @@ pub const STORAGE_REQUIREMENT: crate::core::effects::StorageRequirement =
 
 pub fn build_maintain_sync_intent(
     store: &Db,
-    _context: RecurringIntentContext,
+    context: RecurringIntentContext,
 ) -> Result<Option<Intent>, String> {
+    if context.local_addr.is_none() {
+        return Ok(None);
+    }
+    if !maintenance_due(store, context.now_ms)? {
+        return Ok(None);
+    }
     if connection::connection::queries::connection_rows(store)?.is_empty() {
         return Ok(None);
     }
-    Ok(Some(maintain_sync_intent()))
+    Ok(Some(maintain_sync_intent(context.now_ms)))
 }
 
-fn maintain_sync_intent() -> Intent {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MaintainSync {
+    run_at_ms: u64,
+}
+
+fn maintain_sync_intent(run_at_ms: u64) -> Intent {
+    let mut payload = Vec::with_capacity(9);
+    payload.push(1);
+    payload.extend_from_slice(&run_at_ms.to_be_bytes());
     Intent::new(
         IntentKind::new(MAINTAIN_SYNC).expect("valid maintain_sync kind"),
-        b"v1".to_vec(),
-        vec![1],
+        maintain_sync_key(run_at_ms),
+        payload,
     )
 }
 
-fn decode_maintain_sync(intent: &Intent) -> Result<(), String> {
+fn decode_maintain_sync(intent: &Intent) -> Result<MaintainSync, String> {
     if intent.kind.as_str() != MAINTAIN_SYNC {
         return Err("expected maintain_sync intent".to_string());
     }
-    if intent.key != b"v1" || intent.payload != [1] {
+    if intent.payload.len() != 9 || intent.payload[0] != 1 {
         return Err("maintain_sync payload is malformed".to_string());
     }
-    Ok(())
+    let run_at_ms = u64::from_be_bytes(intent.payload[1..9].try_into().unwrap());
+    if intent.key != maintain_sync_key(run_at_ms) {
+        return Err("maintain_sync key does not match payload".to_string());
+    }
+    Ok(MaintainSync { run_at_ms })
+}
+
+fn maintain_sync_key(run_at_ms: u64) -> Vec<u8> {
+    let bucket = run_at_ms / MAINTAIN_SYNC_MIN_INTERVAL_MS;
+    let mut key = Vec::with_capacity(10);
+    key.extend_from_slice(b"v2");
+    key.extend_from_slice(&bucket.to_be_bytes());
+    key
+}
+
+fn maintenance_due(store: &Db, now_ms: u64) -> Result<bool, String> {
+    let last = store
+        .conn()
+        .query_row(
+            "SELECT last_run_ms
+             FROM sync_maintenance_rows
+             WHERE kind = ?1
+             LIMIT 1",
+            params![MAINTAIN_SYNC_MARKER],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|err| format!("read sync maintenance marker: {err}"))?
+        .map(|value| {
+            u64::try_from(value)
+                .map_err(|_| "sync maintenance marker timestamp is negative".to_string())
+        })
+        .transpose()?;
+    Ok(last.is_none_or(|last| now_ms.saturating_sub(last) >= MAINTAIN_SYNC_MIN_INTERVAL_MS))
+}
+
+fn record_maintenance_run(store: &Db, run_at_ms: u64) -> Result<(), String> {
+    let run_at_ms = i64::try_from(run_at_ms)
+        .map_err(|_| "sync maintenance timestamp exceeds SQLite integer range".to_string())?;
+    store
+        .write_transaction(|tx| {
+            tx.conn().execute(
+                "INSERT INTO sync_maintenance_rows (kind, last_run_ms)
+                 VALUES (?1, ?2)
+                 ON CONFLICT(kind) DO UPDATE SET last_run_ms = excluded.last_run_ms",
+                params![MAINTAIN_SYNC_MARKER, run_at_ms],
+            )?;
+            Ok(())
+        })
+        .map_err(|err| format!("record sync maintenance marker: {err}"))
 }
 
 #[derive(Debug, Clone, Default)]
@@ -64,11 +131,12 @@ impl IntentHandler for MaintainSyncHandler {
     }
 
     fn handle(&self, raw: &Intent, context: &HandlerContext) -> HandlerResult {
-        decode_maintain_sync(raw)?;
+        let input = decode_maintain_sync(raw)?;
         if context.is_replay() {
             return Ok(RuntimeEffects::new());
         }
         let store = context.db()?;
+        record_maintenance_run(store, input.run_at_ms)?;
         let mut output = RuntimeEffects::new();
         for row in connection::connection::queries::connection_rows(store)? {
             output = sync::seed_connection::append_connection_shareable_facts(
@@ -100,10 +168,90 @@ mod tests {
     }
 
     #[test]
-    fn maintain_sync_intent_round_trips() {
-        let intent = maintain_sync_intent();
+    fn recurring_builder_skips_without_daemon_host_context() {
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+            .expect("store");
+        seed_connection_row(&store, [8; 32]);
 
-        decode_maintain_sync(&intent).expect("decode");
+        assert_eq!(
+            build_maintain_sync_intent(&store, RecurringIntentContext::default()).expect("build"),
+            None
+        );
+    }
+
+    #[test]
+    fn recurring_builder_queues_with_connection_in_daemon_host_context() {
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+            .expect("store");
+        seed_connection_row(&store, [8; 32]);
+
+        assert!(build_maintain_sync_intent(&store, daemon_context())
+            .expect("build")
+            .is_some());
+    }
+
+    #[test]
+    fn recurring_builder_waits_for_retry_window() {
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+            .expect("store");
+        seed_connection_row(&store, [8; 32]);
+        record_maintenance_run(&store, 1_000).expect("record marker");
+
+        assert_eq!(
+            build_maintain_sync_intent(
+                &store,
+                RecurringIntentContext {
+                    now_ms: 1_050,
+                    local_addr: Some("127.0.0.1:41000".parse().unwrap()),
+                }
+            )
+            .expect("build"),
+            None
+        );
+        assert!(build_maintain_sync_intent(
+            &store,
+            RecurringIntentContext {
+                now_ms: 1_100,
+                local_addr: Some("127.0.0.1:41000".parse().unwrap()),
+            }
+        )
+        .expect("build")
+        .is_some());
+    }
+
+    #[test]
+    fn maintain_sync_intent_round_trips() {
+        let intent = maintain_sync_intent(123);
+
+        assert_eq!(
+            decode_maintain_sync(&intent).expect("decode"),
+            MaintainSync { run_at_ms: 123 }
+        );
         assert_eq!(intent.kind.as_str(), MAINTAIN_SYNC);
+    }
+
+    fn seed_connection_row(store: &Db, connection_id: crate::core::facts::FactId) {
+        let row = connection::connection::connection_row(
+            connection::connection::ConnectionRowFields::without_addresses(
+                connection_id,
+                [1; 32],
+                [2; 32],
+                [3; 32],
+                [4; 32],
+                [5; 32],
+                [6; 32],
+            ),
+        )
+        .expect("connection row");
+        store
+            .write_transaction(|tx| tx.insert_values_in_tx(&row).map(|_| ()))
+            .expect("insert connection row");
+    }
+
+    fn daemon_context() -> RecurringIntentContext {
+        RecurringIntentContext {
+            now_ms: 123,
+            local_addr: Some("127.0.0.1:41000".parse().unwrap()),
+        }
     }
 }

@@ -2,7 +2,7 @@
 //!
 //! Setup goes through the real `con` binary: a workspace and content messages
 //! are authored, then protocol `update` rebuilds derived state from retained
-//! facts through the ordinary daemon loop.
+//! facts through ordinary runtime turns.
 
 mod cli_harness;
 
@@ -12,7 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use cli_harness::*;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 fn create_workspace(db: &str, name: &str, username: &str, device_name: &str) -> String {
     let out = assert_success(topo(&[
@@ -214,7 +214,24 @@ fn replace_stored_storage_version(db: &str, version: u32) {
 }
 
 fn stored_storage_version(db: &str) -> u32 {
+    stored_storage_version_option(db).expect("read protocol version marker") as u32
+}
+
+fn stored_storage_version_option(db: &str) -> Option<i64> {
     let conn = Connection::open(db).expect("open fixture db");
+    let has_table: bool = conn
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'table' AND name = 'protocol_version_rows'
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .expect("check protocol version table");
+    if !has_table {
+        return None;
+    }
     conn.query_row(
         "SELECT protocol_version
          FROM protocol_version_rows
@@ -223,7 +240,8 @@ fn stored_storage_version(db: &str) -> u32 {
         [],
         |row| row.get::<_, i64>(0),
     )
-    .expect("read protocol version marker") as u32
+    .optional()
+    .expect("read protocol version marker")
 }
 
 fn insert_poison_opened_message_row(db: &str, workspace_id_hex: &str, text: &str) {
@@ -293,20 +311,28 @@ fn spawn_daemon(db: &str, port: u16) -> RunningDaemon {
 }
 
 #[test]
-fn update_command_queues_local_protocol_update_fact() {
+fn update_command_records_current_protocol_version() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "alice.db");
 
     let update = assert_success(topo(&["--db", &db, "update"]));
 
     assert_eq!(line_value(&update, "protocol_version"), "1", "{update}");
-    assert!(
-        line_value(&update, "pending_projection")
-            .parse::<u64>()
-            .unwrap()
-            > 0,
-        "update should queue its local update fact for projection: {update}"
-    );
+    line_value(&update, "pending_projection")
+        .parse::<u64>()
+        .expect("pending projection count");
+    assert_eq!(stored_storage_version(&db), 1);
+}
+
+#[test]
+fn fresh_cli_turn_initializes_protocol_marker_without_daemon() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = temp_db(&tmp, "fresh.db");
+    assert_eq!(stored_storage_version_option(&db), None);
+
+    assert_success(topo(&["--db", &db, "state-summary"]));
+
+    assert_eq!(stored_storage_version(&db), 1);
 }
 
 #[test]
@@ -326,7 +352,7 @@ fn update_rebuilds_derived_state_and_unblocks_queries() {
 }
 
 #[test]
-fn stale_version_marker_blocks_cli_queries_before_materialized_reads() {
+fn stale_version_marker_repairs_before_cli_queries_read_materialized_rows() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "alice.db");
     let workspace_id = seed_workspace_with_content(&db);
@@ -342,24 +368,31 @@ fn stale_version_marker_blocks_cli_queries_before_materialized_reads() {
 
     let output = topo(&["--db", &db, "messages", &workspace_id]);
     assert!(
-        !output.status.success(),
-        "stale storage should block queries before they read materialized rows:\n{}",
-        stdout(&output)
-    );
-    let err = stderr(&output);
-    assert!(
-        err.contains("protocol update required"),
-        "query should fail with the version guard, not by reading stale rows:\n{err}"
+        output.status.success(),
+        "stale storage should repair before queries read materialized rows\nstdout={}\nstderr={}",
+        stdout(&output),
+        stderr(&output)
     );
     assert!(
-        !stdout(&output).contains(poison) && !err.contains(poison),
-        "query leaked data from stale materialized rows\nstdout={}\nstderr={err}",
+        !stdout(&output).contains(poison) && !stderr(&output).contains(poison),
+        "query leaked data from stale materialized rows\nstdout={}\nstderr={}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert_eq!(
+        stored_storage_version(&db),
+        current_storage_version,
+        "runtime preflight should restore the current version marker"
+    );
+    assert!(
+        stdout(&output).contains("first message") && stdout(&output).contains("second message"),
+        "query should read rebuilt rows, not the poison row:\n{}",
         stdout(&output)
     );
 }
 
 #[test]
-fn recurring_version_check_repairs_stale_marker_and_replays_pending_fact() {
+fn runtime_turn_repairs_stale_marker_and_replays_pending_fact() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "alice.db");
     let workspace_id = seed_workspace_with_content(&db);
@@ -381,27 +414,20 @@ fn recurring_version_check_repairs_stale_marker_and_replays_pending_fact() {
     ]));
     assert_eq!(line_value(&sync_setting, "mode"), "range", "{sync_setting}");
 
-    let pending = assert_success(topo(&["--db", &db, "count"]));
-    let facts_before_repair: u64 = line_value(&pending, "facts")
+    let before = assert_success(topo(&["--db", &db, "count"]));
+    let facts_before_repair: u64 = line_value(&before, "facts")
         .parse()
         .expect("facts before repair");
-    let applied_before_repair: u64 = line_value(&pending, "applied_facts")
+    let applied_before_repair: u64 = line_value(&before, "applied_facts")
         .parse()
         .expect("applied before repair");
-    assert!(
-        applied_before_repair < facts_before_repair,
-        "sync setting fact should still be pending before daemon repair:\n{pending}"
+    assert_eq!(
+        applied_before_repair, facts_before_repair,
+        "command runtime turn should drain the sync setting before reporting count:\n{before}"
     );
 
     replace_stored_storage_version(&db, current_storage_version - 1);
-    let stale_query = topo(&["--db", &db, "sync", "show"]);
-    assert!(
-        !stale_query.status.success(),
-        "stale marker should block query commands before daemon repair"
-    );
-
-    let _daemon = spawn_worker_daemon(&db);
-    wait_for_runtime_idle(&db);
+    let sync_show = assert_success(topo(&["--db", &db, "sync", "show"]));
 
     let repaired = assert_success(topo(&["--db", &db, "count"]));
     let facts_after_repair: u64 = line_value(&repaired, "facts")
@@ -409,7 +435,7 @@ fn recurring_version_check_repairs_stale_marker_and_replays_pending_fact() {
         .expect("facts after repair");
     assert!(
         facts_after_repair > facts_before_repair,
-        "recurring check should have authored a local update fact:\nbefore={pending}\nafter={repaired}"
+        "runtime turn should have authored a local update fact:\nbefore={before}\nafter={repaired}"
     );
     assert_eq!(
         stored_storage_version(&db),
@@ -417,7 +443,6 @@ fn recurring_version_check_repairs_stale_marker_and_replays_pending_fact() {
         "recurring update projection should store the current version marker"
     );
 
-    let sync_show = assert_success(topo(&["--db", &db, "sync", "show"]));
     assert_eq!(line_value(&sync_show, "mode"), "range", "{sync_show}");
     assert_eq!(line_value(&sync_show, "start_ms"), "100", "{sync_show}");
     assert_eq!(line_value(&sync_show, "end_ms"), "200", "{sync_show}");

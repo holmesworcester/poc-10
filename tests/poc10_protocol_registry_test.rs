@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use topo::core::daemon::{self, RuntimeTurnHost};
 use topo::core::effects::StorageRequirement;
 use topo::core::runtime::Runtime;
 use topo::protocol::app::{MATCH_PROTOCOL, MATCH_RUNTIME};
@@ -45,14 +46,32 @@ fn executable_protocol_tables_name_the_target_surfaces() {
 }
 
 #[test]
-fn fresh_runtime_seeds_schema_declared_protocol_marker() {
-    let runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
+fn fresh_runtime_initializes_protocol_marker_through_runtime_turn() {
+    let mut runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
 
     assert_eq!(
         runtime
             .db()
             .current_storage_version()
             .expect("read storage version marker"),
+        None
+    );
+
+    let mut scheduler = daemon::RecurringScheduler::install(MATCH_RUNTIME.handlers, 0);
+    daemon::runtime_turn(
+        MATCH_PROTOCOL.daemon,
+        &mut runtime,
+        RuntimeTurnHost::local(),
+        &mut scheduler,
+        32,
+    )
+    .expect("runtime turn");
+
+    assert_eq!(
+        runtime
+            .db()
+            .current_storage_version()
+            .expect("read storage version marker after turn"),
         Some(CURRENT_PROTOCOL_VERSION)
     );
 }

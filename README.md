@@ -159,17 +159,20 @@ The current architecture is described by these boundaries:
 their commands, fact families, intent handlers, schemas, and daemon hooks; the
 app assembles those declarations into a `ProtocolDescription` and passes it to
 core. Core uses that description to build the `con` CLI, open the declared
-runtime, run the declared daemon tick, and dispatch registered protocol commands
+runtime, run bounded runtime turns, and dispatch registered protocol commands
 without hard-coding their names or behavior.
 
-Runtime turns are serialized per database to avoid races between
-command-created facts and ongoing projection or intent activity. A daemon tick
-and a normal protocol CLI command both acquire `<db>.runtime.lock` before
-entering the runtime, so a command cannot admit facts while another turn is
-draining pending facts, matching context, committing projector output, or
-running handlers. The daemon releases the turn after each bounded tick; CLI
-commands wait for the next turn, and `reset` removes the runtime lock file
-along with the database and daemon lock files.
+Runtime turns are serialized per database to avoid races between command-created
+facts and ongoing projection or intent activity. Daemon ticks and normal
+protocol CLI commands both acquire `<db>.runtime.lock` before entering the
+runtime. Each host runs the same bounded turn first; daemon turns supply network
+adapters and dispatch durable handlers, while command/query turns run without
+durable handler dispatch, listener, or outgoing pump adapters. This means a
+command cannot admit facts while another turn is draining pending facts, matching
+context, committing projector output, or running handlers. The daemon releases
+the turn after each bounded tick; CLI commands wait for the next turn, and
+`reset` removes the runtime lock file along with the database and daemon lock
+files.
 
 Runtime work moves through these core-owned queues:
 
@@ -193,12 +196,16 @@ recognized facts in `incoming_facts`. Runtime loads those facts into the owning
 projector, and projector output either deletes the incoming row or retains it as
 a normal fact when it must park on context or become protocol evidence.
 
-Commands do not dispatch handlers or privately project their own writes. A
-command reads the current projected state, authors all facts from that snapshot,
-commits those facts atomically, and returns its receipt. Later visibility is
-normal runtime work: the daemon admits incoming facts and due time wakes, drains
-bounded projection and intent batches, and pumps network output. Tests and CLI
-flows that observe projected state should run daemon work and assert eventually.
+Commands do not privately project their own writes after authoring them. Before
+dispatch, a command/query turn gives recurring builders, projection, time wakes,
+and local intent handlers a bounded chance to advance. It leaves durable handler
+dispatch to daemon-host turns because durable handlers may emit network rows.
+Then the command reads the current projected state, authors all facts from that
+snapshot, commits those facts atomically, and returns its receipt. Later
+visibility is normal runtime work: any later turn can drain bounded projection
+and local intent batches, while daemon turns additionally handle durable intents,
+admit incoming network facts, and pump network output. Tests and CLI flows that
+observe projected state should keep running turns and assert eventually.
 
 User query-facing commands read the projected state already visible to the user.
 If an authoring command needs additional facts before its rows can eventually

@@ -50,14 +50,17 @@ one durable or local intent, loads only the fact inputs declared by that handler
 calls the registered handler, and commits successful handler output atomically
 with queue consumption. Errors leave the row queued without committing output.
 
-The daemon runs the same mechanics without a user command on the stack. Each
-tick fires due recurring intents, accepts network frames into `network_incoming`,
-drains those raw rows through the protocol classifier into `incoming_facts`,
-admits due time-wake ranges as pending projection, drains durable projection,
-drains incoming projection, drains durable intents, drains local intents, and leaves
-any handler-emitted facts queued for later projection work. The runtime lock
-ensures this daemon work cannot race with a CLI command that is admitting new
-facts into the same database.
+Every host runs the same bounded runtime turn before it does host-specific work.
+Each turn gives recurring builders an opportunity, drains local repair work,
+checks storage readiness, admits due time-wake ranges as pending projection,
+drains durable projection, drains incoming projection, drains local intents, and
+leaves any handler-emitted facts queued for later projection work. The daemon
+supplies network host adapters, so daemon turns also dispatch durable handlers,
+accept frames into `network_incoming`, drain those raw rows through the protocol
+classifier into `incoming_facts`, and pump queued outgoing TCP frames.
+Command/query turns run without durable handler dispatch or network adapters.
+The runtime lock ensures a daemon turn cannot race with a CLI command that is
+admitting new facts into the same database.
 
 Core's job is therefore coordination, persistence, and mechanical validation.
 It owns the serialized turn shape, SQLite transaction boundaries, queue
@@ -224,10 +227,10 @@ use core syntax and contracts, but core must not import their semantic rules.
   key lifetimes, authority checks, and semantic validation.
 - `daemon.rs`: long-running process lifecycle and tick ordering. It owns the
   database lock, listener setup, readiness/stop/reset handling, inbound frame
-  intake, due time-wake admission, and the bounded durable projection, incoming
-  projection, durable intent, and local intent queue order. The protocol
-  declaration decides how inbound bytes become runtime effects and which
-  time-wake timelines are active.
+  intake, due time-wake admission, host-aware durable handler dispatch, and the
+  bounded durable projection, incoming projection, and local intent queue order.
+  The protocol declaration decides how inbound bytes become runtime effects and
+  which time-wake timelines are active.
 - `effects.rs`: shared effect language for projectors and handlers.
   `RuntimeEffects` names facts to admit, incoming facts, exact purges, row
   mutations, durable intents, and local intents. The shared commit helper writes
@@ -432,8 +435,8 @@ already present is an invariant error, not a successful commit.
 
 ### Rebuild Mode And Time Wakes
 
-A projector can schedule its own fact on a protocol timeline. When the daemon
-advances that timeline, core marks matching fact owners in
+A projector can schedule its own fact on a protocol timeline. When a runtime
+turn advances that timeline, core marks matching fact owners in
 `pending_projection`, stores the due `TimeRange`, and projection context
 exposes that range without allowing projectors to read the clock.
 
@@ -446,8 +449,9 @@ queue and are projected by the ordinary drain before later work observes them.
 Projectors use replay mode to avoid live-only projection intents. During
 replay-mode dispatch, handlers receive
 `HandlerContext::is_replay()` and return empty effects at live-only edges.
-Recurring work is represented as recurring intents; the live daemon's in-memory
-cadence is only the scheduling mechanism that enqueues due work.
+Recurring work is represented as recurring intents. Runtime turns offer each
+recurring builder a chance to enqueue bounded local work; builders self-gate
+from database state, clock, and optional host context.
 
 ## Example Runtime Graph
 

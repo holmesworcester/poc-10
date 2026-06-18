@@ -17,8 +17,9 @@ runtime contract.
 3. New projectors and queries must not write old materialized table shapes.
 4. Commands, projectors, handlers, and queries declare the storage version they
    expect before they touch materialized state.
-5. If code advances past the stored database marker, normal queries fail and
-   normal effect commits roll back instead of consuming queued work.
+5. If code advances past the stored database marker, normal paths run a bounded
+   turn and remain guarded until repair completes; effect commits roll back
+   instead of consuming queued work under stale storage.
 6. Version repair is the recurring update loop described below.
 
 ## Layout
@@ -50,20 +51,20 @@ by this checkout?
 `src/protocol/versioning.rs`. It is the target version for the materialized
 storage shape this binary expects. It is not read from the database.
 
-The schema-declared protocol marker is the stored version core reads from the
-protocol schema's `StorageVersionSource`:
-`protocol_version_rows.protocol_version`, ordered by `applied_at_ms` and
-`update_fact_id` so the latest marker row wins. That row is projected state.
-After an update, it is the latest projected `local_update` fact. On a fresh
-database, schema setup creates the bootstrap marker row before any daemon work
-runs. If the marker row is missing, core reads the marker as missing, which is
-treated as stale.
+The stored version marker is `protocol_version_rows.protocol_version`, ordered
+by `applied_at_ms` and `update_fact_id` so the latest marker row wins. The
+protocol schema's `StorageVersionSource` tells core where to read that marker;
+the marker itself is protocol-owned projected state. A fresh database has no
+marker row until the update loop creates one. Missing and stale markers both
+mean this database needs a local update fact.
 
 The recurring update path is concrete:
 
-1. The daemon installs the recurring `check_version` intent from the handler
-   registry and fires it on its in-memory cadence.
-2. The recurring builder reads the schema-declared marker and compares it with
+1. Each bounded runtime turn gives recurring builders an opportunity. The daemon
+   loops the same turn with network adapters; commands and queries run it
+   without durable handler dispatch, listener, or outgoing adapters before
+   dispatch.
+2. The `check_version` builder reads the stored marker and compares it with
    `CURRENT_PROTOCOL_VERSION`. If they match, it queues no intent. If the
    marker is stale or missing, it queues `check_version`.
 3. The `check_version` handler repeats the same check before committing effects.
@@ -76,9 +77,10 @@ The recurring update path is concrete:
    derived/runtime state, preserves retained facts and other replay-protected
    tables, and queues all retained facts in `pending_projection` with replay
    mode set.
-5. After that commit, the daemon drains replay projection and replay intent work
-   like normal queued work. The storage-requirement guards above keep ordinary
-   work from consuming stale materialized state while repair is pending.
+5. After that commit, the same runtime turn drains replay projection and replay
+   intent work like normal queued work. The storage-requirement guards above
+   keep ordinary work from consuming stale materialized state while repair is
+   pending.
 
 The update fact is retained as history, but its projector does rebuild work only
 during live projection. Replay projection of an old update fact is a no-op, so
