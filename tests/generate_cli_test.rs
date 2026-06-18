@@ -6,6 +6,7 @@ use std::thread;
 use std::time::Duration;
 
 use cli_harness::*;
+use rusqlite::{params, Connection};
 
 #[test]
 fn generate_cli_uses_real_store_and_reports_applied_facts() {
@@ -129,6 +130,29 @@ fn explicit_at_sets_generated_fact_timestamps() {
     assert_eq!(line_value(&generated, "first_timestamp"), "4000000005100");
     assert_eq!(line_value(&generated, "last_timestamp"), "4000000005100");
     wait_for_content_count(&db, &workspace_id, "4");
+}
+
+#[test]
+fn generate_cli_requires_current_storage_before_authoring() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = temp_db(&tmp, "stale-generate.db");
+    let workspace_id = create_workspace(&db);
+    let _daemon = spawn_daemon(&db, free_port());
+    create_local_content_key(&db, &workspace_id);
+
+    let current_protocol_version = stored_protocol_version(&db);
+    replace_stored_protocol_version(&db, current_protocol_version - 1);
+
+    let output = topo(&["--db", &db, "generate", &workspace_id, "2", "64"]);
+    assert!(
+        !output.status.success(),
+        "generate should fail before reading stale command state"
+    );
+    let err = stderr(&output);
+    assert!(
+        err.contains("protocol update required"),
+        "generate should fail with the storage guard: {err}"
+    );
 }
 
 #[test]
@@ -294,6 +318,31 @@ fn wait_for_identity_contains(db: &str, expected: &str) {
         thread::sleep(Duration::from_millis(100));
     }
     panic!("identity never contained {expected}: {last}");
+}
+
+fn replace_stored_protocol_version(db: &str, version: u32) {
+    let conn = Connection::open(db).expect("open fixture db");
+    conn.execute("DELETE FROM protocol_version_rows", [])
+        .expect("clear protocol version marker");
+    conn.execute(
+        "INSERT INTO protocol_version_rows (update_fact_id, protocol_version, applied_at_ms)
+         VALUES (?1, ?2, ?3)",
+        params![vec![0x55_u8; 32], i64::from(version), 1_i64],
+    )
+    .expect("write stale protocol version marker");
+}
+
+fn stored_protocol_version(db: &str) -> u32 {
+    let conn = Connection::open(db).expect("open fixture db");
+    conn.query_row(
+        "SELECT protocol_version
+         FROM protocol_version_rows
+         ORDER BY applied_at_ms DESC, update_fact_id DESC
+         LIMIT 1",
+        [],
+        |row| row.get::<_, i64>(0).map(|value| value as u32),
+    )
+    .expect("stored protocol version")
 }
 
 struct RunningDaemon {

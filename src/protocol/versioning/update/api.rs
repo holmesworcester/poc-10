@@ -6,9 +6,9 @@
 use crate::core::command::{AuthoredFacts, CommandClock};
 use crate::core::facts::FactId;
 
+use super::super::CURRENT_PROTOCOL_VERSION;
 use super::author::update_fact;
 use super::fact::UpdateFact;
-use super::CURRENT_PROTOCOL_VERSION;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UpdateReceipt {
@@ -36,7 +36,7 @@ mod tests {
     use super::*;
     use crate::core::command::FnClock;
     use crate::core::facts::FactScope;
-    use crate::protocol::versioning::decode_update_fact;
+    use crate::protocol::versioning::update::encode::decode_update_fact;
 
     #[test]
     fn author_update_creates_local_fact() {

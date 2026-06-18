@@ -167,7 +167,8 @@ fn test_text(text: &str) -> &str {
 /// handler files, replacing the old `src/protocol/facts` and
 /// `src/protocol/intents` layer roots.
 const SCOPES: [&str; 4] = ["auth", "connection", "content", "sync"];
-const ROOT_FACT_FAMILIES: [&str; 1] = ["versioning"];
+const EXTRA_SCOPE_ROOTS: [&str; 1] = ["versioning"];
+const EXTRA_FACT_FAMILIES: [(&str, &str); 1] = [("versioning", "update")];
 
 fn scope_dirs(root: &Path) -> Vec<PathBuf> {
     SCOPES
@@ -183,10 +184,16 @@ fn scope_manifests(root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-fn root_fact_family_dirs(root: &Path) -> Vec<PathBuf> {
-    ROOT_FACT_FAMILIES
+fn extra_fact_family_dirs(root: &Path) -> Vec<(String, String, PathBuf)> {
+    EXTRA_FACT_FAMILIES
         .into_iter()
-        .map(|family| root.join("src/protocol").join(family))
+        .map(|(scope, family)| {
+            (
+                scope.to_string(),
+                family.to_string(),
+                root.join("src/protocol").join(scope).join(family),
+            )
+        })
         .collect()
 }
 
@@ -217,6 +224,7 @@ fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
                 "share_fact_with_sync",
             ],
         ),
+        ("versioning", &["check_version"]),
     ];
     HANDLERS
         .iter()
@@ -239,11 +247,17 @@ fn intent_handler_file_set(root: &Path) -> BTreeSet<PathBuf> {
 /// fact CLI/command adapter.
 fn fact_family_files(root: &Path) -> Vec<PathBuf> {
     let handlers = intent_handler_file_set(root);
-    scope_dirs(root)
+    let mut files = scope_dirs(root)
         .iter()
         .flat_map(|dir| rust_files(dir))
         .filter(|path| !handlers.contains(path))
-        .collect()
+        .collect::<Vec<_>>();
+    files.extend(
+        extra_fact_family_dirs(root)
+            .into_iter()
+            .flat_map(|(_, _, dir)| rust_files(&dir)),
+    );
+    files
 }
 
 fn fact_family_files_named(root: &Path, name: &str) -> Vec<PathBuf> {
@@ -1347,9 +1361,9 @@ fn target_manifests_match_their_filesystem_modules() {
         let module_root = root.join("src/protocol").join(scope);
         check_manifest_tree(root, &manifest, &module_root, &mut offenders);
     }
-    for family in ROOT_FACT_FAMILIES {
-        let manifest = root.join("src/protocol").join(format!("{family}.rs"));
-        let module_root = root.join("src/protocol").join(family);
+    for scope in EXTRA_SCOPE_ROOTS {
+        let manifest = root.join("src/protocol").join(format!("{scope}.rs"));
+        let module_root = root.join("src/protocol").join(scope);
         check_manifest_tree(root, &manifest, &module_root, &mut offenders);
     }
 
@@ -1427,7 +1441,7 @@ fn fact_family_directories_contain_only_standard_role_files() {
             }
         }
     }
-    for family_dir in root_fact_family_dirs(root) {
+    for (_, _, family_dir) in extra_fact_family_dirs(root) {
         check_standard_fact_family_dir(root, &family_dir, &mut offenders);
     }
 
@@ -1436,6 +1450,44 @@ fn fact_family_directories_contain_only_standard_role_files() {
         "a fact-family directory may contain only the standard role files \
          {STANDARD_FAMILY_FILES:?} and no subdirectories; fold helper logic into \
          a role file:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn versioning_scope_root_keeps_fact_family_roles_under_update() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let scope = root.join("src/protocol/versioning");
+    let mut offenders = Vec::new();
+
+    for forbidden in ["api.rs", "author.rs", "encode.rs", "fact.rs", "project.rs"] {
+        let path = scope.join(forbidden);
+        if path.exists() {
+            offenders.push(format!(
+                "{} is a fact-family role file; put it under versioning/update/",
+                path.strip_prefix(root).unwrap().display()
+            ));
+        }
+    }
+    for required in [
+        "README.md",
+        "check_version.rs",
+        "cli.rs",
+        "queries.rs",
+        "update",
+    ] {
+        let path = scope.join(required);
+        if !path.exists() {
+            offenders.push(format!(
+                "{} is missing from the versioning scope",
+                path.strip_prefix(root).unwrap().display()
+            ));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "versioning is a scope; only versioning/update is the fact family:\n{}",
         offenders.join("\n")
     );
 }
@@ -1580,9 +1632,9 @@ fn target_intents_are_self_contained_handler_files_without_driver_or_intent_subm
 /// The canonical intent verb vocabulary. Intent handler files are named
 /// `<verb>_<object>`; this set is deliberately small, and growing it is a
 /// deliberate act — add a verb here only when no existing verb fits.
-const INTENT_VERBS: [&str; 11] = [
+const INTENT_VERBS: [&str; 12] = [
     "add", "create", "send", "receive", "purge", "share", "seed", "unwrap", "update", "maintain",
-    "queue",
+    "queue", "check",
 ];
 
 /// A name is verb-first when it begins with `<verb>_` for a canonical intent
@@ -1959,8 +2011,7 @@ fn fact_like_family_directories_are_registered_normal_fact_modules() {
             }
         }
     }
-    for family_dir in root_fact_family_dirs(root) {
-        let family = family_dir.file_name().unwrap().to_str().unwrap();
+    for (scope, family, family_dir) in extra_fact_family_dirs(root) {
         let has_fact = family_dir.join("fact.rs").is_file();
         let has_layout =
             family_dir.join("layout.rs").is_file() || family_dir.join("encode.rs").is_file();
@@ -1977,8 +2028,8 @@ fn fact_like_family_directories_are_registered_normal_fact_modules() {
             continue;
         }
 
-        let layout_route = format!("{family}::");
-        let project_route = format!("{family}::project::");
+        let layout_route = format!("{scope}::{family}::");
+        let project_route = format!("{scope}::{family}::project::");
         if !registry.contains(&layout_route) || !registry.contains(&project_route) {
             offenders.push(format!(
                 "{relative} is fact-like but is not registered in FACT_ROUTES"
@@ -2044,8 +2095,7 @@ fn fact_like_family_directories_are_single_flat_fact_shapes() {
             }
         }
     }
-    for family_dir in root_fact_family_dirs(root) {
-        let family = family_dir.file_name().unwrap().to_str().unwrap();
+    for (scope, family, family_dir) in extra_fact_family_dirs(root) {
         let fact_path = family_dir.join("fact.rs");
         let layout_path = family_dir.join("layout.rs");
         let split_layout = family_dir.join("encode.rs").is_file();
@@ -2068,7 +2118,7 @@ fn fact_like_family_directories_are_single_flat_fact_shapes() {
             }
         }
 
-        let route_marker = format!(", {family}::project::");
+        let route_marker = format!(", {scope}::{family}::project::");
         let route_count = registry
             .lines()
             .filter(|line| {

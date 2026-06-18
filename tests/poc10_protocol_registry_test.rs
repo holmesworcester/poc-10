@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use topo::core::effects::StorageRequirement;
 use topo::protocol::app::{MATCH_PROTOCOL, MATCH_RUNTIME};
-use topo::protocol::check_version::CHECK_VERSION;
+use topo::protocol::versioning::check_version::CHECK_VERSION;
 use topo::protocol::versioning::CURRENT_PROTOCOL_VERSION;
 
 fn rust_files(root: &Path) -> Vec<PathBuf> {
@@ -68,7 +68,7 @@ fn assert_projector_route(tag: u8, expected_project: &str) {
 #[test]
 fn projector_and_handler_routes_declare_storage_requirements() {
     for route in MATCH_RUNTIME.fact_routes {
-        let expected = if route.tag == topo::protocol::versioning::TYPE_VERSIONING_UPDATE {
+        let expected = if route.tag == topo::protocol::versioning::update::TYPE_VERSIONING_UPDATE {
             StorageRequirement::MaintenanceBypass
         } else {
             StorageRequirement::Current(CURRENT_PROTOCOL_VERSION)
@@ -131,7 +131,7 @@ fn projector_and_handler_owner_modules_declare_storage_requirements() {
         "src/protocol/sync/send_needed_fact_id.rs",
         "src/protocol/sync/send_requested_fact.rs",
         "src/protocol/sync/share_fact_with_sync.rs",
-        "src/protocol/check_version.rs",
+        "src/protocol/versioning/check_version.rs",
     ] {
         let text = std::fs::read_to_string(root.join(handler)).expect("read handler module");
         assert!(

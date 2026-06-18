@@ -57,7 +57,7 @@ impl MatchCliContext {
         &mut self,
         run: impl FnOnce(&Db, &dyn CommandClock) -> Result<T, String>,
     ) -> Result<T, String> {
-        self.ensure_storage_ready()?;
+        self.require_current_storage_for_user_command()?;
         let clock = FixedClock(self.command_timestamp()?);
         run(self.runtime.db(), &clock)
     }
@@ -71,7 +71,7 @@ impl MatchCliContext {
     }
 
     fn query_db<T>(&mut self, run: impl FnOnce(&Db) -> Result<T, String>) -> Result<T, String> {
-        self.ensure_storage_ready()?;
+        self.require_current_storage_for_user_command()?;
         run(self.runtime.db())
     }
 
@@ -79,17 +79,26 @@ impl MatchCliContext {
         &mut self,
         run: impl FnOnce(&Runtime) -> Result<T, String>,
     ) -> Result<T, String> {
-        self.ensure_storage_ready()?;
+        self.require_current_storage_for_user_command()?;
         run(&self.runtime)
     }
 
     fn submit_authored_facts<T>(&mut self, output: AuthoredFacts<T>) -> Result<T, String> {
-        self.ensure_storage_ready()?;
+        self.require_current_storage_for_user_command()?;
         self.runtime.submit_authored_facts(output)
     }
 
-    fn ensure_storage_ready(&self) -> Result<(), String> {
-        versioning::ensure_storage_ready(self.runtime.db())
+    fn require_current_storage_for_user_command(&self) -> Result<(), String> {
+        if versioning::queries::storage_ready(self.runtime.db())? {
+            return Ok(());
+        }
+        let stored = versioning::queries::current_version(self.runtime.db())?
+            .map(|row| row.protocol_version.to_string())
+            .unwrap_or_else(|| "missing".to_string());
+        Err(format!(
+            "protocol update required: stored_version={stored} current_version={}; start the daemon or run `update` and let projection drain",
+            versioning::CURRENT_PROTOCOL_VERSION
+        ))
     }
 }
 
@@ -538,6 +547,9 @@ pub(crate) fn generate(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<C
     );
     crate::core::perf_profile::add_duration("parse", parse_started.elapsed());
 
+    crate::core::perf_profile::measure_result("storage_guard", || {
+        ctx.require_current_storage_for_user_command()
+    })?;
     let timestamp =
         crate::core::perf_profile::measure_result("timestamp", || ctx.command_timestamp())?;
     let clock = crate::core::perf_profile::measure_result("context_setup", || {
@@ -598,9 +610,9 @@ pub(crate) fn content_count(
 pub const INTENT_REGISTRY_USAGE: &str = "intent-registry";
 
 pub(crate) fn update(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    args.require_len(0, versioning::cli::UPDATE_USAGE)?;
+    args.require_len(0, versioning::update::cli::UPDATE_USAGE)?;
     let clock = FixedClock(ctx.command_timestamp()?);
-    let output = versioning::api::author_update(&clock)?;
+    let output = versioning::update::api::author_update(&clock)?;
     let (receipt, facts) = output.into_parts();
     let mut effects = crate::core::effects::RuntimeEffects::new();
     for fact in facts {
@@ -608,7 +620,7 @@ pub(crate) fn update(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<Cli
     }
     ctx.runtime_mut()
         .submit_runtime_effects(effects, "submit protocol update fact")?;
-    Ok(versioning::cli::update_output(
+    Ok(versioning::update::cli::update_output(
         &receipt,
         ctx.runtime().pending_projection_count(),
     ))

@@ -1,9 +1,14 @@
-//! Protocol versioning fact family.
+//! Protocol versioning scope.
 //!
-//! The versioning fact family owns the local update fact, the projected release
-//! marker row, command/query helpers for that marker, and state-summary query
-//! diagnostics. Recurring release checks are protocol intents outside this fact
-//! family; they author update facts through this family's public API.
+//! Versioning is a protocol scope, not a fact family. It owns the release
+//! version constant, the local storage guards that compare projected release
+//! marker state with that constant, diagnostic commands such as
+//! `state-summary`, and lifecycle intents such as `check_version`.
+//!
+//! The fact family in this scope is `update`. Update facts are local facts that
+//! record a protocol release marker and request rebuild of derived state. Keep
+//! fact-family role files (`fact.rs`, `encode.rs`, `author.rs`, `project.rs`,
+//! `api.rs`, `cli.rs`) under `versioning/update/`, not in this scope root.
 //!
 //! Keep two version concepts separate:
 //!
@@ -40,37 +45,9 @@
 //! authenticate, validate, and project that type. After that release discipline,
 //! the local storage marker plus per-route storage guards cover the rest.
 
-pub mod api;
-pub mod author;
+pub mod check_version;
 pub mod cli;
-pub mod encode;
-pub mod fact;
-pub mod project;
 pub mod queries;
-
-use crate::core::db::{TableName, TypedTableSchema};
-
-pub use api::{author_update, UpdateReceipt};
-pub use author::update_fact;
-pub use cli::update_output;
-pub use encode::{
-    decode_update_fact, encode_update_fact, TYPE_VERSIONING_UPDATE, UPDATE_FACT_BYTES,
-};
-pub use fact::UpdateFact;
-pub use project::{authenticate, UpdateProjector, PROJECTOR_INFO, STORAGE_REQUIREMENT};
-pub use queries::{
-    current_version, ensure_storage_ready, require_storage_requirement, require_storage_version,
-    storage_ready, VersionRow,
-};
+pub mod update;
 
 pub const CURRENT_PROTOCOL_VERSION: u32 = 1;
-
-pub const PROTOCOL_VERSION_ROWS: TableName = TableName::new("protocol_version_rows");
-pub const PROTOCOL_VERSION_COLUMNS: &[&str] =
-    &["update_fact_id", "protocol_version", "applied_at_ms"];
-pub const PROTOCOL_VERSION_KEY_COLUMNS: &[&str] = &["update_fact_id"];
-pub const PROTOCOL_VERSION_TABLE: TypedTableSchema = TypedTableSchema {
-    table: PROTOCOL_VERSION_ROWS,
-    columns: PROTOCOL_VERSION_COLUMNS,
-    key_columns: PROTOCOL_VERSION_KEY_COLUMNS,
-};

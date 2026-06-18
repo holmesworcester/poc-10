@@ -20,18 +20,14 @@
 //! own their payload layout, idempotence key, exact fact inputs, and handler.
 //!
 //! Scopes are: auth authority and key material, content and retention,
-//! connection protocol, and sync convergence. The root-level versioning module
-//! is a normal fact family for protocol update facts and release-marker
-//! queries. Root-level recurring intents, such as `check_version`, own protocol
-//! lifecycle work that is not a fact family. Shared helpers stay inside the
-//! scope or family that owns their protocol concern.
+//! connection protocol, sync convergence, and versioning. Shared helpers stay
+//! inside the scope or family that owns their protocol concern.
 
 pub mod app;
 pub(crate) mod cli;
 pub mod registry;
 
 pub mod auth;
-pub mod check_version;
 pub mod connection;
 pub mod content;
 pub mod sync;

@@ -37,18 +37,6 @@ pub fn storage_ready(store: &Db) -> Result<bool, String> {
     }
 }
 
-pub fn ensure_storage_ready(store: &Db) -> Result<(), String> {
-    if storage_ready(store)? {
-        return Ok(());
-    }
-    let stored = current_version(store)?
-        .map(|row| row.protocol_version.to_string())
-        .unwrap_or_else(|| "missing".to_string());
-    Err(format!(
-        "protocol update required: stored_version={stored} current_version={CURRENT_PROTOCOL_VERSION}; start the daemon or run `update` and let projection drain"
-    ))
-}
-
 pub fn require_storage_requirement(
     store: &Db,
     requirement: StorageRequirement,
@@ -256,7 +244,7 @@ mod tests {
     use super::*;
     use crate::core::runtime::Runtime;
     use crate::protocol::app::MATCH_RUNTIME;
-    use crate::protocol::versioning::{update_fact, UpdateFact};
+    use crate::protocol::versioning::update::{author::update_fact, fact::UpdateFact};
     use rusqlite::params;
 
     fn replace_stored_version_for_test(store: &Db, protocol_version: u32) {

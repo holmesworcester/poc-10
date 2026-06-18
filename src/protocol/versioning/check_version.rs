@@ -8,10 +8,11 @@
 use crate::core::effects::{RuntimeEffects, StorageRequirement};
 use crate::core::intents::{HandlerContext, HandlerResult, Intent, IntentHandler, IntentKind};
 use crate::core::runtime::RecurringIntentContext;
-use crate::core::wire;
 
 use crate::protocol::versioning::{
-    current_version, update_fact, UpdateFact, CURRENT_PROTOCOL_VERSION,
+    queries::current_version,
+    update::{author::update_fact, fact::UpdateFact},
+    CURRENT_PROTOCOL_VERSION,
 };
 
 pub const CHECK_VERSION: &str = "check_version";
@@ -45,9 +46,19 @@ fn decode_check_version(intent: &Intent) -> Result<UpdateFact, String> {
     if intent.kind.as_str() != CHECK_VERSION {
         return Err("expected check_version intent".to_string());
     }
-    wire::expect_len(&intent.payload, 12).map_err(wire_err)?;
-    let protocol_version = wire::take_u32be(&intent.payload[0..4]).map_err(wire_err)?;
-    let applied_at_ms = wire::take_u64be(&intent.payload[4..12]).map_err(wire_err)?;
+    if intent.payload.len() != 12 {
+        return Err("check_version intent payload must be 12 bytes".to_string());
+    }
+    let protocol_version = u32::from_be_bytes(
+        intent.payload[0..4]
+            .try_into()
+            .expect("slice length checked"),
+    );
+    let applied_at_ms = u64::from_be_bytes(
+        intent.payload[4..12]
+            .try_into()
+            .expect("slice length checked"),
+    );
     Ok(UpdateFact {
         protocol_version,
         applied_at_ms,
@@ -86,17 +97,13 @@ impl IntentHandler for CheckVersionHandler {
     }
 }
 
-fn wire_err(err: wire::WireError) -> String {
-    format!("{err:?}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::intents::IntentHandler;
     use crate::core::runtime::Runtime;
     use crate::protocol::app::MATCH_RUNTIME;
-    use crate::protocol::versioning::decode_update_fact;
+    use crate::protocol::versioning::update::encode::decode_update_fact;
     use rusqlite::params;
 
     fn replace_stored_version_for_test(store: &crate::core::db::Db, protocol_version: u32) {
