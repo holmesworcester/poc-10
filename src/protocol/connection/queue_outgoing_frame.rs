@@ -73,9 +73,9 @@ pub fn decode_queue_outgoing_frame(intent: &Intent) -> Result<QueueOutgoingFrame
     Ok(input)
 }
 
-/// Per-(routing_key, frame) idempotence key. Two intents for the same routing
-/// key carrying the same frame bytes produce the same intent key, which lets
-/// the intent queue collapse duplicates before the handler runs.
+/// Per-(routing_key, frame) queue key. Two intents for the same routing key and
+/// same frame bytes name the same route-resolution work. After route resolution,
+/// the core network queue independently dedupes by concrete target and bytes.
 pub fn queue_outgoing_frame_key(input: &QueueOutgoingFrame) -> Vec<u8> {
     let mut hash = blake3::Hasher::new();
     hash.update(b"topo:queue-outgoing-frame:v1:");

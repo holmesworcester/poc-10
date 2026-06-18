@@ -437,21 +437,6 @@ fn quoted_intent_work_table_name(table: TableName) -> rusqlite::Result<String> {
     }
 }
 
-fn verify_idempotent_intent_insert<T>(
-    changed: usize,
-    existing: impl FnOnce() -> rusqlite::Result<Option<T>>,
-    matches_existing: impl FnOnce(&T) -> bool,
-    conflict_message: impl Into<String>,
-) -> rusqlite::Result<bool> {
-    if changed == 0 {
-        let matches = existing()?.as_ref().map(matches_existing).unwrap_or(false);
-        if !matches {
-            return Err(intent_queue_error(conflict_message));
-        }
-    }
-    Ok(changed > 0)
-}
-
 /// Insert one raw intent work row idempotently inside the caller's transaction.
 pub(crate) fn insert_intent_work_row_in_tx(
     db: &Db,
@@ -471,25 +456,16 @@ pub(crate) fn insert_intent_work_row_in_tx(
             replay_flag_for_handler_mode(row.mode)
         ],
     )?;
-    let inserted = verify_idempotent_intent_insert(
-        changed,
-        || {
-            db.conn()
-                .query_row(
-                    &format!(
-                        "SELECT payload
-                         FROM {table_name}
-                         WHERE kind = ?1 AND idempotence_key = ?2"
-                    ),
-                    params![row.kind.as_str(), row.idempotence_key.as_slice()],
-                    |row| row.get::<_, Vec<u8>>(0),
-                )
-                .optional()
-        },
-        |existing| existing.as_slice() == row.payload.as_slice(),
-        format!("conflicting intent row for {}", row.kind),
-    )?;
+    let inserted = changed > 0;
+    if !inserted && !existing_intent_payload_matches(db, &table_name, row)? {
+        return Err(intent_queue_error(format!(
+            "conflicting intent row for {}",
+            row.kind
+        )));
+    }
     if !inserted && row.mode.is_replay() {
+        // Same queued work re-emitted during replay must run under replay
+        // handler semantics, even if the original row was queued live.
         db.conn().execute(
             &format!(
                 "UPDATE {table_name}
@@ -500,6 +476,29 @@ pub(crate) fn insert_intent_work_row_in_tx(
         )?;
     }
     Ok(inserted)
+}
+
+fn existing_intent_payload_matches(
+    db: &Db,
+    table_name: &str,
+    row: &IntentWorkRow,
+) -> rusqlite::Result<bool> {
+    db.conn()
+        .query_row(
+            &format!(
+                "SELECT payload
+                 FROM {table_name}
+                 WHERE kind = ?1 AND idempotence_key = ?2"
+            ),
+            params![row.kind.as_str(), row.idempotence_key.as_slice()],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .map(|existing| {
+            existing
+                .map(|payload| payload.as_slice() == row.payload.as_slice())
+                .unwrap_or(false)
+        })
 }
 
 fn replay_flag_for_handler_mode(mode: HandlerMode) -> i64 {
@@ -831,6 +830,26 @@ mod tests {
             .expect_err("conflicting insert must reject");
 
         assert!(err.to_string().contains("conflicting intent row for send"));
+    }
+
+    #[test]
+    fn replay_duplicate_marks_existing_intent_for_replay() {
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
+        let row = IntentWorkRow::new("send", b"key".to_vec(), b"payload".to_vec());
+
+        assert!(store
+            .write_transaction(|tx| insert_intent_work_row_in_tx(tx, INTENTS, &row))
+            .expect("insert live intent row"));
+        assert!(!store
+            .write_transaction(|tx| {
+                insert_intent_work_row_in_tx(tx, INTENTS, &row.clone().with_replay(true))
+            })
+            .expect("replay duplicate should match existing row"));
+
+        let selected = next_intent_work_row(&store, INTENTS, "kind, idempotence_key")
+            .expect("select durable row")
+            .expect("durable row");
+        assert_eq!(selected.mode, HandlerMode::Replay);
     }
 
     #[test]
