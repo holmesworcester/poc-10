@@ -2,8 +2,8 @@
 
 Connection is the peer transport and live session scope. We use it to turn an
 invite-backed or membership-backed request into a local connection id, receive
-opaque network bytes, open sealed frames, record local receive observations and
-receipts, close sessions, and ask core networking to move bytes.
+opaque network bytes, open sealed frames, record local receive receipts, close
+sessions, and ask core networking to move bytes.
 
 ## Bootstrap And Membership
 
@@ -26,8 +26,8 @@ Data enters core from three places:
 
 - connection commands and auth invite flows create local `ephemeral_secret`,
   `request`, and `close` facts;
-- the daemon hands accepted TCP frames to `receive_network_frame` intake, which
-  commits recognized frames as incoming facts plus observation facts;
+- the daemon stages accepted TCP frames in core's raw incoming queue; the
+  `receive_network_frame` classifier turns recognized bytes into incoming facts;
 - sync and connection handlers queue outgoing frame bytes.
 
 Projection and handlers return child facts opened from established frames,
@@ -71,10 +71,10 @@ under the same derived invite-secret id that creator-side `invite_secret` facts
 use, so accepted-side bootstrap does not need a separate retained invite-secret
 fact. Request projection consumes invite or membership authority and emits
 `create_connection` after matching a local receive receipt.
-Connection projection consumes request, endpoint or ephemeral-secret, and invite
-context, then offers `connection` and `connection_for_request`. Frame projectors
-consume `connection` and `connection_frame_observation` context before opening
-child facts.
+Connection projection consumes request, endpoint or ephemeral-secret, invite
+context, and incoming origin metadata when projecting received frames, then
+offers `connection` and `connection_for_request`. Frame projectors consume
+`connection` context plus incoming origin metadata before opening child facts.
 
 ### Other Interfaces
 
@@ -94,13 +94,15 @@ opening/admission in `project.rs`. There is no shared `connection/frame.rs` or
 hiding projector-specific receive semantics behind a generic helper.
 
 Established frames received from the network are incoming projection inputs.
-Their projectors can emit `connection_frame_observation`, `connection`,
-`auth_local_endpoint`, or `connection_ephemeral_secret` needs. If required
-context is missing, the incoming fact is retained with standing needs so a
-later context offer can reopen it. Wire-invalid bytes still drop at the network
-boundary or during frame projection. Replay rebuilds retained handshake facts,
-opened child facts, receipts, and rows; unopened incoming frames that were
-retained wait on the same context rules as any other retained fact.
+Their projectors consume core-supplied incoming origin metadata and can emit
+`connection`, `auth_local_endpoint`, or `connection_ephemeral_secret` needs. If
+required context is missing, the incoming fact is retained with standing needs
+and its origin metadata is preserved beside the retained fact so a later context
+offer can reopen it and still emit receipts. Wire-invalid bytes still drop at
+the network boundary or during frame projection. Replay rebuilds retained
+handshake facts, opened child facts, receipts, and rows; unopened incoming
+frames that were retained wait on the same context rules as any other retained
+fact.
 
 ## Cross-Scope Row Reads
 
@@ -124,10 +126,10 @@ with the key from a context need: `auth_local_endpoint` for handshake facts and
 `connection` for established frames. There is no seal-mode and no separate
 envelope fact.
 
-`frame_observation` is local receive metadata for one wire fact. It records the
-observed origin address and local receive time so request, connection, and frame
-projectors can issue receipts without putting local socket metadata into the
-wire fact format.
+Incoming origin metadata is core-owned local receive metadata for one received
+wire fact. It records the observed origin address and local receive time on the
+incoming queue/context path so request, connection, and frame projectors can
+issue receipts without putting local socket metadata into the wire fact format.
 
 Receipts are observational evidence. They do not authorize a request,
 connection, or child fact by themselves. The target projector validates that the
@@ -140,14 +142,13 @@ facts.
 
 ## Runtime Work
 
-`receive_network_frame` is the inbound socket boundary. It normalizes origin
-metadata and stages sealed `request`, sealed `connection`, or
-established-frame bytes as typed incoming facts. It emits the matching
-`frame_observation` fact in the same effect batch so the incoming frame and its
-receive metadata enter projection together. It does no unsealing itself and does
-not decide retention; the owning projector decides whether the incoming fact is
-kept as durable evidence or deleted after projection. It is called directly by
-the daemon's inbound intake hook, not through a queued intent.
+`receive_network_frame` is the inbound byte classifier. Core owns the raw
+incoming queue and origin metadata; the classifier only stages sealed `request`,
+sealed `connection`, or established-frame bytes as typed incoming facts. It does
+no unsealing itself and does not decide retention; the owning projector decides
+whether the incoming fact is kept as durable evidence or deleted after
+projection. It is called by the daemon's inbound network drain, not through a
+queued intent.
 
 `maintain_connections` drives outbound request sends from retryable request
 rows. The request command creates invite or membership authority, initiator
@@ -182,7 +183,7 @@ rows, and leaves rows queued when a target cannot accept bytes.
 
 Global sealed request. Bootstrap mode carries invite proof; membership mode
 carries endpoint membership proof. Sender projection writes a retryable request
-row; receiver projection waits for local endpoint, receive observation, and
+row; receiver projection waits for local endpoint, incoming metadata, and
 authority context, then emits `create_connection`.
 
 ```text
@@ -238,9 +239,9 @@ connection, or established frame path. Projection offers
 ### `frame_small` (tag 168)
 
 Runtime-local wire fact for one established small encrypted frame. Projection
-needs a matching local `frame_observation` plus the referenced local
-`connection`, opens the frame, emits durable child facts, and emits one receipt
-per child. Its `encode.rs` plus projector-local `decode` module are the complete
+needs incoming origin metadata plus the referenced local `connection`, opens the
+frame, emits durable child facts, and emits one receipt per child. Its
+`encode.rs` plus projector-local `decode` module are the complete
 canonical byte layout for this size class; `author.rs` seals outbound frames;
 `project.rs` opens inbound frames.
 
@@ -257,8 +258,9 @@ bundle and admits each contained fact with a receipt.
 
 ### `frame_observation` (tag 173)
 
-Local receive metadata for one request, connection, or established frame fact.
-Projection offers `connection_frame_observation` keyed by `frame_fact_id`.
+Legacy local receive metadata fact for one request, connection, or established
+frame fact. The current ingress path carries receive metadata on the core
+incoming queue and projection context instead of requiring this fact.
 
 ## Example Fact Graph
 
@@ -273,13 +275,11 @@ outbound initiator:
 inbound responder transport observation:
   sealed request bytes
     -> receive_network_frame
-    -> incoming request + frame_observation
-    -> frame_observation
+    -> incoming request with origin metadata
 
 inbound responder dependency graph:
   request
     needs auth_local_endpoint(to_endpoint)
-    needs connection_frame_observation(request)
     needs connection_invite_secret(invite_secret) or endpoint_shared
     -> connection_fact_receipt(request) local receive proof
     -> create_connection(request, authority, receipt)
@@ -295,11 +295,10 @@ connection projector on responder:
 inbound initiator transport observation:
   sealed connection bytes
     -> receive_network_frame
-    -> incoming connection + frame_observation
-    -> frame_observation
+    -> incoming connection with origin metadata
 
 connection projector on initiator:
-  needs request + initiator ephemeral_secret + frame_observation
+  needs request + initiator ephemeral_secret + incoming metadata
   -> connection row + connection offer
   -> seed_connection_sync
 
@@ -308,7 +307,7 @@ established connection transfer:
     -> send_facts_on_connection
     -> network_outgoing
     -> remote frame_small/frame_bundle/frame_file_slice
-    -> remote incoming frame + frame_observation
-       needs frame_observation + connection
+    -> remote incoming frame with origin metadata
+       needs incoming metadata + connection
        open to child facts + fact_receipts
 ```

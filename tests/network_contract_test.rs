@@ -3,7 +3,9 @@ use std::net::{SocketAddr, TcpListener};
 use std::thread;
 
 use topo::core::db::Db;
-use topo::core::network::{self, NetworkTarget, OutgoingNetworkRow};
+use topo::core::network::{
+    self, IncomingNetworkRow, NetworkSource, NetworkTarget, OutgoingNetworkRow,
+};
 
 #[test]
 fn outgoing_network_rows_are_opaque_and_idempotent() {
@@ -93,6 +95,43 @@ fn outgoing_network_rows_are_opaque_and_idempotent() {
             .unwrap()
             .is_empty(),
         "network target rows are process-local scheduling state"
+    );
+}
+
+#[test]
+fn incoming_network_rows_are_opaque_process_local_staging() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("network-queues.db");
+    let store = Db::open_disk_with_schema_sources(&path, &[network::SCHEMA_SOURCE]).unwrap();
+    let source_a = NetworkSource::new("127.0.0.1:41000".parse().unwrap());
+    let source_b = NetworkSource::new("127.0.0.1:41001".parse().unwrap());
+    let first = IncomingNetworkRow::new(source_a, 20, b"first inbound frame".to_vec());
+    let duplicate_first = IncomingNetworkRow::new(source_a, 20, b"first inbound frame".to_vec());
+    let earlier = IncomingNetworkRow::new(source_b, 10, b"earlier inbound frame".to_vec());
+
+    assert_eq!(first.key, duplicate_first.key);
+    assert_ne!(first.key, earlier.key);
+    assert_eq!(
+        network::enqueue_incoming(&store, &[first.clone(), duplicate_first, earlier.clone()])
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        network::claim_incoming(&store, 1).unwrap(),
+        vec![earlier.clone()]
+    );
+    assert_eq!(
+        network::claim_incoming(&store, 16).unwrap(),
+        vec![earlier.clone(), first.clone()]
+    );
+
+    network::delete_incoming(&store, std::slice::from_ref(&earlier)).unwrap();
+    assert_eq!(network::claim_incoming(&store, 16).unwrap(), vec![first]);
+
+    let reopened = Db::open_disk_with_schema_sources(&path, &[network::SCHEMA_SOURCE]).unwrap();
+    assert!(
+        network::claim_incoming(&reopened, 16).unwrap().is_empty(),
+        "incoming rows are process-local IO staging, not restart-durable protocol truth"
     );
 }
 
