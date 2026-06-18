@@ -1,8 +1,17 @@
-//! Local protocol update facts and recurring version checks.
+//! Local protocol update facts and recurring release-version checks.
 //!
-//! Versioning is protocol policy. Core only provides a generic rebuild effect:
-//! clear schema-declared resettable state and requeue retained facts in replay
-//! mode. This module decides when the local protocol needs that effect.
+//! This module owns the release marker side of protocol versioning. The daemon's
+//! recurring `check_version` intent compares the stored marker with
+//! `CURRENT_PROTOCOL_VERSION`. A mismatch emits a priority local update fact.
+//! Projecting that update fact requests the generic rebuild effect, which clears
+//! schema-declared resettable state and requeues retained facts in replay mode,
+//! then records the new marker as protocol state.
+//!
+//! This is deliberately not the same as a projector/query storage requirement.
+//! Per-family projector and query guards are safety contracts for reading or
+//! writing materialized tables. The release marker is only the protocol-owned
+//! trigger that decides when to emit the update fact that can make those guarded
+//! paths safe again.
 
 use crate::core::cli::{encode_hex_32, CliOutput};
 use crate::core::command::{AuthoredFacts, CommandClock};

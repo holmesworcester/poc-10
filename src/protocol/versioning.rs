@@ -1,3 +1,33 @@
 //! Protocol-owned versioning and rebuild controls.
+//!
+//! Keep two version concepts separate:
+//!
+//! 1. The release marker is stored protocol state. The recurring
+//!    `check_version` intent reads that marker, compares it with the one
+//!    `CURRENT_PROTOCOL_VERSION` compiled into this release, and emits a local
+//!    update fact when the database needs a rebuild. The update fact is the
+//!    repair trigger: its projection requests the generic rebuild effect and
+//!    records the new release marker.
+//!
+//! 2. A projector or query storage requirement is a local safety contract for a
+//!    read or write path. A fact family declares the storage version its
+//!    projector and query helpers expect, usually next to `PROJECTOR_INFO` in
+//!    `project.rs`; query modules import that same constant before reading
+//!    materialized rows. This guard is not the release marker and it is not what
+//!    triggers rebuild. It is a concurrency and replay safety hatch: normal work
+//!    must not consume queue rows or read materialized tables under a storage
+//!    shape it did not declare.
+//!
+//! A given checkout/release carries one protocol version. The protocol code does
+//! not contain a live matrix of release versions. Compatibility with older
+//! retained facts or older materialized storage belongs in the owning
+//! projector/query code that needs it. During an update, that code may read old
+//! storage shapes only to derive the current release's state; it must write only
+//! the current release's declared tables and effects, never old database tables.
+//!
+//! Core should remain mechanical here. It may enforce a declared storage
+//! requirement at an atomic commit boundary, but protocol modules own the version
+//! numbers, the release marker, the recurring check, the update fact, and the
+//! per-family compatibility rules.
 
 pub mod update;
