@@ -76,14 +76,22 @@ pub(crate) enum ProjectionSource {
     Incoming,
 }
 
-/// A fact that has been claimed from the pending queue and is ready to project.
-pub(crate) struct PendingFact {
+/// A loaded fact plus the already materialized inputs for this projection run.
+pub(crate) struct LoadedProjectionInput {
     source: ProjectionSource,
     fact: Fact,
     pending_inputs: ProjectionContext,
 }
 
-/// A projector result plus the pending-fact metadata needed to commit it.
+enum ProjectionInput {
+    Stale {
+        source: ProjectionSource,
+        fact_id: FactId,
+    },
+    Loaded(LoadedProjectionInput),
+}
+
+/// A projector result plus the projection-input metadata needed to commit it.
 #[derive(Debug)]
 struct PreparedProjection {
     source: ProjectionSource,
@@ -94,15 +102,16 @@ struct PreparedProjection {
     runtime_effects: RuntimeEffects,
 }
 
-enum DrainResult {
-    Idle,
-    CleanedStaleInput,
-    Ready(PendingFact),
-}
-
-enum ProjectResult {
-    Rejected,
-    Ready(PreparedProjection),
+enum ProjectionOutcome {
+    Stale {
+        source: ProjectionSource,
+        fact_id: FactId,
+    },
+    Rejected {
+        source: ProjectionSource,
+        fact_id: FactId,
+    },
+    Accepted(PreparedProjection),
 }
 
 // =============================================================================
@@ -115,14 +124,15 @@ enum ProjectResult {
 ///
 /// This is the whole projection worker in miniature:
 ///
-/// 1. Drain one pending input from SQL into an in-memory `PendingFact`.
-/// 2. Run exactly one protocol projector over that fact plus pending inputs.
-/// 3. Commit the projector output in one SQL transaction.
+/// 1. Load one projection input from SQL.
+/// 2. Evaluate the projector against that in-memory input.
+/// 3. Commit the terminal outcome in one SQL transaction.
 ///
 /// Everything below this function exists to keep those three stages precise.
-/// Drain owns queue selection and stale cleanup. Project owns pure projector
-/// execution and output validation. Commit owns all durable state changes,
-/// including current-context comparison and wake fanout.
+/// Load owns queue selection and context/time input materialization. Evaluate
+/// owns pure projector execution and output validation. Commit owns every SQL
+/// mutation, including stale cleanup, rejected-input retirement, current-context
+/// comparison, and wake fanout.
 fn project_one_fact(
     store: &Db,
     projector: &(impl Projector + ?Sized),
@@ -131,24 +141,14 @@ fn project_one_fact(
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
 ) -> Result<WorkStatus, String> {
-    let pending_fact = match drain_one_projection_input(store, source, mode)? {
-        DrainResult::Idle => return Ok(WorkStatus::idle()),
-        DrainResult::CleanedStaleInput => return Ok(WorkStatus::progressed(true)),
-        DrainResult::Ready(pending_fact) => pending_fact,
+    let input = match load_one_projection_input(store, source, mode)? {
+        None => return Ok(WorkStatus::idle()),
+        Some(input) => input,
     };
 
-    let projected_fact = match project_pending_fact(
-        store,
-        projector,
-        pending_fact,
-        allowed_tables,
-        fact_admission,
-    )? {
-        ProjectResult::Rejected => return Ok(WorkStatus::progressed(true)),
-        ProjectResult::Ready(projected_fact) => projected_fact,
-    };
+    let outcome = evaluate_projection_input(projector, input, allowed_tables, fact_admission)?;
 
-    commit_projected_fact(store, &projected_fact, allowed_tables, fact_admission)?;
+    commit_projection_outcome(store, &outcome, allowed_tables, fact_admission)?;
     Ok(WorkStatus::progressed(true))
 }
 
@@ -181,72 +181,77 @@ pub(crate) fn project_one(
 // Stages
 // =============================================================================
 
-/// Stage 1: drain one pending projection input.
+/// Stage 1: load one projection input.
 ///
 /// Durable projection drains from `pending_projection`; incoming projection
-/// drains directly from volatile `incoming_facts`. In either case this stage
-/// returns only a ready-to-project fact plus pending inputs, or consumes stale
-/// work that no longer has bytes behind it.
-fn drain_one_projection_input(
+/// drains directly from volatile `incoming_facts`. This stage reads only: it
+/// returns no work, a loaded fact plus pending inputs, or a stale selected owner
+/// whose backing bytes disappeared before load.
+fn load_one_projection_input(
     store: &Db,
     source: ProjectionSource,
     mode: ProjectionMode,
-) -> Result<DrainResult, String> {
+) -> Result<Option<ProjectionInput>, String> {
     let Some(fact_id) =
         perf::measure_result("projection_queue_load", || source.next_pending_owner(store))?
     else {
-        return Ok(DrainResult::Idle);
+        return Ok(None);
     };
 
-    let Some(pending_fact) = perf::measure_result("projection_load_pending_fact", || {
+    let Some(input) = perf::measure_result("projection_load_pending_fact", || {
         load_pending_fact(store, source, fact_id, mode)
     })?
     else {
-        source.clear_missing_pending(store, fact_id)?;
-        return Ok(DrainResult::CleanedStaleInput);
+        return Ok(Some(ProjectionInput::Stale { source, fact_id }));
     };
 
-    Ok(DrainResult::Ready(pending_fact))
+    Ok(Some(ProjectionInput::Loaded(input)))
 }
 
 /// Stage 2: run the protocol projector and validate its uncommitted output.
 ///
-/// A projector rejection consumes the current pending work but keeps retained
-/// fact bytes as evidence. A successful projector run returns a normalized
-/// `PreparedProjection`; it has not modified SQL yet.
-fn project_pending_fact(
-    store: &Db,
+/// This stage is pure with respect to SQL. It never clears a queue row, deletes
+/// incoming intake, publishes context, or commits runtime effects. It only turns
+/// an in-memory input into an in-memory terminal outcome.
+fn evaluate_projection_input(
     projector: &(impl Projector + ?Sized),
-    pending_fact: PendingFact,
+    input: ProjectionInput,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
-) -> Result<ProjectResult, String> {
-    let source = pending_fact.source;
-    let fact_id = pending_fact.fact.id;
-    let projection = match perf::measure_result("projection_prepare_effects", || {
-        prepare_projection(projector, pending_fact, allowed_tables, fact_admission)
-    }) {
-        Ok(projection) => projection,
-        Err(_rejection) => {
-            source.clear_rejected_pending(store, fact_id)?;
-            return Ok(ProjectResult::Rejected);
+) -> Result<ProjectionOutcome, String> {
+    match input {
+        ProjectionInput::Stale { source, fact_id } => {
+            Ok(ProjectionOutcome::Stale { source, fact_id })
         }
-    };
-    Ok(ProjectResult::Ready(projection))
+        ProjectionInput::Loaded(input) => {
+            let source = input.source;
+            let fact_id = input.fact.id;
+            let projection = match perf::measure_result("projection_prepare_effects", || {
+                prepare_projection(projector, input, allowed_tables, fact_admission)
+            }) {
+                Ok(projection) => projection,
+                Err(_rejection) => {
+                    return Ok(ProjectionOutcome::Rejected { source, fact_id });
+                }
+            };
+            Ok(ProjectionOutcome::Accepted(projection))
+        }
+    }
 }
 
-/// Stage 3: commit one projector output as a single durable boundary.
+/// Stage 3: commit one projection outcome as a single durable boundary.
 ///
-/// The projector has already returned all desired effects. Commit is where those
-/// effects become visible: source queue/intake rows are consumed, standing
-/// projection state is replaced, newly visible context wakes dependent facts,
-/// and runtime effects are admitted last.
+/// Commit owns every SQL mutation after selection. Stale inputs are cleaned,
+/// rejected inputs are retired, and accepted projector output becomes visible:
+/// source queue/intake rows are consumed, standing projection state is replaced,
+/// newly visible context wakes dependent facts, and runtime effects are admitted
+/// last.
 ///
 /// This is the `commit_projection_effects` boundary from the old pipeline shape,
-/// kept as a named stage so the central procedure stays drain -> project -> commit.
-fn commit_projected_fact(
+/// kept as a named stage so the central procedure stays load -> evaluate -> commit.
+fn commit_projection_outcome(
     store: &Db,
-    projection: &PreparedProjection,
+    outcome: &ProjectionOutcome,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
 ) -> Result<(), String> {
@@ -254,7 +259,7 @@ fn commit_projected_fact(
         store
             .write_transaction(|tx| {
                 perf::measure_result("projection_commit_tx_body", || {
-                    commit_projected_fact_in_tx(tx, projection, allowed_tables, fact_admission)
+                    commit_projection_outcome_in_tx(tx, outcome, allowed_tables, fact_admission)
                 })
             })
             .map_err(|err| format!("commit projection effects: {err}"))
@@ -262,7 +267,7 @@ fn commit_projected_fact(
 }
 
 // =============================================================================
-// Drain Stage Helpers
+// Load Stage Helpers
 // =============================================================================
 
 impl ProjectionSource {
@@ -324,31 +329,6 @@ impl ProjectionSource {
                 )
             }
             ProjectionSource::Incoming => Ok(ProjectionContext::default().with_mode(mode)),
-        }
-    }
-
-    fn clear_missing_pending(self, store: &Db, fact_id: FactId) -> Result<(), String> {
-        match self {
-            ProjectionSource::Durable => store
-                .write_transaction(|tx| purge_fact_in_tx(tx, fact_id))
-                .map(|_| ())
-                .map_err(|err| format!("purge stale durable pending fact: {err}")),
-            ProjectionSource::Incoming => store
-                .write_transaction(|tx| delete_incoming_fact_in_tx(tx, fact_id))
-                .map(|_| ())
-                .map_err(|err| format!("purge stale incoming fact: {err}")),
-        }
-    }
-
-    fn clear_rejected_pending(self, store: &Db, fact_id: FactId) -> Result<(), String> {
-        match self {
-            ProjectionSource::Durable => store
-                .write_transaction(|tx| clear_pending_projection_work_in_tx(tx, fact_id))
-                .map_err(|err| format!("clear rejected durable projection: {err}")),
-            ProjectionSource::Incoming => store
-                .write_transaction(|tx| delete_incoming_fact_in_tx(tx, fact_id))
-                .map(|_| ())
-                .map_err(|err| format!("drop rejected incoming fact: {err}")),
         }
     }
 }
@@ -415,13 +395,13 @@ pub(crate) fn load_pending_fact(
     source: ProjectionSource,
     fact_id: FactId,
     mode: ProjectionMode,
-) -> Result<Option<PendingFact>, String> {
+) -> Result<Option<LoadedProjectionInput>, String> {
     let fact = perf::measure_result("projection_load_fact", || source.load_fact(store, fact_id))?;
     let Some(fact) = fact else {
         return Ok(None);
     };
     let pending_inputs = source.load_pending_inputs(store, fact_id, mode)?;
-    Ok(Some(PendingFact {
+    Ok(Some(LoadedProjectionInput {
         source,
         fact,
         pending_inputs,
@@ -440,15 +420,15 @@ pub(crate) fn load_pending_fact(
 /// later inside the commit transaction.
 fn prepare_projection(
     projector: &(impl Projector + ?Sized),
-    pending_fact: PendingFact,
+    input: LoadedProjectionInput,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
 ) -> Result<PreparedProjection, String> {
-    let PendingFact {
+    let LoadedProjectionInput {
         source,
         fact,
         pending_inputs,
-    } = pending_fact;
+    } = input;
     let output = perf::measure_result("projection_projector_cpu", || {
         projector.project(&fact, &pending_inputs)
     })?;
@@ -505,15 +485,69 @@ fn enforce_projected_owner(label: &str, owner: FactId, fact_id: FactId) -> Resul
 // Commit Stage Helpers
 // =============================================================================
 
-/// Commit one pending fact's complete projection result.
+/// Commit one projection outcome.
+///
+/// This function is the only stage that mutates SQL after selection. A stale
+/// input retires owner-scoped broken work. A rejected input retires the selected
+/// work without publishing projector state. An accepted projection commits the
+/// projector's complete output.
+fn commit_projection_outcome_in_tx(
+    tx: &Db,
+    outcome: &ProjectionOutcome,
+    allowed_tables: &[TableName],
+    fact_admission: Option<FactAdmissionFn>,
+) -> rusqlite::Result<()> {
+    match outcome {
+        ProjectionOutcome::Stale { source, fact_id } => {
+            commit_stale_projection_input_in_tx(tx, *source, *fact_id)
+        }
+        ProjectionOutcome::Rejected { source, fact_id } => {
+            commit_rejected_projection_input_in_tx(tx, *source, *fact_id)
+        }
+        ProjectionOutcome::Accepted(projection) => {
+            commit_projected_fact_in_tx(tx, projection, allowed_tables, fact_admission)
+        }
+    }
+}
+
+/// Retire selected work whose backing bytes disappeared between selection and load.
+///
+/// Durable stale rows are purged as corrupt owner-scoped state. Incoming stale
+/// rows are just deleted from volatile intake.
+fn commit_stale_projection_input_in_tx(
+    tx: &Db,
+    source: ProjectionSource,
+    fact_id: FactId,
+) -> rusqlite::Result<()> {
+    match source {
+        ProjectionSource::Durable => purge_fact_in_tx(tx, fact_id).map(|_| ()),
+        ProjectionSource::Incoming => delete_incoming_fact_in_tx(tx, fact_id).map(|_| ()),
+    }
+}
+
+/// Retire selected work rejected by pure projector evaluation.
+///
+/// Durable bytes stay retained as evidence; only retry markers are cleared.
+/// Incoming rows are volatile and are dropped on rejection.
+fn commit_rejected_projection_input_in_tx(
+    tx: &Db,
+    source: ProjectionSource,
+    fact_id: FactId,
+) -> rusqlite::Result<()> {
+    match source {
+        ProjectionSource::Durable => clear_pending_projection_work_in_tx(tx, fact_id),
+        ProjectionSource::Incoming => delete_incoming_fact_in_tx(tx, fact_id).map(|_| ()),
+    }
+}
+
+/// Commit one accepted fact's complete projection result.
 ///
 /// This is the projection boundary, the same way `commit_handler_output` is the
 /// dispatch boundary. The transaction consumes this fact's pending row and makes
 /// the projector's output visible: replacement needs, append-only offers,
 /// replacement time wakes, newly woken dependent facts, protocol row mutations,
-/// and follow-up intents. Rejected projection output is handled before this
-/// function. If anything fails inside this transaction, SQLite rolls the whole
-/// boundary back.
+/// and follow-up intents. If anything fails inside this transaction, SQLite
+/// rolls the whole boundary back.
 ///
 /// Transaction contents:
 ///
@@ -2584,7 +2618,7 @@ mod contract_tests {
     ) -> Result<PreparedProjection, String> {
         prepare_projection(
             projector,
-            PendingFact {
+            LoadedProjectionInput {
                 source: ProjectionSource::Durable,
                 fact: fact.clone(),
                 pending_inputs,
@@ -2673,6 +2707,80 @@ mod contract_tests {
             .expect("projection should allow self purge");
 
         assert_eq!(run.runtime_effects.purged_facts, vec![fact.id]);
+    }
+
+    #[test]
+    fn projection_evaluation_does_not_clear_rejected_durable_pending_work() {
+        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+            .expect("open db");
+        let fact = Fact::new(FactScope::Global, 1, b"durable reject".to_vec());
+        submit_fact_to_db(&store, fact.clone()).expect("submit pending fact");
+        let projector = test_projector(|_fact: &Fact, _context: &ProjectionContext| {
+            Err("projector rejected durable fact".to_string())
+        });
+
+        let input =
+            load_one_projection_input(&store, ProjectionSource::Durable, ProjectionMode::Normal)
+                .expect("load projection input")
+                .expect("queued input");
+        let outcome =
+            evaluate_projection_input(&projector, input, &[], None).expect("evaluate projection");
+
+        assert!(matches!(
+            outcome,
+            ProjectionOutcome::Rejected {
+                source: ProjectionSource::Durable,
+                fact_id
+            } if fact_id == fact.id
+        ));
+        assert_eq!(pending_projection_count(&store, fact.id), 1);
+        assert!(retained_fact(&store, &fact.id)
+            .expect("load retained fact")
+            .is_some());
+
+        commit_projection_outcome(&store, &outcome, &[], None).expect("commit rejection");
+
+        assert_eq!(pending_projection_count(&store, fact.id), 0);
+        assert!(retained_fact(&store, &fact.id)
+            .expect("load retained fact")
+            .is_some());
+    }
+
+    #[test]
+    fn projection_evaluation_does_not_delete_rejected_incoming_input() {
+        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+            .expect("open db");
+        let fact = Fact::new(FactScope::Local, 1, b"incoming reject".to_vec());
+        store
+            .write_transaction(|tx| insert_incoming_fact_in_tx(tx, &fact))
+            .expect("insert incoming fact");
+        let projector = test_projector(|_fact: &Fact, _context: &ProjectionContext| {
+            Err("projector rejected incoming fact".to_string())
+        });
+
+        let input =
+            load_one_projection_input(&store, ProjectionSource::Incoming, ProjectionMode::Normal)
+                .expect("load projection input")
+                .expect("queued input");
+        let outcome =
+            evaluate_projection_input(&projector, input, &[], None).expect("evaluate projection");
+
+        assert!(matches!(
+            outcome,
+            ProjectionOutcome::Rejected {
+                source: ProjectionSource::Incoming,
+                fact_id
+            } if fact_id == fact.id
+        ));
+        assert!(incoming_fact_by_id(&store, &fact.id)
+            .expect("load incoming fact")
+            .is_some());
+
+        commit_projection_outcome(&store, &outcome, &[], None).expect("commit rejection");
+
+        assert!(incoming_fact_by_id(&store, &fact.id)
+            .expect("load incoming fact")
+            .is_none());
     }
 
     #[test]
