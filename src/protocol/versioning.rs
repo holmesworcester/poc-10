@@ -30,6 +30,10 @@
 //!    triggers rebuild. It is a concurrency and replay safety hatch: normal work
 //!    must not consume queue rows or read materialized tables under a storage
 //!    shape it did not declare.
+//!    Core can enforce this automatically for commits, but not for raw reads:
+//!    query modules must decide whether to require current storage, deliberately
+//!    support an old not-yet-replayed table shape, or act as a maintenance/
+//!    diagnostic read that is allowed to inspect stale state.
 //!
 //! A given checkout/release carries one protocol version. The protocol code does
 //! not contain a live matrix of release versions. Compatibility with older

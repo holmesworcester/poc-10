@@ -65,6 +65,14 @@ materialized rows and return an error on mismatch.
 This means old materialized state is not trusted by new code. It also means
 stale queued work remains available after the update fact repairs storage.
 
+Reads do not have a core commit boundary, so query modules own their own gate.
+Before touching materialized tables, a query must choose one explicit behavior:
+require the current storage version and return a mismatch error, intentionally
+support an old not-yet-replayed table shape with compatibility SQL, or act as a
+maintenance/diagnostic query that is allowed to inspect stale state. The normal
+user-facing path should require current storage unless the query documents a
+specific stale-storage compatibility path.
+
 ## Rebuild
 
 The update fact projection requests the rebuild effect, writes protocol-visible

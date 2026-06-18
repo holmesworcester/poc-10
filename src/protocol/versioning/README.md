@@ -23,3 +23,9 @@ is the versioning/update diagnostic command.
 `state-summary` is a diagnostic command owned by the local-update family. It
 hashes schema-declared summary tables so rebuild output can be compared without
 adding protocol meaning to core.
+
+Queries are direct SQL readers, so core does not gate them automatically the way
+it gates projection and intent commits. A query that touches materialized tables
+must explicitly choose its storage-version behavior: require current storage,
+support a documented old table shape, or be a maintenance/diagnostic read that
+is allowed to inspect stale state.
