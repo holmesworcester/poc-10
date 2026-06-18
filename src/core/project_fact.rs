@@ -1095,7 +1095,7 @@ pub(crate) mod commit_effects {
                     "derived-state rebuild effect is only allowed from projection".to_string(),
                 ));
             }
-            crate::core::replay::rebuild_derived_state_in_tx(tx).map_err(sqlite_string_error)?;
+            commit_rebuild_effect_in_tx(tx).map_err(sqlite_string_error)?;
         }
 
         let mode = if replay {
@@ -1127,6 +1127,34 @@ pub(crate) mod commit_effects {
             intents,
             local_intents,
         })
+    }
+
+    fn commit_rebuild_effect_in_tx(tx: &Db) -> Result<(), String> {
+        clear_resettable_derived_state_in_tx(tx)
+            .map_err(|err| format!("clear resettable derived state: {err}"))?;
+        enqueue_retained_facts_for_replay_in_tx(tx)?;
+        Ok(())
+    }
+
+    fn clear_resettable_derived_state_in_tx(tx: &Db) -> rusqlite::Result<()> {
+        for table in tx.replay_reset_tables() {
+            let quoted = crate::core::db::quoted_table_name(*table)?;
+            tx.conn().execute(&format!("DELETE FROM {quoted}"), [])?;
+        }
+        Ok(())
+    }
+
+    fn enqueue_retained_facts_for_replay_in_tx(tx: &Db) -> Result<(), String> {
+        tx.conn()
+            .execute(
+                "INSERT OR IGNORE INTO pending_projection (owner, queued_at, priority, replay)
+                 SELECT f.id, m.received_at, 100, 1
+                 FROM facts f
+                 JOIN local_fact_admissions m ON m.fact_id = f.id",
+                [],
+            )
+            .map_err(|err| format!("enqueue retained facts for replay: {err}"))?;
+        Ok(())
     }
 
     fn enforce_storage_requirement(

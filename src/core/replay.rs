@@ -88,17 +88,6 @@ pub struct ReplayReport {
     pub network_rows: usize,
 }
 
-/// Result of the destructive rebuild request committed by projection.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct RebuildReport {
-    /// Derived-state tables cleared by the wipe.
-    pub wiped_tables: usize,
-    /// Retained facts found after the wipe.
-    pub retained_facts: usize,
-    /// Retained facts marked pending in replay mode.
-    pub queued_facts: usize,
-}
-
 /// Run the replay entry point against an opened db.
 ///
 /// Steps: count and drop queued intents, wipe derived state, mark retained facts
@@ -193,22 +182,6 @@ pub fn run_replay(
 pub fn clear_replay_reset_tables(db: &Db) -> Result<usize, String> {
     db.write_transaction(clear_replay_reset_tables_in_tx)
         .map_err(|err| format!("clear replay reset tables: {err}"))
-}
-
-/// Clear derived/runtime state and mark retained facts pending in replay mode.
-///
-/// This is the production rebuild primitive. It does not drain work; the normal
-/// runtime queue loop projects the resulting rows.
-pub(crate) fn rebuild_derived_state_in_tx(db: &Db) -> Result<RebuildReport, String> {
-    let wiped_tables = clear_replay_reset_tables_in_tx(db)
-        .map_err(|err| format!("clear replay reset tables: {err}"))?;
-    let retained_facts = table_count(db, FACTS)?;
-    let queued_facts = enqueue_all_retained_facts_for_replay_in_tx(db)?;
-    Ok(RebuildReport {
-        wiped_tables,
-        retained_facts,
-        queued_facts,
-    })
 }
 
 fn clear_replay_reset_tables_in_tx(db: &Db) -> rusqlite::Result<usize> {
