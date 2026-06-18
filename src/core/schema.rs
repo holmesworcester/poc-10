@@ -24,7 +24,7 @@
 //! in a protocol module when it stores protocol meaning, even if core commits
 //! the row mutation.
 
-use crate::core::db::{quoted_table_name, Db, ReplayTables, SchemaSource, TableName};
+use crate::core::db::{ReplayTables, SchemaSource, TableName};
 
 /// Content-addressed durable fact byte table.
 pub(crate) const FACTS: TableName = TableName::new("facts");
@@ -122,6 +122,8 @@ CREATE TABLE IF NOT EXISTS pending_projection (
 );
 CREATE INDEX IF NOT EXISTS pending_projection_by_queue
     ON pending_projection (queued_at, owner);
+CREATE INDEX IF NOT EXISTS pending_projection_by_priority_queue
+    ON pending_projection (priority, queued_at, owner);
 
 CREATE TABLE IF NOT EXISTS pending_projection_matches (
     owner BLOB NOT NULL,
@@ -189,73 +191,3 @@ CREATE INDEX IF NOT EXISTS incoming_facts_by_received_at
         summary: CORE_REPLAY_SUMMARY_TABLES,
     },
 };
-
-/// Apply compatibility migrations for core runtime tables.
-///
-/// Core schema is mostly idempotent DDL, but adding a column to an existing
-/// table needs an explicit migration because `CREATE TABLE IF NOT EXISTS` leaves
-/// old disk tables unchanged.
-pub(crate) fn migrate_core_schema(db: &Db) -> rusqlite::Result<()> {
-    ensure_column(
-        db,
-        PENDING_PROJECTION,
-        "replay",
-        "INTEGER NOT NULL DEFAULT 0",
-    )?;
-    ensure_column(
-        db,
-        PENDING_PROJECTION,
-        "priority",
-        "INTEGER NOT NULL DEFAULT 100",
-    )?;
-    ensure_column(db, INTENTS, "replay", "INTEGER NOT NULL DEFAULT 0")?;
-    ensure_column(db, LOCAL_INTENTS, "replay", "INTEGER NOT NULL DEFAULT 0")?;
-    db.conn().execute(
-        "CREATE INDEX IF NOT EXISTS pending_projection_by_priority_queue
-         ON pending_projection (priority, queued_at, owner)",
-        [],
-    )?;
-    Ok(())
-}
-
-fn ensure_column(
-    db: &Db,
-    table: TableName,
-    column: &str,
-    column_sql: &str,
-) -> rusqlite::Result<()> {
-    if !table_exists(db, table)? || table_has_column(db, table, column)? {
-        return Ok(());
-    }
-
-    let table = quoted_table_name(table)?;
-    db.conn().execute(
-        &format!("ALTER TABLE {table} ADD COLUMN {column} {column_sql}"),
-        [],
-    )?;
-    Ok(())
-}
-
-fn table_exists(db: &Db, table: TableName) -> rusqlite::Result<bool> {
-    db.conn().query_row(
-        "SELECT EXISTS(
-             SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1
-             UNION ALL
-             SELECT 1 FROM sqlite_temp_master WHERE type = 'table' AND name = ?1
-         )",
-        [table.as_str()],
-        |row| row.get::<_, i64>(0).map(|exists| exists != 0),
-    )
-}
-
-fn table_has_column(db: &Db, table: TableName, column: &str) -> rusqlite::Result<bool> {
-    let table = quoted_table_name(table)?;
-    let mut stmt = db.conn().prepare(&format!("PRAGMA table_info({table})"))?;
-    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
-    for row in rows {
-        if row? == column {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
