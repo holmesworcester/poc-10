@@ -12,11 +12,11 @@ the loop:
 
 - a **fact projector** turns one fact into standing context, rows, time wakes,
   intents, and follow-up facts, and
-- an **intent handler** performs one bounded retryable action (IO, sealing,
+- an **intent handler** performs one bounded stateful action (IO, sealing,
   responding) and returns more facts.
 
 Protocol code also has thinner hooks at the edges — it authors facts for a
-command, converts inbound network bytes into incoming facts, and validates a
+command, converts inbound network bytes into `RuntimeEffects`, and validates a
 fact on admission — but those only feed the queues; the projector and handler
 are where queued work is transformed.
 
@@ -63,6 +63,8 @@ flowchart TD
     FACTS[("facts: immutable store")]
     PENDING[("pending_projection")]
     NETIN["inbound bytes (from peers)"]
+    INTAKE{{"inbound intake hook (protocol)"}}
+    EFFECTS["RuntimeEffects"]
     INCOMING[("incoming_facts (temp)")]
     PROJECTOR{{"fact projector (protocol)"}}
     CONTEXT[("context_edges: needs + offers")]
@@ -75,7 +77,11 @@ flowchart TD
     ROWS[("scope rows: materialized")]
     QUERY["query reads rows"]
 
-    NETIN -->|intake| INCOMING
+    NETIN --> INTAKE
+    INTAKE --> EFFECTS
+    EFFECTS -->|incoming facts| INCOMING
+    EFFECTS -->|retained facts| FACTS
+    EFFECTS -->|intents| INTENTS
     FACTS -->|admit| PENDING
     INCOMING --> PROJECTOR
     PENDING --> PROJECTOR
@@ -85,6 +91,7 @@ flowchart TD
     PROJECTOR -->|time wakes| WAKES
     PROJECTOR -->|intents| INTENTS
     PROJECTOR -->|follow-up facts| FACTS
+    PROJECTOR -.may retain incoming fact.-> FACTS
     PROJECTOR -->|rows| ROWS
 
     CONTEXT -->|core matches range overlap| MATCHES
@@ -101,21 +108,23 @@ flowchart TD
     ROWS -.read for planning.-> HANDLER
 ```
 
-Core owns every arrow and the atomic commit behind it; the two rounded boxes are
-the only protocol code on the diagram. The projector is pure derivation (it may
-park on missing context but never does IO); the handler is the only place
-*protocol* code does bounded, retryable work. Core still does mechanical IO of
-its own — the TCP listener reads frames and the pump writes `network_outgoing`,
-deferring targets whose sockets are not ready — but it moves opaque bytes and
-never interprets a fact.
+Core owns every arrow and the atomic commit behind it; the rounded boxes are the
+only protocol code on the diagram. The inbound intake hook classifies opaque
+network bytes into runtime effects but does not run projection. The projector is
+pure derivation (it may park on missing context but never does IO); the handler
+is the only place *protocol* code does bounded stateful work. Core still does
+mechanical IO of its own — the TCP listener reads frames and the pump writes
+`network_outgoing`, deferring targets whose sockets are not ready — but it moves
+opaque bytes and never interprets a fact.
 
 ## 2) One Serialized Turn
 
 Commands, queries, and the daemon turn all acquire `<db>.runtime.lock`, but they
-do not all drive the runtime loop. A command reads currently projected state,
-authors facts, commits them to durable pending projection, and returns a
-receipt. A query reads currently projected rows. The daemon turn (the recurring
-scheduler plus `daemon::tick`) is the live loop that advances queues.
+do not all drive the runtime loop. A command verifies storage readiness, reads
+currently projected state, authors facts, commits them to durable pending
+projection, and returns a receipt. A query verifies storage readiness and reads
+currently projected rows. The daemon turn (the recurring scheduler plus
+`daemon::tick`) is the live loop that advances queues.
 
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 300}} }%%
@@ -123,39 +132,54 @@ flowchart TD
     LOCK["acquire <db>.runtime.lock"]
 
     LOCK --> CMD["command turn"]
-    CMD --> READ_INPUTS["read current projected rows"]
+    CMD --> CMD_READY["require storage_ready"]
+    CMD_READY --> READ_INPUTS["read current projected rows"]
     READ_INPUTS --> AUTHOR["author facts"]
     AUTHOR --> COMMIT_FACTS["commit authored facts -> pending_projection"]
     COMMIT_FACTS --> RECEIPT["return receipt"]
 
     LOCK --> Q["query turn"]
-    Q --> READ["read materialized rows"]
+    Q --> Q_READY["require storage_ready"]
+    Q_READY --> READ["read materialized rows"]
 
     LOCK --> TICK["daemon turn"]
-    TICK --> T0["daemon::tick step 1. fire recurring intents (maintain_connections, maintain_sync)"]
-    T0 --> T1["2. accept frames -> inbound intake -> incoming_facts"]
-    T1 --> T2["3. admit due time_wakes -> pending_projection"]
-    T2 --> T3["4. drain one projection batch"]
-    T3 --> T4["5. dispatch one intent batch -> handlers"]
-    T4 --> T5["6. pump network_outgoing"]
+    TICK --> R0["1. fire first due recurring intent"]
+    R0 --> R1["if queued: drain one local intent, then durable projection"]
+    R1 --> READY1{"storage_ready?"}
+    READY1 -- no --> REPAIR["drain repair queues only"]
+    REPAIR --> RETURN1["return from tick"]
+    READY1 -- yes --> T0["2. fire remaining due recurring intents"]
+    T0 --> T1["3. drain local intents"]
+    T1 --> T2["4. drain durable projection"]
+    T2 --> READY2{"storage_ready?"}
+    READY2 -- no --> REPAIR
+    READY2 -- yes --> T3["5. accept frames and commit inbound RuntimeEffects"]
+    T3 --> T4["6. admit due time_wakes -> pending_projection"]
+    T4 --> T5["7. drain durable projection"]
+    T5 --> T6["8. drain incoming projection"]
+    T6 --> T7["9. drain durable intents"]
+    T7 --> T8["10. drain local intents"]
+    T8 --> T9["11. pump network_outgoing"]
 
-    T0 -.enqueued intents drained at.-> T4
-    CMD_SETTLE -.same projector loop.-> T3
-    Q_SETTLE -.same projector loop.-> T3
+    T0 -.enqueued local intents drained at.-> T1
+    T3 -.incoming facts projected at.-> T6
+    T4 -.woken durable owners projected at.-> T5
 ```
 
-The only difference between turns is which queues they drain. Queries and
-commands deliberately stop after projection: incoming facts, due time, recurring
-work, and handler-derived state are daemon progress, observed eventually, not
-produced inside a user command. Handler-emitted facts are committed atomically
-with intent dispatch and remain queued for a later projection batch.
+The difference between turns is whether they drain queues at all. Queries and
+commands do not drain projection, incoming facts, time wakes, recurring work, or
+handlers; they observe already projected state and may enqueue authored facts for
+the daemon. Handler-emitted facts are committed atomically with intent dispatch
+and remain queued for a later durable projection batch.
 
-The recurring step is daemon-only and is the source of all periodic work.
+The recurring steps are daemon-only and are the source of all periodic work.
 Recurring intents are not durable state: an in-memory `RecurringScheduler`,
 installed once from the handler registry at daemon start, fires due operational
-loops at the top of `daemon::tick` and enqueues ordinary intents that the same
-tick's intent batch dispatches like any other. The live daemon's cadence is only
-the scheduling mechanism; the work itself is plain facts and handlers.
+loops during `daemon::tick` and enqueues ordinary local intents. The first due
+recurring loop gets a special readiness-repair chance before live IO; if storage
+is not ready, the daemon drains only repair queues and skips normal network and
+wall-clock work. The live daemon's cadence is only the scheduling mechanism; the
+work itself is plain facts and handlers.
 
 ## 3) Needs And Offers
 
