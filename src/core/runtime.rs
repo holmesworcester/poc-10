@@ -31,7 +31,7 @@ use crate::core::facts::Fact;
 use crate::core::handle_intent::{dispatch_one_intent, HandlerSet, IntentQueue};
 use crate::core::intents::Intent;
 use crate::core::project_fact::{
-    self, FactAdmissionFn, FactRoute, ProjectionSource, Projector, Timeline,
+    self, FactAdmissionFn, FactRoute, IncomingMetadata, ProjectionSource, Projector, Timeline,
 };
 use crate::core::schema::{CORE_SCHEMA_SOURCE, INTENTS, LOCAL_INTENTS};
 use std::path::Path;
@@ -230,6 +230,26 @@ impl Runtime {
             label,
         )
         .map(|_| ())
+    }
+
+    /// Stage protocol-classified network input for incoming projection.
+    ///
+    /// The facts remain volatile until their projectors choose to retain them.
+    /// Core stores the receive metadata beside the incoming rows so projectors,
+    /// not ingress code, decide whether it should become durable receipt data.
+    pub(crate) fn submit_network_incoming_facts(
+        &mut self,
+        facts: &[Fact],
+        metadata: &IncomingMetadata,
+        label: &str,
+    ) -> Result<usize, String> {
+        project_fact::commit_network_incoming_facts_to_db(
+            &self.db,
+            facts,
+            metadata,
+            self.description.fact_admission,
+            label,
+        )
     }
 
     // -------------------------------------------------------------------------

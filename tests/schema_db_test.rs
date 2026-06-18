@@ -423,7 +423,10 @@ fn core_replay_preserves_only_retained_facts_and_resets_runtime_tables() {
         .iter()
         .map(|table| table.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(protected, vec!["facts", "local_fact_admissions"]);
+    assert_eq!(
+        protected,
+        vec!["facts", "local_fact_admissions", "retained_fact_origins"]
+    );
 
     let reset = store
         .replay_reset_tables()

@@ -274,10 +274,10 @@ pub mod adapt {
 // POLICY. A `connection_frame_small` fact is admitted iff:
 //   1. STRUCTURAL. The fact is local ephemeral input and its layout contains
 //      exactly one small encrypted connection frame.
-//   2. CONTEXT. The frame fact has exact local `connection_frame_observation`
-//      context, and its header names an exact local `connection`
-//      context. Missing context emits only a transient need for the fixed-point
-//      pass; malformed and undecryptable frames produce no durable output.
+//   2. CONTEXT. The frame fact has incoming origin metadata, and its header
+//      names an exact local `connection` context. Missing context emits only a
+//      transient need for the fixed-point pass; malformed and undecryptable
+//      frames produce no durable output.
 //   3. MATERIALIZE. Opened inner facts are admitted as durable child facts,
 //      each with a durable `connection::fact_receipt`.
 
@@ -350,29 +350,13 @@ pub fn project_observed_frame(
         return Ok(ProjectionOutput::new().drop_incoming());
     };
 
-    let observation_need = exact_need(
-        fact.id,
-        "connection_frame_observation",
-        FactScope::Local,
-        fact.id,
-    );
-    let Some(observation_fact) = context.payload_for(&observation_need) else {
-        return Ok(ProjectionOutput::new().need(observation_need));
-    };
-    if observation_fact.scope != FactScope::Local {
-        return Err("connection frame observation context must be local".to_string());
-    }
-    let observation =
-        connection::frame_observation::project::decode::decode_fact(observation_fact.body())?;
-    if observation.frame_fact_id != fact.id {
-        return Err("connection frame observation does not name frame fact".to_string());
-    }
+    let metadata = context
+        .incoming_metadata()
+        .ok_or_else(|| "connection frame missing incoming origin metadata".to_string())?;
 
     let connection_need = connection::connection::project::connection_need(fact.id, connection_id);
     let Some(connection_fact) = context.payload_for(&connection_need) else {
-        return Ok(ProjectionOutput::new()
-            .need(observation_need)
-            .need(connection_need));
+        return Ok(ProjectionOutput::new().need(connection_need));
     };
     if connection_fact.scope != FactScope::Local {
         return Err("connection frame context must be local".to_string());
@@ -380,9 +364,7 @@ pub fn project_observed_frame(
     let material = match connection_material_from_context(connection_fact, context, fact.id) {
         ConnectionMaterialContext::Open(material) => material,
         ConnectionMaterialContext::Needs(needs) => {
-            let mut output = ProjectionOutput::new()
-                .need(observation_need)
-                .need(connection_need);
+            let mut output = ProjectionOutput::new().need(connection_need);
             for need in needs {
                 output = output.need(need);
             }
@@ -394,16 +376,12 @@ pub fn project_observed_frame(
     match open_received_frame_with_material(
         frame,
         material,
-        observation.origin_addr.bytes(),
-        observation.received_at_local_ms,
+        &metadata.origin_addr,
+        metadata.received_at_local_ms,
     ) {
         Ok(facts) => Ok(facts_output(fact.id, facts)),
         Err(_) => Ok(ProjectionOutput::new().drop_incoming()),
     }
-}
-
-fn exact_need(owner: [u8; 32], role: &'static str, scope: FactScope, key: [u8; 32]) -> ContextNeed {
-    ContextNeed::range(owner, role, scope, key, key)
 }
 
 fn facts_output(frame_fact_id: FactId, facts: Vec<Fact>) -> ProjectionOutput {

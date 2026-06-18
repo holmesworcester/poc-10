@@ -2,17 +2,18 @@
 //!
 //! This file is the durable and memory table inventory for the generic
 //! runtime: facts, local admissions, standing context, time wakes, pending
-//! projection, pending projection matches, incoming facts, intent
-//! queues. It exposes one executable `SchemaSource` plus typed `TableName`
+//! projection, pending projection matches, incoming facts, retained incoming
+//! origins, and intent queues. It exposes one executable `SchemaSource` plus typed `TableName`
 //! constants so the rest of core does not repeat string literals.
 //!
 //! These tables are the shared substrate behind the runtime work documented in
 //! `src/core/README.md` and the projection boundary documented in
 //! `project_fact.rs`.
 //! `facts` and `local_fact_admissions` store immutable inputs and their local
-//! visibility metadata. `context_edges`, `time_wakes`, `pending_projection`,
-//! and `pending_projection_matches` drive fact projection. `intents` and
-//! `local_intents` drive handler dispatch.
+//! visibility metadata. `retained_fact_origins` preserves receive metadata only
+//! for incoming rows that projection chose to retain. `context_edges`,
+//! `time_wakes`, `pending_projection`, and `pending_projection_matches` drive
+//! fact projection. `intents` and `local_intents` drive handler dispatch.
 //!
 //! Core schema is deliberately small and mechanical. It records the runtime
 //! queues and indexes needed to move work; it does not encode protocol policy
@@ -30,6 +31,8 @@ use crate::core::db::{ReplayTables, SchemaSource, TableName};
 pub(crate) const FACTS: TableName = TableName::new("facts");
 /// Local admission metadata table for content-addressed fact bytes.
 pub(crate) const LOCAL_FACT_ADMISSIONS: TableName = TableName::new("local_fact_admissions");
+/// Origin metadata preserved for retained incoming facts.
+pub(crate) const RETAINED_FACT_ORIGINS: TableName = TableName::new("retained_fact_origins");
 /// Standing context edge table.
 pub(crate) const CONTEXT_EDGES: TableName = TableName::new("context_edges");
 /// Semantic time wake table.
@@ -47,7 +50,8 @@ pub(crate) const INTENTS: TableName = TableName::new("intents");
 pub(crate) const LOCAL_INTENTS: TableName = TableName::new("local_intents");
 /// Volatile fact table for outside-origin incoming inputs.
 pub(crate) const INCOMING_FACTS: TableName = TableName::new("incoming_facts");
-const CORE_REPLAY_PROTECTED_TABLES: &[TableName] = &[FACTS, LOCAL_FACT_ADMISSIONS];
+const CORE_REPLAY_PROTECTED_TABLES: &[TableName] =
+    &[FACTS, LOCAL_FACT_ADMISSIONS, RETAINED_FACT_ORIGINS];
 
 const CORE_REPLAY_RESET_TABLES: &[TableName] = &[
     CONTEXT_EDGES,
@@ -88,6 +92,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS local_fact_admissions_by_fact
     ON local_fact_admissions (fact_id);
 CREATE INDEX IF NOT EXISTS local_fact_admissions_by_scope_received_at
     ON local_fact_admissions (scope, scope_kind, scope_id, received_at);
+
+CREATE TABLE IF NOT EXISTS retained_fact_origins (
+    fact_id BLOB PRIMARY KEY NOT NULL,
+    origin_addr BLOB NOT NULL,
+    received_at INTEGER NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS context_edges (
     owner BLOB NOT NULL,
@@ -179,7 +189,9 @@ CREATE TEMP TABLE IF NOT EXISTS incoming_facts (
     scope_kind TEXT NOT NULL,
     scope_id BLOB NOT NULL,
     received_at INTEGER NOT NULL,
-    bytes BLOB NOT NULL
+    bytes BLOB NOT NULL,
+    origin_addr BLOB,
+    origin_received_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS incoming_facts_by_received_at
     ON incoming_facts (received_at, id);
