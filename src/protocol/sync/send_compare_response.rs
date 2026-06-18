@@ -15,6 +15,10 @@ use crate::protocol::connection::send_facts_on_connection::{
 
 pub const SEND_SYNC_COMPARE_RESPONSE: &str = "send_sync_compare_response";
 
+pub const STORAGE_VERSION: u32 = crate::protocol::versioning::update::CURRENT_PROTOCOL_VERSION;
+pub const STORAGE_REQUIREMENT: crate::core::effects::StorageRequirement =
+    crate::core::effects::StorageRequirement::Current(STORAGE_VERSION);
+
 pub type HandlerId = [u8; 32];
 
 #[derive(Debug, Clone, PartialEq, Eq)]

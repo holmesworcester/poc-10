@@ -152,12 +152,12 @@ and attempt rows.
 membership tables. It reads accepted bootstrap peer rows, unanswered request
 rows, answered connection rows, and request-owned
 `bootstrap_connection_attempt_rows`. It creates connection attempts and request
-facts only as live work after replay has completed, and records one attempt row
-per accepted invite to avoid forking duplicate requests.
+facts only as live work after rebuild/readiness has completed, and records one
+attempt row per accepted invite to avoid forking duplicate requests.
 
 Replay rebuilds accepted bootstrap peer rows by replaying retained
 `invite_accepted` facts. The recurring `maintain_connections` intent is
-live-only and starts after replay, once those rows have been rebuilt.
+live-only and starts after storage is ready, once those rows have been rebuilt.
 
 Bootstrap connection attempts are covered by this maintenance loop. A replayed
 `invite_accepted` row makes the accepted invite eligible. A later live
@@ -196,18 +196,13 @@ retained or removed by the normal purge/retirement facts.
 
 ## CLI Test Surface
 
-Add CLI commands that exercise replay and recurring intents without requiring
-an actual upgrade:
+Add CLI commands that exercise protocol update and replay diagnostics without
+making replay the public upgrade command:
 
-- `replay [--reverse | --scramble --seed N]`: run the replay entry point with
-  network and recurring schedules disabled. The default pass uses canonical
-  fact order, `--reverse` admits retained facts newest-first, and `--scramble`
-  admits retained facts in a deterministic shuffled order. Each pass drops
-  queued intents, wipes derived state, projects retained facts, admits
-  replayable semantic time wakes, drains replay work to fixpoint, and prints
-  counters for dropped intents, projected facts, context match wakeups,
-  semantic time wakes, replayed intents, emitted facts, purged facts, row
-  mutations, and blocked network work.
+- `update`: author a local protocol update fact. Its live projection records the
+  current protocol version, requests the generic rebuild effect, and leaves the
+  retained update fact as audit history. Replay-mode projection of update facts
+  is a no-op, so old update facts remain records without re-triggering rebuild.
 - `state-summary`: print a stable hashable summary of replay-relevant state:
   retained facts, materialized rows, context edges, semantic time wakes, sync
   indexes, local key-material rows, and connection-maintenance rows. The output
@@ -218,11 +213,11 @@ an actual upgrade:
   out of the summary because their schema sources do not mark them
   summary-visible.
 - `replay-check`: copy the database to scratch snapshots, run canonical replay,
-  an idempotent replay, `replay --reverse`, and several
-  `replay --scramble --seed N` passes, then compare the same state summary
+  an idempotent replay, reverse-order replay, and several deterministic
+  scrambled-order replay passes, then compare the same state summary
   `state_hash` for every pass. It should prove replay idempotence, projection
-  order independence, replay work interleaving independence, and report
-  the per-area hash/count differences for any table or owned-state area whose
+  order independence, replay work interleaving independence, and report the
+  per-area hash/count differences for any table or owned-state area whose
   replay-derived rows diverge.
 - `intent-registry`: list every handler route with recurrence metadata and
   command exclusion. Replay behavior is visible in handler code through
@@ -237,9 +232,9 @@ an actual upgrade:
   accepted bootstrap peer rows, active attempts, active connections, target
   count, and pending local bootstrap sends.
 
-These commands should make side effects visible. A replay command that leaves
-network rows, fires recurring schedulers, or creates maintenance attempts
-before the replay barrier should report an error.
+These commands should make side effects visible. `replay-check` should report
+an error if any diagnostic replay pass leaves network rows, fires recurring
+schedulers, or creates maintenance attempts before the replay barrier.
 
 ## Test Plan
 
@@ -276,6 +271,6 @@ before the replay barrier should report an error.
 - Replay CLI test: `replay-check` reports the same state summary digest for
   canonical replay, idempotent replay, reverse projection order, and scrambled
   replay order, with zero network/live-only side effects during every pass.
-- Replay order test: `replay --reverse` and `replay --scramble --seed N`
-  produce the same state summary as canonical replay while exercising different
-  projection order and replay work interleavings.
+- Replay order test: `replay-check` covers reverse and scrambled replay plans
+  that produce the same state summary as canonical replay while exercising
+  different projection order and replay work interleavings.

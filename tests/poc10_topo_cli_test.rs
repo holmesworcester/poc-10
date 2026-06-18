@@ -115,9 +115,9 @@ fn con_cascade_fixture_commands_are_not_registered() {
         let stderr = cli_harness::stderr(&output);
         assert!(
         stderr.contains(&format!("unknown command `{command}`"))
-                && stderr.contains("con --db PATH [--at TIMESTAMP_MS] replay [--reverse | --scramble --seed N]")
+                && stderr.contains("con --db PATH [--at TIMESTAMP_MS] replay-check")
                 && !stderr.contains("cascade"),
-            "`{command}` should be rejected while replay order diagnostics remain available; got:\n{stderr}"
+            "`{command}` should be rejected while replay-check diagnostics remain available; got:\n{stderr}"
         );
     }
 }

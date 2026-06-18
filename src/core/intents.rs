@@ -88,6 +88,7 @@ pub(crate) struct IntentWorkRow {
     pub(crate) kind: String,
     pub(crate) idempotence_key: Vec<u8>,
     pub(crate) payload: Vec<u8>,
+    pub(crate) mode: HandlerMode,
 }
 
 impl IntentWorkRow {
@@ -100,7 +101,17 @@ impl IntentWorkRow {
             kind: kind.into(),
             idempotence_key: idempotence_key.into(),
             payload: payload.into(),
+            mode: HandlerMode::Live,
         }
+    }
+
+    pub(crate) fn with_replay(mut self, replay: bool) -> Self {
+        self.mode = if replay {
+            HandlerMode::Replay
+        } else {
+            HandlerMode::Live
+        };
+        self
     }
 }
 
@@ -114,11 +125,16 @@ impl Intent {
     }
 
     pub(crate) fn work_row(&self) -> IntentWorkRow {
+        self.work_row_with_mode(false)
+    }
+
+    pub(crate) fn work_row_with_mode(&self, replay: bool) -> IntentWorkRow {
         IntentWorkRow::new(
             self.kind.as_str().to_string(),
             self.key.clone(),
             self.payload.clone(),
         )
+        .with_replay(replay)
     }
 
     pub(crate) fn from_work_row(row: IntentWorkRow) -> Result<Self, String> {

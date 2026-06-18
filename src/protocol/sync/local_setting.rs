@@ -59,6 +59,10 @@ pub enum SyncCliCommand {
 pub const PROJECTOR_INFO: FactProjectorInfo =
     FactProjectorInfo::projector("sync::local_setting::SyncLocalSettingProjector");
 
+pub const STORAGE_VERSION: u32 = crate::protocol::versioning::update::CURRENT_PROTOCOL_VERSION;
+pub const STORAGE_REQUIREMENT: crate::core::effects::StorageRequirement =
+    crate::core::effects::StorageRequirement::Current(STORAGE_VERSION);
+
 /// Projected sync settings keyed by setting fact id. Queries resolve the active
 /// row with `(effective_at_ms, setting_fact_id)` ordering.
 pub const SYNC_LOCAL_SETTING_ROWS: TableName = TableName::new("sync_local_setting_rows");

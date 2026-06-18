@@ -16,13 +16,13 @@ fn accept_handshake_does_not_create_durable_facts() {
     let port = free_port();
     let alice_port = free_port();
     let bob_invite = invite(&bob, port);
+    let _daemon = spawn_daemon(&bob, port);
     assert_eq!(
-        sync_fact_count(&bob),
+        wait_for_count_value(&bob, "sync_facts", 0),
         0,
         "invite facts must not become syncable facts"
     );
 
-    let _daemon = spawn_daemon(&bob, port);
     let _alice_daemon = spawn_daemon(&alice, alice_port);
     let connected = accept_connection_with_retry(&alice, &bob_invite);
     assert!(connected.contains("connected:"), "{connected}");
@@ -159,7 +159,7 @@ fn accept_invite(db: &str, invite: &str) -> Output {
 
 fn wait_for_connection_count(db: &str, expected: usize) {
     for _ in 0..100 {
-        if connection_count(db) == expected {
+        if count_value(db, "connections") == Some(expected) {
             return;
         }
         thread::sleep(Duration::from_millis(50));
@@ -172,7 +172,7 @@ fn wait_for_connection_count(db: &str, expected: usize) {
 
 fn wait_for_connection_fact_count(db: &str, expected: usize) {
     for _ in 0..100 {
-        if connection_fact_count(db) == expected {
+        if count_value(db, "connection_facts") == Some(expected) {
             return;
         }
         thread::sleep(Duration::from_millis(50));
@@ -202,22 +202,34 @@ fn replace_invite_part(link: &str, label: &str, value: &str) -> String {
 }
 
 fn sync_fact_count(db: &str) -> usize {
-    let out = assert_success(topo(&["--db", db, "count"]));
-    line_value(&out, "sync_facts")
-        .parse()
-        .expect("parse sync fact count")
+    count_value(db, "sync_facts").expect("count sync facts")
 }
 
 fn connection_count(db: &str) -> usize {
-    let out = assert_success(topo(&["--db", db, "count"]));
-    line_value(&out, "connections")
-        .parse()
-        .expect("parse connection count")
+    count_value(db, "connections").expect("count connections")
 }
 
 fn connection_fact_count(db: &str) -> usize {
-    let out = assert_success(topo(&["--db", db, "count"]));
-    line_value(&out, "connection_facts")
-        .parse()
-        .expect("parse connection fact count")
+    count_value(db, "connection_facts").expect("count connection facts")
+}
+
+fn wait_for_count_value(db: &str, key: &str, expected: usize) -> usize {
+    for _ in 0..100 {
+        if count_value(db, key) == Some(expected) {
+            return expected;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    panic!(
+        "count {key} never reached {expected}; current {:?}",
+        count_value(db, key)
+    );
+}
+
+fn count_value(db: &str, key: &str) -> Option<usize> {
+    let output = topo(&["--db", db, "count"]);
+    if !output.status.success() {
+        return None;
+    }
+    line_value(&stdout(&output), key).parse().ok()
 }

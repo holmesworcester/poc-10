@@ -458,20 +458,29 @@ fn poc10_projector_output_contract_emits_context_time_wakes_and_intents() {
 #[test]
 fn poc10_runtime_effects_names_the_common_commit_shape() {
     let topo::core::effects::RuntimeEffects {
+        storage_requirement,
         facts,
+        priority_facts,
         incoming_facts,
         purged_facts,
         row_mutations,
         intents,
         local_intents,
+        rebuild_derived_state,
     } = topo::core::effects::RuntimeEffects::new();
 
+    assert_eq!(
+        storage_requirement,
+        topo::core::effects::StorageRequirement::MaintenanceBypass
+    );
     assert!(facts.is_empty());
+    assert!(priority_facts.is_empty());
     assert!(incoming_facts.is_empty());
     assert!(purged_facts.is_empty());
     assert!(row_mutations.is_empty());
     assert!(intents.is_empty());
     assert!(local_intents.is_empty());
+    assert!(!rebuild_derived_state);
 }
 
 #[test]

@@ -116,10 +116,14 @@ CREATE INDEX IF NOT EXISTS time_wakes_by_owner
 
 CREATE TABLE IF NOT EXISTS pending_projection (
     owner BLOB PRIMARY KEY NOT NULL,
-    queued_at INTEGER NOT NULL
+    queued_at INTEGER NOT NULL,
+    priority INTEGER NOT NULL DEFAULT 100,
+    replay INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS pending_projection_by_queue
     ON pending_projection (queued_at, owner);
+CREATE INDEX IF NOT EXISTS pending_projection_by_priority_queue
+    ON pending_projection (priority, queued_at, owner);
 
 CREATE TABLE IF NOT EXISTS pending_projection_matches (
     owner BLOB NOT NULL,
@@ -157,6 +161,7 @@ CREATE TABLE IF NOT EXISTS intents (
     kind TEXT NOT NULL,
     idempotence_key BLOB NOT NULL,
     payload BLOB NOT NULL,
+    replay INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (kind, idempotence_key)
 );
 
@@ -164,6 +169,7 @@ CREATE TEMP TABLE IF NOT EXISTS local_intents (
     kind TEXT NOT NULL,
     idempotence_key BLOB NOT NULL,
     payload BLOB NOT NULL,
+    replay INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (kind, idempotence_key)
 );
 

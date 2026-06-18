@@ -31,19 +31,28 @@ fn intent_runtime_output_boundary_is_facts_and_followup_intents_only() {
         .expect("handler output");
 
     let RuntimeEffects {
+        storage_requirement,
         facts,
+        priority_facts,
         incoming_facts,
         purged_facts,
         row_mutations,
         intents,
         local_intents,
+        rebuild_derived_state,
     } = output;
 
+    assert_eq!(
+        storage_requirement,
+        topo::core::effects::StorageRequirement::MaintenanceBypass
+    );
     assert_eq!(facts.len(), 1);
+    assert!(priority_facts.is_empty());
     assert!(incoming_facts.is_empty());
     assert!(purged_facts.is_empty());
     assert!(row_mutations.is_empty());
     assert!(local_intents.is_empty());
+    assert!(!rebuild_derived_state);
     assert_eq!(facts[0].scope, FactScope::Local);
     assert_eq!(facts[0].timestamp, 42);
     assert_eq!(facts[0].bytes, b"handler-produced-fact");

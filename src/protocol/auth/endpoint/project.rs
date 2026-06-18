@@ -221,6 +221,10 @@ use super::local_endpoint_insert;
 pub const PROJECTOR_INFO: FactProjectorInfo =
     FactProjectorInfo::projector("auth::endpoint::project::EndpointProjector");
 
+pub const STORAGE_VERSION: u32 = crate::protocol::versioning::update::CURRENT_PROTOCOL_VERSION;
+pub const STORAGE_REQUIREMENT: crate::core::effects::StorageRequirement =
+    crate::core::effects::StorageRequirement::Current(STORAGE_VERSION);
+
 const DAEMON_ENDPOINT_ROLE: &str = "auth_daemon_endpoint";
 const DAEMON_ENDPOINT_KEY: &[u8] = b"daemon_endpoint";
 

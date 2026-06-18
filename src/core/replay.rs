@@ -28,13 +28,11 @@
 //! state, so replay never decides by ad hoc SQLite table enumeration.
 
 use crate::core::db::{quoted_table_name, Db, TableName};
+use crate::core::effects::StorageRequirementCheck;
 use crate::core::facts::FactId;
 use crate::core::handle_intent::{dispatch_one_intent, HandlerRoute, HandlerSet, IntentQueue};
-use crate::core::intents::HandlerMode;
 use crate::core::network::OUTGOING_TABLE;
-use crate::core::project_fact::{
-    self, FactAdmissionFn, ProjectionMode, ProjectionSource, Projector,
-};
+use crate::core::project_fact::{self, FactAdmissionFn, ProjectionSource, Projector};
 use crate::core::schema::{CONTEXT_EDGES, FACTS, INTENTS, LOCAL_INTENTS, TIME_WAKES};
 use rusqlite::params;
 use std::collections::BTreeSet;
@@ -90,6 +88,17 @@ pub struct ReplayReport {
     pub network_rows: usize,
 }
 
+/// Result of the destructive rebuild request committed by projection.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RebuildReport {
+    /// Derived-state tables cleared by the wipe.
+    pub wiped_tables: usize,
+    /// Retained facts found after the wipe.
+    pub retained_facts: usize,
+    /// Retained facts marked pending in replay mode.
+    pub queued_facts: usize,
+}
+
 /// Run the replay entry point against an opened db.
 ///
 /// Steps: count and drop queued intents, wipe derived state, mark retained facts
@@ -102,6 +111,7 @@ pub fn run_replay(
     routes: &'static [HandlerRoute],
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
+    storage_requirement_check: Option<StorageRequirementCheck>,
     order: ReplayOrder,
 ) -> Result<ReplayReport, String> {
     let mut report = ReplayReport {
@@ -118,14 +128,35 @@ pub fn run_replay(
     match order {
         ReplayOrder::Canonical => {
             enqueue_all_retained_facts_for_replay(db)?;
-            drain_replay_barrier(db, projector, &handlers, allowed_tables, fact_admission)?;
+            drain_replay_barrier(
+                db,
+                projector,
+                &handlers,
+                allowed_tables,
+                fact_admission,
+                storage_requirement_check,
+            )?;
         }
         ReplayOrder::Reverse | ReplayOrder::Scramble { .. } => {
             for fact_id in ordered_fact_ids(db, order)? {
                 enqueue_retained_fact_for_replay(db, fact_id)?;
-                drain_replay_barrier(db, projector, &handlers, allowed_tables, fact_admission)?;
+                drain_replay_barrier(
+                    db,
+                    projector,
+                    &handlers,
+                    allowed_tables,
+                    fact_admission,
+                    storage_requirement_check,
+                )?;
             }
-            drain_replay_barrier(db, projector, &handlers, allowed_tables, fact_admission)?;
+            drain_replay_barrier(
+                db,
+                projector,
+                &handlers,
+                allowed_tables,
+                fact_admission,
+                storage_requirement_check,
+            )?;
         }
     }
 
@@ -160,16 +191,34 @@ pub fn run_replay(
 /// construction when the database opens, so retained fact storage cannot be
 /// cleared by a replay bug in a caller.
 pub fn clear_replay_reset_tables(db: &Db) -> Result<usize, String> {
-    db.write_transaction(|tx| {
-        let mut cleared = 0usize;
-        for table in tx.replay_reset_tables() {
-            let quoted = quoted_table_name(*table)?;
-            tx.conn().execute(&format!("DELETE FROM {quoted}"), [])?;
-            cleared += 1;
-        }
-        Ok(cleared)
+    db.write_transaction(clear_replay_reset_tables_in_tx)
+        .map_err(|err| format!("clear replay reset tables: {err}"))
+}
+
+/// Clear derived/runtime state and mark retained facts pending in replay mode.
+///
+/// This is the production rebuild primitive. It does not drain work; the normal
+/// runtime queue loop projects the resulting rows.
+pub(crate) fn rebuild_derived_state_in_tx(db: &Db) -> Result<RebuildReport, String> {
+    let wiped_tables = clear_replay_reset_tables_in_tx(db)
+        .map_err(|err| format!("clear replay reset tables: {err}"))?;
+    let retained_facts = table_count(db, FACTS)?;
+    let queued_facts = enqueue_all_retained_facts_for_replay_in_tx(db)?;
+    Ok(RebuildReport {
+        wiped_tables,
+        retained_facts,
+        queued_facts,
     })
-    .map_err(|err| format!("clear replay reset tables: {err}"))
+}
+
+fn clear_replay_reset_tables_in_tx(db: &Db) -> rusqlite::Result<usize> {
+    let mut cleared = 0usize;
+    for table in db.replay_reset_tables() {
+        let quoted = quoted_table_name(*table)?;
+        db.conn().execute(&format!("DELETE FROM {quoted}"), [])?;
+        cleared += 1;
+    }
+    Ok(cleared)
 }
 
 /// Drain replay work in the same visible queue order as the live runtime loop.
@@ -185,6 +234,7 @@ fn drain_replay_barrier(
     handlers: &HandlerSet,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
+    storage_requirement_check: Option<StorageRequirementCheck>,
 ) -> Result<(), String> {
     for _ in 0..REPLAY_MAX_DRAIN_STEPS {
         let mut active = false;
@@ -195,6 +245,7 @@ fn drain_replay_barrier(
             ProjectionSource::Durable,
             allowed_tables,
             fact_admission,
+            storage_requirement_check,
         )?;
         active |= drain_replay_projection_queue(
             db,
@@ -203,6 +254,7 @@ fn drain_replay_barrier(
             ProjectionSource::Incoming,
             allowed_tables,
             fact_admission,
+            storage_requirement_check,
         )?;
 
         active |= drain_replay_intent_queue(
@@ -211,6 +263,7 @@ fn drain_replay_barrier(
             IntentQueue::Durable,
             allowed_tables,
             fact_admission,
+            storage_requirement_check,
         )?;
         active |= drain_replay_intent_queue(
             db,
@@ -218,6 +271,7 @@ fn drain_replay_barrier(
             IntentQueue::Local,
             allowed_tables,
             fact_admission,
+            storage_requirement_check,
         )?;
 
         if !active {
@@ -234,6 +288,7 @@ fn drain_replay_projection_queue(
     source: ProjectionSource,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
+    storage_requirement_check: Option<StorageRequirementCheck>,
 ) -> Result<bool, String> {
     let mut active = false;
     for _ in 0..REPLAY_WORK_LIMIT {
@@ -241,10 +296,10 @@ fn drain_replay_projection_queue(
             db,
             projector,
             source,
-            ProjectionMode::Replay,
             allowed_tables,
             handlers.intent_kinds(),
             fact_admission,
+            storage_requirement_check,
         )? {
             break;
         }
@@ -259,6 +314,7 @@ fn drain_replay_intent_queue(
     queue: IntentQueue,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
+    storage_requirement_check: Option<StorageRequirementCheck>,
 ) -> Result<bool, String> {
     let mut active = false;
     for _ in 0..REPLAY_WORK_LIMIT {
@@ -268,7 +324,7 @@ fn drain_replay_intent_queue(
             queue,
             allowed_tables,
             fact_admission,
-            HandlerMode::Replay,
+            storage_requirement_check,
         )? {
             break;
         }
@@ -283,10 +339,14 @@ fn drain_replay_intent_queue(
 /// resettable runtime work. This insert is safe to repeat because the queue is
 /// keyed by owner.
 fn enqueue_all_retained_facts_for_replay(db: &Db) -> Result<usize, String> {
+    enqueue_all_retained_facts_for_replay_in_tx(db)
+}
+
+fn enqueue_all_retained_facts_for_replay_in_tx(db: &Db) -> Result<usize, String> {
     db.conn()
         .execute(
-            "INSERT OR IGNORE INTO pending_projection (owner, queued_at)
-             SELECT f.id, m.received_at
+            "INSERT OR IGNORE INTO pending_projection (owner, queued_at, priority, replay)
+             SELECT f.id, m.received_at, 100, 1
              FROM facts f
              JOIN local_fact_admissions m ON m.fact_id = f.id",
             [],
@@ -296,13 +356,25 @@ fn enqueue_all_retained_facts_for_replay(db: &Db) -> Result<usize, String> {
 
 /// Mark one retained fact as replay pending for order-variation diagnostics.
 fn enqueue_retained_fact_for_replay(db: &Db, fact_id: FactId) -> Result<bool, String> {
-    db.conn()
+    let inserted = db
+        .conn()
         .execute(
-            "INSERT OR IGNORE INTO pending_projection (owner, queued_at) VALUES (?1, 0)",
+            "INSERT OR IGNORE INTO pending_projection (owner, queued_at, priority, replay)
+             VALUES (?1, 0, 100, 1)",
             params![fact_id.as_slice()],
         )
-        .map(|inserted| inserted > 0)
-        .map_err(|err| format!("enqueue retained fact for replay: {err}"))
+        .map_err(|err| format!("enqueue retained fact for replay: {err}"))?;
+    if inserted == 0 {
+        db.conn()
+            .execute(
+                "UPDATE pending_projection
+                 SET replay = 1
+                 WHERE owner = ?1 AND replay = 0",
+                params![fact_id.as_slice()],
+            )
+            .map_err(|err| format!("mark retained fact replay pending: {err}"))?;
+    }
+    Ok(inserted > 0)
 }
 
 /// Compute the fact admission order for the requested replay order.

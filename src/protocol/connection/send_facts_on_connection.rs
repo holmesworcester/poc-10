@@ -28,6 +28,10 @@ use crate::protocol::sync::shared_fact;
 pub type HandlerId = [u8; 32];
 
 pub const SEND_FACTS_ON_CONNECTION: &str = "send_facts_on_connection";
+
+pub const STORAGE_VERSION: u32 = crate::protocol::versioning::update::CURRENT_PROTOCOL_VERSION;
+pub const STORAGE_REQUIREMENT: crate::core::effects::StorageRequirement =
+    crate::core::effects::StorageRequirement::Current(STORAGE_VERSION);
 pub const SHAREABLE_BUCKET_TIMESTAMPS: u64 = 4096;
 
 const EXPLICIT_FACTS_PAYLOAD: u8 = 1;

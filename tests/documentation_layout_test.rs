@@ -9,6 +9,15 @@ fn normalize_whitespace(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+fn rust_module_doc_text(path: &Path) -> String {
+    source_text(path)
+        .lines()
+        .filter_map(|line| line.trim_start().strip_prefix("//!"))
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[test]
 fn documentation_layout_keeps_current_docs_live_and_old_notes_archived() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -246,14 +255,16 @@ fn poc10_replay_intent_shape_doc_records_current_upgrade_readiness_plan() {
         "Bootstrap connection attempts are covered by this maintenance loop",
         "There is no separate durable `connection_peer_retry` loop",
         "## CLI Test Surface",
-        "`replay [--reverse | --scramble --seed N]`",
+        "`update`",
+        "author a local protocol update fact",
+        "Replay-mode projection of update facts is a no-op",
         "`state-summary`",
         "print a stable hashable summary of replay-relevant state",
         "include one overall `state_hash` plus per-area hashes and counts",
         "computed from canonical row serialization with deterministic ordering",
         "`replay-check`",
         "copy the database to scratch snapshots",
-        "canonical replay, an idempotent replay, `replay --reverse`, and several `replay --scramble --seed N` passes",
+        "canonical replay, an idempotent replay, reverse-order replay, and several deterministic scrambled-order replay passes",
         "compare the same state summary `state_hash` for every pass",
         "per-area hash/count differences",
         "projection order independence",
@@ -274,7 +285,7 @@ fn poc10_replay_intent_shape_doc_records_current_upgrade_readiness_plan() {
         "Recurring-intent test: `recurring-intents` and `intent-registry` show `maintain_connections` as live-only recurring work",
         "Replay CLI test: `replay-check` reports the same state summary digest",
         "reverse projection order, and scrambled replay order",
-        "Replay order test: `replay --reverse` and `replay --scramble --seed N`",
+        "Replay order test: `replay-check` covers reverse and scrambled replay plans",
         "different projection order and replay work interleavings",
     ] {
         assert!(
@@ -418,6 +429,58 @@ fn repo_instructions_point_at_live_documentation_style_rules() {
         assert!(
             normalized_rules.contains(required),
             "docs/RULES.md is missing documentation style guidance {required:?}"
+        );
+    }
+}
+
+#[test]
+fn protocol_versioning_docs_separate_release_marker_from_storage_guards() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let versioning = rust_module_doc_text(&root.join("src/protocol/versioning.rs"));
+    let update = rust_module_doc_text(&root.join("src/protocol/versioning/update.rs"));
+    let normalized_versioning = normalize_whitespace(&versioning);
+    let normalized_update = normalize_whitespace(&update);
+
+    for required in [
+        "Keep two version concepts separate",
+        "The release marker is stored protocol state",
+        "The recurring `check_version` intent reads that marker",
+        "compares it with the one `CURRENT_PROTOCOL_VERSION` compiled into this release",
+        "emits a local update fact when the database needs a rebuild",
+        "The update fact is the repair trigger",
+        "A projector or query storage requirement is a local safety contract",
+        "usually next to `PROJECTOR_INFO` in `project.rs`",
+        "query modules import that same constant before reading materialized rows",
+        "This guard is not the release marker and it is not what triggers rebuild",
+        "A given checkout/release carries one protocol version",
+        "The protocol code does not contain a live matrix of release versions",
+        "Compatibility with older retained facts or older materialized storage belongs in the owning projector/query code",
+        "may read old storage shapes only to derive the current release's state",
+        "must write only the current release's declared tables and effects",
+        "never old database tables",
+        "Core should remain mechanical here",
+        "protocol modules own the version numbers, the release marker, the recurring check, the update fact, and the per-family compatibility rules",
+    ] {
+        assert!(
+            normalized_versioning.contains(required),
+            "src/protocol/versioning.rs is missing versioning contract detail {required:?}"
+        );
+    }
+
+    for required in [
+        "Local protocol update facts and recurring release-version checks",
+        "owns the release marker side of protocol versioning",
+        "recurring `check_version` intent compares the stored marker with `CURRENT_PROTOCOL_VERSION`",
+        "A mismatch emits a priority local update fact",
+        "Projecting that update fact requests the generic rebuild effect",
+        "records the new marker as protocol state",
+        "not the same as a projector/query storage requirement",
+        "Per-family projector and query guards are safety contracts",
+        "release marker is only the protocol-owned trigger",
+    ] {
+        assert!(
+            normalized_update.contains(required),
+            "src/protocol/versioning/update.rs is missing update contract detail {required:?}"
         );
     }
 }

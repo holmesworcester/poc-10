@@ -23,14 +23,16 @@ the authored facts, and returns. A command must not query after it has started
 authoring facts. If chained authoring needs an id from an earlier authored fact,
 it uses the in-memory fact or receipt it just constructed, not a projected row.
 
-The daemon is the live queue driver. One daemon tick fires recurring intents,
-accepts inbound network input, admits due time wakes, drains one projection
-batch, drains one intent batch, and pumps outgoing network rows.
+The daemon is the live queue driver. One daemon tick gives the first recurring
+intent a chance to repair storage readiness, blocks live IO while a declared
+readiness guard is false, accepts inbound network input, admits due time wakes,
+drains projection and intent batches, and pumps outgoing network rows.
 
-Replay is a command because it takes the runtime turn lock and blocks daemon
-work. Replay wipes derived state, marks retained facts pending in replay mode,
-and drives replay queues until the replay barrier is clear. Replay-specific
-queue driving should not be exposed as a general runtime fixpoint helper.
+Production derived-state rebuild is protocol policy: a protocol-owned update
+fact requests the generic rebuild effect, which wipes resettable state and marks
+retained facts pending in replay mode. Replay order variation remains a
+diagnostic surface for proving idempotence and order independence, not the
+public upgrade command.
 
 ## File Roles
 
@@ -65,6 +67,13 @@ functions that need direct row access.
 5. Flatten replay language.
    Replay may drive queues to its barrier, but the public model should not teach
    a general runtime fixpoint.
+6. Minimize core rebuild/versioning surface.
+   Version checks, update facts, and rebuild policy should stay in protocol
+   modules. Core should keep only protocol-neutral mechanics: queue mode,
+   priority work admission, resettable table declarations, and diagnostic
+   replay checks. Revisit `runtime`, `daemon`, and `replay` after the update
+   path settles to remove any version-specific vocabulary or unnecessary
+   orchestration helpers.
 
 ## Fact Family Migration Inventory
 

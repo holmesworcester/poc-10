@@ -21,6 +21,10 @@ use rusqlite::{params, OptionalExtension};
 
 pub const SHARE_FACT_WITH_SYNC: &str = "share_fact_with_sync";
 
+pub const STORAGE_VERSION: u32 = crate::protocol::versioning::update::CURRENT_PROTOCOL_VERSION;
+pub const STORAGE_REQUIREMENT: crate::core::effects::StorageRequirement =
+    crate::core::effects::StorageRequirement::Current(STORAGE_VERSION);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncShareState {
     Upsert,
