@@ -74,7 +74,7 @@ fn create_handler_emits_responder_secret_and_sealed_connection() {
         .expect("open connection as responder");
 
     assert_eq!(ephemeral.owner_endpoint, scenario.responder_endpoint);
-    assert_eq!(ephemeral.created_at_ms, scenario.received_at);
+    assert_eq!(ephemeral.created_at_ms, scenario.request_fact.timestamp);
     assert_eq!(
         connection.responder_ephemeral_secret_fact_id,
         ephemeral_fact.id
@@ -93,6 +93,41 @@ fn create_handler_emits_responder_secret_and_sealed_connection() {
     );
     assert_ne!(connection.handshake_hash, [0u8; 32]);
     assert_ne!(connection.connection_secret, [0u8; 32]);
+}
+
+#[test]
+fn create_handler_duplicate_work_emits_same_facts() {
+    let scenario = synthesize_scenario(SynthOpts {
+        request_dialed_addr: Some("127.0.0.1:41099".parse().expect("addr")),
+        ..SynthOpts::default()
+    });
+    let store = test_store();
+    store
+        .insert_table_values(vec![endpoint_rows::local_endpoint_insert(
+            &scenario.endpoint,
+        )])
+        .expect("seed local endpoint");
+    let context = HandlerContext::with_facts([
+        scenario.request_fact.clone(),
+        scenario.invite_fact.clone(),
+        scenario.receive_fact.clone(),
+    ])
+    .with_db(&store);
+
+    let first = CreateConnectionHandler::new()
+        .handle(&scenario.intent, &context)
+        .expect("first output");
+    let second = CreateConnectionHandler::new()
+        .handle(&scenario.intent, &context)
+        .expect("second output");
+
+    let mut first_ids: Vec<_> = first.facts.iter().map(|fact| fact.id).collect();
+    let mut second_ids: Vec<_> = second.facts.iter().map(|fact| fact.id).collect();
+    first_ids.sort();
+    second_ids.sort();
+
+    assert_eq!(first_ids, second_ids);
+    assert_eq!(first.facts, second.facts);
 }
 
 #[test]
@@ -134,7 +169,6 @@ struct Scenario {
     initiator_endpoint: [u8; 32],
     responder_endpoint: [u8; 32],
     request_dialed_addr: Option<std::net::SocketAddr>,
-    received_at: u64,
 }
 
 #[derive(Default)]
@@ -227,7 +261,6 @@ fn synthesize_scenario(opts: SynthOpts) -> Scenario {
         initiator_endpoint,
         responder_endpoint,
         request_dialed_addr: opts.request_dialed_addr,
-        received_at,
     }
 }
 

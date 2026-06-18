@@ -148,6 +148,21 @@ impl Runtime {
         stored + local
     }
 
+    pub(crate) fn has_pending_local_intent_kind(&self, kind: &str) -> Result<bool, String> {
+        let pending: i64 = self
+            .db
+            .conn()
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM local_intents WHERE kind = ?1 LIMIT 1
+                 )",
+                rusqlite::params![kind],
+                |row| row.get(0),
+            )
+            .map_err(|err| format!("check pending local intent kind {kind}: {err}"))?;
+        Ok(pending != 0)
+    }
+
     /// Borrow the declared handler routes for registry diagnostics.
     pub fn handler_routes(&self) -> &'static [HandlerRoute] {
         self.description.handlers
@@ -168,12 +183,12 @@ impl Runtime {
         project_fact::submit_facts_with_admission(&self.db, facts, self.description.fact_admission)
     }
 
-    /// Queue durable idempotent work for the protocol handler registry.
+    /// Queue durable work for the protocol handler registry.
     ///
     /// The handler selected by `intent.kind` runs in a later runtime/daemon work
     /// pass. Use `submit_local_intent` for work that is only valid on this
     /// process and should disappear on restart.
-    pub fn submit_intent(&mut self, intent: Intent) -> Result<bool, String> {
+    pub fn submit_intent(&mut self, intent: Intent) -> Result<(), String> {
         crate::core::handle_intent::validate_intent_kind_registered(
             &intent,
             self.handlers.intent_kinds(),
@@ -182,7 +197,7 @@ impl Runtime {
     }
 
     /// Queue ephemeral work for this runtime connection.
-    pub fn submit_local_intent(&mut self, intent: Intent) -> Result<bool, String> {
+    pub fn submit_local_intent(&mut self, intent: Intent) -> Result<(), String> {
         crate::core::handle_intent::validate_intent_kind_registered(
             &intent,
             self.handlers.intent_kinds(),

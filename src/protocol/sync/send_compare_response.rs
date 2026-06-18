@@ -49,7 +49,7 @@ pub fn decode_send_sync_compare_response(
     let compare_fact_id = intent.payload[1..33].try_into().unwrap();
     let input = SendSyncCompareResponse { compare_fact_id };
     if intent.key != send_sync_compare_response_key(&input) {
-        return Err("send_sync_compare_response idempotence key does not match payload".into());
+        return Err("send_sync_compare_response intent key does not match payload".into());
     }
     Ok(input)
 }

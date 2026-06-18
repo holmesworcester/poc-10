@@ -2,7 +2,7 @@
 //!
 //! Acceptance is represented by the queued intent and its declared facts. The
 //! handler opens the specific wrap with the specific local recipient material
-//! chosen by projection. The intent payload, idempotence key, and constructor
+//! chosen by projection. The intent payload, handler key, and constructor
 //! live here so the handler is self-contained.
 
 use crate::core::effects::RuntimeEffects;

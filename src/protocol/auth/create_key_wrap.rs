@@ -2,7 +2,7 @@
 //!
 //! The projector decides that a recipient, source secret, and signer capability
 //! may meet; this handler loads those declared facts and asks the key-wrap
-//! module to build the deterministic raw wrap. The intent payload, idempotence key, and
+//! module to build the deterministic raw wrap. The intent payload, handler key, and
 //! constructor live here so the handler is self-contained.
 
 use crate::core::effects::RuntimeEffects;

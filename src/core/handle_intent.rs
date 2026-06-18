@@ -6,17 +6,17 @@
 //! emits an `Intent` instead of running that work inline. The runtime later
 //! dispatches the intent to the protocol handler registered for its kind. This
 //! keeps commands, projection, network IO, and background maintenance on the
-//! same idempotent queue model.
+//! same queue and commit model.
 //!
 //! Dispatch owns the lifecycle of one queued intent row. The SQL shape is two
 //! queues with the same columns: durable `intents` rows and process-local
-//! `local_intents` rows. Queue identity is `(kind, idempotence_key)`, so
-//! inserts are idempotent only when the payload also matches. Runtime admission
-//! rejects intent kinds that are not in the handler registry; if a stale
-//! unregistered row is already present, dispatch reports an invariant error and
-//! leaves the row untouched. Durable rows are selected in stable identity order
-//! for replay and tests; local rows are selected by SQLite insertion order so
-//! live IO preserves arrival order.
+//! `local_intents` rows. Every insert gets a fresh row id; `kind` only selects
+//! the handler, while `intent_key` and `payload` remain handler-owned bytes.
+//! Runtime admission rejects intent kinds that are not in the handler registry;
+//! if a stale unregistered row is already present, dispatch reports an invariant
+//! error and leaves the row untouched. Durable and local rows are both selected
+//! by SQLite insertion order so projection, replay, and live IO all preserve the
+//! order in which work was queued.
 //!
 //! A handler declares exact fact inputs. Dispatch loads those inputs by joining
 //! durable `facts` bytes with `local_fact_admissions` metadata and places them
@@ -28,10 +28,9 @@
 //! deleting the work item, and no deletion without committing the output. That
 //! delete and every `RuntimeEffects` write happen inside one SQLite transaction.
 //! If the transaction rolls back, the queued row is still there; if it commits,
-//! the row is gone and the output is durable. Durable work wins when both queues
-//! contain the same kind, and handling a durable row removes a duplicate local
-//! row with the same identity so ephemeral duplicates do not repeat work already
-//! accepted durably.
+//! the row is gone and the output is durable. Queue rows do not collapse by
+//! `(kind, key)`; protocols that need backpressure express it in their own
+//! facts, row mutations, network queues, or handler-local state.
 
 use crate::core::db::{quoted_table_name, Db, TableName};
 use crate::core::effects::{RuntimeEffects, StorageRequirement};
@@ -39,6 +38,7 @@ use crate::core::facts::{fact_from_storage_row, Fact, FactId};
 use crate::core::intents::{HandlerContext, HandlerMode, Intent, IntentHandler, IntentWorkRow};
 use crate::core::schema::{INTENTS, LOCAL_INTENTS};
 
+use crate::core::crypto;
 use crate::core::project_fact::commit_effects::{
     commit_runtime_effects_in_tx, validate_runtime_effects_for_admission,
 };
@@ -47,6 +47,8 @@ use rusqlite::{params, OptionalExtension};
 use std::net::SocketAddr;
 
 struct QueuedIntent {
+    /// Random row id for the exact queued work item being dispatched.
+    intent_id: Vec<u8>,
     /// Queue from which this row was claimed.
     queue: IntentQueue,
     intent: Intent,
@@ -76,8 +78,8 @@ struct IntentInput<'a> {
 ///
 /// Handlers are allowed to observe runtime state, so this is not a
 /// pure-evaluation boundary like projection. The queue lifecycle is still
-/// centralized: only the commit stage deletes handled rows, removes durable
-/// shadowed local rows, and publishes effects.
+/// centralized: only the commit stage deletes handled rows and publishes
+/// effects.
 pub(crate) fn dispatch_one_intent(
     store: &Db,
     handlers: &HandlerSet,
@@ -111,9 +113,8 @@ pub(crate) fn dispatch_one_intent(
 
 /// Stage 1: load one queued intent and the facts its handler declared.
 ///
-/// Durable queue rows are ordered by stable identity for deterministic tests
-/// and replay. Local rows use insertion order so inbound network frames and
-/// other ephemeral work preserve arrival order within one process.
+/// Durable and local rows use insertion order. Replay re-emits work in the
+/// order projectors recorded it instead of sorting by handler-owned keys.
 fn load_one_intent_input<'a>(
     store: &'a Db,
     handlers: &'a HandlerSet,
@@ -178,8 +179,10 @@ fn next_queued_intent_in_queue(
     next_intent_work_row(store, queue.table(), queue.order_by_sql())
         .map_err(|err| format!("load queued intent: {err}"))?
         .map(|row| {
-            let mode = row.mode;
-            Intent::from_work_row(row).map(|intent| QueuedIntent {
+            let QueuedIntentWorkRow { intent_id, work } = row;
+            let mode = work.mode;
+            Intent::from_work_row(work).map(|intent| QueuedIntent {
+                intent_id,
                 queue,
                 intent,
                 mode,
@@ -229,10 +232,10 @@ fn load_retained_fact(store: &Db, id: &FactId) -> Result<Option<Fact>, String> {
 ///
 /// This is the boundary for intent dispatch, not a second implementation of
 /// effect commits. Dispatch owns deleting the handled queued intent and
-/// removing any shadowed ephemeral duplicate; `commit_effects` owns purging
-/// facts, admitting emitted facts, applying row mutations, and recording
-/// follow-up intents. Keeping those steps in one transaction means a handler
-/// output is visible exactly when its input queue row is consumed.
+/// `commit_effects` owns purging facts, admitting emitted facts, applying row
+/// mutations, and recording follow-up intents. Keeping those steps in one
+/// transaction means a handler output is visible exactly when its input queue
+/// row is consumed.
 ///
 /// If the handled row is already gone, nothing commits and the returned value
 /// is `false`.
@@ -246,13 +249,8 @@ fn commit_handler_output(
 ) -> Result<bool, String> {
     store
         .write_transaction(|tx| {
-            let kind = queued.intent.kind.as_str();
-            let idempotence_key = queued.intent.key.as_slice();
-            if delete_intent_work_row_in_tx(tx, queued.queue.table(), kind, idempotence_key)? == 0 {
+            if delete_intent_work_row_in_tx(tx, queued.queue.table(), &queued.intent_id)? == 0 {
                 return Ok(false);
-            }
-            if queued.queue == IntentQueue::Durable {
-                delete_intent_work_row_in_tx(tx, LOCAL_INTENTS, kind, idempotence_key)?;
             }
 
             commit_runtime_effects_in_tx(
@@ -407,10 +405,7 @@ impl IntentQueue {
     }
 
     fn order_by_sql(self) -> &'static str {
-        match self {
-            Self::Durable => "kind, idempotence_key",
-            Self::Local => "rowid",
-        }
+        "rowid"
     }
 }
 
@@ -433,69 +428,44 @@ fn quoted_intent_work_table_name(table: TableName) -> rusqlite::Result<String> {
     }
 }
 
-fn verify_idempotent_intent_insert<T>(
-    changed: usize,
-    existing: impl FnOnce() -> rusqlite::Result<Option<T>>,
-    matches_existing: impl FnOnce(&T) -> bool,
-    conflict_message: impl Into<String>,
-) -> rusqlite::Result<bool> {
-    if changed == 0 {
-        let matches = existing()?.as_ref().map(matches_existing).unwrap_or(false);
-        if !matches {
-            return Err(intent_queue_error(conflict_message));
-        }
-    }
-    Ok(changed > 0)
-}
-
-/// Insert one raw intent work row idempotently inside the caller's transaction.
+/// Insert one raw intent work row inside the caller's transaction.
 pub(crate) fn insert_intent_work_row_in_tx(
     db: &Db,
     table: TableName,
     row: &IntentWorkRow,
-) -> rusqlite::Result<bool> {
+) -> rusqlite::Result<()> {
     let table_name = quoted_intent_work_table_name(table)?;
-    let changed = db.conn().execute(
-        &format!(
-            "INSERT OR IGNORE INTO {table_name} (kind, idempotence_key, payload, replay)
-             VALUES (?1, ?2, ?3, ?4)"
-        ),
-        params![
-            row.kind.as_str(),
-            row.idempotence_key.as_slice(),
-            row.payload.as_slice(),
-            replay_flag_for_handler_mode(row.mode)
-        ],
-    )?;
-    let inserted = verify_idempotent_intent_insert(
-        changed,
-        || {
-            db.conn()
-                .query_row(
-                    &format!(
-                        "SELECT payload
-                         FROM {table_name}
-                         WHERE kind = ?1 AND idempotence_key = ?2"
-                    ),
-                    params![row.kind.as_str(), row.idempotence_key.as_slice()],
-                    |row| row.get::<_, Vec<u8>>(0),
-                )
-                .optional()
-        },
-        |existing| existing.as_slice() == row.payload.as_slice(),
-        format!("conflicting intent row for {}", row.kind),
-    )?;
-    if !inserted && row.mode.is_replay() {
-        db.conn().execute(
+    for _ in 0..8 {
+        let intent_id = random_intent_id();
+        let changed = db.conn().execute(
             &format!(
-                "UPDATE {table_name}
-                 SET replay = 1
-                 WHERE kind = ?1 AND idempotence_key = ?2 AND replay = 0"
+                "INSERT OR IGNORE INTO {table_name} (intent_id, kind, intent_key, payload, replay)
+                 VALUES (?1, ?2, ?3, ?4, ?5)"
             ),
-            params![row.kind.as_str(), row.idempotence_key.as_slice()],
+            params![
+                intent_id.as_slice(),
+                row.kind.as_str(),
+                row.intent_key.as_slice(),
+                row.payload.as_slice(),
+                replay_flag_for_handler_mode(row.mode)
+            ],
         )?;
+        if changed == 1 {
+            return Ok(());
+        }
     }
-    Ok(inserted)
+    Err(intent_queue_error(
+        "intent id collision while queuing intent",
+    ))
+}
+
+fn random_intent_id() -> [u8; 16] {
+    let random = crypto::random_bytes_32();
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&random[..16]);
+    id[6] = (id[6] & 0x0f) | 0x40;
+    id[8] = (id[8] & 0x3f) | 0x80;
+    id
 }
 
 fn replay_flag_for_handler_mode(mode: HandlerMode) -> i64 {
@@ -506,17 +476,16 @@ fn replay_flag_for_handler_mode(mode: HandlerMode) -> i64 {
     }
 }
 
-/// Delete one raw intent work row by its idempotent queue identity.
+/// Delete one raw intent work row by its queue row id.
 fn delete_intent_work_row_in_tx(
     db: &Db,
     table: TableName,
-    kind: &str,
-    idempotence_key: &[u8],
+    intent_id: &[u8],
 ) -> rusqlite::Result<usize> {
     let table_name = quoted_intent_work_table_name(table)?;
     db.conn().execute(
-        &format!("DELETE FROM {table_name} WHERE kind = ?1 AND idempotence_key = ?2"),
-        params![kind, idempotence_key],
+        &format!("DELETE FROM {table_name} WHERE intent_id = ?1"),
+        params![intent_id],
     )
 }
 
@@ -525,27 +494,35 @@ fn next_intent_work_row(
     db: &Db,
     table: TableName,
     order_by_sql: &str,
-) -> rusqlite::Result<Option<IntentWorkRow>> {
+) -> rusqlite::Result<Option<QueuedIntentWorkRow>> {
     let table_name = quoted_intent_work_table_name(table)?;
     db.conn()
         .query_row(
             &format!(
-                "SELECT kind, idempotence_key, payload, replay
+                "SELECT intent_id, kind, intent_key, payload, replay
                  FROM {table_name}
                  ORDER BY {order_by_sql}
                  LIMIT 1"
             ),
             [],
             |row| {
-                Ok(IntentWorkRow {
-                    kind: row.get(0)?,
-                    idempotence_key: row.get(1)?,
-                    payload: row.get(2)?,
-                    mode: handler_mode_from_replay_flag(row.get(3)?),
+                Ok(QueuedIntentWorkRow {
+                    intent_id: row.get(0)?,
+                    work: IntentWorkRow {
+                        kind: row.get(1)?,
+                        intent_key: row.get(2)?,
+                        payload: row.get(3)?,
+                        mode: handler_mode_from_replay_flag(row.get(4)?),
+                    },
                 })
             },
         )
         .optional()
+}
+
+struct QueuedIntentWorkRow {
+    intent_id: Vec<u8>,
+    work: IntentWorkRow,
 }
 
 fn handler_mode_from_replay_flag(replay: i64) -> HandlerMode {
@@ -557,24 +534,23 @@ fn handler_mode_from_replay_flag(replay: i64) -> HandlerMode {
 }
 
 /// Queue ephemeral handler work on this SQLite connection.
-pub(crate) fn submit_local_intent_to_db(store: &Db, intent: Intent) -> Result<bool, String> {
+pub(crate) fn submit_local_intent_to_db(store: &Db, intent: Intent) -> Result<(), String> {
     submit_intent_to_table(store, LOCAL_INTENTS, intent)
 }
 
 /// Insert one intent into the selected queue.
 ///
-/// Queue identity is `(kind, idempotence_key)`. Re-inserting the same payload is
-/// a no-op; a different payload for the same identity rejects because dispatch
-/// would no longer know which work item the key names.
+/// Every insert records a distinct queued work item. Repeated semantic work
+/// must be collapsed by the handler's own facts, row writes, network queue, or
+/// in-memory state when that protocol needs backpressure.
 pub(crate) fn submit_intent_to_table(
     store: &Db,
     table: TableName,
     intent: Intent,
-) -> Result<bool, String> {
-    let inserted = store
+) -> Result<(), String> {
+    store
         .write_transaction(|tx| insert_intent_work_row_in_tx(tx, table, &intent.work_row()))
-        .map_err(|err| format!("submit intent: {err}"))?;
-    Ok(inserted)
+        .map_err(|err| format!("submit intent: {err}"))
 }
 
 #[cfg(test)]
@@ -593,7 +569,7 @@ mod tests {
     static AFTER_FACT_CALLS: AtomicUsize = AtomicUsize::new(0);
 
     #[test]
-    fn durable_success_deletes_shadowed_local_intent() {
+    fn durable_success_deletes_only_claimed_row() {
         let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
         let intent = test_intent("handled", b"same-key");
 
@@ -614,8 +590,8 @@ mod tests {
         assert_eq!(store.table_row_count(INTENTS).expect("durable count"), 0);
         assert_eq!(
             store.table_row_count(LOCAL_INTENTS).expect("local count"),
-            0,
-            "durable success should remove the duplicate local row"
+            1,
+            "durable success should not collapse a distinct local row"
         );
     }
 
@@ -801,18 +777,18 @@ mod tests {
     }
 
     #[test]
-    fn intent_work_rows_are_idempotent_but_conflicts_reject() {
+    fn intent_work_rows_preserve_repeated_keys_as_distinct_work() {
         let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
         let row = IntentWorkRow::new("send", b"key".to_vec(), b"one".to_vec());
 
-        assert!(store
+        store
             .write_transaction(|tx| insert_intent_work_row_in_tx(tx, INTENTS, &row))
-            .expect("insert intent row"));
-        assert!(!store
+            .expect("insert first intent row");
+        store
             .write_transaction(|tx| insert_intent_work_row_in_tx(tx, INTENTS, &row))
-            .expect("idempotent insert"));
+            .expect("insert repeated intent row");
 
-        let err = store
+        store
             .write_transaction(|tx| {
                 insert_intent_work_row_in_tx(
                     tx,
@@ -820,13 +796,13 @@ mod tests {
                     &IntentWorkRow::new("send", b"key".to_vec(), b"two".to_vec()),
                 )
             })
-            .expect_err("conflicting insert must reject");
+            .expect("insert repeated key with different payload");
 
-        assert!(err.to_string().contains("conflicting intent row for send"));
+        assert_eq!(store.table_row_count(INTENTS).expect("durable count"), 3);
     }
 
     #[test]
-    fn intent_work_rows_select_durable_by_identity_order() {
+    fn intent_work_rows_select_durable_by_insertion_order() {
         let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
         for row in [
             IntentWorkRow::new("z_kind", b"2".to_vec(), b"z".to_vec()),
@@ -838,13 +814,13 @@ mod tests {
                 .expect("insert durable row");
         }
 
-        let selected = next_intent_work_row(&store, INTENTS, "kind, idempotence_key")
+        let selected = next_intent_work_row(&store, INTENTS, "rowid")
             .expect("select durable row")
             .expect("durable row");
 
-        assert_eq!(selected.kind, "a_kind");
-        assert_eq!(selected.idempotence_key, b"1");
-        assert_eq!(selected.payload, b"a1");
+        assert_eq!(selected.work.kind, "z_kind");
+        assert_eq!(selected.work.intent_key, b"2");
+        assert_eq!(selected.work.payload, b"z");
     }
 
     #[test]
@@ -862,7 +838,8 @@ mod tests {
             next_intent_work_row(&store, LOCAL_INTENTS, "rowid",)
                 .expect("select first local")
                 .expect("first local")
-                .idempotence_key,
+                .work
+                .intent_key,
             b"first"
         );
     }

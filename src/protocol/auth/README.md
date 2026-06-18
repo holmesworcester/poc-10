@@ -201,7 +201,7 @@ source key material
 source coordinate
 ```
 
-The wrap idempotence key does not include request entropy. A duplicate request
+The wrap identity does not include request entropy. A duplicate request
 for the same edge converges on the same pending wrap or fact, preventing key
 amplification.
 
@@ -304,8 +304,9 @@ recipient key, and frontier, decrypts the wrapped secret, validates the
 resulting local secret id against the wrap coordinate, and returns either a
 `local_key_secret` or `local_history_node_secret` fact.
 
-Both handlers use the intent payload as the idempotence key source. If any input
-fact is missing, core retries through the normal handler contract.
+Both handlers use the intent payload as the handler key source. Projectors should
+only emit these intents once their declared input facts are retained; a missing
+input is a dispatch error and commits no output.
 These are auth-owned handler routes registered with core; other scopes do not
 call them directly.
 

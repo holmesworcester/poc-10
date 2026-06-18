@@ -99,7 +99,7 @@ fn decode_maintain_connections(intent: &Intent) -> Result<MaintainConnections, S
         local_addr,
     };
     if intent.key != maintain_connections_key(&input) {
-        return Err("maintain_connections idempotence key does not match payload".to_string());
+        return Err("maintain_connections intent key does not match payload".to_string());
     }
     Ok(input)
 }

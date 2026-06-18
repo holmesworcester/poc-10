@@ -49,9 +49,9 @@ pub struct RuntimeEffects {
     pub purged_facts: Vec<FactId>,
     /// Protocol or core table mutations validated against the runtime allowlist.
     pub row_mutations: Vec<RowMutation>,
-    /// Durable idempotent work for handlers.
+    /// Durable queued work for handlers.
     pub intents: Vec<Intent>,
-    /// Connection-local idempotent work, dropped on restart.
+    /// Connection-local queued work, dropped on restart.
     pub local_intents: Vec<Intent>,
     /// Clear derived/runtime state and requeue all retained facts in replay mode.
     pub rebuild_derived_state: bool,

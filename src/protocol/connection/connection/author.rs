@@ -2,7 +2,9 @@
 
 use std::net::SocketAddr;
 
-use crate::core::crypto::{x25519_public_key, X25519PrivateKey, X25519PublicKey};
+use crate::core::crypto::{
+    self, x25519_public_key, X25519PrivateKey, X25519PublicKey, XChaCha20Poly1305Nonce,
+};
 use crate::core::facts::{Fact, FactScope};
 use crate::protocol::auth::endpoint::fact::EndpointFact;
 use crate::protocol::auth::invite_secret::fact::InviteSecretFact;
@@ -28,8 +30,50 @@ pub struct BuildResponderResult {
     pub connection: ConnectionFact,
 }
 
+pub struct DeterministicResponderOutput {
+    pub ephemeral_private_key: X25519PrivateKey,
+    pub seal_randomness: XChaCha20Poly1305Nonce,
+}
+
+pub fn deterministic_responder_output(
+    endpoint_secret: &X25519PrivateKey,
+    request_id: [u8; 32],
+    authority_id: [u8; 32],
+    receive_id: [u8; 32],
+) -> DeterministicResponderOutput {
+    let mut info = Vec::with_capacity(32 * 3);
+    info.extend_from_slice(&request_id);
+    info.extend_from_slice(&authority_id);
+    info.extend_from_slice(&receive_id);
+
+    let ephemeral_private_key = crypto::blake3_keyed_hash(
+        endpoint_secret,
+        b"topo:create-connection:responder-ephemeral:v1",
+        &info,
+    );
+    let nonce_bytes = crypto::blake3_keyed_hash(
+        endpoint_secret,
+        b"topo:create-connection:seal-nonce:v1",
+        &info,
+    );
+    let mut seal_randomness = [0u8; crypto::XCHACHA20_POLY1305_NONCE_BYTES];
+    seal_randomness.copy_from_slice(&nonce_bytes[..crypto::XCHACHA20_POLY1305_NONCE_BYTES]);
+    DeterministicResponderOutput {
+        ephemeral_private_key,
+        seal_randomness,
+    }
+}
+
 pub fn build_responder_connection(
     input: BuildResponderConnection<'_>,
+) -> Result<BuildResponderResult, String> {
+    let seal_nonce = crate::core::crypto::random_xchacha20poly1305_nonce();
+    build_responder_connection_with_seal_randomness(input, seal_nonce)
+}
+
+pub fn build_responder_connection_with_seal_randomness(
+    input: BuildResponderConnection<'_>,
+    seal_randomness: XChaCha20Poly1305Nonce,
 ) -> Result<BuildResponderResult, String> {
     let responder_ephemeral_public_key: X25519PublicKey =
         x25519_public_key(&input.responder_ephemeral_private_key);
@@ -61,7 +105,11 @@ pub fn build_responder_connection(
         handshake_hash: material.handshake_hash,
         connection_secret: material.connection_secret,
     };
-    let bytes = encode::seal_fact(&connection, &input.responder_ephemeral_private_key)?;
+    let bytes = encode::seal_fact_with_nonce(
+        &connection,
+        &input.responder_ephemeral_private_key,
+        seal_randomness,
+    )?;
     let fact = Fact::new(FactScope::Local, input.created_at_ms, bytes);
     Ok(BuildResponderResult { fact, connection })
 }
