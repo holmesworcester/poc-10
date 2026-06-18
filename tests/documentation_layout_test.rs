@@ -83,6 +83,7 @@ fn documentation_layout_keeps_current_docs_live_and_old_notes_archived() {
         "docs/documentation_guide.md",
         "docs/auth.md",
         "docs/negentropy_recs.md",
+        "docs/research/protocol-versioning.md",
     ] {
         assert!(
             !root.join(removed_duplicate_doc).exists(),
@@ -303,7 +304,7 @@ fn poc10_replay_intent_shape_doc_records_current_upgrade_readiness_plan() {
 fn fact_authenticator_research_docs_record_authentication_boundary() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let authenticator_note = source_text(&root.join("docs/research/fact-validators.md"));
-    let versioning_note = source_text(&root.join("docs/research/protocol-versioning.md"));
+    let versioning_note = source_text(&root.join("src/protocol/versioning/README.md"));
     let normalized_authenticator = normalize_whitespace(&authenticator_note);
     let normalized_versioning = normalize_whitespace(&versioning_note);
 
@@ -349,8 +350,10 @@ fn fact_authenticator_research_docs_record_authentication_boundary() {
     }
 
     for required in [
-        "# Protocol Versioning",
-        "Versioning is protocol-owned release discipline plus a local storage repair loop",
+        "# Versioning",
+        "This scope owns the release constant `CURRENT_PROTOCOL_VERSION`",
+        "Core owns the generic commit-side `StorageRequirement` guard",
+        "see `src/core/README.md` for that runtime contract",
         "A release must not author a new durable fact type until every non-deprecated release can decode, authenticate, validate, and project that type",
         "Projectors for current code must support every old durable fact type that can remain in `facts`",
         "New projectors and queries must not write old materialized table shapes",
@@ -358,24 +361,20 @@ fn fact_authenticator_research_docs_record_authentication_boundary() {
         "The recurring version check emits a local update fact",
         "wipes resettable derived state, queues retained facts in replay mode, records protocol-visible update history, and advances the schema-declared protocol marker",
         "`src/protocol/versioning.rs` owns `CURRENT_PROTOCOL_VERSION`",
-        "`src/protocol/versioning/local_update.rs` owns the local update fact family",
-        "`StorageRequirement::MaintenanceBypass`",
-        "Projection commit is the only path that may request it",
+        "`src/protocol/versioning/local_update.rs` owns the `local_update` fact family",
         "The update loop is protocol responsibility",
-        "Projector and handler effects carry a required storage version",
+        "The update fact projection requests the rebuild effect",
+        "Protocol projectors and handlers register `StorageRequirement::Current`",
         "Core enforces that requirement inside the same SQL transaction",
         "On mismatch, SQLite rolls the whole transaction back",
-        "Queries check the same schema-declared protocol marker",
-        "Reads do not have a core commit boundary",
-        "query modules own their own gate",
+        "`StorageRequirement::MaintenanceBypass`",
+        "Queries are direct SQL readers",
+        "query must choose one explicit behavior",
         "support an old not-yet-replayed table shape",
-        "The update fact projection requests the rebuild effect, writes protocol-visible update history, and advances the schema-declared protocol marker in the same projection commit",
-        "Replay mode is carried by work rows",
-        "Retained facts are the source of truth",
         "Core does not know release policy, fact-family compatibility, or table meaning",
+        "Protocol modules own the marker table, version number, recurring check, update fact, query policy",
         "Incoming is volatile intake",
         "Fact storage happens only after admission and projection",
-        "release review must enforce the read-before-write rule",
     ] {
         assert!(
             normalized_versioning.contains(required),
@@ -560,6 +559,7 @@ fn core_readmes_document_runtime_boundaries() {
         "## Responsibility Boundary",
         "### Top-Level Files",
         "### Runtime Work Sections",
+        "### Storage Version Commit Guards",
         "### Projection Path And Commit Boundary",
         "### Handler Commit Boundary",
         "### Rebuild Mode And Time Wakes",
@@ -617,6 +617,15 @@ fn core_readmes_document_runtime_boundaries() {
         "one queued fact projection item",
         "runtime.rs",
         "bounded work ordering",
+        "A `SchemaSource` may declare a `StorageVersionSource`",
+        "what storage version does this database currently project",
+        "Projector and handler routes declare the storage shape their effects expect",
+        "`StorageRequirement::Current(version)`",
+        "commit_effects` reads the schema-declared marker",
+        "A mismatch aborts the SQLite transaction",
+        "`StorageRequirement::MaintenanceBypass` is the explicit escape hatch",
+        "Core does not decide when a database should be repaired",
+        "whether queries can read old table shapes",
         "raw fact -> tag route -> projector -> ProjectionOutput -> commit",
         "command -> author -> encode -> protocol self-check -> AuthoredFacts facts -> admit -> projection",
         "`FactAdmissionFn`",

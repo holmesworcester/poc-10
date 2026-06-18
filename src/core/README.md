@@ -89,8 +89,9 @@ Protocol code enters core through declarations and effect values:
   facts to admit durably, incoming facts to stage for projection, purges, row
   mutations, durable intents, and local intents.
 - `db::SchemaSource` lets core, network IO, and protocol registry code
-  declare SQL DDL, opaque row-table allowlists, and rebuild lifecycle for
-  retained fact storage, resettable runtime state, and state-summary tables.
+  declare SQL DDL, an optional storage-version marker source, opaque row-table
+  allowlists, and rebuild lifecycle for retained fact storage, resettable
+  runtime state, and state-summary tables.
 
 Data leaves core through the same narrow surfaces: commands receive
 `CliOutput`, protocol queries read schema-owned rows through `Db`, daemon
@@ -170,6 +171,13 @@ the owning projector decide whether that time proves anything.
   `DeleteWhere` followed by `InsertValues`.
 - Row mutations are accepted only for tables declared by the selected runtime.
   The module that builds a row owns its columns, key bytes, and semantics.
+- Storage-version requirements are commit guards. A projector or handler route
+  can attach `StorageRequirement::Current(version)` to its effects; core reads
+  the `StorageVersionSource` declared by the active schema and compares that
+  marker with the required version before it consumes queue rows or commits
+  effects. Mismatch aborts the transaction and leaves the queued work in place.
+  `StorageRequirement::MaintenanceBypass` is reserved for repair work that must
+  run while the marker is stale.
 - Db is below policy. It applies schemas, transactions, and row helpers; it
   does not interpret protocol rows, facts, context roles, or sync ranges.
 
@@ -261,8 +269,8 @@ use core syntax and contracts, but core must not import their semantic rules.
   queues, local network
   tables, and rebuild reset groups. Protocol rows live in protocol schema sources.
 - `db.rs`: SQLite substrate below runtime policy. It applies schema batches,
-  opens transactions, quotes identifiers, and applies typed row mutations. It
-  does not know what a fact tag,
+  opens transactions, quotes identifiers, reads schema-declared storage-version
+  markers, and applies typed row mutations. It does not know what a fact tag,
   context role, network frame, or protocol row means.
 - `wire.rs`: fixed-layout byte primitive layer. It provides exact-length
   readers/writers, big-endian integers, one-byte booleans, bounded padded
@@ -290,8 +298,9 @@ mode.
   append-only offers, plus shared `RuntimeEffects` for one fact.
 - `project_fact.rs::commit_effects`: shared atomic commit path for
   `RuntimeEffects`. It validates duplicate or conflicting effects, purges exact
-  facts, admits durable facts, incoming facts, row mutations, and queues
-  follow-up intents inside the caller's transaction.
+  facts, enforces storage-version requirements, admits durable facts, incoming
+  facts, row mutations, and queues follow-up intents inside the caller's
+  transaction.
 - `project_fact.rs::context_db`: SQL implementation of standing context. It
   stores need/offer edges, assembles projection context from queued
   `pending_projection_matches`, computes replacement-need and append-only-offer
@@ -308,6 +317,26 @@ mode.
   selects durable and incoming projection items through `project_fact.rs`,
   dispatches queued intents through `handle_intent.rs`, and lets context wakes
   or emitted child facts re-enter the queue explicitly.
+
+### Storage Version Commit Guards
+
+Core owns the commit-side guard, not the protocol's version policy. A
+`SchemaSource` may declare a `StorageVersionSource`: the table, version column,
+and ordering columns that answer "what storage version does this database
+currently project?" Core reads that marker as an integer and treats the row's
+meaning as opaque protocol state.
+
+Projector and handler routes declare the storage shape their effects expect by
+attaching `StorageRequirement::Current(version)`. During projection and intent
+commit, `commit_effects` reads the schema-declared marker and compares it with
+the route requirement before deleting pending work, applying row mutations,
+admitting follow-up facts, or queuing intents. A mismatch aborts the SQLite
+transaction, so the pending fact or intent remains available for later repair.
+
+`StorageRequirement::MaintenanceBypass` is the explicit escape hatch for repair
+work. Core does not decide when a database should be repaired, how the marker is
+advanced, whether queries can read old table shapes, or what compatibility old
+facts require. Those choices belong to the protocol.
 
 ### Projection Path And Commit Boundary
 
