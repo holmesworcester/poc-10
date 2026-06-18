@@ -172,6 +172,74 @@ are not projected inline: durable emitted facts go to `facts` and
 `pending_projection`, incoming emitted facts go to `incoming_facts`, and a later
 projection item handles each one.
 
+## 2.1) Project One Fact: Queues And Phases
+
+This is the same worker as section 2, drawn as queues/tables plus phases. The
+cylinders are durable or temp SQLite state. The rectangles are in-memory phases
+inside one runtime turn. Arrow labels are the mutations applied by the commit.
+`ProjectionOutput` and `PreparedProjection` are not queues; they exist only
+between projector evaluation and the SQL transaction.
+
+```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 300}} }%%
+flowchart TD
+    PENDING[("pending_projection")]
+    INCOMING[("incoming_facts")]
+    FACTS[("facts")]
+    MATCHES[("pending_projection_matches")]
+    DUE[("pending_time_ranges")]
+
+    LOAD["phase: load one projection input"]
+    PROJECT["phase: run protocol projector"]
+    PREPARE["phase: validate output and prepare commit"]
+    OUTPUT["ProjectionOutput (in memory)"]
+    COMMIT["phase: commit projection transaction"]
+    CLEANUP["phase: cleanup stale or rejected input"]
+
+    CONTEXT[("context_edges")]
+    WAKES[("time_wakes")]
+    ROWS[("scope rows")]
+    INTENTS[("intents")]
+    LOCAL_INTENTS[("local_intents")]
+
+    PENDING -->|claim durable owner| LOAD
+    INCOMING -->|claim incoming fact| LOAD
+    FACTS -.load durable bytes.-> LOAD
+    MATCHES -.attach matched context.-> LOAD
+    DUE -.attach due time ranges.-> LOAD
+
+    LOAD -->|fact + projection context| PROJECT
+    LOAD -.missing backing fact.-> CLEANUP
+    PROJECT -->|accepted projector result| OUTPUT
+    PROJECT -.rejected projector result.-> CLEANUP
+    OUTPUT --> PREPARE
+    PREPARE -->|PreparedProjection| COMMIT
+
+    CLEANUP -->|clear selected pending row| PENDING
+    CLEANUP -->|delete selected incoming row| INCOMING
+
+    COMMIT -->|consume selected pending row| PENDING
+    COMMIT -->|consume selected incoming row| INCOMING
+    COMMIT -->|retain incoming input if requested| FACTS
+    COMMIT -->|replace needs, append offers| CONTEXT
+    COMMIT -->|wake matched owners| PENDING
+    COMMIT -->|record matched payloads| MATCHES
+    COMMIT -->|replace owner wakes| WAKES
+    COMMIT -->|apply row mutations| ROWS
+    COMMIT -->|admit emitted durable facts| FACTS
+    COMMIT -->|queue emitted durable facts| PENDING
+    COMMIT -->|stage emitted incoming facts| INCOMING
+    COMMIT -->|record durable intents| INTENTS
+    COMMIT -->|record local intents| LOCAL_INTENTS
+    COMMIT -->|purge exact facts| FACTS
+```
+
+The projector decides the output shape: retain or drop an incoming input,
+publish needs or offers, schedule wakes, mutate rows, emit facts, emit intents,
+or purge facts. The commit applies that output atomically. The diagram therefore
+treats retain/drop/purge as commit mutations against queues and tables, not as
+separate runtime phases.
+
 ## 3) Serialized Turns And Locks
 
 Commands, queries, and the daemon turn all acquire `<db>.runtime.lock`, but they
