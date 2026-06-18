@@ -260,10 +260,6 @@ use core syntax and contracts, but core must not import their semantic rules.
   opens databases, applies declared schemas, submits authored facts, exposes
   bounded projection and intent queue drains, admits due time wakes, and
   composes `project_fact.rs` and `handle_intent.rs` into bounded runtime turns.
-- `work_status.rs`: shared status for one bounded runtime pass. It records
-  whether a worker made progress and whether it yielded with selected work still
-  queued, so runtime, daemon, replay, projection, and intent dispatch share one
-  drain contract.
 - `schema.rs`: core-owned SQL table inventory. It declares facts, local
   admissions, context edges, time wakes, pending projection, incoming facts,
   pending projection matches, the `pending_time_ranges` work table, intent
@@ -273,10 +269,6 @@ use core syntax and contracts, but core must not import their semantic rules.
   opens transactions, quotes identifiers, and applies typed row mutations. It
   does not know what a fact tag,
   context role, network frame, or protocol row means.
-- `versioning.rs`: protocol-neutral version ceiling and release-profile policy.
-  It computes read/admit ceilings, maps protocol bundles to family versions,
-  decides which versions a release may author, and classifies received bytes as
-  active or pending before protocol code interprets them.
 - `wire.rs`: fixed-layout byte primitive layer. It provides exact-length
   readers/writers, big-endian integers, one-byte booleans, bounded padded
   slots, and trailing-byte checks. Owning fact and intent modules layer tags,

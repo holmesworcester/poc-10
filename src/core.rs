@@ -39,5 +39,4 @@ pub mod replay;
 pub mod replay_check;
 pub mod runtime;
 pub mod schema;
-pub mod versioning;
 pub mod wire;

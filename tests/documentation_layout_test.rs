@@ -358,46 +358,47 @@ fn fact_authenticator_research_docs_record_authentication_boundary() {
     }
 
     for required in [
-        "fact-authenticator split",
-        "projector-local decode, validation, adaptation, and projection helpers",
-        "The active route model maps tags to projectors only",
-        "Agent note: Part II contains historical/current-code inventory refs captured while planning",
-        "use `fact-validators.md`, `src/core/README.md`, and `project_fact.rs` inline docs as the source of truth",
-        "current projector-local model",
-        "Projector routes, then route gating",
-        "Every routed family now carries a projector-local identity adapt helper",
-        "The model family lessons are in `fact-validators.md`",
-        "sealed request/connection opener validation",
-        "The projector runs decode, validation, adaptation, and semantic projection as plain protocol-local calls",
-        "Core has the write-side admission hook for commands and emitted facts",
-        "encode -> protocol self-check -> admit",
-        "Core can know that tag 50 uses a particular projector",
-        "Carry-over TODO for the model-family pass",
-        "Known-route validation",
-        "core routes raw bytes to that tag's projector",
-        "A fact version chooses whether verifier key material is embedded or referenced",
-        "trade self-contained verification against public-key size without changing projector semantics",
-        "Pending before active",
-        "Pending, not active truth",
-        "Wire-invalid bytes still drop",
-        "Pending is syncable and waiting",
-        "pending ingress",
-        "not active protocol truth",
-        "Context payloads are adapted too",
-        "needs and offers match on stable role/scope/range coordinates",
-        "A projector's needs and offers match on stable role/scope/range coordinates",
-        "without re-running authentication",
-        "receives context payloads in the semantic version it expects",
-        "the projector materializes the recovered inner fact bytes and receipts",
-        "Those inner facts then re-enter admission and route to their own projectors by tag",
-        "Creation is deliberately called out because it is currently the least tidy part of the protocol boundary",
-        "Its transcript helpers produce the bytes fed to crypto",
-        "Protocol self-check",
-        "Move crypto transcript helpers into `encode.rs`; keep actual signing, encryption, and assembly in `author.rs`",
+        "# Protocol Versioning",
+        "Versioning is protocol-owned release discipline plus a local storage repair loop",
+        "A release must not author a new durable fact type until every non-deprecated release can decode, authenticate, validate, and project that type",
+        "Projectors for current code must support every old durable fact type that can remain in `facts`",
+        "New projectors and queries must not write old materialized table shapes",
+        "Commands, projectors, handlers, and queries declare the storage version they expect",
+        "The recurring version check emits a local update fact",
+        "wipes resettable derived state, queues retained facts in replay mode, and records the current release marker",
+        "`src/protocol/versioning/update.rs` owns `CURRENT_PROTOCOL_VERSION`",
+        "`StorageRequirement::MaintenanceBypass`",
+        "Projection commit is the only path that may request it",
+        "The release marker is stored protocol state",
+        "Projector and handler effects carry a required storage version",
+        "Core enforces that requirement inside the same SQL transaction",
+        "On mismatch, SQLite rolls the whole transaction back",
+        "Queries call the protocol-owned guard",
+        "The update fact projection requests the rebuild effect and writes the new marker row in the same projection commit",
+        "Replay mode is carried by work rows",
+        "Retained facts are the source of truth",
+        "Core does not know release policy, fact-family compatibility, version numbers, or table meaning",
+        "Incoming is volatile intake",
+        "Fact storage happens only after admission and projection",
+        "release review must enforce the read-before-write rule",
     ] {
         assert!(
             normalized_versioning.contains(required),
-            "protocol versioning note is missing authenticator detail {required:?}"
+            "protocol versioning note is missing current-model detail {required:?}"
+        );
+    }
+
+    for removed in [
+        "ReleaseManifestEntry",
+        "ProtocolBundle",
+        "ReleaseProfile",
+        "global protocol ceiling",
+        "pending ingress",
+        "above-ceiling",
+    ] {
+        assert!(
+            !versioning_note.contains(removed),
+            "protocol versioning note should not describe removed model detail {removed:?}"
         );
     }
 }
@@ -460,6 +461,8 @@ fn protocol_versioning_docs_separate_release_marker_from_storage_guards() {
         "never old database tables",
         "Core should remain mechanical here",
         "protocol modules own the version numbers, the release marker, the recurring check, the update fact, and the per-family compatibility rules",
+        "do not ship code that authors a new durable fact type until every non-deprecated release can decode, authenticate, validate, and project that type",
+        "the local storage marker plus per-route storage guards cover the rest",
     ] {
         assert!(
             normalized_versioning.contains(required),
@@ -662,7 +665,6 @@ fn architecture_docs_match_current_module_and_context_names() {
         "`replay_check.rs`: replay diagnostics",
         "`db.rs`: SQLite substrate below runtime policy",
         "applies typed row mutations",
-        "`versioning.rs`: protocol-neutral version ceiling and release-profile policy",
         "`pending_time_ranges` work table",
     ] {
         assert!(

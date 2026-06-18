@@ -29,5 +29,10 @@
 //! requirement at an atomic commit boundary, but protocol modules own the version
 //! numbers, the release marker, the recurring check, the update fact, and the
 //! per-family compatibility rules.
+//!
+//! The release rule is deliberately outside core: do not ship code that authors
+//! a new durable fact type until every non-deprecated release can decode,
+//! authenticate, validate, and project that type. After that release discipline,
+//! the local storage marker plus per-route storage guards cover the rest.
 
 pub mod update;
