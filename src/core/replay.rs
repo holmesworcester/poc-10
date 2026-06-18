@@ -191,6 +191,7 @@ fn drain_replay_barrier(
         active |= drain_replay_projection_queue(
             db,
             projector,
+            handlers,
             ProjectionSource::Durable,
             allowed_tables,
             fact_admission,
@@ -198,6 +199,7 @@ fn drain_replay_barrier(
         active |= drain_replay_projection_queue(
             db,
             projector,
+            handlers,
             ProjectionSource::Incoming,
             allowed_tables,
             fact_admission,
@@ -228,6 +230,7 @@ fn drain_replay_barrier(
 fn drain_replay_projection_queue(
     db: &Db,
     projector: &dyn Projector,
+    handlers: &HandlerSet,
     source: ProjectionSource,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
@@ -240,6 +243,7 @@ fn drain_replay_projection_queue(
             source,
             ProjectionMode::Replay,
             allowed_tables,
+            handlers.intent_kinds(),
             fact_admission,
         )? {
             break;

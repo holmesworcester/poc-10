@@ -220,8 +220,9 @@ use core syntax and contracts, but core must not import their semantic rules.
 - `effects.rs`: shared effect language for projectors and handlers.
   `RuntimeEffects` names facts to admit, incoming facts, exact purges, row
   mutations, durable intents, and local intents. The shared commit helper writes
-  this mechanical description atomically inside the caller's transaction;
-  commands use `AuthoredFacts` facts plus a receipt instead.
+  this mechanical description atomically inside the caller's transaction and
+  rejects follow-up intent kinds that are not in the active handler registry.
+  Commands use `AuthoredFacts` facts plus a receipt instead.
 - `facts.rs`: protocol-neutral fact identity and visibility scope. It defines
   fact ids as BLAKE3 hashes of immutable bytes, the `Fact` container, and the
   `Global`, `Local`, and protocol-defined `Scoped` visibility model. It does
@@ -406,7 +407,9 @@ record local follow-up intents
 Only validated successful handler output reaches this transaction. If any
 commit step fails, SQLite rolls back the whole unit. This is what makes handler
 replay and process restart safe. Handler errors and validation errors leave the
-intent row in place.
+intent row in place. Durable and local intent admission validates handler
+registry membership before queue insertion; a stale unregistered row that is
+already present is an invariant error, not a successful commit.
 
 ### Replay And Time Wakes
 

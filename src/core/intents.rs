@@ -25,7 +25,8 @@
 //! core to load specific facts and may use query helpers through `Db`, then
 //! return `RuntimeEffects` for runtime workers to commit atomically. Missing
 //! declared inputs or semantic violations are handler errors: dispatch does not
-//! commit output or consume the queue row.
+//! commit output or consume the queue row. Runtime effect validation rejects any
+//! emitted intent whose kind is not registered by the active runtime.
 
 use crate::core::db::Db;
 use crate::core::effects::RuntimeEffects;

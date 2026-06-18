@@ -11,9 +11,12 @@
 //! Dispatch owns the lifecycle of one queued intent row. The SQL shape is two
 //! queues with the same columns: durable `intents` rows and process-local
 //! `local_intents` rows. Queue identity is `(kind, idempotence_key)`, so
-//! inserts are idempotent only when the payload also matches. Durable rows are
-//! selected in stable identity order for replay and tests; local rows are
-//! selected by SQLite insertion order so live IO preserves arrival order.
+//! inserts are idempotent only when the payload also matches. Runtime admission
+//! rejects intent kinds that are not in the handler registry; if a stale
+//! unregistered row is already present, dispatch reports an invariant error and
+//! leaves the row untouched. Durable rows are selected in stable identity order
+//! for replay and tests; local rows are selected by SQLite insertion order so
+//! live IO preserves arrival order.
 //!
 //! A handler declares exact fact inputs. Dispatch loads those inputs by joining
 //! durable `facts` bytes with `local_fact_admissions` metadata and places them
@@ -40,7 +43,7 @@ use crate::core::project_fact::commit_effects::{
     commit_runtime_effects_in_tx, validate_runtime_effects_for_admission,
 };
 use crate::core::project_fact::route::FactAdmissionFn;
-use rusqlite::{params, params_from_iter, OptionalExtension};
+use rusqlite::{params, OptionalExtension};
 use std::net::SocketAddr;
 
 struct QueuedIntent {
@@ -85,8 +88,20 @@ pub(crate) fn dispatch_one_intent(
         None => return Ok(false),
         Some(input) => input,
     };
-    let (queued, effects) = run_loaded_intent(input, allowed_tables, fact_admission)?;
-    commit_handler_output(store, &queued, &effects, allowed_tables, fact_admission)
+    let (queued, effects) = run_loaded_intent(
+        input,
+        allowed_tables,
+        handlers.intent_kinds(),
+        fact_admission,
+    )?;
+    commit_handler_output(
+        store,
+        &queued,
+        &effects,
+        allowed_tables,
+        handlers.intent_kinds(),
+        fact_admission,
+    )
 }
 
 // =============================================================================
@@ -104,7 +119,7 @@ fn load_one_intent_input<'a>(
     queue: IntentQueue,
     mode: HandlerMode,
 ) -> Result<Option<IntentInput<'a>>, String> {
-    let Some(queued) = next_queued_intent_in_queue(store, queue, handlers.intent_kinds())? else {
+    let Some(queued) = next_queued_intent_in_queue(store, queue)? else {
         return Ok(None);
     };
     let handler = handlers.handler_for_intent(&queued.intent)?;
@@ -126,6 +141,7 @@ fn load_one_intent_input<'a>(
 fn run_loaded_intent(
     input: IntentInput<'_>,
     allowed_tables: &[TableName],
+    registered_intent_kinds: &[&str],
     fact_admission: Option<FactAdmissionFn>,
 ) -> Result<(QueuedIntent, RuntimeEffects), String> {
     let IntentInput {
@@ -135,7 +151,12 @@ fn run_loaded_intent(
     } = input;
     match handler.handle(&queued.intent, &context) {
         Ok(effects) => {
-            validate_runtime_effects_for_admission(&effects, allowed_tables, fact_admission)?;
+            validate_runtime_effects_for_admission(
+                &effects,
+                allowed_tables,
+                registered_intent_kinds,
+                fact_admission,
+            )?;
             Ok((queued, effects))
         }
         Err(err) => Err(err.to_string()),
@@ -146,13 +167,12 @@ fn run_loaded_intent(
 // Load Stage Helpers
 // =============================================================================
 
-/// Return the first queued intent matching a declared handler route.
+/// Return the first queued intent in queue order.
 fn next_queued_intent_in_queue(
     store: &Db,
     queue: IntentQueue,
-    allowed_kinds: &[&str],
 ) -> Result<Option<QueuedIntent>, String> {
-    next_intent_work_row(store, queue.table(), allowed_kinds, queue.order_by_sql())
+    next_intent_work_row(store, queue.table(), queue.order_by_sql())
         .map_err(|err| format!("load queued intent: {err}"))?
         .map(|row| Intent::from_work_row(row).map(|intent| QueuedIntent { queue, intent }))
         .transpose()
@@ -211,6 +231,7 @@ fn commit_handler_output(
     queued: &QueuedIntent,
     effects: &RuntimeEffects,
     allowed_tables: &[TableName],
+    registered_intent_kinds: &[&str],
     fact_admission: Option<FactAdmissionFn>,
 ) -> Result<bool, String> {
     store
@@ -224,7 +245,13 @@ fn commit_handler_output(
                 delete_intent_work_row_in_tx(tx, LOCAL_INTENTS, kind, idempotence_key)?;
             }
 
-            commit_runtime_effects_in_tx(tx, effects, allowed_tables, fact_admission)?;
+            commit_runtime_effects_in_tx(
+                tx,
+                effects,
+                allowed_tables,
+                registered_intent_kinds,
+                fact_admission,
+            )?;
             Ok(true)
         })
         .map_err(|err| format!("commit handler output: {err}"))
@@ -316,7 +343,7 @@ impl HandlerSet {
         }
     }
 
-    fn intent_kinds(&self) -> &[&'static str] {
+    pub(crate) fn intent_kinds(&self) -> &[&'static str] {
         &self.intent_kinds
     }
 
@@ -331,6 +358,24 @@ impl HandlerSet {
             .iter()
             .find(|entry| entry.intent_kind == kind)
             .map(|entry| entry.handler.as_ref())
+    }
+}
+
+/// Verify that an intent can be dispatched by this runtime's handler registry.
+pub(crate) fn validate_intent_kind_registered(
+    intent: &Intent,
+    registered_kinds: &[&str],
+) -> Result<(), String> {
+    if registered_kinds
+        .iter()
+        .any(|kind| *kind == intent.kind.as_str())
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "intent kind {} is not registered",
+            intent.kind.as_str()
+        ))
     }
 }
 
@@ -442,31 +487,22 @@ fn delete_intent_work_row_in_tx(
     )
 }
 
-/// Select the next raw intent work row for any allowed handler kind.
+/// Select the next raw intent work row in queue order.
 fn next_intent_work_row(
     db: &Db,
     table: TableName,
-    allowed_kinds: &[&str],
     order_by_sql: &str,
 ) -> rusqlite::Result<Option<IntentWorkRow>> {
-    if allowed_kinds.is_empty() {
-        return Ok(None);
-    }
     let table_name = quoted_intent_work_table_name(table)?;
-    let placeholders = (1..=allowed_kinds.len())
-        .map(|idx| format!("?{idx}"))
-        .collect::<Vec<_>>()
-        .join(", ");
     db.conn()
         .query_row(
             &format!(
                 "SELECT kind, idempotence_key, payload
                  FROM {table_name}
-                 WHERE kind IN ({placeholders})
                  ORDER BY {order_by_sql}
                  LIMIT 1"
             ),
-            params_from_iter(allowed_kinds.iter().copied()),
+            [],
             |row| {
                 Ok(IntentWorkRow {
                     kind: row.get(0)?,
@@ -588,7 +624,7 @@ mod tests {
         assert!(err.contains("test fatal"), "{err}");
         assert_eq!(store.table_row_count(INTENTS).expect("durable count"), 1);
         assert_eq!(
-            next_queued_intent_in_queue(&store, IntentQueue::Durable, &["fatal"])
+            next_queued_intent_in_queue(&store, IntentQueue::Durable)
                 .expect("next durable intent")
                 .expect("queued durable intent")
                 .intent
@@ -596,6 +632,29 @@ mod tests {
             b"first".to_vec(),
             "fatal errors should not consume the row"
         );
+    }
+
+    #[test]
+    fn unregistered_queued_intent_errors_without_consuming_row() {
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
+        submit_intent_to_table(&store, INTENTS, test_intent("unregistered", b"first"))
+            .expect("submit unregistered intent row");
+
+        let err = dispatch_one_intent(
+            &store,
+            &HandlerSet::new(NOOP_ROUTES),
+            IntentQueue::Durable,
+            &[],
+            None,
+            HandlerMode::Live,
+        )
+        .expect_err("unregistered queued intent should be an invariant error");
+
+        assert!(
+            err.contains("no handler registered for intent kind unregistered"),
+            "{err}"
+        );
+        assert_eq!(store.table_row_count(INTENTS).expect("durable count"), 1);
     }
 
     #[test]
@@ -620,13 +679,40 @@ mod tests {
         );
         assert_eq!(store.table_row_count(INTENTS).expect("durable count"), 1);
         assert_eq!(
-            next_queued_intent_in_queue(&store, IntentQueue::Durable, &["invalid_output"])
+            next_queued_intent_in_queue(&store, IntentQueue::Durable)
                 .expect("next durable intent")
                 .expect("queued durable intent")
                 .intent
                 .key,
             b"first".to_vec(),
             "validation errors should not consume the row"
+        );
+    }
+
+    #[test]
+    fn handler_output_with_unregistered_followup_intent_errors_before_commit() {
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
+        submit_intent_to_table(&store, INTENTS, test_intent("emit_unknown", b"first"))
+            .expect("submit emitting intent");
+
+        let err = dispatch_one_intent(
+            &store,
+            &HandlerSet::new(EMIT_UNKNOWN_ROUTES),
+            IntentQueue::Durable,
+            &[],
+            None,
+            HandlerMode::Live,
+        )
+        .expect_err("unregistered follow-up intent should fail validation");
+
+        assert!(
+            err.contains("intent kind unknown_followup is not registered"),
+            "{err}"
+        );
+        assert_eq!(
+            store.table_row_count(INTENTS).expect("durable count"),
+            1,
+            "handler output validation errors should not consume the source row"
         );
     }
 
@@ -717,14 +803,9 @@ mod tests {
                 .expect("insert durable row");
         }
 
-        let selected = next_intent_work_row(
-            &store,
-            INTENTS,
-            &["z_kind", "a_kind"],
-            "kind, idempotence_key",
-        )
-        .expect("select durable row")
-        .expect("durable row");
+        let selected = next_intent_work_row(&store, INTENTS, "kind, idempotence_key")
+            .expect("select durable row")
+            .expect("durable row");
 
         assert_eq!(selected.kind, "a_kind");
         assert_eq!(selected.idempotence_key, b"1");
@@ -743,7 +824,7 @@ mod tests {
         }
 
         assert_eq!(
-            next_intent_work_row(&store, LOCAL_INTENTS, &["work"], "rowid",)
+            next_intent_work_row(&store, LOCAL_INTENTS, "rowid",)
                 .expect("select first local")
                 .expect("first local")
                 .idempotence_key,
@@ -811,6 +892,12 @@ mod tests {
         },
     ];
 
+    const EMIT_UNKNOWN_ROUTES: &[HandlerRoute] = &[HandlerRoute {
+        intent_kind: "emit_unknown",
+        factory: emit_unknown_handler,
+        recurrence: None,
+    }];
+
     impl IntentHandler for NoopHandler {
         fn handle(&self, _intent: &Intent, _context: &HandlerContext<'_>) -> HandlerResult {
             Ok(RuntimeEffects::new())
@@ -847,6 +934,14 @@ mod tests {
         }
     }
 
+    struct EmitUnknownHandler;
+
+    impl IntentHandler for EmitUnknownHandler {
+        fn handle(&self, _intent: &Intent, _context: &HandlerContext<'_>) -> HandlerResult {
+            Ok(RuntimeEffects::new().intent(test_intent("unknown_followup", b"child")))
+        }
+    }
+
     struct AfterFactHandler;
 
     impl IntentHandler for AfterFactHandler {
@@ -870,6 +965,10 @@ mod tests {
 
     fn emit_fact_handler() -> Box<dyn IntentHandler> {
         Box::new(EmitFactHandler)
+    }
+
+    fn emit_unknown_handler() -> Box<dyn IntentHandler> {
+        Box::new(EmitUnknownHandler)
     }
 
     fn after_fact_handler() -> Box<dyn IntentHandler> {

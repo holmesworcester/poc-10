@@ -176,11 +176,19 @@ impl Runtime {
     /// pass. Use `submit_local_intent` for work that is only valid on this
     /// process and should disappear on restart.
     pub fn submit_intent(&mut self, intent: Intent) -> Result<bool, String> {
+        crate::core::handle_intent::validate_intent_kind_registered(
+            &intent,
+            self.handlers.intent_kinds(),
+        )?;
         crate::core::handle_intent::submit_intent_to_table(&self.db, INTENTS, intent)
     }
 
     /// Queue ephemeral work for this runtime connection.
     pub fn submit_local_intent(&mut self, intent: Intent) -> Result<bool, String> {
+        crate::core::handle_intent::validate_intent_kind_registered(
+            &intent,
+            self.handlers.intent_kinds(),
+        )?;
         crate::core::handle_intent::submit_local_intent_to_db(&self.db, intent)
     }
 
@@ -214,6 +222,7 @@ impl Runtime {
             &self.db,
             &effects,
             self.description.row_mutation_tables,
+            self.handlers.intent_kinds(),
             self.description.fact_admission,
             label,
         )
@@ -254,6 +263,7 @@ impl Runtime {
                 source,
                 ProjectionMode::Normal,
                 self.description.row_mutation_tables,
+                self.handlers.intent_kinds(),
                 self.description.fact_admission,
             )
         })
@@ -635,6 +645,35 @@ mod tests {
             "one intent batch should dispatch at most its limit"
         );
         assert_eq!(intent_runtime.pending_intent_count(), 1);
+    }
+
+    #[test]
+    fn runtime_rejects_intents_without_registered_handlers() {
+        let mut runtime = Runtime::open_memory(&HANDLER_RUNTIME).expect("runtime");
+        let durable = runtime
+            .submit_intent(Intent::new(
+                IntentKind::new("missing").expect("intent kind"),
+                b"one".to_vec(),
+                Vec::new(),
+            ))
+            .expect_err("unknown durable intent should reject");
+        let local = runtime
+            .submit_local_intent(Intent::new(
+                IntentKind::new("missing").expect("intent kind"),
+                b"two".to_vec(),
+                Vec::new(),
+            ))
+            .expect_err("unknown local intent should reject");
+
+        assert!(
+            durable.contains("intent kind missing is not registered"),
+            "{durable}"
+        );
+        assert!(
+            local.contains("intent kind missing is not registered"),
+            "{local}"
+        );
+        assert_eq!(runtime.pending_intent_count(), 0);
     }
 
     #[test]

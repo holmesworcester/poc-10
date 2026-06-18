@@ -141,6 +141,7 @@ pub(crate) fn project_one(
     source: ProjectionSource,
     mode: ProjectionMode,
     allowed_tables: &[TableName],
+    registered_intent_kinds: &[&str],
     fact_admission: Option<FactAdmissionFn>,
 ) -> Result<bool, String> {
     let load = match load_one_projection_input(store, source, mode)? {
@@ -149,9 +150,13 @@ pub(crate) fn project_one(
     };
 
     let outcome = match load {
-        ProjectionLoad::Loaded(input) => {
-            evaluate_loaded_projection_input(projector, input, allowed_tables, fact_admission)?
-        }
+        ProjectionLoad::Loaded(input) => evaluate_loaded_projection_input(
+            projector,
+            input,
+            allowed_tables,
+            registered_intent_kinds,
+            fact_admission,
+        )?,
         ProjectionLoad::Stale { source, fact_id } => {
             // The selected queue/intake owner no longer has backing bytes, so
             // there is no fact to evaluate. Commit still owns retiring that
@@ -160,7 +165,13 @@ pub(crate) fn project_one(
         }
     };
 
-    commit_projection_outcome(store, &outcome, allowed_tables, fact_admission)?;
+    commit_projection_outcome(
+        store,
+        &outcome,
+        allowed_tables,
+        registered_intent_kinds,
+        fact_admission,
+    )?;
     Ok(true)
 }
 
@@ -204,12 +215,19 @@ fn evaluate_loaded_projection_input(
     projector: &(impl Projector + ?Sized),
     input: ProjectionInput,
     allowed_tables: &[TableName],
+    registered_intent_kinds: &[&str],
     fact_admission: Option<FactAdmissionFn>,
 ) -> Result<ProjectionOutcome, String> {
     let source = input.source;
     let fact_id = input.fact.id;
     let projection = match perf::measure_result("projection_prepare_effects", || {
-        prepare_projection(projector, input, allowed_tables, fact_admission)
+        prepare_projection(
+            projector,
+            input,
+            allowed_tables,
+            registered_intent_kinds,
+            fact_admission,
+        )
     }) {
         Ok(projection) => projection,
         Err(_rejection) => {
@@ -233,13 +251,20 @@ fn commit_projection_outcome(
     store: &Db,
     outcome: &ProjectionOutcome,
     allowed_tables: &[TableName],
+    registered_intent_kinds: &[&str],
     fact_admission: Option<FactAdmissionFn>,
 ) -> Result<(), String> {
     perf::measure_result("projection_commit_effects", || {
         store
             .write_transaction(|tx| {
                 perf::measure_result("projection_commit_tx_body", || {
-                    commit_projection_outcome_in_tx(tx, outcome, allowed_tables, fact_admission)
+                    commit_projection_outcome_in_tx(
+                        tx,
+                        outcome,
+                        allowed_tables,
+                        registered_intent_kinds,
+                        fact_admission,
+                    )
                 })
             })
             .map_err(|err| format!("commit projection effects: {err}"))
@@ -402,6 +427,7 @@ fn prepare_projection(
     projector: &(impl Projector + ?Sized),
     input: ProjectionInput,
     allowed_tables: &[TableName],
+    registered_intent_kinds: &[&str],
     fact_admission: Option<FactAdmissionFn>,
 ) -> Result<PreparedProjection, String> {
     let ProjectionInput {
@@ -416,7 +442,12 @@ fn prepare_projection(
     let projected_context = output.context_set();
     let runtime_effects = output.effects;
     perf::measure_result("projection_validate_effects", || {
-        validate_runtime_effects_for_admission(&runtime_effects, allowed_tables, fact_admission)
+        validate_runtime_effects_for_admission(
+            &runtime_effects,
+            allowed_tables,
+            registered_intent_kinds,
+            fact_admission,
+        )
     })?;
     Ok(PreparedProjection {
         source,
@@ -475,6 +506,7 @@ fn commit_projection_outcome_in_tx(
     tx: &Db,
     outcome: &ProjectionOutcome,
     allowed_tables: &[TableName],
+    registered_intent_kinds: &[&str],
     fact_admission: Option<FactAdmissionFn>,
 ) -> rusqlite::Result<()> {
     match outcome {
@@ -484,9 +516,13 @@ fn commit_projection_outcome_in_tx(
         ProjectionOutcome::RetireRejectedInput { source, fact_id } => {
             commit_rejected_projection_input_in_tx(tx, *source, *fact_id)
         }
-        ProjectionOutcome::Accepted(projection) => {
-            commit_projected_fact_in_tx(tx, projection, allowed_tables, fact_admission)
-        }
+        ProjectionOutcome::Accepted(projection) => commit_projected_fact_in_tx(
+            tx,
+            projection,
+            allowed_tables,
+            registered_intent_kinds,
+            fact_admission,
+        ),
     }
 }
 
@@ -546,6 +582,7 @@ fn commit_projected_fact_in_tx(
     tx: &Db,
     projection: &PreparedProjection,
     allowed_tables: &[TableName],
+    registered_intent_kinds: &[&str],
     fact_admission: Option<FactAdmissionFn>,
 ) -> rusqlite::Result<()> {
     let fact_id = projection.fact.id;
@@ -571,6 +608,7 @@ fn commit_projected_fact_in_tx(
             tx,
             &projection.runtime_effects,
             allowed_tables,
+            registered_intent_kinds,
             fact_admission,
         )
     })?;
@@ -798,9 +836,10 @@ pub(crate) mod commit_effects {
     pub(crate) fn validate_runtime_effects(
         effects: &RuntimeEffects,
         allowed_tables: &[TableName],
+        registered_intent_kinds: &[&str],
     ) -> Result<(), String> {
-        validate_intents(&effects.intents)?;
-        validate_intents(&effects.local_intents)?;
+        validate_intents(&effects.intents, registered_intent_kinds)?;
+        validate_intents(&effects.local_intents, registered_intent_kinds)?;
         validate_row_mutations(&effects.row_mutations, allowed_tables)?;
         Ok(())
     }
@@ -808,9 +847,10 @@ pub(crate) mod commit_effects {
     pub(crate) fn validate_runtime_effects_for_admission(
         effects: &RuntimeEffects,
         allowed_tables: &[TableName],
+        registered_intent_kinds: &[&str],
         fact_admission: Option<FactAdmissionFn>,
     ) -> Result<(), String> {
-        validate_runtime_effects(effects, allowed_tables)?;
+        validate_runtime_effects(effects, allowed_tables, registered_intent_kinds)?;
         validate_fact_admissions(effects, fact_admission)?;
         Ok(())
     }
@@ -835,9 +875,16 @@ pub(crate) mod commit_effects {
     /// conflicting duplicates within that one destination queue; the durable and
     /// ephemeral queues are allowed to carry the same `(kind, key)` because
     /// dispatch defines how durable work shadows local work.
-    fn validate_intents(intents: &[Intent]) -> Result<(), String> {
+    fn validate_intents(
+        intents: &[Intent],
+        registered_intent_kinds: &[&str],
+    ) -> Result<(), String> {
         let mut proposed = BTreeMap::<Vec<u8>, &Intent>::new();
         for intent in intents {
+            crate::core::handle_intent::validate_intent_kind_registered(
+                intent,
+                registered_intent_kinds,
+            )?;
             let key = intent_validation_key(intent);
             if let Some(existing) = proposed.insert(key, intent) {
                 if existing != intent {
@@ -900,13 +947,25 @@ pub(crate) mod commit_effects {
         store: &Db,
         effects: &RuntimeEffects,
         allowed_tables: &[TableName],
+        registered_intent_kinds: &[&str],
         fact_admission: Option<FactAdmissionFn>,
         label: &str,
     ) -> Result<RuntimeEffectCounts, String> {
-        validate_runtime_effects_for_admission(effects, allowed_tables, fact_admission)?;
+        validate_runtime_effects_for_admission(
+            effects,
+            allowed_tables,
+            registered_intent_kinds,
+            fact_admission,
+        )?;
         store
             .write_transaction(|tx| {
-                commit_runtime_effects_in_tx(tx, effects, allowed_tables, fact_admission)
+                commit_runtime_effects_in_tx(
+                    tx,
+                    effects,
+                    allowed_tables,
+                    registered_intent_kinds,
+                    fact_admission,
+                )
             })
             .map_err(|err| format!("{label}: {err}"))
     }
@@ -925,8 +984,11 @@ pub(crate) mod commit_effects {
         tx: &Db,
         effects: &RuntimeEffects,
         allowed_tables: &[TableName],
+        registered_intent_kinds: &[&str],
         fact_admission: Option<FactAdmissionFn>,
     ) -> rusqlite::Result<RuntimeEffectCounts> {
+        validate_runtime_effects(effects, allowed_tables, registered_intent_kinds)
+            .map_err(sqlite_string_error)?;
         validate_fact_admissions(effects, fact_admission).map_err(sqlite_string_error)?;
         for purged in &effects.purged_facts {
             purge_fact_in_tx(tx, *purged)?;
@@ -2421,7 +2483,7 @@ pub(crate) fn submit_authored_facts_to_db<T>(
         facts,
         ..RuntimeEffects::new()
     };
-    commit_runtime_effects_to_db(store, &effects, allowed_tables, fact_admission, label)?;
+    commit_runtime_effects_to_db(store, &effects, allowed_tables, &[], fact_admission, label)?;
     Ok(receipt)
 }
 
@@ -2587,6 +2649,19 @@ mod contract_tests {
     use rusqlite::OptionalExtension;
     use std::cell::Cell;
 
+    const TEST_REGISTERED_INTENT_KINDS: &[&str] = &[
+        "ephemeral_partial",
+        "ephemeral_ready",
+        "followup",
+        "multi_stage_ready",
+        "observed",
+        "premature",
+        "queue_ready",
+        "queued_context_ready",
+        "ready",
+        "readded_ready",
+    ];
+
     fn submit_fact_to_db(store: &Db, fact: Fact) -> Result<bool, String> {
         submit_facts_to_db(store, [fact]).map(|inserted| inserted > 0)
     }
@@ -2596,6 +2671,20 @@ mod contract_tests {
         fact: &Fact,
         pending_inputs: ProjectionContext,
     ) -> Result<PreparedProjection, String> {
+        run_projection_with_registered_intents(
+            projector,
+            fact,
+            pending_inputs,
+            TEST_REGISTERED_INTENT_KINDS,
+        )
+    }
+
+    fn run_projection_with_registered_intents(
+        projector: &(impl Projector + ?Sized),
+        fact: &Fact,
+        pending_inputs: ProjectionContext,
+        registered_intent_kinds: &[&str],
+    ) -> Result<PreparedProjection, String> {
         prepare_projection(
             projector,
             ProjectionInput {
@@ -2604,6 +2693,7 @@ mod contract_tests {
                 pending_inputs,
             },
             &[],
+            registered_intent_kinds,
             None,
         )
     }
@@ -2710,7 +2800,7 @@ mod contract_tests {
             load_one_projection_input(&store, ProjectionSource::Durable, ProjectionMode::Normal)
                 .expect("load projection input"),
         );
-        let outcome = evaluate_loaded_projection_input(&projector, input, &[], None)
+        let outcome = evaluate_loaded_projection_input(&projector, input, &[], &[], None)
             .expect("evaluate projection");
 
         assert!(matches!(
@@ -2725,7 +2815,7 @@ mod contract_tests {
             .expect("load retained fact")
             .is_some());
 
-        commit_projection_outcome(&store, &outcome, &[], None).expect("commit rejection");
+        commit_projection_outcome(&store, &outcome, &[], &[], None).expect("commit rejection");
 
         assert_eq!(pending_projection_count(&store, fact.id), 0);
         assert!(retained_fact(&store, &fact.id)
@@ -2749,7 +2839,7 @@ mod contract_tests {
             load_one_projection_input(&store, ProjectionSource::Incoming, ProjectionMode::Normal)
                 .expect("load projection input"),
         );
-        let outcome = evaluate_loaded_projection_input(&projector, input, &[], None)
+        let outcome = evaluate_loaded_projection_input(&projector, input, &[], &[], None)
             .expect("evaluate projection");
 
         assert!(matches!(
@@ -2763,7 +2853,7 @@ mod contract_tests {
             .expect("load incoming fact")
             .is_some());
 
-        commit_projection_outcome(&store, &outcome, &[], None).expect("commit rejection");
+        commit_projection_outcome(&store, &outcome, &[], &[], None).expect("commit rejection");
 
         assert!(incoming_fact_by_id(&store, &fact.id)
             .expect("load incoming fact")
@@ -2809,6 +2899,31 @@ mod contract_tests {
         assert!(next.projected_context.needs.is_empty());
         assert_eq!(next.runtime_effects.intents.len(), 1);
         assert_eq!(next.runtime_effects.intents[0].kind.as_str(), "followup");
+    }
+
+    #[test]
+    fn projection_rejects_unregistered_intent_output() {
+        let fact = Fact::new(FactScope::Global, 1, b"unknown intent".to_vec());
+        let projector = test_projector(|_fact: &Fact, _context: &ProjectionContext| {
+            Ok(ProjectionOutput::new().intent(Intent::new(
+                IntentKind::new("unknown_followup").expect("intent kind"),
+                b"child".to_vec(),
+                Vec::new(),
+            )))
+        });
+
+        let err = run_projection_with_registered_intents(
+            &projector,
+            &fact,
+            ProjectionContext::new(Vec::new()),
+            &[],
+        )
+        .expect_err("unregistered intent output should fail validation");
+
+        assert!(
+            err.contains("intent kind unknown_followup is not registered"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -3494,6 +3609,7 @@ mod contract_tests {
                 ProjectionSource::Durable,
                 ProjectionMode::Normal,
                 allowed_tables,
+                TEST_REGISTERED_INTENT_KINDS,
                 fact_admission,
             )?;
             if !step {
@@ -3503,6 +3619,7 @@ mod contract_tests {
                     ProjectionSource::Incoming,
                     ProjectionMode::Normal,
                     allowed_tables,
+                    TEST_REGISTERED_INTENT_KINDS,
                     fact_admission,
                 )?;
             }
