@@ -16,7 +16,7 @@ the loop:
   responding) and returns more facts.
 
 Protocol code also has thinner hooks at the edges — it authors facts for a
-command, converts inbound network bytes into `RuntimeEffects`, and validates a
+command, classifies inbound network bytes into incoming facts, and validates a
 fact on admission — but those only feed the queues; the projector and handler
 are where queued work is transformed.
 
@@ -34,8 +34,9 @@ another turn (see diagram 3):
 
 ```text
 facts (+ local_fact_admissions)   immutable fact store
-incoming_facts                    outside-origin facts staged for projection (temp)
-pending_projection                facts waiting to be projected
+network_incoming                  raw inbound frame bytes awaiting classification (temp)
+incoming_facts                    incoming facts staged for projection (temp)
+pending_projection                pending facts waiting to be projected
 context_edges                     standing needs and offers
 pending_projection_matches        offers that matched a parked need
 time_wakes                        facts scheduled to reproject at a time
@@ -60,12 +61,11 @@ sync computing range summaries).
 %%{init: {"flowchart": {"wrappingWidth": 300}} }%%
 flowchart TD
     FACTS[("facts: immutable store")]
-    PENDING[("pending_projection")]
-    NETIN["inbound bytes (from peers)"]
-    INTAKE{{"inbound intake hook (protocol)"}}
-    EFFECTS["RuntimeEffects"]
-    INCOMING[("incoming_facts (temp)")]
-    PROJECTOR{{"fact projector (protocol)"}}
+    PENDING[("pending: pending_projection")]
+    PEER["other peer"]
+    NETWORK[("network: TCP + network_incoming")]
+    INCOMING[("incoming: incoming_facts")]
+    PROJECTOR{{"projection: fact projector (protocol)"}}
     CONTEXT[("context_edges: needs + offers")]
     MATCHES[("pending_projection_matches")]
     WAKES[("time_wakes")]
@@ -76,10 +76,8 @@ flowchart TD
     ROWS[("scope rows: materialized")]
     QUERY["query reads rows"]
 
-    NETIN --> INTAKE
-    INTAKE --> EFFECTS
-    EFFECTS -->|incoming facts| INCOMING
-    EFFECTS -->|retained facts| FACTS
+    PEER --> NETWORK
+    NETWORK -->|classify inbound bytes| INCOMING
     FACTS -->|admit| PENDING
     INCOMING --> PROJECTOR
     PENDING --> PROJECTOR
@@ -90,6 +88,7 @@ flowchart TD
     PROJECTOR -->|intents| INTENTS
     PROJECTOR -->|follow-up facts| FACTS
     PROJECTOR -.may retain incoming fact.-> FACTS
+    PROJECTOR -.parked or follow-up work.-> PENDING
     PROJECTOR -->|rows| ROWS
 
     CONTEXT -->|core matches range overlap| MATCHES
@@ -107,13 +106,14 @@ flowchart TD
 ```
 
 Core owns every arrow and the atomic commit behind it; the rounded boxes are the
-only protocol code on the diagram. The inbound intake hook classifies opaque
-network bytes into runtime effects but does not run projection. The projector is
-pure derivation (it may park on missing context but never does IO); the handler
-is the only place *protocol* code does bounded stateful work. Core still does
-mechanical IO of its own — the TCP listener reads frames and the pump writes
-`network_outgoing`, deferring targets whose sockets are not ready — but it moves
-opaque bytes and never interprets a fact.
+only protocol code on the diagram. The inbound classifier turns opaque network
+bytes into typed incoming facts but does not run projection or decide
+durability. The projector is pure derivation (it may park on missing context but
+never does IO); the handler is the only place *protocol* code does bounded
+stateful work. Core still does mechanical IO of its own — the TCP listener reads
+frames, the raw incoming queue holds them until classification, and the pump
+writes `network_outgoing`, deferring targets whose sockets are not ready — but
+it moves opaque bytes and never interprets a fact.
 
 ## 2) Project One Fact
 
@@ -267,8 +267,9 @@ flowchart TD
     LOCAL --> DURABLE_PRE["drain durable projection"]
     DURABLE_PRE --> READY_TWO{"storage_ready?"}
     READY_TWO -- no --> REPAIR
-    READY_TWO -- yes --> INBOUND["accept frames and commit inbound RuntimeEffects"]
-    INBOUND --> TIME["admit due time_wakes"]
+    READY_TWO -- yes --> INBOUND["accept frames into network_incoming"]
+    INBOUND --> CLASSIFY_IN["drain network_incoming into incoming_facts"]
+    CLASSIFY_IN --> TIME["admit due time_wakes"]
     TIME --> DURABLE["drain durable projection"]
     DURABLE --> INCOMING["drain incoming projection"]
     INCOMING --> DURABLE_INTENTS["drain durable intents"]
@@ -342,7 +343,7 @@ nesting projection or handlers inline.
 flowchart LR
     subgraph ENTRY["turn N: entry point"]
         CMD["CLI command"] --> AUTHORED["commit AuthoredFacts"]
-        NET["inbound intake"] --> INCOMING["commit incoming_facts"]
+        NET["network_incoming drain"] --> INCOMING["commit incoming_facts"]
         TIME["due time_wake"] --> WOKEN["mark owner pending_projection"]
         HANDLER_OUT["handler output"] --> EFFECTS_IN["commit RuntimeEffects"]
     end
@@ -376,12 +377,11 @@ a projector that emits intents does not run their handlers before committing.
 ## 7) Daemon Network Flow
 
 The daemon owns background network progress. Another peer is abstracted here as
-one node. Incoming network bytes are accepted by core and passed to the protocol
-inbound intake hook. The hook commits `RuntimeEffects`: a retained receive
-observation fact plus a temporary incoming frame fact for recognized frames.
-Projection opens that incoming fact with standing context and emits recovered
-protocol facts. Outgoing bytes are produced by protocol handlers and written by
-the core TCP pump.
+one node. Incoming network bytes are accepted by core into `network_incoming`,
+then drained through the protocol inbound classifier into `incoming_facts`.
+Projection opens those incoming facts with standing context plus incoming
+metadata and emits recovered protocol facts and receipts. Outgoing bytes are
+produced by protocol handlers and written by the core TCP pump.
 
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 300}} }%%
@@ -390,10 +390,10 @@ flowchart LR
 
     subgraph DAEMON["local daemon tick"]
         TCP_IN --> ACCEPT["accept_available"]
-        ACCEPT --> INTAKE["receive_network_frame_effects"]
-        INTAKE --> OBSERVATION["retained frame_observation fact"]
+        ACCEPT --> RAW_IN["network_incoming raw bytes + origin metadata"]
+        RAW_IN --> INTAKE["receive_network_frame_facts"]
         INTAKE --> FRAME_FACT["incoming request, connection, or frame fact"]
-        OBSERVATION -.origin and receive-time context.-> PROJECT_FRAME["drain incoming projection: project frame fact"]
+        RAW_IN -.origin and receive-time metadata.-> PROJECT_FRAME["drain incoming projection: project frame fact"]
         FRAME_FACT --> PROJECT_FRAME
         PROJECT_FRAME --> RECOVERED["recovered protocol facts"]
         RECOVERED --> DURABLE_PROJECT["later durable projection"]
@@ -409,10 +409,11 @@ flowchart LR
     TCP_OUT --> PEER
 ```
 
-`receive_network_frame_effects` does not unseal established frames or run a
+`receive_network_frame_facts` does not unseal established frames or run a
 handler. It chooses the incoming fact family from opaque frame bytes and lets
-that fact's projector open the payload once the needed observation, connection,
-endpoint, or secret context is available.
+that fact's projector decide whether to retain or drop the fact. Origin and
+receive-time metadata stay on the incoming queue/context path; projectors use
+that metadata when emitting receipts.
 
 ## 8) Sync: The Convergence Loop
 

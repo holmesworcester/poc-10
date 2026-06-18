@@ -21,7 +21,6 @@ use topo::protocol::connection::ephemeral_secret::project::decode as ephemeral_l
 use topo::protocol::connection::ephemeral_secret::{
     fact::ConnectionEphemeralSecretFact, CONNECTION_EPHEMERAL_SECRET_ROWS,
 };
-use topo::protocol::connection::frame_observation;
 use topo::protocol::connection::request::api::{
     create_bootstrap, CreateBootstrapConnectionRequest,
 };
@@ -143,17 +142,19 @@ fn closing_connection_purges_connection_fact_and_row() {
     })
     .expect("build connection");
     let connection_fact = connection.fact;
-    let connection_observation_fact = frame_observation::author::fact_from_observation(
-        connection_fact.id,
-        b"127.0.0.1:41002",
-        1_003,
-    )
-    .expect("connection observation");
     let connection_id = connection_fact.id;
 
     runtime
-        .submit_facts([connection_fact.clone(), connection_observation_fact])
+        .submit_facts([connection_fact.clone()])
         .expect("submit connection");
+    Connection::open(&db_path)
+        .expect("open sqlite")
+        .execute(
+            "INSERT INTO retained_fact_origins (fact_id, origin_addr, received_at)
+             VALUES (?1, ?2, ?3)",
+            params![connection_id.as_slice(), b"127.0.0.1:41002", 1_003i64],
+        )
+        .expect("seed retained incoming metadata");
     drain_projection_for_test(&mut runtime, 8, 64);
 
     assert!(retained_fact_exists(&db_path, &initiator_ephemeral_id));

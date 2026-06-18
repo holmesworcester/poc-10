@@ -748,7 +748,6 @@ use crate::protocol::connection::connection::{
 use crate::protocol::connection::fact_receipt::fact::ReceiptPathInput;
 use crate::protocol::connection::fact_receipt::fact::RECEIVE_PATH_CONNECTION;
 use crate::protocol::connection::fact_receipt::project::connection_fact_receipt_for_path;
-use crate::protocol::connection::frame_observation;
 use crate::protocol::connection::queue_outgoing_frame::{
     queue_outgoing_frame_intent, QueueOutgoingFrame,
 };
@@ -903,38 +902,35 @@ fn project_initiator_connection(
     context: &ProjectionContext,
     needs: ConnectionNeeds,
 ) -> Result<ProjectionOutput, String> {
-    let observation_need = exact_need(
-        fact.id,
-        "connection_frame_observation",
-        FactScope::Local,
-        fact.id,
-    );
-    let needs = needs.with_observation(observation_need.clone());
-    let Some(observation_fact) = context.payload_for(&observation_need) else {
-        return Ok(needs.apply_to(ProjectionOutput::new()));
+    let output = needs
+        .apply_to(materialized_output(fact, connection))
+        .intent(seed_connection_sync_intent(SeedConnectionSync {
+            connection_id: fact.id,
+        }));
+    // The connection fact is a durable retained fact. Origin metadata exists only
+    // while the fact is staged in volatile incoming intake, so we emit the durable
+    // `connection_fact_receipt` (which bakes the origin address into protocol fact
+    // bytes) during that incoming run. On a replay run the ambient metadata is
+    // gone; the receipt fact reprojects from its own retained bytes, so this
+    // projector must not depend on incoming metadata to rebuild.
+    let Some(metadata) = context.incoming_metadata() else {
+        if context.is_replay() {
+            return Ok(output);
+        }
+        return Err("connection missing incoming origin metadata".to_string());
     };
-    let observation = frame_observation::project::decode::decode_fact(observation_fact.body())
-        .map_err(|_| "connection observation context is malformed".to_string())?;
-    if observation.frame_fact_id != fact.id {
-        return Err("connection observation targets another fact".to_string());
-    }
     let receipt = connection_fact_receipt_for_path(ReceiptPathInput {
         received_fact_id: fact.id,
-        origin_addr: observation.origin_addr.bytes(),
+        origin_addr: &metadata.origin_addr,
         local_endpoint_id: connection.to_endpoint,
         sender_endpoint_id: connection.from_endpoint,
         receive_path: RECEIVE_PATH_CONNECTION,
         connection_id: Some(fact.id),
         request_id: Some(connection.request_id),
         frame_hash: crypto::hash(fact.body()),
-        received_at_local_ms: observation.received_at_local_ms,
+        received_at_local_ms: metadata.received_at_local_ms,
     })?;
-    Ok(needs
-        .apply_to(materialized_output(fact, connection))
-        .fact(receipt)
-        .intent(seed_connection_sync_intent(SeedConnectionSync {
-            connection_id: fact.id,
-        })))
+    Ok(output.fact(receipt))
 }
 
 fn materialized_output(fact: &Fact, connection: &ConnectionFact) -> ProjectionOutput {
@@ -956,10 +952,6 @@ fn materialized_output(fact: &Fact, connection: &ConnectionFact) -> ProjectionOu
         ))
 }
 
-fn exact_need(owner: FactId, role: &'static str, scope: FactScope, key: FactId) -> ContextNeed {
-    authenticate::exact_need(owner, role, scope, key)
-}
-
 #[derive(Debug, Clone)]
 struct ConnectionNeeds {
     close: ContextNeed,
@@ -968,7 +960,6 @@ struct ConnectionNeeds {
     responder_secret: Option<ContextNeed>,
     endpoint: Option<ContextNeed>,
     initiator: Option<ContextNeed>,
-    observation: Option<ContextNeed>,
     invite: Option<ContextNeed>,
 }
 
@@ -987,7 +978,6 @@ impl ConnectionNeeds {
             responder_secret: Some(responder_secret),
             endpoint: None,
             initiator: None,
-            observation: None,
             invite,
         }
     }
@@ -1007,14 +997,8 @@ impl ConnectionNeeds {
             responder_secret: None,
             endpoint: Some(endpoint),
             initiator: Some(initiator),
-            observation: None,
             invite,
         }
-    }
-
-    fn with_observation(mut self, observation: ContextNeed) -> Self {
-        self.observation = Some(observation);
-        self
     }
 
     fn apply_to(&self, output: ProjectionOutput) -> ProjectionOutput {
@@ -1026,7 +1010,6 @@ impl ConnectionNeeds {
             &self.responder_secret,
             &self.endpoint,
             &self.initiator,
-            &self.observation,
             &self.invite,
         ]
         .into_iter()

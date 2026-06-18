@@ -2,16 +2,20 @@
 //!
 //! This file is the durable and memory table inventory for the generic
 //! runtime: facts, local admissions, standing context, time wakes, pending
-//! projection, pending projection matches, incoming facts, intent
-//! queues. It exposes one executable `SchemaSource` plus typed `TableName`
+//! projection, pending projection matches, incoming facts, and intent queues.
+//! It exposes one executable `SchemaSource` plus typed `TableName`
 //! constants so the rest of core does not repeat string literals.
 //!
 //! These tables are the shared substrate behind the runtime work documented in
 //! `src/core/README.md` and the projection boundary documented in
 //! `project_fact.rs`.
 //! `facts` and `local_fact_admissions` store immutable inputs and their local
-//! visibility metadata. `context_edges`, `time_wakes`, `pending_projection`,
-//! and `pending_projection_matches` drive fact projection. `intents` and
+//! visibility metadata. Origin address and receive time for an outside-origin
+//! input live only on its volatile `incoming_facts` row; nothing durable in core
+//! preserves them. Origin metadata that must survive replay is carried in
+//! ordinary protocol fact bytes emitted by a projector, not in a core side
+//! table. `context_edges`, `time_wakes`, `pending_projection`, and
+//! `pending_projection_matches` drive fact projection. `intents` and
 //! `local_intents` drive handler dispatch.
 //!
 //! Core schema is deliberately small and mechanical. It records the runtime
@@ -179,7 +183,9 @@ CREATE TEMP TABLE IF NOT EXISTS incoming_facts (
     scope_kind TEXT NOT NULL,
     scope_id BLOB NOT NULL,
     received_at INTEGER NOT NULL,
-    bytes BLOB NOT NULL
+    bytes BLOB NOT NULL,
+    origin_addr BLOB,
+    origin_received_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS incoming_facts_by_received_at
     ON incoming_facts (received_at, id);

@@ -65,7 +65,23 @@ use crate::core::wire::Writer;
 use rusqlite::{params, OptionalExtension};
 
 pub use crate::core::facts::verify_fact_id;
-pub(crate) use commit_effects::commit_runtime_effects_to_db;
+pub(crate) use commit_effects::{
+    commit_network_incoming_facts_to_db, commit_runtime_effects_to_db,
+};
+
+/// Transport metadata attached to an outside-origin projection input.
+///
+/// Incoming rows carry this only while they are volatile, so a projector can
+/// read it while the row is staged in `incoming_facts`. It is process-local and
+/// never copied into durable core storage: once an incoming fact is retained or
+/// dropped, the metadata is gone. Origin evidence that must survive replay has
+/// to be baked into ordinary protocol fact bytes (for example a
+/// `connection_fact_receipt`) emitted by a projector during the incoming run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncomingMetadata {
+    pub origin_addr: Vec<u8>,
+    pub received_at_local_ms: u64,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProjectionSource {
@@ -337,15 +353,28 @@ impl ProjectionSource {
                     perf::measure_result("projection_load_pending_time_inputs", || {
                         pending_time_ranges_for_owner(store, fact_id)
                     })?;
-                Ok(
+                // Durable retained facts never carry ambient incoming origin
+                // metadata. Origin evidence survives replay only inside ordinary
+                // protocol fact bytes (such as a `connection_fact_receipt`) that
+                // reproject on their own, so a durable projection run must not be
+                // able to read receive metadata from core.
+                let context =
                     perf::measure_result("projection_load_pending_context_inputs", || {
                         pending_projection_input_context_for_owner(store, &fact_id)
                     })?
                     .with_time_ranges(time_ranges)
-                    .with_mode(mode),
-                )
+                    .with_mode(mode);
+                Ok(context)
             }
-            ProjectionSource::Incoming => Ok(ProjectionContext::default().with_mode(mode)),
+            ProjectionSource::Incoming => {
+                let mut context = ProjectionContext::default().with_mode(mode);
+                if let Some(metadata) = incoming_origin_metadata_by_id(store, &fact_id)
+                    .map_err(|err| format!("load incoming metadata: {err}"))?
+                {
+                    context = context.with_incoming_metadata(metadata);
+                }
+                Ok(context)
+            }
         }
     }
 }
@@ -866,6 +895,7 @@ pub(crate) mod commit_effects {
 
     use crate::core::db::{Db, TableName};
     use crate::core::effects::{RuntimeEffects, StorageRequirement, StorageRequirementCheck};
+    use crate::core::facts::Fact;
     use crate::core::intents::{Intent, RowMutation};
     use crate::core::schema::{INTENTS, LOCAL_INTENTS};
     use std::collections::BTreeMap;
@@ -875,6 +905,7 @@ pub(crate) mod commit_effects {
     use super::{
         insert_facts_and_record_matches_with_mode_in_tx, insert_incoming_fact_in_tx,
         insert_priority_facts_and_record_matches_with_mode_in_tx, purge_fact_in_tx,
+        IncomingMetadata,
     };
 
     /// Counts of newly inserted follow-up work after an effect commit.
@@ -1059,6 +1090,29 @@ pub(crate) mod commit_effects {
             .map_err(|err| format!("{label}: {err}"))
     }
 
+    pub(crate) fn commit_network_incoming_facts_to_db(
+        store: &Db,
+        facts: &[Fact],
+        metadata: &IncomingMetadata,
+        fact_admission: Option<FactAdmissionFn>,
+        label: &str,
+    ) -> Result<usize, String> {
+        if let Some(fact_admission) = fact_admission {
+            facts.iter().try_for_each(fact_admission)?;
+        }
+        store
+            .write_transaction(|tx| {
+                let mut inserted = 0usize;
+                for fact in facts {
+                    if super::insert_network_incoming_fact_in_tx(tx, fact, metadata)? {
+                        inserted += 1;
+                    }
+                }
+                Ok(inserted)
+            })
+            .map_err(|err| format!("{label}: {err}"))
+    }
+
     /// Write all shared effects into an already-open transaction.
     ///
     /// The order is intentional: purges remove stale core-owned rows first,
@@ -1199,6 +1253,7 @@ pub mod context {
     //! Projection context visible while processing one fact.
 
     use super::effects::{TimeRange, Timeline};
+    use super::IncomingMetadata;
     use crate::core::context::{ContextNeed, ContextOffer};
     use crate::core::facts::Fact;
     use std::collections::BTreeMap;
@@ -1233,6 +1288,7 @@ pub mod context {
         matched: Vec<MatchedContext>,
         matched_by_need: BTreeMap<ContextNeed, Vec<usize>>,
         time_ranges: Vec<TimeRange>,
+        incoming_metadata: Option<IncomingMetadata>,
     }
 
     /// One matched need/offer pair plus the offer owner's payload fact.
@@ -1293,6 +1349,17 @@ pub mod context {
         pub(crate) fn with_mode(mut self, mode: ProjectionMode) -> Self {
             self.mode = mode;
             self
+        }
+
+        /// Attach receive metadata for an outside-origin projection input.
+        pub fn with_incoming_metadata(mut self, metadata: IncomingMetadata) -> Self {
+            self.incoming_metadata = Some(metadata);
+            self
+        }
+
+        /// Return receive metadata for incoming facts retained from the network.
+        pub fn incoming_metadata(&self) -> Option<&IncomingMetadata> {
+            self.incoming_metadata.as_ref()
         }
 
         /// Return all distinct offers visible to this projection run.
@@ -2532,7 +2599,23 @@ fn replay_flag_for_projection_mode(mode: ProjectionMode) -> i64 {
     }
 }
 
+pub(crate) fn insert_network_incoming_fact_in_tx(
+    store: &Db,
+    fact: &Fact,
+    metadata: &IncomingMetadata,
+) -> rusqlite::Result<bool> {
+    insert_incoming_fact_with_metadata_in_tx(store, fact, Some(metadata))
+}
+
 fn insert_incoming_fact_in_tx(store: &Db, fact: &Fact) -> rusqlite::Result<bool> {
+    insert_incoming_fact_with_metadata_in_tx(store, fact, None)
+}
+
+fn insert_incoming_fact_with_metadata_in_tx(
+    store: &Db,
+    fact: &Fact,
+    metadata: Option<&IncomingMetadata>,
+) -> rusqlite::Result<bool> {
     if let Some(bytes) = fact_bytes_by_id_in_tx(store, &fact.id)? {
         if bytes == fact.bytes {
             return Ok(false);
@@ -2543,17 +2626,23 @@ fn insert_incoming_fact_in_tx(store: &Db, fact: &Fact) -> rusqlite::Result<bool>
     }
 
     let (scope, scope_kind, scope_id) = fact.scope.storage_columns();
+    let origin_addr = metadata.map(|metadata| metadata.origin_addr.as_slice());
+    let origin_received_at = metadata
+        .map(|metadata| sqlite_u64(metadata.received_at_local_ms, "incoming origin received_at"))
+        .transpose()?;
     let changed = store.conn().execute(
         "INSERT OR IGNORE INTO incoming_facts
-            (id, scope, scope_kind, scope_id, received_at, bytes)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            (id, scope, scope_kind, scope_id, received_at, bytes, origin_addr, origin_received_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             fact.id.as_slice(),
             scope,
             scope_kind,
             scope_id.as_slice(),
             sqlite_u64(fact.timestamp, "incoming fact received_at")?,
-            fact.bytes.as_slice()
+            fact.bytes.as_slice(),
+            origin_addr,
+            origin_received_at,
         ],
     )?;
     verify_idempotent_insert(
@@ -2574,6 +2663,11 @@ fn delete_incoming_fact_in_tx(store: &Db, owner: FactId) -> rusqlite::Result<boo
 }
 
 fn move_incoming_to_retained_in_tx(store: &Db, fact: &Fact) -> rusqlite::Result<bool> {
+    // Retention copies only the fact bytes and admission metadata. The volatile
+    // incoming row's origin address and receive time are intentionally dropped:
+    // core keeps no durable receive metadata, so any origin evidence that must
+    // outlive the volatile row was already emitted as a protocol fact during the
+    // incoming projection run.
     let retained = insert_retained_fact_in_tx(store, fact)?;
     delete_incoming_fact_in_tx(store, fact.id)?;
     Ok(retained)
@@ -2684,6 +2778,41 @@ fn incoming_fact_by_id_in_tx(store: &Db, id: &FactId) -> rusqlite::Result<Option
             validate_fact_query_result,
         )
         .optional()
+}
+
+fn incoming_origin_metadata_by_id(
+    store: &Db,
+    id: &FactId,
+) -> rusqlite::Result<Option<IncomingMetadata>> {
+    store
+        .conn()
+        .query_row(
+            "SELECT origin_addr, origin_received_at
+             FROM incoming_facts
+             WHERE id = ?1
+             LIMIT 1",
+            params![id.as_slice()],
+            metadata_from_optional_columns,
+        )
+        .optional()
+        .map(|row| row.flatten())
+}
+
+fn metadata_from_optional_columns(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<Option<IncomingMetadata>> {
+    let origin_addr = row.get::<_, Option<Vec<u8>>>(0)?;
+    let received_at = row.get::<_, Option<i64>>(1)?;
+    match (origin_addr, received_at) {
+        (Some(origin_addr), Some(received_at)) => Ok(Some(IncomingMetadata {
+            origin_addr,
+            received_at_local_ms: u64_column(received_at, "incoming origin received_at")?,
+        })),
+        (None, None) => Ok(None),
+        _ => Err(projection_sql_error(
+            "incoming origin metadata columns must both be set or both be null",
+        )),
+    }
 }
 
 fn fact_bytes_by_id_in_tx(store: &Db, id: &FactId) -> rusqlite::Result<Option<Vec<u8>>> {
@@ -3765,6 +3894,45 @@ mod contract_tests {
         let context = stored_context_for_owner(&store, &parent.id).expect("parent context");
         assert_eq!(context.needs.len(), 1);
         assert!(context.offers.is_empty());
+    }
+
+    #[test]
+    fn retained_incoming_fact_has_no_ambient_origin_metadata_from_core() {
+        // Origin address and receive time are volatile: they live on the
+        // `incoming_facts` row and are dropped when the fact is retained. A later
+        // durable projection run must not be able to read receive metadata from
+        // core, because nothing durable in core preserves it. Origin evidence
+        // that needs to survive belongs in protocol fact bytes, not here.
+        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+            .expect("open db");
+        let parent = Fact::new(FactScope::Local, 1, b"ephemeral-origin".to_vec());
+        let metadata = IncomingMetadata {
+            origin_addr: b"127.0.0.1:41001".to_vec(),
+            received_at_local_ms: 1_700_000_222,
+        };
+        store
+            .write_transaction(|tx| insert_network_incoming_fact_in_tx(tx, &parent, &metadata))
+            .expect("insert incoming fact with metadata");
+
+        let role = Role::new("exact").unwrap();
+        let key = ContextKey::from_bytes([17; 32]);
+        let projector = need_only(role, key);
+        let progress =
+            drain_projection(&projector, &store, &[], None, 10).expect("incoming parks on needs");
+
+        assert!(progress);
+        assert!(incoming_fact_by_id(&store, &parent.id)
+            .expect("load incoming")
+            .is_none());
+        let input = load_pending_fact(
+            &store,
+            ProjectionSource::Durable,
+            parent.id,
+            ProjectionMode::Normal,
+        )
+        .expect("load parked fact")
+        .expect("parked fact should load");
+        assert_eq!(input.pending_inputs.incoming_metadata(), None);
     }
 
     #[test]

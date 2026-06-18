@@ -187,11 +187,11 @@ worker/daemon
 
 Command-authored facts and intent-created facts skip the incoming intake table:
 core retains them in `facts` and `local_fact_admissions`, then marks them in
-`pending_projection` in the same transaction. Outside-origin facts from the
-network handler enter through the temporary `incoming_facts` queue. Intake only
-stages those rows; runtime loads them into the owning projector, and projector
-output either deletes the incoming row or retains it as a normal fact when it
-must park on context or become protocol evidence.
+`pending_projection` in the same transaction. Outside-origin bytes first enter
+core's temporary `network_incoming` queue, then the daemon classifier stages
+recognized facts in `incoming_facts`. Runtime loads those facts into the owning
+projector, and projector output either deletes the incoming row or retains it as
+a normal fact when it must park on context or become protocol evidence.
 
 Commands do not dispatch handlers or privately project their own writes. A
 command reads the current projected state, authors all facts from that snapshot,
@@ -212,14 +212,15 @@ the setting, and recurring daemon sync reads that projected row to perform
 compare/have/need/fact-send work. A setting command changes durable facts, not
 the handler queue.
 
-Network input is accepted by core's TCP listener and handed directly to the
-protocol-declared inbound intake. The intake commits recognized wire frames as
-incoming facts plus observation facts through `RuntimeEffects`; core does not
-store a separate inbound byte queue. Network output is produced by protocol
-handlers as opaque frame bytes addressed to a `SocketAddr`. Core stores those
-bytes in memory-local `network_outgoing` rows, keeps active peer addresses in
-`network_outgoing_targets`, and lets the daemon TCP pump write and delete frames as
-socket capacity allows.
+Network input is accepted by core's TCP listener into memory-local
+`network_incoming` rows with origin metadata. The daemon drains those rows
+through the protocol-declared inbound classifier, which returns typed facts for
+the temporary `incoming_facts` queue. Projectors decide what, if anything,
+becomes durable and use the incoming metadata when emitting receipts. Network
+output is produced by protocol handlers as opaque frame bytes addressed to a
+`SocketAddr`. Core stores those bytes in memory-local `network_outgoing` rows,
+keeps active peer addresses in `network_outgoing_targets`, and lets the daemon
+TCP pump write and delete frames as socket capacity allows.
 
 ## Scope Layout
 
@@ -300,11 +301,11 @@ This keeps core's network interface minimal. Core owns TCP accept/write
 mechanics, the volatile outgoing frame queue, and the active-target scheduling
 index. It does not know whether a byte string is a bootstrap request, bootstrap
 response, established connection frame, auth fact, sync fact, or content fact.
-On ingress, the daemon hands accepted bytes to the protocol-declared inbound
-intake; the connection scope classifies the frame, emits the right local
-wrapper fact and observation fact, and lets connection projectors open it with
-auth and connection context. Opened payloads re-enter the normal fact admission
-path as child facts, and receipt facts record which connection delivered them.
+On ingress, the daemon stages accepted bytes in the core incoming queue; the
+connection scope classifies the frame, emits the right incoming wrapper fact,
+and lets connection projectors open it with incoming metadata plus auth or
+connection context. Opened payloads re-enter the normal fact admission path as
+child facts, and receipt facts record which connection delivered them.
 
 Egress is the same boundary in reverse. Sync may decide that a fact id should
 be sent to an authorized connection, but the connection scope decides how to
