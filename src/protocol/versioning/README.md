@@ -19,10 +19,20 @@ runtime contract.
    expect before they touch materialized state.
 5. If code advances past the stored database marker, normal queries fail and
    normal effect commits roll back instead of consuming queued work.
-6. The recurring version check emits a local update fact. Projecting that fact
-   wipes resettable derived state, queues retained facts in replay mode, records
-   protocol-visible update history, and advances the schema-declared protocol
-   marker.
+6. Version repair is driven by the daemon-installed recurring `check_version`
+   intent.
+   - The recurring path checks the schema-declared protocol marker against
+     `CURRENT_PROTOCOL_VERSION`.
+   - If the marker is current, it emits no work. If it is stale, the handler
+     creates a priority local update fact.
+   - Live projection of that update fact commits the rebuild boundary: it
+     records protocol-visible update history, advances the schema-declared
+     protocol marker, clears schema-declared resettable derived/runtime state
+     while preserving retained facts and other replay-protected tables, and
+     queues all retained facts in `pending_projection` with replay mode set.
+   - After that commit, the daemon drains the replay projection and replay
+     intent work like normal queued work. The storage-requirement guards above
+     keep ordinary work from consuming stale materialized state in the meantime.
 
 ## Layout
 
