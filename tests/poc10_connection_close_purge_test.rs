@@ -143,16 +143,16 @@ fn closing_connection_purges_connection_fact_and_row() {
     })
     .expect("build connection");
     let connection_fact = connection.fact;
-    let connection_observation_fact = frame_observation::author::fact_from_observation(
-        connection_fact.id,
+    let connection_id = connection_fact.id;
+    let connection_observation = frame_observation::project::connection_frame_observation_fact(
+        connection_id,
         b"127.0.0.1:41002",
         1_003,
     )
-    .expect("connection observation");
-    let connection_id = connection_fact.id;
+    .expect("connection receive observation");
 
     runtime
-        .submit_facts([connection_fact.clone(), connection_observation_fact])
+        .submit_facts([connection_observation, connection_fact.clone()])
         .expect("submit connection");
     drain_projection_for_test(&mut runtime, 8, 64);
 

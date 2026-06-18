@@ -327,7 +327,8 @@ pub mod adapt {
 // and frame-child projectors own the path-specific proof that consumes the
 // offer.
 
-use crate::core::facts::{Fact, FactScope};
+use crate::core::context::{ContextNeed, ContextOffer};
+use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::project_fact::{
     FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
@@ -353,6 +354,28 @@ pub fn connection_fact_receipt_for_path(
         input.received_at_local_ms,
         super::encode::encode_fact(&fact)?,
     ))
+}
+
+pub const CONNECTION_FACT_RECEIPT_ROLE: &str = "connection_fact_receipt";
+
+pub fn connection_fact_receipt_need(owner: FactId, received_fact_id: FactId) -> ContextNeed {
+    ContextNeed::range(
+        owner,
+        CONNECTION_FACT_RECEIPT_ROLE,
+        FactScope::Local,
+        received_fact_id,
+        received_fact_id,
+    )
+}
+
+pub fn connection_fact_receipt_offer(owner: FactId, received_fact_id: FactId) -> ContextOffer {
+    ContextOffer::range(
+        owner,
+        CONNECTION_FACT_RECEIPT_ROLE,
+        FactScope::Local,
+        received_fact_id,
+        received_fact_id,
+    )
 }
 
 pub(crate) fn validate_local_receipt_scope(fact: &Fact) -> Result<(), String> {
@@ -404,11 +427,8 @@ impl ConnectionFactReceiptProjector {
         validate_local_receipt_scope(fact)?;
         // 3. Materialize.
         Ok(ProjectionOutput::new()
-            .offer(crate::core::context::ContextOffer::range(
+            .offer(connection_fact_receipt_offer(
                 fact.id,
-                "connection_fact_receipt",
-                crate::core::facts::FactScope::Local,
-                received.received_fact_id,
                 received.received_fact_id,
             ))
             .row_mutation(RowMutation::InsertValues(

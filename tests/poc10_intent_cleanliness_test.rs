@@ -1893,7 +1893,7 @@ fn connection_frame_wire_facts_do_not_embed_observation_metadata() {
 
     assert!(
         offenders.is_empty(),
-        "connection frame facts must stay canonical wire facts; receive metadata belongs only in connection_frame_observation:\n{}",
+        "connection frame facts must stay canonical wire facts; receive metadata belongs outside frame wire facts:\n{}",
         offenders.join("\n")
     );
 }
@@ -1933,7 +1933,7 @@ fn connection_frame_send_and_receive_paths_use_frame_fact_create_helpers() {
 
     assert!(
         offenders.is_empty(),
-        "send and receive should go through concrete frame-family author.rs files; only receive emits observation context intents:\n{}",
+        "send and receive should go through concrete frame-family author.rs files; receive only classifies incoming frame facts:\n{}",
         offenders.join("\n")
     );
 }

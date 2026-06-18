@@ -2,9 +2,9 @@
 //!
 //! This file is the durable and memory table inventory for the generic
 //! runtime: facts, local admissions, standing context, time wakes, pending
-//! projection, pending projection matches, incoming facts, intent
-//! queues. It exposes one executable `SchemaSource` plus typed `TableName`
-//! constants so the rest of core does not repeat string literals.
+//! projection, pending projection matches, incoming facts, and intent queues. It
+//! exposes one executable `SchemaSource` plus typed `TableName` constants so the
+//! rest of core does not repeat string literals.
 //!
 //! These tables are the shared substrate behind the runtime work documented in
 //! `src/core/README.md` and the projection boundary documented in
@@ -179,7 +179,9 @@ CREATE TEMP TABLE IF NOT EXISTS incoming_facts (
     scope_kind TEXT NOT NULL,
     scope_id BLOB NOT NULL,
     received_at INTEGER NOT NULL,
-    bytes BLOB NOT NULL
+    bytes BLOB NOT NULL,
+    origin_addr BLOB,
+    origin_received_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS incoming_facts_by_received_at
     ON incoming_facts (received_at, id);

@@ -3,8 +3,8 @@
 //! Protocol code hands opaque frame bytes to this module. Core stores outgoing
 //! bytes in per-target memory-local SQLite queue rows, keeps a separate active
 //! target index for fair scheduling, pumps queued frames to TCP when a daemon
-//! tick has socket capacity, and delivers inbound TCP frames to a
-//! caller-provided intake callback as soon as the frame has been decoded.
+//! tick has socket capacity, and stages inbound TCP frames in a process-local
+//! queue before protocol classification.
 //!
 //! The queue rows are process-local operational state, not protocol truth.
 //! Durable work lives in projected facts, context, rows, and intents; network
@@ -18,8 +18,8 @@
 //! produced, it has crossed out of core and into a fact module.
 //!
 //! Outgoing rows are produced by protocol handlers and consumed by the
-//! TCP pump. Inbound frames are read by the TCP pump and handed directly to the
-//! daemon's protocol intake callback. This keeps socket readiness, backpressure,
+//! TCP pump. Inbound rows are produced by the TCP listener and consumed by the
+//! daemon's protocol intake step. This keeps socket readiness, backpressure,
 //! and partial writes out of protocol handlers while also keeping protocol
 //! admission out of this network module.
 //!
@@ -40,6 +40,8 @@ use rusqlite::{params, OptionalExtension};
 pub const OUTGOING_TABLE: TableName = TableName::new("network_outgoing");
 /// Ephemeral active-target index for the outgoing network queue.
 pub const OUTGOING_TARGETS_TABLE: TableName = TableName::new("network_outgoing_targets");
+/// Ephemeral incoming network frame queue table.
+pub const INCOMING_TABLE: TableName = TableName::new("network_incoming");
 const MAX_FRAME_BYTES: usize = 128 * 1024 * 1024;
 const WRITE_FRAME_BUDGET: Duration = Duration::from_secs(1);
 
@@ -61,11 +63,19 @@ CREATE INDEX IF NOT EXISTS network_outgoing_by_target
 CREATE TEMP TABLE IF NOT EXISTS network_outgoing_targets (
     target_addr TEXT PRIMARY KEY NOT NULL
 );
+CREATE TEMP TABLE IF NOT EXISTS network_incoming (
+    queue_key BLOB PRIMARY KEY NOT NULL,
+    source_addr TEXT NOT NULL,
+    received_at INTEGER NOT NULL,
+    frame_bytes BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS network_incoming_by_received_at
+    ON network_incoming (received_at, queue_key);
 "#,
     storage_version: None,
     replay: ReplayTables {
         protected: &[],
-        reset: &[OUTGOING_TABLE, OUTGOING_TARGETS_TABLE],
+        reset: &[OUTGOING_TABLE, OUTGOING_TARGETS_TABLE, INCOMING_TABLE],
         summary: &[],
     },
 };
@@ -123,6 +133,27 @@ pub struct OutgoingNetworkRow {
     pub bytes: Vec<u8>,
 }
 
+/// Memory-queued incoming frame plus receive metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncomingNetworkRow {
+    pub key: Vec<u8>,
+    pub source: NetworkSource,
+    pub received_at_ms: u64,
+    pub bytes: Vec<u8>,
+}
+
+impl IncomingNetworkRow {
+    /// Build a deterministic incoming queue row.
+    pub fn new(source: NetworkSource, received_at_ms: u64, bytes: Vec<u8>) -> Self {
+        Self {
+            key: incoming_queue_key(source.addr(), received_at_ms, &bytes),
+            source,
+            received_at_ms,
+            bytes,
+        }
+    }
+}
+
 impl OutgoingNetworkRow {
     /// Build a deterministic outgoing queue row.
     pub fn new(target: NetworkTarget, bytes: Vec<u8>) -> Self {
@@ -159,6 +190,62 @@ pub fn enqueue_outgoing(store: &Db, rows: &[OutgoingNetworkRow]) -> Result<usize
             Ok(inserted_frames)
         })
         .map_err(|err| format!("enqueue outgoing network rows: {err}"))
+}
+
+/// Insert incoming rows idempotently.
+pub fn enqueue_incoming(store: &Db, rows: &[IncomingNetworkRow]) -> Result<usize, String> {
+    store
+        .write_transaction(|tx| insert_incoming_rows_in_tx(tx, rows))
+        .map_err(|err| format!("enqueue incoming network rows: {err}"))
+}
+
+/// Claim at most `limit` incoming rows in receive order.
+pub fn claim_incoming(store: &Db, limit: usize) -> Result<Vec<IncomingNetworkRow>, String> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    let mut stmt = store
+        .conn()
+        .prepare(
+            "SELECT queue_key, source_addr, received_at, frame_bytes
+             FROM network_incoming
+             ORDER BY received_at, queue_key
+             LIMIT ?1",
+        )
+        .map_err(|err| format!("claim incoming network rows: {err}"))?;
+    let rows = stmt
+        .query_map(params![limit], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+            ))
+        })
+        .map_err(|err| format!("claim incoming network rows: {err}"))?;
+    rows.map(|row| {
+        row.map_err(|err| format!("claim incoming network rows: {err}"))
+            .and_then(|(key, source_addr, received_at, bytes)| {
+                decode_incoming(key, &source_addr, received_at, bytes)
+            })
+    })
+    .collect()
+}
+
+/// Delete incoming rows after the caller has accepted responsibility for them.
+pub fn delete_incoming(store: &Db, rows: &[IncomingNetworkRow]) -> Result<(), String> {
+    store
+        .write_transaction(|tx| {
+            for row in rows {
+                tx.conn().execute(
+                    "DELETE FROM network_incoming WHERE queue_key = ?1",
+                    params![row.key.as_slice()],
+                )?;
+            }
+            Ok(())
+        })
+        .map_err(|err| format!("delete incoming network rows: {err}"))
 }
 
 /// Claim at most `limit` outgoing rows for one concrete target.
@@ -311,6 +398,88 @@ fn insert_outgoing_rows_in_tx(store: &Db, rows: &[OutgoingNetworkRow]) -> rusqli
         inserted += changed;
     }
     Ok(inserted)
+}
+
+fn insert_incoming_rows_in_tx(store: &Db, rows: &[IncomingNetworkRow]) -> rusqlite::Result<usize> {
+    let mut inserted = 0usize;
+    for row in rows {
+        let source_addr = row.source.addr().to_string();
+        let received_at = sqlite_u64(row.received_at_ms, "incoming network received_at")?;
+        let changed = store.conn().execute(
+            "INSERT OR IGNORE INTO network_incoming
+                (queue_key, source_addr, received_at, frame_bytes)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                row.key.as_slice(),
+                source_addr.as_str(),
+                received_at,
+                row.bytes.as_slice()
+            ],
+        )?;
+        if changed == 0 && !incoming_row_matches(store, row, &source_addr, received_at)? {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "conflicting incoming network row".to_string(),
+            ));
+        }
+        inserted += changed;
+    }
+    Ok(inserted)
+}
+
+fn incoming_row_matches(
+    store: &Db,
+    row: &IncomingNetworkRow,
+    source_addr: &str,
+    received_at: i64,
+) -> rusqlite::Result<bool> {
+    store
+        .conn()
+        .query_row(
+            "SELECT source_addr, received_at, frame_bytes
+             FROM network_incoming
+             WHERE queue_key = ?1
+             LIMIT 1",
+            params![row.key.as_slice()],
+            |existing| {
+                Ok((
+                    existing.get::<_, String>(0)?,
+                    existing.get::<_, i64>(1)?,
+                    existing.get::<_, Vec<u8>>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map(|existing| {
+            existing
+                .map(|(existing_source, existing_received_at, bytes)| {
+                    existing_source == source_addr
+                        && existing_received_at == received_at
+                        && bytes.as_slice() == row.bytes.as_slice()
+                })
+                .unwrap_or(false)
+        })
+}
+
+fn decode_incoming(
+    key: Vec<u8>,
+    source_addr: &str,
+    received_at: i64,
+    bytes: Vec<u8>,
+) -> Result<IncomingNetworkRow, String> {
+    let source_addr = SocketAddr::from_str(source_addr)
+        .map_err(|_| "incoming network source address is invalid".to_string())?;
+    let received_at_ms =
+        u64::try_from(received_at).map_err(|_| "incoming network received_at is negative")?;
+    let expected = incoming_queue_key(source_addr, received_at_ms, &bytes);
+    if key != expected {
+        return Err("incoming network row key does not match row contents".to_string());
+    }
+    Ok(IncomingNetworkRow {
+        key,
+        source: NetworkSource::new(source_addr),
+        received_at_ms,
+        bytes,
+    })
 }
 
 fn outgoing_row_matches(
@@ -480,6 +649,24 @@ fn queue_key(kind: &[u8], addr: SocketAddr, bytes: &[u8]) -> Vec<u8> {
     hasher.update(bytes);
     key.extend_from_slice(hasher.finalize().as_bytes());
     key
+}
+
+fn incoming_queue_key(addr: SocketAddr, received_at_ms: u64, bytes: &[u8]) -> Vec<u8> {
+    let mut key = target_prefix(addr);
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"incoming");
+    hasher.update(addr.to_string().as_bytes());
+    hasher.update(&received_at_ms.to_be_bytes());
+    hasher.update(&(bytes.len() as u64).to_be_bytes());
+    hasher.update(bytes);
+    key.extend_from_slice(hasher.finalize().as_bytes());
+    key
+}
+
+fn sqlite_u64(value: u64, name: &str) -> rusqlite::Result<i64> {
+    i64::try_from(value).map_err(|_| {
+        rusqlite::Error::InvalidParameterName(format!("{name}: SQL value exceeds SQLite integer"))
+    })
 }
 
 /// Counts observed while pumping one TCP stream.

@@ -185,10 +185,9 @@ pub mod authenticate {
 
     #[cfg(test)]
     mod tests {
-        use crate::core::facts::Fact;
+        use crate::core::facts::{Fact, FactScope};
         use crate::core::project_fact::ProjectionContext;
-        use crate::core::wire::FixedBytes;
-        use crate::protocol::connection::frame_small::author::fact_from_wire;
+        use crate::core::wire::{FixedBytes, FixedSlot};
         use crate::protocol::connection::frame_small::encode as frame_encode;
         use crate::protocol::connection::frame_small::fact::ConnectionFrameSmallFact;
 
@@ -199,7 +198,14 @@ pub mod authenticate {
                 &[3; 32],
             )
             .expect("frame bytes");
-            fact_from_wire(&frame, 100).expect("connection_frame_small fact")
+            Fact::new(
+                FactScope::Local,
+                100,
+                frame_encode::encode_fact(&ConnectionFrameSmallFact {
+                    frame: FixedSlot::new(&frame).expect("frame slot"),
+                })
+                .expect("connection_frame_small fact"),
+            )
         }
 
         fn authenticate(fact: &Fact) -> Result<ConnectionFrameSmallFact, String> {
@@ -274,11 +280,12 @@ pub mod adapt {
 // POLICY. A `connection_frame_small` fact is admitted iff:
 //   1. STRUCTURAL. The fact is local ephemeral input and its layout contains
 //      exactly one small encrypted connection frame.
-//   2. CONTEXT. The frame fact has exact local `connection_frame_observation`
-//      context, and its header names an exact local `connection`
-//      context. Missing context emits only a transient need for the fixed-point
-//      pass; malformed and undecryptable frames produce no durable output.
-//   3. MATERIALIZE. Opened inner facts are admitted as durable child facts,
+//   2. CONTEXT. The frame fact has incoming origin metadata or durable frame
+//      observation context, and its header names an exact local `connection`
+//      context. Missing connection context emits a frame observation fact and
+//      parks the wrapper; malformed and undecryptable frames produce no durable
+//      output.
+//   3. MATERIALIZE. Opened inner facts are emitted as incoming projection inputs,
 //      each with a durable `connection::fact_receipt`.
 
 use crate::core::context::ContextNeed;
@@ -350,29 +357,9 @@ pub fn project_observed_frame(
         return Ok(ProjectionOutput::new().drop_incoming());
     };
 
-    let observation_need = exact_need(
-        fact.id,
-        "connection_frame_observation",
-        FactScope::Local,
-        fact.id,
-    );
-    let Some(observation_fact) = context.payload_for(&observation_need) else {
-        return Ok(ProjectionOutput::new().need(observation_need));
-    };
-    if observation_fact.scope != FactScope::Local {
-        return Err("connection frame observation context must be local".to_string());
-    }
-    let observation =
-        connection::frame_observation::project::decode::decode_fact(observation_fact.body())?;
-    if observation.frame_fact_id != fact.id {
-        return Err("connection frame observation does not name frame fact".to_string());
-    }
-
     let connection_need = connection::connection::project::connection_need(fact.id, connection_id);
     let Some(connection_fact) = context.payload_for(&connection_need) else {
-        return Ok(ProjectionOutput::new()
-            .need(observation_need)
-            .need(connection_need));
+        return Ok(frame_observation_output(fact, context)?.need(connection_need));
     };
     if connection_fact.scope != FactScope::Local {
         return Err("connection frame context must be local".to_string());
@@ -380,9 +367,7 @@ pub fn project_observed_frame(
     let material = match connection_material_from_context(connection_fact, context, fact.id) {
         ConnectionMaterialContext::Open(material) => material,
         ConnectionMaterialContext::Needs(needs) => {
-            let mut output = ProjectionOutput::new()
-                .need(observation_need)
-                .need(connection_need);
+            let mut output = frame_observation_output(fact, context)?.need(connection_need);
             for need in needs {
                 output = output.need(need);
             }
@@ -391,27 +376,80 @@ pub fn project_observed_frame(
         ConnectionMaterialContext::Invalid => return Ok(ProjectionOutput::new().drop_incoming()),
     };
 
+    let Some(origin) = observed_frame_origin(fact, context)? else {
+        return Ok(frame_observation_output(fact, context)?.need(connection_need));
+    };
     match open_received_frame_with_material(
         frame,
         material,
-        observation.origin_addr.bytes(),
-        observation.received_at_local_ms,
+        &origin.origin_addr,
+        origin.received_at_local_ms,
     ) {
         Ok(facts) => Ok(facts_output(fact.id, facts)),
         Err(_) => Ok(ProjectionOutput::new().drop_incoming()),
     }
 }
 
-fn exact_need(owner: [u8; 32], role: &'static str, scope: FactScope, key: [u8; 32]) -> ContextNeed {
-    ContextNeed::range(owner, role, scope, key, key)
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ObservedOrigin {
+    origin_addr: Vec<u8>,
+    received_at_local_ms: u64,
 }
 
-fn facts_output(frame_fact_id: FactId, facts: Vec<Fact>) -> ProjectionOutput {
+fn observed_frame_origin(
+    fact: &Fact,
+    context: &ProjectionContext,
+) -> Result<Option<ObservedOrigin>, String> {
+    if let Some(metadata) = context.incoming_metadata() {
+        return Ok(Some(ObservedOrigin {
+            origin_addr: metadata.origin_addr.clone(),
+            received_at_local_ms: metadata.received_at_local_ms,
+        }));
+    }
+    let need =
+        connection::frame_observation::project::connection_frame_observation_need(fact.id, fact.id);
+    let Some(observation_fact) = context.payload_for(&need) else {
+        return Ok(None);
+    };
+    if observation_fact.scope != FactScope::Local {
+        return Err("connection frame observation context must be local".to_string());
+    }
+    let observed =
+        connection::frame_observation::project::decode::decode_fact(observation_fact.body())
+            .map_err(|_| "connection frame observation context is malformed".to_string())?;
+    if observed.frame_fact_id != fact.id {
+        return Err("connection frame observation does not bind frame".to_string());
+    }
+    Ok(Some(ObservedOrigin {
+        origin_addr: observed.origin_addr.bytes().to_vec(),
+        received_at_local_ms: observed.received_at_local_ms,
+    }))
+}
+
+fn frame_observation_output(
+    fact: &Fact,
+    context: &ProjectionContext,
+) -> Result<ProjectionOutput, String> {
+    let need =
+        connection::frame_observation::project::connection_frame_observation_need(fact.id, fact.id);
+    let output = ProjectionOutput::new().need(need);
+    let Some(metadata) = context.incoming_metadata() else {
+        return Ok(output);
+    };
+    let observation = connection::frame_observation::project::connection_frame_observation_fact(
+        fact.id,
+        &metadata.origin_addr,
+        metadata.received_at_local_ms,
+    )?;
+    Ok(output.fact(observation))
+}
+
+fn facts_output(frame_fact_id: FactId, facts: Vec<(Fact, Fact)>) -> ProjectionOutput {
     let mut output = ProjectionOutput::new()
         .drop_incoming()
         .purge_self(frame_fact_id);
-    for fact in facts {
-        output = output.incoming_fact(fact);
+    for (received, receipt) in facts {
+        output = output.incoming_fact(received).fact(receipt);
     }
     output
 }
@@ -421,7 +459,7 @@ fn open_received_frame_with_material(
     connection: ConnectionMaterial,
     origin_addr: &[u8],
     received_at_local_ms: u64,
-) -> Result<Vec<Fact>, String> {
+) -> Result<Vec<(Fact, Fact)>, String> {
     let opened = open_connection_frame(frame, &connection.connection_secret)?;
     if connection.connection_id != opened.connection_id {
         return Err(
@@ -434,7 +472,7 @@ fn open_received_frame_with_material(
         opened.receiver_endpoint_id,
     )?;
 
-    let mut facts = Vec::with_capacity(opened.facts.len() * 2);
+    let mut facts = Vec::with_capacity(opened.facts.len());
     for bytes in opened.facts {
         let received = admit_received_fact_bytes(bytes)?;
         let receipt = connection_fact_receipt_for_path(ReceiptPathInput {
@@ -448,8 +486,7 @@ fn open_received_frame_with_material(
             frame_hash: opened.frame_hash,
             received_at_local_ms,
         })?;
-        facts.push(received);
-        facts.push(receipt);
+        facts.push((received, receipt));
     }
     Ok(facts)
 }

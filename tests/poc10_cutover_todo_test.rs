@@ -1045,7 +1045,7 @@ fn cutover_runtime_step_commits_projection_context_rows_and_intents_atomically()
     }
     if core_daemon.contains("network::delete_inbound") {
         offenders.push(
-            "src/core/daemon.rs should not own an inbound row queue separate from direct network intake"
+            "src/core/daemon.rs should not delete inbound rows outside the proven classifier commit"
                 .to_string(),
         );
     }
@@ -1148,12 +1148,12 @@ fn cutover_network_io_boundaries_are_live_only_work() {
         offenders
             .push("send_facts_on_connection does not enqueue network frames directly".to_string());
     }
-    if !daemon.contains("runtime.submit_runtime_effects(effects")
-        || !protocol_app.contains("inbound_network_intake: Some(receive_network_frame_effects)")
+    if !daemon.contains("drain_inbound_network_queue")
+        || !daemon.contains("runtime.submit_network_incoming_facts")
+        || !protocol_app.contains("inbound_network_intake: Some(receive_network_frame_facts)")
     {
         offenders.push(
-            "daemon inbound network frames are not committed through direct intake effects"
-                .to_string(),
+            "daemon inbound network frames are not staged through core incoming facts".to_string(),
         );
     }
     if daemon.contains("runtime.submit_local_intent(to_intent") {

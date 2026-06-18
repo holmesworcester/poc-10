@@ -163,9 +163,10 @@ fn root_readme_describes_context_project_aims() {
         "committed RuntimeEffects",
         "Command-authored facts and intent-created facts skip the incoming intake table",
         "`facts` and `local_fact_admissions`",
+        "`network_incoming`",
         "`incoming_facts`",
-        "Intake only stages those rows",
-        "runtime loads them into the owning projector",
+        "the daemon classifier stages recognized facts in `incoming_facts`",
+        "Runtime loads those facts into the owning projector",
         "projector output either deletes the incoming row or retains it as a normal fact",
     ] {
         assert!(
@@ -631,7 +632,8 @@ fn core_readmes_document_runtime_boundaries() {
         "`FactAdmissionFn`",
         "poc-10 installs one that dispatches by fact tag to protocol-local decode and validation helpers",
         "durable fact admission or incoming_facts staging",
-        "outside-origin bytes are staged in the temporary `incoming_facts` queue until runtime loads them into the owning projector",
+        "temporary `network_incoming` queue with origin and receive-time metadata",
+        "Recognized frame bytes then become temporary `incoming_facts`",
         "stage incoming facts in `incoming_facts`",
         "The owning projector decides whether each incoming frame fact is retained",
         "submit local (ephemeral, not-replayed) intents to `local_intents`",

@@ -1,9 +1,10 @@
-//! Received connection-frame observation fact family.
+//! Received wire-fact observation fact family.
 //!
 //! A `connection_frame_observation` fact is durable local metadata saying this
-//! daemon observed a canonical frame fact from a socket origin at a local time.
-//! Frame facts contain only wire bytes; this family supplies the receive
-//! context needed before those bytes may be opened.
+//! daemon observed a request, connection, or established frame wrapper fact from
+//! a socket origin at a local time. Wire facts contain only received bytes; this
+//! family supplies replay-safe receive context when a projector must park before
+//! it can emit the final receive receipt.
 
 pub mod author;
 pub mod encode;
