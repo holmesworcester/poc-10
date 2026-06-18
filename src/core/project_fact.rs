@@ -103,11 +103,11 @@ struct PreparedProjection {
 }
 
 enum ProjectionOutcome {
-    Stale {
+    RetireStaleInput {
         source: ProjectionSource,
         fact_id: FactId,
     },
-    Rejected {
+    RetireRejectedInput {
         source: ProjectionSource,
         fact_id: FactId,
     },
@@ -115,38 +115,15 @@ enum ProjectionOutcome {
 }
 
 // =============================================================================
-// Runtime Entry Point
-// =============================================================================
-
-/// Runtime-facing entry point for one projection worker step.
-///
-/// The caller owns source order and batching. This wrapper delegates to the
-/// central procedure below so the projection algorithm has one place to read.
-pub(crate) fn project_one(
-    store: &Db,
-    projector: &(impl Projector + ?Sized),
-    source: ProjectionSource,
-    mode: ProjectionMode,
-    allowed_tables: &[TableName],
-    fact_admission: Option<FactAdmissionFn>,
-) -> Result<WorkStatus, String> {
-    project_one_fact(
-        store,
-        projector,
-        source,
-        mode,
-        allowed_tables,
-        fact_admission,
-    )
-}
-
-// =============================================================================
 // Central Procedure
 // =============================================================================
 
-/// Project one fact-like input.
+/// Project one fact-like input selected from one source.
 ///
 /// Run and commit one queued projection item.
+///
+/// Runtime owns source order and batching; this function owns the complete work
+/// unit after the caller has selected a source.
 ///
 /// This is the whole projection worker in miniature:
 ///
@@ -159,7 +136,7 @@ pub(crate) fn project_one(
 /// owns pure projector execution and output validation. Commit owns every SQL
 /// mutation, including stale cleanup, rejected-input retirement, current-context
 /// comparison, and wake fanout.
-fn project_one_fact(
+pub(crate) fn project_one(
     store: &Db,
     projector: &(impl Projector + ?Sized),
     source: ProjectionSource,
@@ -173,9 +150,14 @@ fn project_one_fact(
     };
 
     let outcome = match load {
-        ProjectionLoad::Stale { source, fact_id } => ProjectionOutcome::Stale { source, fact_id },
         ProjectionLoad::Loaded(input) => {
             evaluate_loaded_projection_input(projector, input, allowed_tables, fact_admission)?
+        }
+        ProjectionLoad::Stale { source, fact_id } => {
+            // The selected queue/intake owner no longer has backing bytes, so
+            // there is no fact to evaluate. Commit still owns retiring that
+            // stale owner from SQL.
+            ProjectionOutcome::RetireStaleInput { source, fact_id }
         }
     };
 
@@ -232,7 +214,7 @@ fn evaluate_loaded_projection_input(
     }) {
         Ok(projection) => projection,
         Err(_rejection) => {
-            return Ok(ProjectionOutcome::Rejected { source, fact_id });
+            return Ok(ProjectionOutcome::RetireRejectedInput { source, fact_id });
         }
     };
     Ok(ProjectionOutcome::Accepted(projection))
@@ -497,10 +479,10 @@ fn commit_projection_outcome_in_tx(
     fact_admission: Option<FactAdmissionFn>,
 ) -> rusqlite::Result<()> {
     match outcome {
-        ProjectionOutcome::Stale { source, fact_id } => {
+        ProjectionOutcome::RetireStaleInput { source, fact_id } => {
             commit_stale_projection_input_in_tx(tx, *source, *fact_id)
         }
-        ProjectionOutcome::Rejected { source, fact_id } => {
+        ProjectionOutcome::RetireRejectedInput { source, fact_id } => {
             commit_rejected_projection_input_in_tx(tx, *source, *fact_id)
         }
         ProjectionOutcome::Accepted(projection) => {
@@ -2734,7 +2716,7 @@ mod contract_tests {
 
         assert!(matches!(
             outcome,
-            ProjectionOutcome::Rejected {
+            ProjectionOutcome::RetireRejectedInput {
                 source: ProjectionSource::Durable,
                 fact_id
             } if fact_id == fact.id
@@ -2773,7 +2755,7 @@ mod contract_tests {
 
         assert!(matches!(
             outcome,
-            ProjectionOutcome::Rejected {
+            ProjectionOutcome::RetireRejectedInput {
                 source: ProjectionSource::Incoming,
                 fact_id
             } if fact_id == fact.id
