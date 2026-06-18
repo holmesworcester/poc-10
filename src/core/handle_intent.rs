@@ -236,16 +236,17 @@ pub(crate) fn insert_intent_work_row_in_tx(
     let table_name = quoted_intent_work_table_name(table)?;
     let changed = db.conn().execute(
         &format!(
-            "INSERT OR IGNORE INTO {table_name} (kind, idempotence_key, payload)
-             VALUES (?1, ?2, ?3)"
+            "INSERT OR IGNORE INTO {table_name} (kind, idempotence_key, payload, replay)
+             VALUES (?1, ?2, ?3, ?4)"
         ),
         params![
             row.kind.as_str(),
             row.idempotence_key.as_slice(),
-            row.payload.as_slice()
+            row.payload.as_slice(),
+            replay_flag_for_handler_mode(row.mode)
         ],
     )?;
-    verify_idempotent_intent_insert(
+    let inserted = verify_idempotent_intent_insert(
         changed,
         || {
             db.conn()
@@ -262,7 +263,26 @@ pub(crate) fn insert_intent_work_row_in_tx(
         },
         |existing| existing.as_slice() == row.payload.as_slice(),
         format!("conflicting intent row for {}", row.kind),
-    )
+    )?;
+    if !inserted && row.mode.is_replay() {
+        db.conn().execute(
+            &format!(
+                "UPDATE {table_name}
+                 SET replay = 1
+                 WHERE kind = ?1 AND idempotence_key = ?2 AND replay = 0"
+            ),
+            params![row.kind.as_str(), row.idempotence_key.as_slice()],
+        )?;
+    }
+    Ok(inserted)
+}
+
+fn replay_flag_for_handler_mode(mode: HandlerMode) -> i64 {
+    if mode.is_replay() {
+        1
+    } else {
+        0
+    }
 }
 
 /// Delete one raw intent work row by its idempotent queue identity.
@@ -310,7 +330,7 @@ fn next_intent_work_row(
     db.conn()
         .query_row(
             &format!(
-                "SELECT kind, idempotence_key, payload
+                "SELECT kind, idempotence_key, payload, replay
                  FROM {table_name}
                  WHERE kind IN ({placeholders})
                  ORDER BY {order_by_sql}
@@ -322,10 +342,19 @@ fn next_intent_work_row(
                     kind: row.get(0)?,
                     idempotence_key: row.get(1)?,
                     payload: row.get(2)?,
+                    mode: handler_mode_from_replay_flag(row.get(3)?),
                 })
             },
         )
         .optional()
+}
+
+fn handler_mode_from_replay_flag(replay: i64) -> HandlerMode {
+    if replay == 0 {
+        HandlerMode::Live
+    } else {
+        HandlerMode::Replay
+    }
 }
 
 /// Queue ephemeral handler work on this SQLite connection.
@@ -383,14 +412,13 @@ fn handle_intent_with_policy(
     store: &Db,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
-    handler_mode: HandlerMode,
 ) -> Result<WorkStatus, String> {
     let IntentWork { queued, handler } = work;
     let mut status = WorkStatus::idle();
-    let context = load_handler_context(store, handler, &queued.intent, handler_mode)?;
+    let context = load_handler_context(store, handler, &queued.intent, queued.mode)?;
     let Some(output) = run_handler(handler, &queued.intent, &context, &mut status)? else {
         if status.retried && queued.queue == IntentQueue::Local {
-            rotate_local_retry_to_tail(store, &queued.intent)?;
+            rotate_local_retry_to_tail(store, &queued)?;
         }
         return Ok(status);
     };
@@ -411,13 +439,12 @@ pub(crate) fn dispatch_one_intent(
     queue: IntentQueue,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
-    handler_mode: HandlerMode,
 ) -> Result<WorkStatus, String> {
     let kinds = handlers.intent_kinds();
     let Some(work) = next_intent_work_in_queue(store, handlers, queue, &kinds)? else {
         return Ok(WorkStatus::idle());
     };
-    handle_intent_with_policy(work, store, allowed_tables, fact_admission, handler_mode)
+    handle_intent_with_policy(work, store, allowed_tables, fact_admission)
 }
 
 fn next_intent_work_in_queue<'a>(
@@ -444,7 +471,14 @@ fn next_queued_intent_in_queue(
 ) -> Result<Option<QueuedIntent>, String> {
     next_intent_work_row(store, queue.table(), allowed_kinds, queue.order_by_sql())
         .map_err(|err| format!("load queued intent: {err}"))?
-        .map(|row| Intent::from_work_row(row).map(|intent| QueuedIntent { queue, intent }))
+        .map(|row| {
+            let mode = row.mode;
+            Intent::from_work_row(row).map(|intent| QueuedIntent {
+                queue,
+                intent,
+                mode,
+            })
+        })
         .transpose()
 }
 
@@ -530,16 +564,27 @@ fn commit_handler_output(
                 delete_intent_work_row_in_tx(tx, LOCAL_INTENTS, kind, idempotence_key)?;
             }
 
-            commit_runtime_effects_in_tx(tx, effects, allowed_tables, fact_admission)?;
+            commit_runtime_effects_in_tx(
+                tx,
+                effects,
+                allowed_tables,
+                fact_admission,
+                queued.mode.is_replay(),
+                false,
+            )?;
             Ok(true)
         })
         .map_err(|err| format!("commit handler output: {err}"))
 }
 
-fn rotate_local_retry_to_tail(store: &Db, intent: &Intent) -> Result<bool, String> {
+fn rotate_local_retry_to_tail(store: &Db, queued: &QueuedIntent) -> Result<bool, String> {
     store
         .write_transaction(|tx| {
-            rotate_intent_work_row_to_tail_in_tx(tx, LOCAL_INTENTS, &intent.work_row())
+            rotate_intent_work_row_to_tail_in_tx(
+                tx,
+                LOCAL_INTENTS,
+                &queued.intent.work_row_with_mode(queued.mode.is_replay()),
+            )
         })
         .map_err(|err| format!("rotate local retry intent: {err}"))
 }
@@ -548,6 +593,7 @@ pub(crate) struct QueuedIntent {
     /// Queue from which this row was claimed.
     queue: IntentQueue,
     pub(crate) intent: Intent,
+    mode: HandlerMode,
 }
 
 #[cfg(test)]
@@ -577,7 +623,6 @@ mod tests {
             &[],
             None,
             1,
-            HandlerMode::Live,
         )
         .expect("dispatch durable intent");
 
@@ -607,7 +652,6 @@ mod tests {
             &[],
             None,
             8,
-            HandlerMode::Live,
         )
         .expect("dispatch retrying local intents");
 
@@ -646,7 +690,6 @@ mod tests {
             &[],
             None,
             8,
-            HandlerMode::Live,
         )
         .expect("dispatch emitting intent");
 
@@ -769,18 +812,11 @@ mod tests {
         allowed_tables: &[TableName],
         fact_admission: Option<FactAdmissionFn>,
         limit: usize,
-        handler_mode: HandlerMode,
     ) -> Result<TestIntentProgress, String> {
         let mut progress = TestIntentProgress::default();
         for _ in 0..limit {
-            let step_status = dispatch_one_intent(
-                store,
-                handlers,
-                queue,
-                allowed_tables,
-                fact_admission,
-                handler_mode,
-            )?;
+            let step_status =
+                dispatch_one_intent(store, handlers, queue, allowed_tables, fact_admission)?;
             if step_status.is_idle() {
                 break;
             }

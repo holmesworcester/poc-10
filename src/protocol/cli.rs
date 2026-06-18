@@ -18,12 +18,11 @@ use crate::core::cli::{decode_hex_32_named as decode_hex_32, encode_hex_32, CliA
 use crate::core::command::{AuthoredFacts, CommandClock};
 use crate::core::daemon;
 use crate::core::db::Db;
-use crate::core::replay::{ReplayOrder, ReplayReport};
 use crate::core::replay_check::StateSummary;
 use crate::core::runtime::Runtime;
 use crate::protocol::connection;
 use crate::protocol::sync;
-use crate::protocol::{auth, content};
+use crate::protocol::{auth, content, versioning};
 use std::path::{Path, PathBuf};
 
 pub struct MatchCliContext {
@@ -59,6 +58,7 @@ impl MatchCliContext {
         &mut self,
         run: impl FnOnce(&Db, &dyn CommandClock) -> Result<T, String>,
     ) -> Result<T, String> {
+        self.ensure_storage_ready()?;
         let clock = FixedClock(self.command_timestamp()?);
         run(self.runtime.db(), &clock)
     }
@@ -72,6 +72,7 @@ impl MatchCliContext {
     }
 
     fn query_db<T>(&mut self, run: impl FnOnce(&Db) -> Result<T, String>) -> Result<T, String> {
+        self.ensure_storage_ready()?;
         run(self.runtime.db())
     }
 
@@ -79,11 +80,17 @@ impl MatchCliContext {
         &mut self,
         run: impl FnOnce(&Runtime) -> Result<T, String>,
     ) -> Result<T, String> {
+        self.ensure_storage_ready()?;
         run(&self.runtime)
     }
 
     fn submit_authored_facts<T>(&mut self, output: AuthoredFacts<T>) -> Result<T, String> {
+        self.ensure_storage_ready()?;
         self.runtime.submit_authored_facts(output)
+    }
+
+    fn ensure_storage_ready(&self) -> Result<(), String> {
+        versioning::update::ensure_storage_ready(self.runtime.db())
     }
 }
 
@@ -583,23 +590,33 @@ pub(crate) fn content_count(
     Ok(content::message::cli::content_count_output(output))
 }
 
-// Replay diagnostics.
+// Update and replay diagnostics.
 //
-// These commands exercise the core replay entry point and the deterministic
-// state summary without requiring an actual upgrade. `replay` rebuilds derived
-// state in place; `state-summary` hashes replay-relevant state; `replay-check`
-// proves replay idempotence and projection-order independence on scratch copies;
-// `intent-registry` lists each handler route's intent kind and recurring policy.
+// `update` authors a local protocol update fact; `state-summary` hashes
+// replay-relevant state; `replay-check` proves replay idempotence and
+// projection-order independence on scratch copies; `intent-registry` lists each
+// handler route's intent kind and recurring policy.
 
-pub const REPLAY_USAGE: &str = "replay [--reverse | --scramble --seed N]";
+pub const UPDATE_USAGE: &str = "update";
 pub const STATE_SUMMARY_USAGE: &str = "state-summary";
 pub const REPLAY_CHECK_USAGE: &str = "replay-check";
 pub const INTENT_REGISTRY_USAGE: &str = "intent-registry";
 
-pub(crate) fn replay(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    let order = parse_replay_order(args)?;
-    let report = ctx.runtime_mut().replay(order)?;
-    Ok(replay_report_output(order, &report))
+pub(crate) fn update(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
+    args.require_len(0, UPDATE_USAGE)?;
+    let clock = FixedClock(ctx.command_timestamp()?);
+    let output = versioning::update::author_update(&clock)?;
+    let (receipt, facts) = output.into_parts();
+    let mut effects = crate::core::effects::RuntimeEffects::new();
+    for fact in facts {
+        effects = effects.priority_fact(fact);
+    }
+    ctx.runtime_mut()
+        .submit_runtime_effects(effects, "submit protocol update fact")?;
+    Ok(versioning::update::update_output(
+        &receipt,
+        ctx.runtime().pending_projection_count(),
+    ))
 }
 
 pub(crate) fn state_summary(
@@ -655,45 +672,6 @@ fn replay_check_output(report: &crate::core::replay_check::ReplayCheckReport) ->
         }
     }
     CliOutput::lines(lines)
-}
-
-fn parse_replay_order(args: CliArgs<'_>) -> Result<ReplayOrder, String> {
-    match args.values() {
-        [] => Ok(ReplayOrder::Canonical),
-        [flag] if flag == "--reverse" => Ok(ReplayOrder::Reverse),
-        [scramble, seed_flag, seed] if scramble == "--scramble" && seed_flag == "--seed" => {
-            let seed = seed.parse::<u64>().map_err(|_| REPLAY_USAGE.to_string())?;
-            Ok(ReplayOrder::Scramble { seed })
-        }
-        _ => Err(REPLAY_USAGE.to_string()),
-    }
-}
-
-fn replay_order_label(order: ReplayOrder) -> String {
-    match order {
-        ReplayOrder::Canonical => "canonical".to_string(),
-        ReplayOrder::Reverse => "reverse".to_string(),
-        ReplayOrder::Scramble { seed } => format!("scramble:{seed}"),
-    }
-}
-
-fn replay_report_output(order: ReplayOrder, report: &ReplayReport) -> CliOutput {
-    CliOutput::lines(vec![
-        format!("order: {}", replay_order_label(order)),
-        format!(
-            "dropped_durable_intents: {}",
-            report.dropped_durable_intents
-        ),
-        format!("dropped_local_intents: {}", report.dropped_local_intents),
-        format!("wiped_tables: {}", report.wiped_tables),
-        format!("retained_facts: {}", report.retained_facts),
-        format!("emitted_facts: {}", report.emitted_facts),
-        format!("purged_facts: {}", report.purged_facts),
-        format!("standing_time_wakes: {}", report.standing_time_wakes),
-        format!("context_edges: {}", report.context_edges),
-        format!("row_mutations: {}", report.row_mutations),
-        format!("network_rows: {}", report.network_rows),
-    ])
 }
 
 fn state_summary_output(summary: &StateSummary) -> CliOutput {

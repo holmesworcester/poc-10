@@ -2995,18 +2995,19 @@ deterministic `create_key_wrap` / `unwrap_key_wrap` handlers (idempotent,
 respect purge/retirement, do not resurrect opened secrets), the `content_purged`
 CONTEXT (re-derived from retained deletion/expiry/retention facts), and the
 replay barrier (full replay + purge complete before any network activity
-resumes; `runs_during_replay` gates which handlers dispatch before the barrier).
+resumes; replay-mode handler/projector branches own no-op behavior before the
+barrier).
 
-Replay CLI surface under test (from `docs/research/poc10-replay-intent-shape.md`,
-the planned verbs this cluster validates): `replay [--reverse | --scramble
---seed N]`, `state-summary` (emits `state_hash` + per-area hashes/counts),
-`replay-check` (snapshots the DB, runs canonical + idempotent + `--reverse` +
-several `--scramble --seed N` passes, compares `state_hash`), `intent-registry`
-(lists `runs_during_replay` / recurrence / network-IO per `HandlerRoute`), and
-`recurring-intents`. The in-tree replay diagnostics now exercise the real replay
-entry point directly: `con replay`, `con replay --reverse`, `con replay
---scramble --seed N`, and `con replay-check` all rebuild through the ordinary
-runtime workers rather than a synthetic dependency fixture.
+Replay/update CLI surface under test (from
+`docs/research/poc10-replay-intent-shape.md`, the planned verbs this cluster
+validates): `update` (authors the local protocol update fact), `state-summary`
+(emits `state_hash` + per-area hashes/counts), `replay-check` (snapshots the
+DB, runs canonical + idempotent + reverse-order + deterministic scrambled-order
+passes, compares `state_hash`), `intent-registry` (lists recurrence metadata per
+`HandlerRoute`), and `recurring-intents`. The in-tree replay diagnostics now
+exercise the real replay entry point through scratch runtimes: `con
+replay-check` rebuilds through the ordinary runtime workers rather than a
+synthetic dependency fixture.
 
 Per the charter, the `{new version}/{old version}` axis is enumerated as
 separate tests for the representative versioned families (`content::message`,
@@ -3156,11 +3157,11 @@ connection, sync) is enumerated as separate tests where it changes the assertion
 - **Refs:** `disappearing-tighten`/`disappearing-compact` (content::retention_policy::cli); `content/purge/project.rs`; content::retention_policy (147).
 
 ### REPLAY-21 — Full replay + purge complete BEFORE any network activity resumes (barrier) `guardrail`
-- **Setup:** Node with retained facts including content + connection request/response history. `con replay` invoked with network and recurring schedules disabled (per the verb contract).
-- **Action:** Inspect the replay sequence: drop intents -> wipe -> mark pending -> drain fact projection -> admit replayable time wakes -> drain replay-allowed work to fixpoint -> (barrier) -> only then start daemon / install recurring intents / resume dispatch.
-- **Expect:** No network send, no connection maintenance, no bootstrap retry, no presence refresh, no sync poll occurs before the replay barrier; replay counter "blocked network/live-only work" is reported; if any network/live-only work were attempted pre-barrier, `con replay` reports an ERROR (per doc "A replay command that causes network rows... should report an error").
+- **Setup:** Node with retained facts including content + connection request/response history. `con replay-check` runs replay diagnostics on scratch databases with network and recurring schedules disabled.
+- **Action:** Inspect the replay sequence: drop intents -> wipe -> mark pending -> drain fact projection -> admit replayable time wakes -> drain replay-mode work to fixpoint -> (barrier) -> only then a live daemon may install recurring intents / resume dispatch.
+- **Expect:** No network send, no connection maintenance, no bootstrap retry, no presence refresh, no sync poll occurs before the replay barrier; if any network/live-only work is attempted pre-barrier, replay-check reports an ERROR for that diagnostic pass.
 - **Defends:** Full replay + purge complete before network activity resumes; Invariant (4) barrier.
-- **Refs:** doc runtime-changes steps 1-9 (esp. step 8 "Finish all replay-required work before network activity resumes"); `con replay`.
+- **Refs:** doc runtime-changes steps 1-9 (esp. step 8 "Finish all replay-required work before network activity resumes"); `con replay-check`.
 
 ### REPLAY-22 — Network/connection-send handlers are NOT dispatched before the barrier (runs_during_replay=false) `guardrail`
 - **Setup:** `intent-registry` declares `runs_during_replay` per HANDLER_ROUTE. The four network/IO intents (`send_bootstrap_connection_request`, `send_facts_on_connection`, `send_network_frame`, `receive_network_frame`) plus `create_connection_response` and sync compare/have/need/send are `runs_during_replay = false`.

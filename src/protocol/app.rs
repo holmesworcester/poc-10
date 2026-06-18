@@ -43,6 +43,7 @@ pub const MATCH_PROTOCOL: ProtocolDescription<MatchCliContext> = ProtocolDescrip
     daemon: DaemonDescription {
         inbound_network_intake: Some(receive_network_frame_effects),
         time_wakes: MATCH_DAEMON_TIME_WAKES,
+        storage_ready: Some(crate::protocol::versioning::update::storage_ready),
     },
     commands: MATCH_COMMANDS,
     context: MatchCliContext::new,

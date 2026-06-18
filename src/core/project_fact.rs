@@ -83,6 +83,12 @@ pub(crate) struct ProjectionInput {
     pending_inputs: ProjectionContext,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingProjectionItem {
+    owner: FactId,
+    mode: ProjectionMode,
+}
+
 enum ProjectionLoad {
     Stale {
         source: ProjectionSource,
@@ -96,6 +102,7 @@ enum ProjectionLoad {
 struct PreparedProjection {
     source: ProjectionSource,
     fact: Fact,
+    mode: ProjectionMode,
     retain_self: bool,
     projected_context: ContextSet,
     time_wakes: Vec<TimeWake>,
@@ -140,11 +147,10 @@ pub(crate) fn project_one(
     store: &Db,
     projector: &(impl Projector + ?Sized),
     source: ProjectionSource,
-    mode: ProjectionMode,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
 ) -> Result<WorkStatus, String> {
-    let load = match load_one_projection_input(store, source, mode)? {
+    let load = match load_one_projection_input(store, source)? {
         None => return Ok(WorkStatus::idle()),
         Some(load) => load,
     };
@@ -178,19 +184,21 @@ pub(crate) fn project_one(
 fn load_one_projection_input(
     store: &Db,
     source: ProjectionSource,
-    mode: ProjectionMode,
 ) -> Result<Option<ProjectionLoad>, String> {
-    let Some(fact_id) =
+    let Some(item) =
         perf::measure_result("projection_queue_load", || source.next_pending_owner(store))?
     else {
         return Ok(None);
     };
 
     let Some(input) = perf::measure_result("projection_load_pending_fact", || {
-        load_pending_fact(store, source, fact_id, mode)
+        load_pending_fact(store, source, item.owner, item.mode)
     })?
     else {
-        return Ok(Some(ProjectionLoad::Stale { source, fact_id }));
+        return Ok(Some(ProjectionLoad::Stale {
+            source,
+            fact_id: item.owner,
+        }));
     };
 
     Ok(Some(ProjectionLoad::Loaded(input)))
@@ -252,7 +260,7 @@ fn commit_projection_outcome(
 // =============================================================================
 
 impl ProjectionSource {
-    fn next_pending_owner(self, store: &Db) -> Result<Option<FactId>, String> {
+    fn next_pending_owner(self, store: &Db) -> Result<Option<PendingProjectionItem>, String> {
         match self {
             ProjectionSource::Durable => next_durable_projection_item(store),
             ProjectionSource::Incoming => next_incoming_projection_item(store),
@@ -318,18 +326,23 @@ impl ProjectionSource {
 ///
 /// The item commit removes the row only after projection succeeds. Missing
 /// facts are handled by the queue driver as stale pending rows.
-fn next_durable_projection_item(store: &Db) -> Result<Option<FactId>, String> {
+fn next_durable_projection_item(store: &Db) -> Result<Option<PendingProjectionItem>, String> {
     store
         .conn()
         .query_row(
             r#"
-            SELECT owner
+            SELECT owner, replay
             FROM pending_projection
-            ORDER BY queued_at, owner
+            ORDER BY priority, queued_at, owner
             LIMIT 1
             "#,
             [],
-            |row| fact_id_column(row.get::<_, Vec<u8>>(0)?, "owner"),
+            |row| {
+                Ok(PendingProjectionItem {
+                    owner: fact_id_column(row.get::<_, Vec<u8>>(0)?, "owner")?,
+                    mode: projection_mode_from_replay_flag(row.get(1)?),
+                })
+            },
         )
         .optional()
         .map_err(|err| format!("load pending projection: {err}"))
@@ -339,7 +352,7 @@ fn next_durable_projection_item(store: &Db) -> Result<Option<FactId>, String> {
 ///
 /// Incoming rows do not have separate pending queue rows. A standing need parks
 /// the incoming owner until context fanout records a pending match for it.
-fn next_incoming_projection_item(store: &Db) -> Result<Option<FactId>, String> {
+fn next_incoming_projection_item(store: &Db) -> Result<Option<PendingProjectionItem>, String> {
     store
         .conn()
         .query_row(
@@ -361,10 +374,23 @@ fn next_incoming_projection_item(store: &Db) -> Result<Option<FactId>, String> {
             LIMIT 1
             "#,
             [],
-            |row| fact_id_column(row.get::<_, Vec<u8>>(0)?, "incoming id"),
+            |row| {
+                Ok(PendingProjectionItem {
+                    owner: fact_id_column(row.get::<_, Vec<u8>>(0)?, "incoming id")?,
+                    mode: ProjectionMode::Normal,
+                })
+            },
         )
         .optional()
         .map_err(|err| format!("load incoming facts: {err}"))
+}
+
+fn projection_mode_from_replay_flag(replay: i64) -> ProjectionMode {
+    if replay == 0 {
+        ProjectionMode::Normal
+    } else {
+        ProjectionMode::Replay
+    }
 }
 
 /// Load everything projection needs for one fact.
@@ -410,23 +436,43 @@ fn prepare_projection(
         fact,
         pending_inputs,
     } = input;
+    let mode = pending_inputs.mode();
     let output = perf::measure_result("projection_projector_cpu", || {
         projector.project(&fact, &pending_inputs)
     })?;
     enforce_owner_is_self(&fact, &output)?;
     let projected_context = output.context_set();
     let runtime_effects = output.effects;
+    validate_rebuild_projection_shape(&projected_context, &output.time_wakes, &runtime_effects)?;
     perf::measure_result("projection_validate_effects", || {
         validate_runtime_effects_for_admission(&runtime_effects, allowed_tables, fact_admission)
     })?;
     Ok(PreparedProjection {
         source,
         fact,
+        mode,
         retain_self: output.retain_self,
         projected_context,
         time_wakes: output.time_wakes,
         runtime_effects,
     })
+}
+
+fn validate_rebuild_projection_shape(
+    context: &ContextSet,
+    time_wakes: &[TimeWake],
+    effects: &RuntimeEffects,
+) -> Result<(), String> {
+    if !effects.rebuild_derived_state {
+        return Ok(());
+    }
+    if !context.needs.is_empty() || !context.offers.is_empty() || !time_wakes.is_empty() {
+        return Err(
+            "derived-state rebuild projection cannot publish standing context or time wakes"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// Reject any projected need, offer, time wake, or purge whose owner is not the
@@ -573,6 +619,8 @@ fn commit_projected_fact_in_tx(
             &projection.runtime_effects,
             allowed_tables,
             fact_admission,
+            projection.mode.is_replay(),
+            true,
         )
     })?;
     Ok(())
@@ -715,10 +763,10 @@ pub(crate) mod commit_effects {
     //! Core is built around a simple rule: runtime work describes what should
     //! change, then one commit boundary makes that description durable. Commands,
     //! projectors, and intent handlers do not directly mutate all of core state.
-    //! They return `RuntimeEffects`: facts to admit, facts to purge, row
-    //! mutations, durable intents, and ephemeral intents. A commit is the
-    //! moment those pending effects are validated, written to SQLite, and made
-    //! visible together.
+    //! They return `RuntimeEffects`: facts to admit, priority facts to project
+    //! before ordinary work, facts to purge, row mutations, durable intents, and
+    //! ephemeral intents. A commit is the moment those pending effects are
+    //! validated, written to SQLite, and made visible together.
     //!
     //! Commit requests come from three places. `Runtime::submit_authored_facts`
     //! commits effects produced by a user-facing command. Fact projection owns a
@@ -729,12 +777,15 @@ pub(crate) mod commit_effects {
     //! callers own their surrounding runtime work; this module owns the common
     //! effect language inside that work.
     //!
-    //! Committing effects changes the runtime in four ways. Purged facts remove the
-    //! fact and its core-owned derived rows. New facts enter `facts`,
-    //! `local_fact_admissions`, and `pending_projection`. Row mutations update
-    //! protocol or core IO tables the runtime explicitly allowed. Follow-up intents
-    //! are recorded after the data they depend on, so later handler passes never see
-    //! queued work for state that failed to commit.
+    //! Committing effects changes the runtime in five ways. Purged facts remove
+    //! the fact and its core-owned derived rows. A rebuild request clears
+    //! resettable derived state and marks retained facts pending in replay mode.
+    //! New facts enter `facts`, `local_fact_admissions`, and
+    //! `pending_projection`; priority facts use the same storage path but sort
+    //! before ordinary projection work. Row mutations update protocol or core IO
+    //! tables the runtime explicitly allowed. Follow-up intents are recorded
+    //! after the data they depend on, so later handler passes never see queued
+    //! work for state that failed to commit.
     //!
     //! The mechanism is deliberately split in two. `validate_runtime_effects`
     //! checks failures that do not need SQL: conflicting duplicate intents inside a
@@ -752,10 +803,13 @@ pub(crate) mod commit_effects {
     //! `DeleteWhere` and `InsertValues` mutations in the desired order.
     //!
     //! The commit order is part of the contract. Purges run first so stale
-    //! core-owned rows disappear before new facts and derived rows become visible.
-    //! New facts are admitted and marked pending for projection. Row mutations
-    //! apply next. Follow-up durable and ephemeral intents are recorded last, so
-    //! downstream work is not queued until the data it depends on has committed.
+    //! core-owned rows disappear before new facts and derived rows become
+    //! visible. A rebuild wipe runs before fact admission and row mutations; that
+    //! lets a control-plane projector request rebuild and then write the version
+    //! or marker row that survives it. New facts are admitted and marked pending
+    //! for projection. Row mutations apply next. Follow-up durable and ephemeral
+    //! intents are recorded last, so downstream work is not queued until the data
+    //! it depends on has committed.
     //!
     //! Keep this file protocol-neutral. It may decide whether an effect is allowed
     //! to touch a registered table and whether an idempotent write conflicts with
@@ -771,9 +825,11 @@ pub(crate) mod commit_effects {
     use crate::core::schema::{INTENTS, LOCAL_INTENTS};
     use std::collections::BTreeMap;
 
+    use super::context::ProjectionMode;
     use super::route::FactAdmissionFn;
     use super::{
-        insert_facts_and_record_matches_in_tx, insert_incoming_fact_in_tx, purge_fact_in_tx,
+        insert_facts_and_record_matches_with_mode_in_tx, insert_incoming_fact_in_tx,
+        insert_priority_facts_and_record_matches_with_mode_in_tx, purge_fact_in_tx,
     };
 
     /// Counts of newly inserted follow-up work after an effect commit.
@@ -802,6 +858,7 @@ pub(crate) mod commit_effects {
     ) -> Result<(), String> {
         validate_intents(&effects.intents)?;
         validate_intents(&effects.local_intents)?;
+        validate_rebuild_effect_shape(effects)?;
         validate_row_mutations(&effects.row_mutations, allowed_tables)?;
         Ok(())
     }
@@ -826,8 +883,26 @@ pub(crate) mod commit_effects {
         effects
             .facts
             .iter()
+            .chain(effects.priority_facts.iter())
             .chain(effects.incoming_facts.iter())
             .try_for_each(fact_admission)
+    }
+
+    fn validate_rebuild_effect_shape(effects: &RuntimeEffects) -> Result<(), String> {
+        if !effects.rebuild_derived_state {
+            return Ok(());
+        }
+        if !effects.facts.is_empty()
+            || !effects.priority_facts.is_empty()
+            || !effects.incoming_facts.is_empty()
+            || !effects.intents.is_empty()
+            || !effects.local_intents.is_empty()
+        {
+            return Err(
+                "derived-state rebuild effect cannot be mixed with facts or intents".to_string(),
+            );
+        }
+        Ok(())
     }
 
     /// Validate that a batch can be written to one intent queue.
@@ -902,21 +977,31 @@ pub(crate) mod commit_effects {
         effects: &RuntimeEffects,
         allowed_tables: &[TableName],
         fact_admission: Option<FactAdmissionFn>,
+        replay: bool,
+        allow_rebuild: bool,
         label: &str,
     ) -> Result<RuntimeEffectCounts, String> {
         validate_runtime_effects_for_admission(effects, allowed_tables, fact_admission)?;
         store
             .write_transaction(|tx| {
-                commit_runtime_effects_in_tx(tx, effects, allowed_tables, fact_admission)
+                commit_runtime_effects_in_tx(
+                    tx,
+                    effects,
+                    allowed_tables,
+                    fact_admission,
+                    replay,
+                    allow_rebuild,
+                )
             })
             .map_err(|err| format!("{label}: {err}"))
     }
 
     /// Write all shared effects into an already-open transaction.
     ///
-    /// The order is intentional: purges remove stale core-owned rows first, new
-    /// facts become pending, rows mutate, and follow-up intents are recorded last.
-    /// If any step fails, the caller's transaction rolls the whole batch back.
+    /// The order is intentional: purges remove stale core-owned rows first,
+    /// rebuild clears resettable state when requested, facts become pending, rows
+    /// mutate, and follow-up intents are recorded last. If any step fails, the
+    /// caller's transaction rolls the whole batch back.
     ///
     /// This function does not open or close the transaction. The caller owns the
     /// larger atomic boundary, which is why projection can update context and time
@@ -927,13 +1012,34 @@ pub(crate) mod commit_effects {
         effects: &RuntimeEffects,
         allowed_tables: &[TableName],
         fact_admission: Option<FactAdmissionFn>,
+        replay: bool,
+        allow_rebuild: bool,
     ) -> rusqlite::Result<RuntimeEffectCounts> {
         validate_fact_admissions(effects, fact_admission).map_err(sqlite_string_error)?;
         for purged in &effects.purged_facts {
             purge_fact_in_tx(tx, *purged)?;
         }
 
-        let facts = insert_facts_and_record_matches_in_tx(tx, &effects.facts)?;
+        if effects.rebuild_derived_state {
+            if !allow_rebuild {
+                return Err(sqlite_string_error(
+                    "derived-state rebuild effect is only allowed from projection".to_string(),
+                ));
+            }
+            crate::core::replay::rebuild_derived_state_in_tx(tx).map_err(sqlite_string_error)?;
+        }
+
+        let mode = if replay {
+            ProjectionMode::Replay
+        } else {
+            ProjectionMode::Normal
+        };
+        let facts = insert_facts_and_record_matches_with_mode_in_tx(tx, &effects.facts, mode)?
+            + insert_priority_facts_and_record_matches_with_mode_in_tx(
+                tx,
+                &effects.priority_facts,
+                mode,
+            )?;
 
         for fact in &effects.incoming_facts {
             insert_incoming_fact_in_tx(tx, fact)?;
@@ -943,8 +1049,9 @@ pub(crate) mod commit_effects {
             .map_err(sqlite_string_error)?;
         tx.apply_row_mutations_in_tx(&effects.row_mutations)?;
 
-        let intents = insert_intents_in_tx(tx, INTENTS, &effects.intents)?;
-        let local_intents = insert_intents_in_tx(tx, LOCAL_INTENTS, &effects.local_intents)?;
+        let intents = insert_intents_in_tx(tx, INTENTS, &effects.intents, replay)?;
+        let local_intents =
+            insert_intents_in_tx(tx, LOCAL_INTENTS, &effects.local_intents, replay)?;
 
         Ok(RuntimeEffectCounts {
             facts,
@@ -957,13 +1064,14 @@ pub(crate) mod commit_effects {
         tx: &Db,
         table: TableName,
         intents: &[Intent],
+        replay: bool,
     ) -> rusqlite::Result<usize> {
         let mut inserted = 0usize;
         for intent in intents {
             if crate::core::handle_intent::insert_intent_work_row_in_tx(
                 tx,
                 table,
-                &intent.work_row(),
+                &intent.work_row_with_mode(replay),
             )? {
                 inserted += 1;
             }
@@ -1918,6 +2026,18 @@ pub mod effects {
             self
         }
 
+        /// Request a database-wide rebuild of derived/runtime state.
+        ///
+        /// This is intentionally much broader than `purge_self`: the commit
+        /// boundary clears schema-declared resettable tables and requeues every
+        /// retained fact in replay mode. Protocols should reserve it for local
+        /// control-plane facts whose replay-mode projector is a no-op, so the
+        /// retained record remains auditable without re-triggering the rebuild.
+        pub fn rebuild_derived_state(mut self) -> Self {
+            self.effects.rebuild_derived_state = true;
+            self
+        }
+
         pub fn fact(mut self, fact: Fact) -> Self {
             self.effects.facts.push(fact);
             self
@@ -2123,6 +2243,8 @@ const OWNER_KEYED_FACT_CLEANUP_TABLES: &[TableName] = &[
     PENDING_PROJECTION_MATCHES,
     PENDING_PROJECTION,
 ];
+const CONTROL_PROJECTION_PRIORITY: i64 = 0;
+const NORMAL_PROJECTION_PRIORITY: i64 = 100;
 
 fn projection_sql_error(message: impl Into<String>) -> rusqlite::Error {
     rusqlite::Error::InvalidParameterName(message.into())
@@ -2159,19 +2281,69 @@ fn retained_fact(store: &Db, id: &FactId) -> Result<Option<Fact>, String> {
         .map_err(|err| format!("load retained fact: {err}"))
 }
 
-/// Insert a fact and mark it pending in the caller's transaction.
+#[cfg(test)]
 pub(crate) fn insert_fact_and_pending_in_tx(store: &Db, fact: &Fact) -> rusqlite::Result<bool> {
+    insert_fact_and_pending_with_mode_in_tx(store, fact, ProjectionMode::Normal)
+}
+
+fn insert_fact_and_pending_with_mode_in_tx(
+    store: &Db,
+    fact: &Fact,
+    mode: ProjectionMode,
+) -> rusqlite::Result<bool> {
+    insert_fact_and_pending_with_options_in_tx(store, fact, mode, NORMAL_PROJECTION_PRIORITY)
+}
+
+fn insert_priority_fact_and_pending_with_mode_in_tx(
+    store: &Db,
+    fact: &Fact,
+    mode: ProjectionMode,
+) -> rusqlite::Result<bool> {
+    insert_fact_and_pending_with_options_in_tx(store, fact, mode, CONTROL_PROJECTION_PRIORITY)
+}
+
+/// Insert a fact and mark it pending with the supplied execution mode and queue priority.
+fn insert_fact_and_pending_with_options_in_tx(
+    store: &Db,
+    fact: &Fact,
+    mode: ProjectionMode,
+    priority: i64,
+) -> rusqlite::Result<bool> {
     let inserted = insert_retained_fact_in_tx(store, fact)?;
     if inserted {
-        insert_pending_owner_in_tx(store, fact.id)?;
+        insert_pending_owner_with_options_in_tx(store, fact.id, mode, priority)?;
     }
     Ok(inserted)
 }
 
 fn insert_facts_and_record_matches_in_tx(store: &Db, facts: &[Fact]) -> rusqlite::Result<usize> {
+    insert_facts_and_record_matches_with_mode_in_tx(store, facts, ProjectionMode::Normal)
+}
+
+fn insert_facts_and_record_matches_with_mode_in_tx(
+    store: &Db,
+    facts: &[Fact],
+    mode: ProjectionMode,
+) -> rusqlite::Result<usize> {
     let mut inserted = 0;
     for fact in facts {
-        if insert_fact_and_pending_in_tx(store, fact)? {
+        if insert_fact_and_pending_with_mode_in_tx(store, fact, mode)? {
+            context_db::record_pending_context_inputs_for_stored_needs_in_tx(store, fact.id)
+                .map_err(commit_effects::sqlite_string_error)?;
+            inserted += 1;
+        }
+    }
+    Ok(inserted)
+}
+
+fn insert_priority_facts_and_record_matches_with_mode_in_tx(
+    store: &Db,
+    facts: &[Fact],
+    mode: ProjectionMode,
+) -> rusqlite::Result<usize> {
+    let mut inserted = 0;
+    for fact in facts {
+        if insert_priority_fact_and_pending_with_mode_in_tx(store, fact, mode)? {
             context_db::record_pending_context_inputs_for_stored_needs_in_tx(store, fact.id)
                 .map_err(commit_effects::sqlite_string_error)?;
             inserted += 1;
@@ -2181,10 +2353,58 @@ fn insert_facts_and_record_matches_in_tx(store: &Db, facts: &[Fact]) -> rusqlite
 }
 
 fn insert_pending_owner_in_tx(store: &Db, owner: FactId) -> rusqlite::Result<usize> {
-    store.conn().execute(
-        "INSERT OR IGNORE INTO pending_projection (owner, queued_at) VALUES (?1, ?2)",
-        params![owner.as_slice(), queue_now_ms()?],
-    )
+    insert_pending_owner_with_mode_in_tx(store, owner, ProjectionMode::Normal)
+}
+
+fn insert_pending_owner_with_mode_in_tx(
+    store: &Db,
+    owner: FactId,
+    mode: ProjectionMode,
+) -> rusqlite::Result<usize> {
+    insert_pending_owner_with_options_in_tx(store, owner, mode, NORMAL_PROJECTION_PRIORITY)
+}
+
+fn insert_pending_owner_with_options_in_tx(
+    store: &Db,
+    owner: FactId,
+    mode: ProjectionMode,
+    priority: i64,
+) -> rusqlite::Result<usize> {
+    let inserted = store.conn().execute(
+        "INSERT OR IGNORE INTO pending_projection (owner, queued_at, priority, replay)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            owner.as_slice(),
+            queue_now_ms()?,
+            priority,
+            replay_flag_for_projection_mode(mode)
+        ],
+    )?;
+    if inserted == 0 && mode.is_replay() {
+        store.conn().execute(
+            "UPDATE pending_projection
+             SET replay = 1,
+                 priority = MIN(priority, ?2)
+             WHERE owner = ?1",
+            params![owner.as_slice(), priority],
+        )?;
+    } else if inserted == 0 && priority < NORMAL_PROJECTION_PRIORITY {
+        store.conn().execute(
+            "UPDATE pending_projection
+             SET priority = MIN(priority, ?2)
+             WHERE owner = ?1",
+            params![owner.as_slice(), priority],
+        )?;
+    }
+    Ok(inserted)
+}
+
+fn replay_flag_for_projection_mode(mode: ProjectionMode) -> i64 {
+    if mode.is_replay() {
+        1
+    } else {
+        0
+    }
 }
 
 fn insert_incoming_fact_in_tx(store: &Db, fact: &Fact) -> rusqlite::Result<bool> {
@@ -2422,7 +2642,15 @@ pub(crate) fn submit_authored_facts_to_db<T>(
         facts,
         ..RuntimeEffects::new()
     };
-    commit_runtime_effects_to_db(store, &effects, allowed_tables, fact_admission, label)?;
+    commit_runtime_effects_to_db(
+        store,
+        &effects,
+        allowed_tables,
+        fact_admission,
+        false,
+        false,
+        label,
+    )?;
     Ok(receipt)
 }
 
@@ -2708,7 +2936,7 @@ mod contract_tests {
         });
 
         let input = expect_loaded(
-            load_one_projection_input(&store, ProjectionSource::Durable, ProjectionMode::Normal)
+            load_one_projection_input(&store, ProjectionSource::Durable)
                 .expect("load projection input"),
         );
         let outcome = evaluate_loaded_projection_input(&projector, input, &[], None)
@@ -2747,7 +2975,7 @@ mod contract_tests {
         });
 
         let input = expect_loaded(
-            load_one_projection_input(&store, ProjectionSource::Incoming, ProjectionMode::Normal)
+            load_one_projection_input(&store, ProjectionSource::Incoming)
                 .expect("load projection input"),
         );
         let outcome = evaluate_loaded_projection_input(&projector, input, &[], None)
@@ -3492,7 +3720,6 @@ mod contract_tests {
                 store,
                 projector,
                 ProjectionSource::Durable,
-                ProjectionMode::Normal,
                 allowed_tables,
                 fact_admission,
             )?;
@@ -3501,7 +3728,6 @@ mod contract_tests {
                     store,
                     projector,
                     ProjectionSource::Incoming,
-                    ProjectionMode::Normal,
                     allowed_tables,
                     fact_admission,
                 )?;
@@ -4052,6 +4278,36 @@ mod tests {
     }
 
     #[test]
+    fn priority_pending_projection_runs_before_older_normal_work() {
+        let db = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
+        let normal = Fact::new(FactScope::Global, 1, b"normal pending".to_vec());
+        let priority = Fact::new(FactScope::Local, 2, b"priority pending".to_vec());
+
+        db.write_transaction(|tx| {
+            assert!(insert_fact_and_pending_with_mode_in_tx(
+                tx,
+                &normal,
+                ProjectionMode::Normal
+            )?);
+            assert!(insert_priority_fact_and_pending_with_mode_in_tx(
+                tx,
+                &priority,
+                ProjectionMode::Normal
+            )?);
+            Ok(())
+        })
+        .expect("insert pending facts");
+
+        assert_eq!(
+            next_durable_projection_item(&db)
+                .expect("next pending")
+                .expect("pending item")
+                .owner,
+            priority.id
+        );
+    }
+
+    #[test]
     fn next_incoming_projection_item_treats_pending_matches_as_ready() {
         let db = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
         let ready = Fact::new(FactScope::Local, 1, b"ready incoming".to_vec());
@@ -4076,7 +4332,9 @@ mod tests {
         .expect("seed incoming facts");
 
         assert_eq!(
-            next_incoming_projection_item(&db).expect("next incoming"),
+            next_incoming_projection_item(&db)
+                .expect("next incoming")
+                .map(|item| item.owner),
             Some(ready.id)
         );
 
@@ -4097,7 +4355,9 @@ mod tests {
             .expect("record pending match");
 
         assert_eq!(
-            next_incoming_projection_item(&db).expect("matched incoming"),
+            next_incoming_projection_item(&db)
+                .expect("matched incoming")
+                .map(|item| item.owner),
             Some(blocked.id)
         );
     }

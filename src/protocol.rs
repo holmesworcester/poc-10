@@ -31,3 +31,4 @@ pub mod auth;
 pub mod connection;
 pub mod content;
 pub mod sync;
+pub mod versioning;

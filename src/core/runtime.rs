@@ -31,9 +31,9 @@ use crate::core::db::{Db, SchemaSource, TableName};
 use crate::core::effects::RuntimeEffects;
 use crate::core::facts::Fact;
 use crate::core::handle_intent::{dispatch_one_intent, HandlerSet, IntentQueue};
-use crate::core::intents::{HandlerMode, Intent};
+use crate::core::intents::Intent;
 use crate::core::project_fact::{
-    self, FactAdmissionFn, FactRoute, ProjectionMode, ProjectionSource, Projector, Timeline,
+    self, FactAdmissionFn, FactRoute, ProjectionSource, Projector, Timeline,
 };
 use crate::core::schema::{CORE_SCHEMA_SOURCE, INTENTS, LOCAL_INTENTS};
 use std::path::Path;
@@ -106,6 +106,8 @@ impl Runtime {
     }
 
     fn from_db(description: &'static RuntimeDescription, db: Db) -> Result<Self, String> {
+        crate::core::schema::migrate_core_schema(&db)
+            .map_err(|err| format!("migrate core schema: {err}"))?;
         Ok(Self {
             description,
             db,
@@ -215,6 +217,8 @@ impl Runtime {
             &effects,
             self.description.row_mutation_tables,
             self.description.fact_admission,
+            false,
+            false,
             label,
         )
         .map(|_| ())
@@ -252,7 +256,6 @@ impl Runtime {
                 &self.db,
                 self.projector.as_ref(),
                 source,
-                ProjectionMode::Normal,
                 self.description.row_mutation_tables,
                 self.description.fact_admission,
             )
@@ -288,7 +291,6 @@ impl Runtime {
                 queue,
                 self.description.row_mutation_tables,
                 self.description.fact_admission,
-                HandlerMode::Live,
             )
         })
     }
@@ -430,6 +432,7 @@ mod tests {
     use crate::core::facts::{Fact, FactScope};
     use crate::core::intents::{HandlerContext, HandlerResult, IntentHandler, IntentKind};
     use crate::core::project_fact::{ProjectionContext, ProjectionOutput};
+    use rusqlite::Connection;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct NoopProjector;
@@ -534,6 +537,47 @@ mod tests {
         fact_admission: None,
         handlers: EMIT_FACT_HANDLERS,
     };
+
+    #[test]
+    fn open_disk_migrates_old_queue_tables_before_priority_index() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("old-runtime.db");
+        Connection::open(&path)
+            .expect("seed sqlite")
+            .execute_batch(
+                r#"
+CREATE TABLE pending_projection (
+    owner BLOB PRIMARY KEY NOT NULL,
+    queued_at INTEGER NOT NULL
+);
+CREATE TABLE intents (
+    kind TEXT NOT NULL,
+    idempotence_key BLOB NOT NULL,
+    payload BLOB NOT NULL,
+    PRIMARY KEY (kind, idempotence_key)
+);
+"#,
+            )
+            .expect("seed old core queue shape");
+
+        let runtime = Runtime::open_disk(&TEST_RUNTIME, &path).expect("open migrated runtime");
+
+        let pending_columns = table_columns(runtime.db(), "pending_projection");
+        assert!(has_column(&pending_columns, "priority"));
+        assert!(has_column(&pending_columns, "replay"));
+        assert!(has_column(
+            &table_columns(runtime.db(), "intents"),
+            "replay"
+        ));
+        assert!(has_column(
+            &table_columns(runtime.db(), "local_intents"),
+            "replay"
+        ));
+        assert!(
+            index_exists(runtime.db(), "pending_projection_by_priority_queue"),
+            "priority queue index should be created only after the priority column exists"
+        );
+    }
 
     #[test]
     fn db_handle_reads_store_backed_fact_counts_from_sqlite() {
@@ -726,5 +770,34 @@ mod tests {
             err.contains("SQL value exceeds SQLite integer range"),
             "{err}"
         );
+    }
+
+    fn table_columns(runtime: &Db, table: &str) -> Vec<String> {
+        let mut stmt = runtime
+            .conn()
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .expect("prepare table info");
+        stmt.query_map([], |row| row.get::<_, String>(1))
+            .expect("query table info")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect table columns")
+    }
+
+    fn has_column(columns: &[String], column: &str) -> bool {
+        columns.iter().any(|value| value == column)
+    }
+
+    fn index_exists(runtime: &Db, index: &str) -> bool {
+        runtime
+            .conn()
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1
+                 )",
+                [index],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("query index")
+            != 0
     }
 }

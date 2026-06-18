@@ -29,7 +29,7 @@ use crate::core::project_fact::{
 };
 use crate::core::runtime::{HandlerRoute, RecurringIntentSpec};
 use crate::protocol::cli as command;
-use crate::protocol::{auth, connection, content, sync};
+use crate::protocol::{auth, connection, content, sync, versioning};
 
 pub use crate::protocol::cli::MatchCliContext;
 
@@ -392,6 +392,11 @@ pub(crate) fn authenticate_fact_for_admission(fact: &Fact) -> Result<(), String>
             sync::local_setting::decode_fact_payload,
             sync::local_setting::authenticate
         ),
+        versioning::update::TYPE_VERSIONING_UPDATE => authenticate_admission_arm!(
+            fact,
+            versioning::update::decode_update_fact,
+            versioning::update::authenticate
+        ),
         connection::frame_small::encode::TYPE_CONNECTION_FRAME_SMALL => {
             authenticate_admission_arm!(
                 fact,
@@ -478,6 +483,7 @@ const FACT_REPLAY_TABLES: &[TableName] = &[
     sync::shared_fact::index::NEGENTROPY_CONTEXT_HAVE_ROWS,
     sync::shared_fact::index::NEGENTROPY_NODE_ROWS,
     sync::local_setting::SYNC_LOCAL_SETTING_ROWS,
+    versioning::update::PROTOCOL_VERSION_ROWS,
     read_models::MESSAGE_DELETION_ROWS,
     read_models::FILE_DELETION_ROWS,
     content::retention_policy::RETENTION_POLICY_ROWS,
@@ -496,6 +502,14 @@ CREATE TABLE IF NOT EXISTS opened_message_rows (
 );
 CREATE INDEX IF NOT EXISTS opened_message_rows_by_workspace_created
     ON opened_message_rows (workspace_id, created_at_ms);
+
+CREATE TABLE IF NOT EXISTS protocol_version_rows (
+    update_fact_id BLOB PRIMARY KEY NOT NULL,
+    protocol_version INTEGER NOT NULL,
+    applied_at_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS protocol_version_rows_by_version
+    ON protocol_version_rows (protocol_version, applied_at_ms);
 
 CREATE TABLE IF NOT EXISTS message_tombstone_rows (
     workspace_id BLOB NOT NULL,
@@ -1048,9 +1062,10 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
         content_count
     ),
     cli_command!("count", auth::workspace::cli::COUNT_USAGE, count),
-    // Replay diagnostics: rebuild derived state, hash replay-relevant state, and
-    // prove replay idempotence/order-independence on scratch copies.
-    cli_command!("replay", command::REPLAY_USAGE, replay),
+    // Update/replay diagnostics: request a local protocol update, hash
+    // replay-relevant state, and prove replay idempotence/order-independence on
+    // scratch copies.
+    cli_command!("update", command::UPDATE_USAGE, update),
     cli_command!("state-summary", command::STATE_SUMMARY_USAGE, state_summary),
     cli_command!("replay-check", command::REPLAY_CHECK_USAGE, replay_check),
     cli_command!(
@@ -1098,6 +1113,7 @@ pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
     sync::have_id::SYNC_HAVE_ID_ROWS,
     sync::need_id::SYNC_NEED_ID_ROWS,
     sync::local_setting::SYNC_LOCAL_SETTING_ROWS,
+    versioning::update::PROTOCOL_VERSION_ROWS,
 ];
 
 pub(crate) fn protocol_projector() -> Box<dyn Projector> {
@@ -1183,6 +1199,7 @@ projector_routes! {
     project_sync_have_id => sync::have_id::encode::TYPE_SYNC_HAVE_ID, sync::have_id::project::SyncHaveIdProjector, sync::have_id::project::PROJECTOR_INFO;
     project_sync_need_id => sync::need_id::encode::TYPE_SYNC_NEED_ID, sync::need_id::project::SyncNeedIdProjector, sync::need_id::project::PROJECTOR_INFO;
     project_sync_local_setting => sync::local_setting::TYPE_SYNC_LOCAL_SETTING, sync::local_setting::SyncLocalSettingProjector, sync::local_setting::PROJECTOR_INFO;
+    project_versioning_update => versioning::update::TYPE_VERSIONING_UPDATE, versioning::update::UpdateProjector, versioning::update::PROJECTOR_INFO;
     project_connection_frame_small => connection::frame_small::encode::TYPE_CONNECTION_FRAME_SMALL, connection::frame_small::project::ConnectionFrameSmallProjector, connection::frame_small::project::PROJECTOR_INFO;
     project_connection_frame_file_slice => connection::frame_file_slice::encode::TYPE_CONNECTION_FRAME_FILE_SLICE, connection::frame_file_slice::project::ConnectionFrameFileSliceProjector, connection::frame_file_slice::project::PROJECTOR_INFO;
     project_connection_frame_bundle => connection::frame_bundle::encode::TYPE_CONNECTION_FRAME_BUNDLE, connection::frame_bundle::project::ConnectionFrameBundleProjector, connection::frame_bundle::project::PROJECTOR_INFO;
@@ -1214,6 +1231,18 @@ macro_rules! handler_route {
 }
 
 pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
+    // Version checks are protocol policy. The recurring intent compares the
+    // binary's protocol version with projected local version state and emits a
+    // local update fact when a rebuild is needed.
+    handler_route!(
+        versioning::update::CHECK_VERSION,
+        versioning::update::CheckVersionHandler,
+        recurring = RecurringIntentSpec {
+            interval_ms: 250,
+            initial_delay_ms: 0,
+            build_intent: versioning::update::build_check_version_intent,
+        }
+    ),
     // Handshake/sync sends and the response builders are operational IO over a
     // live session, rebuilt from committed request/response facts after the
     // barrier — never replay-time work.

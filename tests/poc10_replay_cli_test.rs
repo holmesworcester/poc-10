@@ -1,12 +1,10 @@
-//! Black-box CLI tests for the replay entry point and deterministic state
-//! summary.
+//! Black-box CLI tests for protocol updates and deterministic replay
+//! diagnostics.
 //!
 //! Setup goes through the real `con` binary: a workspace and content messages
-//! are authored, then `replay` rebuilds derived state from retained facts. The
-//! tests prove the replay/intent-shape guarantees: replay is idempotent, drops
-//! queued intents, recreates sync- and key-wrap-derived state, never crosses the
-//! network barrier, and reaches the same state digest regardless of fact
-//! projection order.
+//! are authored, then protocol `update` rebuilds derived state from retained
+//! facts through the ordinary daemon loop. Replay order checks stay diagnostic
+//! through `replay-check`.
 
 mod cli_harness;
 
@@ -91,12 +89,24 @@ fn wait_for_runtime_idle(db: &str) {
     let started = Instant::now();
     let timeout = Duration::from_secs(10);
     loop {
-        let last = assert_success(topo(&["--db", db, "count"]));
-        let facts: u64 = line_value(&last, "facts").parse().expect("facts count");
-        let applied: u64 = line_value(&last, "applied_facts")
+        let output = topo(&["--db", db, "count"]);
+        if !output.status.success() {
+            let last = stderr(&output);
+            assert!(
+                started.elapsed() < timeout,
+                "runtime queues did not become queryable:\n{last}"
+            );
+            thread::sleep(Duration::from_millis(50));
+            continue;
+        }
+        let last_count = stdout(&output);
+        let facts: u64 = line_value(&last_count, "facts")
+            .parse()
+            .expect("facts count");
+        let applied: u64 = line_value(&last_count, "applied_facts")
             .parse()
             .expect("applied facts count");
-        let pending_intents: u64 = line_value(&last, "pending_intents")
+        let pending_intents: u64 = line_value(&last_count, "pending_intents")
             .parse()
             .expect("pending intents count");
         if facts == applied && pending_intents == 0 {
@@ -104,7 +114,7 @@ fn wait_for_runtime_idle(db: &str) {
         }
         assert!(
             started.elapsed() < timeout,
-            "daemon did not drain runtime queues:\n{last}"
+            "daemon did not drain runtime queues:\n{last_count}"
         );
         thread::sleep(Duration::from_millis(50));
     }
@@ -236,89 +246,36 @@ fn spawn_daemon(db: &str, port: u16) -> RunningDaemon {
 }
 
 #[test]
-fn replay_is_idempotent_and_rebuilds_derived_state() {
+fn update_command_queues_local_protocol_update_fact() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = temp_db(&tmp, "alice.db");
+
+    let update = assert_success(topo(&["--db", &db, "update"]));
+
+    assert_eq!(line_value(&update, "protocol_version"), "1", "{update}");
+    assert!(
+        line_value(&update, "pending_projection")
+            .parse::<u64>()
+            .unwrap()
+            > 0,
+        "update should queue its local update fact for projection: {update}"
+    );
+}
+
+#[test]
+fn update_rebuilds_derived_state_and_unblocks_queries() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "alice.db");
     let workspace_id = seed_workspace_with_content(&db);
 
-    let before = state_hash(&db);
-
-    let replay = assert_success(topo(&["--db", &db, "replay"]));
-    assert_eq!(
-        line_value(&replay, "order"),
-        "canonical",
-        "default replay uses canonical fact order"
-    );
-    assert_eq!(
-        line_value(&replay, "network_rows"),
-        "0",
-        "replay must not produce network rows before the barrier"
-    );
-    assert!(
-        line_value(&replay, "retained_facts")
-            .parse::<u64>()
-            .unwrap()
-            > 0,
-        "replay should reproject retained facts"
-    );
-    assert!(
-        line_value(&replay, "row_mutations").parse::<u64>().unwrap() > 0,
-        "replay should rebuild materialized read-model rows"
-    );
-    let after = state_hash(&db);
-    assert_eq!(before, after, "replay must rebuild byte-identical state");
+    assert_success(topo(&["--db", &db, "update"]));
+    let _daemon = spawn_worker_daemon(&db);
+    wait_for_runtime_idle(&db);
 
     // The rebuilt read model still answers content queries.
     let messages = assert_success(topo(&["--db", &db, "messages", &workspace_id]));
     assert!(messages.contains("first message"), "{messages}");
     assert!(messages.contains("second message"), "{messages}");
-}
-
-#[test]
-fn second_replay_changes_nothing() {
-    let tmp = tempfile::tempdir().unwrap();
-    let db = temp_db(&tmp, "alice.db");
-    seed_workspace_with_content(&db);
-
-    assert_success(topo(&["--db", &db, "replay"]));
-    let once = state_hash(&db);
-    assert_success(topo(&["--db", &db, "replay"]));
-    let twice = state_hash(&db);
-    assert_eq!(once, twice, "replay is idempotent");
-}
-
-#[test]
-fn replay_reverse_rebuilds_same_state_as_canonical() {
-    let tmp = tempfile::tempdir().unwrap();
-    let db = temp_db(&tmp, "alice.db");
-    seed_workspace_with_content(&db);
-
-    let before = state_hash(&db);
-    let replay = assert_success(topo(&["--db", &db, "replay", "--reverse"]));
-    assert_eq!(line_value(&replay, "order"), "reverse");
-    assert_eq!(line_value(&replay, "network_rows"), "0");
-    let after = state_hash(&db);
-    assert_eq!(
-        before, after,
-        "reverse projection order must reach the same state"
-    );
-}
-
-#[test]
-fn replay_scramble_rebuilds_same_state_as_canonical() {
-    let tmp = tempfile::tempdir().unwrap();
-    let db = temp_db(&tmp, "alice.db");
-    seed_workspace_with_content(&db);
-
-    let before = state_hash(&db);
-    let replay = assert_success(topo(&["--db", &db, "replay", "--scramble", "--seed", "7"]));
-    assert_eq!(line_value(&replay, "order"), "scramble:7");
-    assert_eq!(line_value(&replay, "network_rows"), "0");
-    let after = state_hash(&db);
-    assert_eq!(
-        before, after,
-        "scrambled projection order must reach the same state"
-    );
 }
 
 #[test]
@@ -381,7 +338,7 @@ fn wait_for_area_count_at_least(db: &str, area: &str, expected_min: u64) -> Stri
 }
 
 #[test]
-fn replay_recreates_key_material_idempotently() {
+fn update_rebuild_preserves_key_material_rows() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "alice.db");
     let daemon_port = free_port();
@@ -403,26 +360,14 @@ fn replay_recreates_key_material_idempotently() {
     // The recipient scenario materializes at least one key wrap.
     let key_wrap_count = area_count(&summary_before, "key_wrap_rows");
     assert!(key_wrap_count > 0, "{key_wrap_before}");
-    let before = state_hash(&db);
+    assert_success(topo(&["--db", &db, "update"]));
+    wait_for_runtime_idle(&db);
 
-    let replay = assert_success(topo(&["--db", &db, "replay"]));
-    // create_key_wrap / unwrap_key_wrap run during replay as deterministic fact
-    // creation. They must not duplicate any wrap or local-secret fact, so replay
-    // emits no new facts and purges none.
-    assert_eq!(
-        line_value(&replay, "emitted_facts"),
-        "0",
-        "replay key-material handlers must not create duplicate facts"
-    );
-    assert_eq!(line_value(&replay, "purged_facts"), "0");
-    assert_eq!(line_value(&replay, "network_rows"), "0");
-    let after = state_hash(&db);
-    assert_eq!(before, after, "key material must rebuild identically");
     let summary_after = assert_success(topo(&["--db", &db, "state-summary"]));
     assert_eq!(
         area_line(&summary_after, "key_wrap_rows"),
         key_wrap_before,
-        "key wrap rows must be byte-identical after replay"
+        "key wrap rows must be byte-identical after update rebuild"
     );
 }
 
