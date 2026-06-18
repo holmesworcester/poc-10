@@ -158,19 +158,19 @@ CREATE TABLE IF NOT EXISTS pending_time_ranges (
 );
 
 CREATE TABLE IF NOT EXISTS intents (
+    intent_id BLOB PRIMARY KEY NOT NULL,
     kind TEXT NOT NULL,
-    idempotence_key BLOB NOT NULL,
+    intent_key BLOB NOT NULL,
     payload BLOB NOT NULL,
-    replay INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (kind, idempotence_key)
+    replay INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TEMP TABLE IF NOT EXISTS local_intents (
+    intent_id BLOB PRIMARY KEY NOT NULL,
     kind TEXT NOT NULL,
-    idempotence_key BLOB NOT NULL,
+    intent_key BLOB NOT NULL,
     payload BLOB NOT NULL,
-    replay INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (kind, idempotence_key)
+    replay INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TEMP TABLE IF NOT EXISTS incoming_facts (

@@ -90,13 +90,24 @@ pub fn seal_fact(
     connection: &ConnectionFact,
     responder_ephemeral_private_key: &X25519PrivateKey,
 ) -> Result<Vec<u8>, String> {
+    seal_fact_with_nonce(
+        connection,
+        responder_ephemeral_private_key,
+        crypto::random_xchacha20poly1305_nonce(),
+    )
+}
+
+pub fn seal_fact_with_nonce(
+    connection: &ConnectionFact,
+    responder_ephemeral_private_key: &X25519PrivateKey,
+    nonce: XChaCha20Poly1305Nonce,
+) -> Result<Vec<u8>, String> {
     if crypto::x25519_public_key(responder_ephemeral_private_key)
         != connection.responder_ephemeral_public_key
     {
         return Err("sealed connection ephemeral key does not match connection".to_string());
     }
     let plaintext = encode_plaintext(connection)?;
-    let nonce = crypto::random_xchacha20poly1305_nonce();
     let header = sealed_header(
         connection.responder_ephemeral_public_key,
         connection.to_endpoint,

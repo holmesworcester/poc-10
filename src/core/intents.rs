@@ -1,10 +1,10 @@
 //! Intent queues and handler contract types.
 //!
-//! An intent is idempotent queued work. Core persists durable intents in
-//! `intents`, stores ephemeral intents in `local_intents`, and dispatches
+//! An intent is one queued unit of handler work. Core persists durable intents
+//! in `intents`, stores ephemeral intents in `local_intents`, and dispatches
 //! both through the same handler contract. The intent kind selects a handler;
-//! the key deduplicates equivalent work of that kind; the payload is opaque
-//! bytes owned by the protocol module that registered the handler.
+//! the key is handler-owned semantic metadata; the payload is opaque bytes
+//! owned by the protocol module that registered the handler.
 //!
 //! Intents are the runtime's "do this later" language. Projection emits an
 //! intent when it discovers work that should not run inside a projector, such
@@ -14,12 +14,12 @@
 //! context, and commits the handler's `RuntimeEffects` atomically with queue
 //! consumption.
 //!
-//! Durable and ephemeral intents share identity and payload rules. Durable
-//! intents survive process restarts and participate in replay. Ephemeral
-//! intents are connection-local work, useful for inbound frames and other
-//! process-scoped signals that should disappear on restart. If the same durable
-//! identity is handled, dispatch removes the matching ephemeral duplicate so
-//! local work does not repeat accepted durable work.
+//! Durable intents survive process restarts and participate in replay.
+//! Ephemeral intents are connection-local work, useful for inbound frames and
+//! other process-scoped signals that should disappear on restart. Each queued
+//! row is a distinct work item; duplicate suppression belongs in facts,
+//! protocol rows, network queues, or handler-local state when a handler needs
+//! backpressure.
 //!
 //! Handlers are reactive runtime code, not user-facing commands. They may ask
 //! core to load specific facts and may use query helpers through `Db`, then
@@ -64,16 +64,16 @@ impl IntentKind {
     }
 }
 
-/// One idempotent unit of handler work.
+/// One unit of handler work.
 ///
-/// `(kind, key)` is the queue identity. Re-emitting the same payload is a
-/// no-op; re-emitting a different payload for the same identity is rejected by
-/// runtime effect validation because it would make repeated dispatch ambiguous.
+/// Core uses `kind` for routing and treats every enqueued row as distinct work.
+/// The `key` remains available to handlers as a stable semantic key for their
+/// own protocol checks, payload validation, and row writes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Intent {
     /// Handler routing key.
     pub kind: IntentKind,
-    /// Idempotence key within `kind`.
+    /// Handler-owned semantic key within `kind`.
     pub key: Vec<u8>,
     /// Opaque handler-owned payload bytes.
     pub payload: Vec<u8>,
@@ -86,7 +86,7 @@ pub struct Intent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IntentWorkRow {
     pub(crate) kind: String,
-    pub(crate) idempotence_key: Vec<u8>,
+    pub(crate) intent_key: Vec<u8>,
     pub(crate) payload: Vec<u8>,
     pub(crate) mode: HandlerMode,
 }
@@ -94,12 +94,12 @@ pub(crate) struct IntentWorkRow {
 impl IntentWorkRow {
     pub(crate) fn new(
         kind: impl Into<String>,
-        idempotence_key: impl Into<Vec<u8>>,
+        intent_key: impl Into<Vec<u8>>,
         payload: impl Into<Vec<u8>>,
     ) -> Self {
         Self {
             kind: kind.into(),
-            idempotence_key: idempotence_key.into(),
+            intent_key: intent_key.into(),
             payload: payload.into(),
             mode: HandlerMode::Live,
         }
@@ -140,7 +140,7 @@ impl Intent {
     pub(crate) fn from_work_row(row: IntentWorkRow) -> Result<Self, String> {
         let kind = IntentKind::new(row.kind)
             .map_err(|err| format!("invalid queued intent kind: {err}"))?;
-        Ok(Self::new(kind, row.idempotence_key, row.payload))
+        Ok(Self::new(kind, row.intent_key, row.payload))
     }
 }
 
@@ -336,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn intent_carries_idempotence_key() {
+    fn intent_carries_handler_key() {
         let intent = Intent::new(
             IntentKind::new("materialize").unwrap(),
             b"same-work",

@@ -34,7 +34,7 @@ pub struct CreateConnection {
 
 pub fn create_connection_intent(input: CreateConnection) -> Intent {
     let payload = encode_payload(&input);
-    let key = idempotence_key(&input);
+    let key = intent_key(&input);
     Intent::new(
         IntentKind::new(CREATE_CONNECTION).expect("valid create connection intent kind"),
         key,
@@ -54,8 +54,8 @@ pub fn decode_create_connection_intent(intent: &Intent) -> Result<CreateConnecti
         initiator_endpoint_shared_id: take_id(&intent.payload, 1),
         receive_id: take_id(&intent.payload, 2),
     };
-    if intent.key != idempotence_key(&input) {
-        return Err("create_connection idempotence key does not match payload".into());
+    if intent.key != intent_key(&input) {
+        return Err("create_connection intent key does not match payload".into());
     }
     Ok(input)
 }
@@ -68,10 +68,10 @@ fn encode_payload(input: &CreateConnection) -> Vec<u8> {
     out
 }
 
-fn idempotence_key(input: &CreateConnection) -> Vec<u8> {
+fn intent_key(input: &CreateConnection) -> Vec<u8> {
     // The request fact id is the connection-authoring unit of work; duplicate
     // deliveries may produce different receipt fact ids, but only one
-    // connection is authored per request.
+    // handler key is needed for the request.
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"topo:create-connection-intent:v1:");
     hasher.update(&input.request_id);
@@ -112,7 +112,7 @@ mod tests {
     }
 
     #[test]
-    fn idempotence_key_is_request_scoped() {
+    fn intent_key_is_request_scoped() {
         let mut duplicate_receive = sample();
         duplicate_receive.receive_id = [9; 32];
         assert_eq!(
@@ -131,7 +131,8 @@ use crate::core::intents::{
 use crate::protocol::auth::endpoint::author as local_endpoint;
 use crate::protocol::auth::endpoint_shared;
 use crate::protocol::connection::connection::author::{
-    build_responder_connection, BuildResponderConnection,
+    build_responder_connection_with_seal_randomness, deterministic_responder_output,
+    BuildResponderConnection,
 };
 use crate::protocol::connection::ephemeral_secret::author as ephemeral_author;
 use crate::protocol::connection::fact_receipt;
@@ -230,21 +231,34 @@ impl IntentHandler for CreateConnectionHandler {
             .initiator_addr
             .or(Some(parse_origin_addr(&received)?));
 
-        let (responder_ephemeral, responder_ephemeral_fact) =
-            ephemeral_author::random_secret_fact(endpoint.endpoint, received.received_at_local_ms)?;
+        let derived = deterministic_responder_output(
+            &endpoint.secret,
+            input.request_id,
+            input.initiator_endpoint_shared_id,
+            input.receive_id,
+        );
+        let created_at_ms = request_fact.timestamp;
+        let (responder_ephemeral, responder_ephemeral_fact) = ephemeral_author::secret_fact(
+            endpoint.endpoint,
+            derived.ephemeral_private_key,
+            created_at_ms,
+        )?;
         let responder_ephemeral_private_key = responder_ephemeral.ephemeral_private_key;
 
-        let built = build_responder_connection(BuildResponderConnection {
-            request_id: input.request_id,
-            request: &request,
-            invite: invite.as_ref(),
-            endpoint: &endpoint,
-            responder_ephemeral_private_key,
-            responder_ephemeral_secret_fact_id: responder_ephemeral_fact.id,
-            responder_addr,
-            initiator_addr,
-            created_at_ms: received.received_at_local_ms,
-        })?;
+        let built = build_responder_connection_with_seal_randomness(
+            BuildResponderConnection {
+                request_id: input.request_id,
+                request: &request,
+                invite: invite.as_ref(),
+                endpoint: &endpoint,
+                responder_ephemeral_private_key,
+                responder_ephemeral_secret_fact_id: responder_ephemeral_fact.id,
+                responder_addr,
+                initiator_addr,
+                created_at_ms,
+            },
+            derived.seal_randomness,
+        )?;
 
         Ok(RuntimeEffects::new()
             .fact(responder_ephemeral_fact)

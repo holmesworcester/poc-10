@@ -7,9 +7,9 @@
 //! send attempt is stale and commits no effects. TCP reachability belongs to the
 //! core outgoing pump, not to this protocol handler.
 //!
-//! The payload is only `(routing_key, frame bytes)`, and the idempotence key is
-//! deterministic over both fields. Change this file for route lookup, stale
-//! local-send behavior, or outgoing network queue interaction. Change the
+//! The payload is only `(routing_key, frame bytes)`, and the intent key is a
+//! deterministic checksum over both fields. Change this file for route lookup,
+//! stale local-send behavior, or outgoing network queue interaction. Change the
 //! concrete connection frame fact families for frame byte semantics.
 
 use crate::core::effects::RuntimeEffects;
@@ -32,7 +32,7 @@ pub const MAX_FRAME_BYTES: usize = 1 << 21; // 2 MiB
 
 /// 32-byte routing key. May be a connection id or any other handle the
 /// connection-layer dispatcher uses to select a socket. The handler treats the
-/// bits only as an idempotence dimension.
+/// bits only as route input.
 pub type RoutingKey = [u8; 32];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,14 +68,12 @@ pub fn decode_queue_outgoing_frame(intent: &Intent) -> Result<QueueOutgoingFrame
 
     let input = QueueOutgoingFrame { routing_key, frame };
     if intent.key != queue_outgoing_frame_key(&input) {
-        return Err("queue_outgoing_frame idempotence key does not match payload".into());
+        return Err("queue_outgoing_frame intent key does not match payload".into());
     }
     Ok(input)
 }
 
-/// Per-(routing_key, frame) idempotence key. Two intents for the same routing
-/// key carrying the same frame bytes produce the same intent key, which lets
-/// the intent queue collapse duplicates before the handler runs.
+/// Per-(routing_key, frame) intent key used to detect payload tampering.
 pub fn queue_outgoing_frame_key(input: &QueueOutgoingFrame) -> Vec<u8> {
     let mut hash = blake3::Hasher::new();
     hash.update(b"topo:queue-outgoing-frame:v1:");

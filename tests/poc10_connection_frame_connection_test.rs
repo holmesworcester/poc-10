@@ -196,7 +196,7 @@ fn intent_kind_names_keep_connection_boundaries_clear() {
 }
 
 #[test]
-fn idempotence_keys_distinguish_parallel_batches_on_same_route() {
+fn handler_keys_distinguish_parallel_batches_on_same_route() {
     let first_batch = send_facts_on_connection_intent(SendFactsOnConnection {
         connection_id: [1; 32],
         fact_ids: vec![[2; 32], [3; 32]],

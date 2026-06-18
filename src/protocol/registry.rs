@@ -8,7 +8,7 @@
 //!
 //! The registry should read like a table of contents, not like an
 //! implementation file. Fact modules own layouts, projectors, rows, queries,
-//! and commands. Intent modules own payloads, idempotence keys, and handlers.
+//! and commands. Intent modules own payloads, handler keys, and handlers.
 //! Context helper modules own relationship semantics. The registry names those
 //! pieces once so core can route facts by tag, route intents by kind, apply
 //! schemas, and validate row mutation targets.

@@ -11,6 +11,14 @@ pub fn random_secret_fact(
     created_at_ms: u64,
 ) -> Result<(ConnectionEphemeralSecretFact, Fact), String> {
     let ephemeral_private_key = crypto::random_x25519_private_key();
+    secret_fact(owner_endpoint, ephemeral_private_key, created_at_ms)
+}
+
+pub fn secret_fact(
+    owner_endpoint: FactId,
+    ephemeral_private_key: crypto::X25519PrivateKey,
+    created_at_ms: u64,
+) -> Result<(ConnectionEphemeralSecretFact, Fact), String> {
     let ephemeral = ConnectionEphemeralSecretFact {
         owner_endpoint,
         ephemeral_private_key,

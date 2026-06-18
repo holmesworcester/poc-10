@@ -17,7 +17,7 @@
 //! `fact.rs` for typed payloads, `encode.rs` for canonical bytes, `project.rs`
 //! for projector-local decode/auth/adapt plus semantic projection and effects,
 //! `author.rs` for construction, and `queries.rs` for user-facing reads. Intents
-//! own their payload layout, idempotence key, exact fact inputs, and handler.
+//! own their payload layout, handler key, exact fact inputs, and handler.
 //!
 //! Scopes are: auth authority and key material, content and retention,
 //! connection protocol, sync convergence, and versioning. Shared helpers stay

@@ -304,7 +304,9 @@ pub(crate) fn now_ms() -> u64 {
 /// cadence while the process runs. Nothing is persisted, so there is nothing to
 /// wipe on rebuild and nothing to replay. A protocol can put a storage-readiness
 /// check first in the registry; `tick` gives that first due schedule a chance to
-/// queue and drain repair work before later schedules run.
+/// queue and drain repair work before later schedules run. The scheduler also
+/// skips a due tick when local work for the same recurring kind is still queued,
+/// so operational loops do not build an unbounded backlog.
 pub struct RecurringScheduler {
     schedules: Vec<RecurringSchedule>,
 }
@@ -380,6 +382,10 @@ impl RecurringScheduler {
         let mut fired = 0;
         for schedule in &mut self.schedules {
             if now_ms < schedule.next_at_ms {
+                continue;
+            }
+            if runtime.has_pending_local_intent_kind(schedule.kind)? {
+                schedule.next_at_ms = now_ms.saturating_add(schedule.interval_ms);
                 continue;
             }
             let builder_context = RecurringIntentContext { now_ms, local_addr };
@@ -1199,6 +1205,29 @@ mod tests {
             0,
             "the same daemon tick should dispatch the recurring intent it fired"
         );
+    }
+
+    #[test]
+    fn recurring_scheduler_skips_kind_with_pending_local_work() {
+        let mut runtime = Runtime::open_memory(&RECURRING_RUNTIME).expect("runtime");
+        let mut scheduler = RecurringScheduler::install(RECURRING_RUNTIME.handlers, 0);
+        let addr = Some("127.0.0.1:41000".parse().expect("addr"));
+
+        assert_eq!(
+            scheduler
+                .fire_due(&mut runtime, 0, addr)
+                .expect("first fire"),
+            1
+        );
+        assert_eq!(runtime.pending_intent_count(), 1);
+        assert_eq!(
+            scheduler
+                .fire_due(&mut runtime, 60_000, addr)
+                .expect("second fire"),
+            0,
+            "pending recurring work should backpressure the next tick"
+        );
+        assert_eq!(runtime.pending_intent_count(), 1);
     }
 
     #[test]

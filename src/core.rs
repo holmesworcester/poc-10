@@ -7,7 +7,7 @@
 //! it.
 //!
 //! The central runtime loop is fact-based. Protocol code admits immutable facts
-//! and idempotent intents; core persists them, runs projection, matches context,
+//! and queued intents; core persists them, runs projection, matches context,
 //! dispatches handlers, and commits `RuntimeEffects` through SQLite
 //! transactions. Core owns the queue mechanics and atomicity rules. Protocol
 //! modules own byte layouts, authority checks, user-facing commands, and the

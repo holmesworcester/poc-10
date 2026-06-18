@@ -61,7 +61,8 @@ facts into the same database.
 
 Core's job is therefore coordination, persistence, and mechanical validation.
 It owns the serialized turn shape, SQLite transaction boundaries, queue
-ordering, bounded drain status, idempotent fact and intent admission,
+ordering, bounded drain status, idempotent fact admission, queued intent
+admission,
 protocol-blind context matching, network byte pumping, and schema/row allowlist
 checks. It leaves protocol meaning in the protocol scopes: fact layouts,
 authority checks, sync policy, connection-frame opening, read-model rows,
@@ -78,7 +79,7 @@ Protocol code enters core through declarations and effect values:
 - `project_fact::Projector` receives one `Fact` plus a `ProjectionContext` and
   returns a `ProjectionOutput`; fact families keep decode, authenticate, adapt,
   and semantic projection helpers inside their owning `project.rs`.
-- `intents::IntentHandler` receives one idempotent `Intent` plus a
+- `intents::IntentHandler` receives one queued `Intent` plus a
   `HandlerContext` containing only declared input facts and returns
   `RuntimeEffects`.
 - `command` defines the protocol-neutral command clock, local capability value
@@ -148,8 +149,9 @@ the owning projector decide whether that time proves anything.
   start_key, end_key)`. Projectors must decode and validate matched payloads.
 - Projectors do not query the database, perform IO, call handlers, or mutate
   process-local state.
-- Intent queue identity is `(kind, idempotence_key)`. Re-emitting the same
-  payload is idempotent; conflicting payloads for the same identity reject.
+- Each intent queue insert records a distinct row id. `kind` routes to a
+  handler; `key` and `payload` are handler-owned bytes. Duplicate suppression
+  belongs in facts, protocol rows, network queues, or handler-local state.
 - Handler output commits atomically with deletion of the handled queue row.
   Handler and validation errors leave the row queued without committing output.
 - Projection mode is sticky toward replay. If an owner is already queued in
@@ -382,7 +384,6 @@ One handler commit performs this ordered unit:
 
 ```text
 delete claimed intent row
-delete shadowed local duplicate intent when the claimed row was durable
 purge exact facts
 admit emitted durable facts and mark them pending
 stage emitted incoming facts

@@ -141,7 +141,7 @@ pub fn decode_share_fact_with_sync(intent: &Intent) -> Result<ShareFactWithSync,
         context_have,
     };
     if intent.key != share_fact_with_sync_key(&input) {
-        return Err("share_fact_with_sync idempotence key does not match payload".into());
+        return Err("share_fact_with_sync intent key does not match payload".into());
     }
     Ok(input)
 }

@@ -833,12 +833,12 @@ pub(crate) mod commit_effects {
     //! work for state that failed to commit.
     //!
     //! The mechanism is deliberately split in two. `validate_runtime_effects`
-    //! checks failures that do not need SQL: conflicting duplicate intents inside a
-    //! batch and row mutations aimed at tables outside the runtime allowlist. The
-    //! commit functions then rely on the database for the state-dependent checks:
-    //! content-addressed facts must match their ids, typed-table inserts must
-    //! be new rows or exact duplicates of the full supplied row, and intent
-    //! queue inserts must keep `(kind, key)` stable.
+    //! checks failures that do not need SQL: unknown intent kinds, invalid
+    //! rebuild batches, and row mutations aimed at tables outside the runtime
+    //! allowlist. The commit functions then rely on the database for the
+    //! state-dependent checks: content-addressed facts must match their ids and
+    //! typed-table inserts must be new rows or exact duplicates of the full
+    //! supplied row.
     //!
     //! That row-table rule is not the rule for all projection state. Context rows
     //! and time wakes are handled by owner in the projection commit boundary before
@@ -857,18 +857,12 @@ pub(crate) mod commit_effects {
     //! it depends on has committed.
     //!
     //! Keep this file protocol-neutral. It may decide whether an effect is allowed
-    //! to touch a registered table and whether an idempotent write conflicts with
+    //! to touch a registered table and whether a typed-table write conflicts with
     //! existing SQL state. It must not interpret payload bytes, decide which facts
     //! are valid, or know why a protocol table row matters. Add a new effect kind
     //! here only when it needs this same all-or-nothing commit boundary; display
     //! receipts, command-only output, and protocol policy belong in their owner
     //! modules.
-
-    use crate::core::db::{Db, TableName};
-    use crate::core::effects::{RuntimeEffects, StorageRequirement, StorageRequirementCheck};
-    use crate::core::intents::{Intent, RowMutation};
-    use crate::core::schema::{INTENTS, LOCAL_INTENTS};
-    use std::collections::BTreeMap;
 
     use super::context::ProjectionMode;
     use super::route::FactAdmissionFn;
@@ -876,12 +870,16 @@ pub(crate) mod commit_effects {
         insert_facts_and_record_matches_with_mode_in_tx, insert_incoming_fact_in_tx,
         insert_priority_facts_and_record_matches_with_mode_in_tx, purge_fact_in_tx,
     };
+    use crate::core::db::{Db, TableName};
+    use crate::core::effects::{RuntimeEffects, StorageRequirement, StorageRequirementCheck};
+    use crate::core::intents::{Intent, RowMutation};
+    use crate::core::schema::{INTENTS, LOCAL_INTENTS};
 
-    /// Counts of newly inserted follow-up work after an effect commit.
+    /// Counts of follow-up work recorded after an effect commit.
     ///
     /// These counts are not a full change report. Purges, row mutations, and
-    /// idempotent duplicates are intentionally omitted because callers use this as
-    /// a scheduling signal for new facts and intents, not as an audit log.
+    /// exact duplicate facts are intentionally omitted because callers use this
+    /// as a scheduling signal for new facts and intents, not as an audit log.
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
     pub(crate) struct RuntimeEffectCounts {
         /// Facts newly admitted.
@@ -954,38 +952,20 @@ pub(crate) mod commit_effects {
 
     /// Validate that a batch can be written to one intent queue.
     ///
-    /// Intent durability is owned by the destination table. This check only rejects
-    /// conflicting duplicates within that one destination queue; the durable and
-    /// ephemeral queues are allowed to carry the same `(kind, key)` because
-    /// dispatch defines how durable work shadows local work.
+    /// Intent durability is owned by the destination table. Core only validates
+    /// that every emitted kind has a handler in this runtime; repeated keys are
+    /// distinct queued rows.
     fn validate_intents(
         intents: &[Intent],
         registered_intent_kinds: &[&str],
     ) -> Result<(), String> {
-        let mut proposed = BTreeMap::<Vec<u8>, &Intent>::new();
         for intent in intents {
             crate::core::handle_intent::validate_intent_kind_registered(
                 intent,
                 registered_intent_kinds,
             )?;
-            let key = intent_validation_key(intent);
-            if let Some(existing) = proposed.insert(key, intent) {
-                if existing != intent {
-                    return Err(format!(
-                        "runtime effects emitted conflicting intents for {}",
-                        intent.kind.as_str()
-                    ));
-                }
-            }
         }
         Ok(())
-    }
-
-    fn intent_validation_key(intent: &Intent) -> Vec<u8> {
-        let mut key = intent.kind.as_str().as_bytes().to_vec();
-        key.push(0);
-        key.extend_from_slice(&intent.key);
-        key
     }
 
     /// Reject any row mutation targeting a table this runtime has not registered.
@@ -1184,13 +1164,12 @@ pub(crate) mod commit_effects {
     ) -> rusqlite::Result<usize> {
         let mut inserted = 0usize;
         for intent in intents {
-            if crate::core::handle_intent::insert_intent_work_row_in_tx(
+            crate::core::handle_intent::insert_intent_work_row_in_tx(
                 tx,
                 table,
                 &intent.work_row_with_mode(replay),
-            )? {
-                inserted += 1;
-            }
+            )?;
+            inserted += 1;
         }
         Ok(inserted)
     }
@@ -3992,7 +3971,7 @@ mod contract_tests {
         store
             .conn()
             .query_row(
-                "SELECT payload FROM intents WHERE kind = ?1 AND idempotence_key = ?2",
+                "SELECT payload FROM intents WHERE kind = ?1 AND intent_key = ?2 ORDER BY rowid LIMIT 1",
                 rusqlite::params![kind, key.as_slice()],
                 |row| row.get(0),
             )
