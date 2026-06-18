@@ -206,11 +206,14 @@ impl IntentHandler for ShareFactWithSyncHandler {
                     let changed = crate::core::perf_profile::measure_result(
                         "share_record_sync_contribution",
                         || -> Result<bool, HandlerError> {
-                            Ok(shared_fact::record_sync_contribution(
+                            shared_fact::record_sync_contribution_in_tx(
                                 context.db()?,
                                 &input,
                                 Some(owner),
-                            )?)
+                            )
+                            .map_err(|err| {
+                                HandlerError::fatal(format!("record sync contribution rows: {err}"))
+                            })
                         },
                     )?;
                     if changed && !context.is_replay() {
@@ -235,11 +238,12 @@ impl IntentHandler for ShareFactWithSyncHandler {
                     crate::core::perf_profile::measure_result(
                         "share_record_sync_contribution",
                         || -> Result<bool, HandlerError> {
-                            Ok(shared_fact::record_sync_contribution(
-                                context.db()?,
-                                &input,
-                                None,
-                            )?)
+                            shared_fact::record_sync_contribution_in_tx(context.db()?, &input, None)
+                                .map_err(|err| {
+                                    HandlerError::fatal(format!(
+                                        "record sync contribution rows: {err}"
+                                    ))
+                                })
                         },
                     )?;
                     Ok(crate::core::effects::RuntimeEffects::new())

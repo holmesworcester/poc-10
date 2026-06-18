@@ -137,7 +137,7 @@ impl IntentHandler for MaintainConnectionsHandler {
         let mut effects = RuntimeEffects::new();
 
         for pending in pending_connection_requests(store)? {
-            network::queue_outgoing(
+            network::queue_outgoing_in_tx(
                 store,
                 NetworkTarget::new(pending.addr),
                 OutgoingFrame {

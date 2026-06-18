@@ -175,19 +175,33 @@ pub fn record_sync_contribution(
     input: &share_fact_with_sync::ShareFactWithSync,
     owner: Option<&Fact>,
 ) -> Result<bool, String> {
+    store
+        .write_transaction(|tx| record_sync_contribution_in_tx(tx, input, owner))
+        .map_err(|err| format!("record sync contribution rows: {err}"))
+}
+
+pub fn record_sync_contribution_in_tx(
+    tx: &Db,
+    input: &share_fact_with_sync::ShareFactWithSync,
+    owner: Option<&Fact>,
+) -> rusqlite::Result<bool> {
     match input.state {
         share_fact_with_sync::SyncShareState::Upsert => {
-            let owner = owner
-                .ok_or_else(|| "share_fact_with_sync upsert requires owner fact".to_string())?;
+            let owner = owner.ok_or_else(|| {
+                rusqlite::Error::InvalidParameterName(
+                    "share_fact_with_sync upsert requires owner fact".to_string(),
+                )
+            })?;
             validate_sync_owner(
                 input.workspace_id,
                 input.owner_fact_id,
                 input.timestamp_ms,
                 owner,
-            )?;
-            upsert_sync_contribution(store, input, owner)
+            )
+            .map_err(rusqlite::Error::InvalidParameterName)?;
+            upsert_sync_contribution_in_tx(tx, input, owner)
         }
-        share_fact_with_sync::SyncShareState::Retract => retract_sync_contribution(store, input),
+        share_fact_with_sync::SyncShareState::Retract => retract_sync_contribution_in_tx(tx, input),
     }
 }
 
@@ -219,134 +233,124 @@ fn validate_sync_owner(
     Ok(())
 }
 
-fn upsert_sync_contribution(
-    store: &Db,
+fn upsert_sync_contribution_in_tx(
+    tx: &Db,
     input: &share_fact_with_sync::ShareFactWithSync,
     owner: &Fact,
-) -> Result<bool, String> {
-    store
-        .write_transaction(|tx| {
-            let old_leaf =
-                negentropy_leaf_row_for_owner(tx, input.workspace_id, input.owner_fact_id)
-                    .map_err(rusqlite::Error::InvalidParameterName)?;
-            if let Some(old_leaf) = &old_leaf {
-                if old_leaf.timestamp_ms != input.timestamp_ms {
-                    return Err(rusqlite::Error::InvalidParameterName(
-                        "share_fact_with_sync timestamp changed for existing owner".to_string(),
-                    ));
-                }
-            }
+) -> rusqlite::Result<bool> {
+    let old_leaf = negentropy_leaf_row_for_owner(tx, input.workspace_id, input.owner_fact_id)
+        .map_err(rusqlite::Error::InvalidParameterName)?;
+    if let Some(old_leaf) = &old_leaf {
+        if old_leaf.timestamp_ms != input.timestamp_ms {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "share_fact_with_sync timestamp changed for existing owner".to_string(),
+            ));
+        }
+    }
 
-            let mut context_have =
-                negentropy_context_have_for_leaf(tx, input.workspace_id, input.owner_fact_id)
-                    .map_err(rusqlite::Error::InvalidParameterName)?;
-            context_have.extend(input.context_have.iter().copied());
-            context_have.sort();
-            context_have.dedup();
-            let new_fingerprint = contribution_fingerprint(
-                input.workspace_id,
-                input.owner_fact_id,
-                input.timestamp_ms,
-                &context_have,
-            );
-            if old_leaf
-                .as_ref()
-                .map(|leaf| leaf.contribution_fingerprint == new_fingerprint)
-                .unwrap_or(false)
-            {
-                return Ok(false);
-            }
+    let mut context_have =
+        negentropy_context_have_for_leaf(tx, input.workspace_id, input.owner_fact_id)
+            .map_err(rusqlite::Error::InvalidParameterName)?;
+    context_have.extend(input.context_have.iter().copied());
+    context_have.sort();
+    context_have.dedup();
+    let new_fingerprint = contribution_fingerprint(
+        input.workspace_id,
+        input.owner_fact_id,
+        input.timestamp_ms,
+        &context_have,
+    );
+    if old_leaf
+        .as_ref()
+        .map(|leaf| leaf.contribution_fingerprint == new_fingerprint)
+        .unwrap_or(false)
+    {
+        return Ok(false);
+    }
 
-            let old_summary = old_leaf.as_ref().map(|leaf| RangeSummary {
-                count: 1,
-                fingerprint: leaf.contribution_fingerprint,
-            });
-            let new_summary = RangeSummary {
-                count: 1,
-                fingerprint: new_fingerprint,
-            };
-            let leaf_row = negentropy_leaf_row(NegentropyLeafRow {
+    let old_summary = old_leaf.as_ref().map(|leaf| RangeSummary {
+        count: 1,
+        fingerprint: leaf.contribution_fingerprint,
+    });
+    let new_summary = RangeSummary {
+        count: 1,
+        fingerprint: new_fingerprint,
+    };
+    let leaf_row = negentropy_leaf_row(NegentropyLeafRow {
+        workspace_id: input.workspace_id,
+        owner_fact_id: input.owner_fact_id,
+        timestamp_ms: input.timestamp_ms,
+        contribution_fingerprint: new_fingerprint,
+    });
+    let shareable_row = shareable_fact_row(ShareableFactRow {
+        workspace_id: input.workspace_id,
+        fact_id: owner.id,
+        timestamp_ms: owner.timestamp,
+    });
+    let context_rows = context_have
+        .iter()
+        .map(|context_fact_id| {
+            negentropy_context_have_row(NegentropyContextHaveRow {
                 workspace_id: input.workspace_id,
                 owner_fact_id: input.owner_fact_id,
-                timestamp_ms: input.timestamp_ms,
-                contribution_fingerprint: new_fingerprint,
-            });
-            let shareable_row = shareable_fact_row(ShareableFactRow {
-                workspace_id: input.workspace_id,
-                fact_id: owner.id,
-                timestamp_ms: owner.timestamp,
-            });
-            let context_rows = context_have
-                .iter()
-                .map(|context_fact_id| {
-                    negentropy_context_have_row(NegentropyContextHaveRow {
-                        workspace_id: input.workspace_id,
-                        owner_fact_id: input.owner_fact_id,
-                        context_fact_id: *context_fact_id,
-                    })
-                })
-                .collect::<Vec<_>>();
-            tx.delete_where_in_tx(&NEGENTROPY_LEAF_TABLE.delete_by_key(vec![
-                Value::Bytes(input.workspace_id.to_vec()),
-                Value::Bytes(input.owner_fact_id.to_vec()),
-            ]))?;
-            delete_context_rows_for_leaf(tx, input.workspace_id, input.owner_fact_id)?;
-            crate::core::perf_profile::measure_result("negentropy_update_path", || {
-                update_node_path_in_tx(
-                    tx,
-                    input.workspace_id,
-                    input.timestamp_ms,
-                    old_summary,
-                    Some(new_summary),
-                )
-            })?;
-            tx.insert_values_in_tx(&shareable_row)?;
-            tx.insert_values_in_tx(&leaf_row)?;
-            for row in context_rows {
-                tx.insert_values_in_tx(&row)?;
-            }
-            Ok(true)
+                context_fact_id: *context_fact_id,
+            })
         })
-        .map_err(|err| format!("record sync contribution rows: {err}"))
+        .collect::<Vec<_>>();
+    tx.delete_where_in_tx(&NEGENTROPY_LEAF_TABLE.delete_by_key(vec![
+        Value::Bytes(input.workspace_id.to_vec()),
+        Value::Bytes(input.owner_fact_id.to_vec()),
+    ]))?;
+    delete_context_rows_for_leaf(tx, input.workspace_id, input.owner_fact_id)?;
+    crate::core::perf_profile::measure_result("negentropy_update_path", || {
+        update_node_path_in_tx(
+            tx,
+            input.workspace_id,
+            input.timestamp_ms,
+            old_summary,
+            Some(new_summary),
+        )
+    })?;
+    tx.insert_values_in_tx(&shareable_row)?;
+    tx.insert_values_in_tx(&leaf_row)?;
+    for row in context_rows {
+        tx.insert_values_in_tx(&row)?;
+    }
+    Ok(true)
 }
 
-fn retract_sync_contribution(
-    store: &Db,
+fn retract_sync_contribution_in_tx(
+    tx: &Db,
     input: &share_fact_with_sync::ShareFactWithSync,
-) -> Result<bool, String> {
-    store
-        .write_transaction(|tx| {
-            let Some(old_leaf) =
-                negentropy_leaf_row_for_owner(tx, input.workspace_id, input.owner_fact_id)
-                    .map_err(rusqlite::Error::InvalidParameterName)?
-            else {
-                return Ok(false);
-            };
-            let old_summary = RangeSummary {
-                count: 1,
-                fingerprint: old_leaf.contribution_fingerprint,
-            };
-            tx.delete_where_in_tx(&SHAREABLE_FACT_TABLE.delete_by_key(vec![
-                Value::Bytes(input.workspace_id.to_vec()),
-                Value::Bytes(input.owner_fact_id.to_vec()),
-            ]))?;
-            tx.delete_where_in_tx(&NEGENTROPY_LEAF_TABLE.delete_by_key(vec![
-                Value::Bytes(input.workspace_id.to_vec()),
-                Value::Bytes(input.owner_fact_id.to_vec()),
-            ]))?;
-            delete_context_rows_for_leaf(tx, input.workspace_id, input.owner_fact_id)?;
-            crate::core::perf_profile::measure_result("negentropy_update_path", || {
-                update_node_path_in_tx(
-                    tx,
-                    input.workspace_id,
-                    old_leaf.timestamp_ms,
-                    Some(old_summary),
-                    None,
-                )
-            })?;
-            Ok(true)
-        })
-        .map_err(|err| format!("retract sync contribution rows: {err}"))
+) -> rusqlite::Result<bool> {
+    let Some(old_leaf) = negentropy_leaf_row_for_owner(tx, input.workspace_id, input.owner_fact_id)
+        .map_err(rusqlite::Error::InvalidParameterName)?
+    else {
+        return Ok(false);
+    };
+    let old_summary = RangeSummary {
+        count: 1,
+        fingerprint: old_leaf.contribution_fingerprint,
+    };
+    tx.delete_where_in_tx(&SHAREABLE_FACT_TABLE.delete_by_key(vec![
+        Value::Bytes(input.workspace_id.to_vec()),
+        Value::Bytes(input.owner_fact_id.to_vec()),
+    ]))?;
+    tx.delete_where_in_tx(&NEGENTROPY_LEAF_TABLE.delete_by_key(vec![
+        Value::Bytes(input.workspace_id.to_vec()),
+        Value::Bytes(input.owner_fact_id.to_vec()),
+    ]))?;
+    delete_context_rows_for_leaf(tx, input.workspace_id, input.owner_fact_id)?;
+    crate::core::perf_profile::measure_result("negentropy_update_path", || {
+        update_node_path_in_tx(
+            tx,
+            input.workspace_id,
+            old_leaf.timestamp_ms,
+            Some(old_summary),
+            None,
+        )
+    })?;
+    Ok(true)
 }
 
 fn update_node_path_in_tx(

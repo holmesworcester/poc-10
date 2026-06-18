@@ -21,10 +21,10 @@ pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::SharedFact, String> {
 pub use index::{
     connection_id_for_peer_or_connection, connection_ids_for_shareable_fact,
     expand_fact_ids_with_context_for_connection, negentropy_context_have_for_leaf,
-    range_summary_for_connection, record_sync_contribution, shareable_fact_for_connection,
-    shareable_fact_row, shareable_fact_rows, shareable_facts_for_connection,
-    shareable_facts_for_connection_range, sync_status, NegentropyContextHaveRow, NegentropyLeafRow,
-    NegentropyNodeRow, ShareableFactRow, NEGENTROPY_CONTEXT_HAVE_ROWS, NEGENTROPY_LEAF_ROWS,
-    NEGENTROPY_NODE_ROWS, SHAREABLE_FACT_ROWS,
+    range_summary_for_connection, record_sync_contribution, record_sync_contribution_in_tx,
+    shareable_fact_for_connection, shareable_fact_row, shareable_fact_rows,
+    shareable_facts_for_connection, shareable_facts_for_connection_range, sync_status,
+    NegentropyContextHaveRow, NegentropyLeafRow, NegentropyNodeRow, ShareableFactRow,
+    NEGENTROPY_CONTEXT_HAVE_ROWS, NEGENTROPY_LEAF_ROWS, NEGENTROPY_NODE_ROWS, SHAREABLE_FACT_ROWS,
 };
 pub(crate) use index::{retained_fact, retained_fact_exists};

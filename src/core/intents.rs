@@ -22,11 +22,12 @@
 //! backpressure.
 //!
 //! Handlers are reactive runtime code, not user-facing commands. They may ask
-//! core to load specific facts and may use query helpers through `Db`, then
-//! return `RuntimeEffects` for runtime workers to commit atomically. Missing
-//! declared inputs or semantic violations are handler errors: dispatch does not
-//! commit output or consume the queue row. Runtime effect validation rejects any
-//! emitted intent whose kind is not registered by the active runtime.
+//! core to load specific facts, use the transaction-local `Db` for
+//! handler-owned SQL, and return `RuntimeEffects` for runtime workers to commit
+//! atomically. Missing declared inputs or semantic violations are handler
+//! errors: dispatch does not commit output or consume the queue row. Runtime
+//! effect validation rejects any emitted intent whose kind is not registered by
+//! the active runtime.
 
 use crate::core::db::Db;
 use crate::core::effects::RuntimeEffects;
@@ -208,12 +209,13 @@ impl HandlerMode {
     }
 }
 
-/// Read-only inputs handed to an intent handler.
+/// Inputs handed to an intent handler.
 ///
 /// Durable and local queue dispatch both build this immediately before
 /// `handle`.
-/// The handler gets only the facts it requested plus the database for explicit
-/// query helpers; it cannot reach runtime workers directly.
+/// The handler gets only the facts it requested plus the transaction-local
+/// database handle for explicit handler-owned SQL; it cannot reach runtime
+/// workers directly.
 #[derive(Clone, Default)]
 pub struct HandlerContext<'a> {
     facts: BTreeMap<FactId, Fact>,
@@ -247,7 +249,7 @@ impl<'a> HandlerContext<'a> {
         }
     }
 
-    /// Attach the database handle used by query helpers.
+    /// Attach the database handle used by handler-owned SQL helpers.
     pub fn with_db(mut self, db: &'a Db) -> Self {
         self.db = Some(db);
         self
@@ -269,7 +271,8 @@ impl<'a> HandlerContext<'a> {
         self.mode.is_replay()
     }
 
-    /// Borrow the database or return a fatal handler error if none was attached.
+    /// Borrow the transaction-local database or return a fatal handler error if
+    /// none was attached.
     pub fn db(&self) -> Result<&Db, HandlerError> {
         self.db
             .ok_or_else(|| HandlerError::fatal("handler context missing db"))
@@ -317,7 +320,7 @@ pub trait IntentHandler {
         Ok(Vec::new())
     }
 
-    /// Run one intent against its read-only context and return uncommitted effects.
+    /// Run one intent against its context and return uncommitted effects.
     fn handle(&self, intent: &Intent, context: &HandlerContext<'_>) -> HandlerResult;
 }
 

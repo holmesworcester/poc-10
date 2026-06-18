@@ -625,8 +625,8 @@ fn commit_rejected_projection_input_in_tx(
 
 /// Commit one accepted fact's complete projection result.
 ///
-/// This is the projection boundary, the same way `commit_handler_output` is the
-/// dispatch boundary. The transaction consumes this fact's pending row and makes
+/// This is the projection boundary, the same way intent dispatch owns the
+/// handler boundary. The transaction consumes this fact's pending row and makes
 /// the projector's output visible: replacement needs, append-only offers,
 /// replacement time wakes, newly woken dependent facts, protocol row mutations,
 /// and follow-up intents. If anything fails inside this transaction, SQLite

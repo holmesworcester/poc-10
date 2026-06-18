@@ -115,10 +115,12 @@ impl IntentHandler for QueueOutgoingFrameHandler {
             return Ok(RuntimeEffects::new());
         }
         if let Some(target) = resolve_target(&input.routing_key, context)? {
-            network::queue_outgoing(context.db()?, target, OutgoingFrame { bytes: input.frame })
-                .map_err(|err| {
-                    HandlerError::fatal(format!("queue_outgoing_frame enqueue: {err}"))
-                })?;
+            network::queue_outgoing_in_tx(
+                context.db()?,
+                target,
+                OutgoingFrame { bytes: input.frame },
+            )
+            .map_err(|err| HandlerError::fatal(format!("queue_outgoing_frame enqueue: {err}")))?;
         }
         Ok(RuntimeEffects::new())
     }

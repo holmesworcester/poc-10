@@ -23,14 +23,15 @@
 //! in `HandlerContext`; handlers that require an input call
 //! `HandlerContext::require_fact`.
 //!
-//! This transaction boundary is why dispatch matters. A handler output is
-//! visible exactly when its input queue row is consumed: no output without
-//! deleting the work item, and no deletion without committing the output. That
-//! delete and every `RuntimeEffects` write happen inside one SQLite transaction.
-//! If the transaction rolls back, the queued row is still there; if it commits,
-//! the row is gone and the output is durable. Queue rows do not collapse by
-//! `(kind, key)`; protocols that need backpressure express it in their own
-//! facts, row mutations, network queues, or handler-local state.
+//! This transaction boundary is why dispatch matters. Handler-owned SQL and
+//! returned runtime effects become visible exactly when the input queue row is
+//! consumed: no output without deleting the work item, and no deletion without
+//! committing the output. That delete, the handler's direct SQL, and every
+//! `RuntimeEffects` write happen inside one SQLite transaction. If the
+//! transaction rolls back, the queued row is still there; if it commits, the row
+//! is gone and the output is durable. Queue rows do not collapse by `(kind,
+//! key)`; protocols that need backpressure express it in their own facts, row
+//! mutations, network queues, or handler-local state.
 
 use crate::core::db::{quoted_table_name, Db, TableName};
 use crate::core::effects::{RuntimeEffects, StorageRequirement};
@@ -40,7 +41,7 @@ use crate::core::schema::{INTENTS, LOCAL_INTENTS};
 
 use crate::core::crypto;
 use crate::core::project_fact::commit_effects::{
-    commit_runtime_effects_in_tx, validate_runtime_effects_for_admission,
+    commit_runtime_effects_in_tx, sqlite_string_error, validate_runtime_effects_for_admission,
 };
 use crate::core::project_fact::route::FactAdmissionFn;
 use rusqlite::{params, OptionalExtension};
@@ -59,7 +60,6 @@ struct IntentInput<'a> {
     queued: QueuedIntent,
     handler: &'a dyn IntentHandler,
     storage_requirement: StorageRequirement,
-    context: HandlerContext<'a>,
 }
 
 // =============================================================================
@@ -72,14 +72,15 @@ struct IntentInput<'a> {
 ///
 /// This is the whole intent worker in miniature:
 ///
-/// 1. Load one queued intent, registered handler, and declared fact context.
-/// 2. Run the handler and validate its uncommitted output.
-/// 3. Commit validated handler output, removing the queue row.
+/// 1. Load one queued intent and its registered handler route.
+/// 2. Delete that exact row, run the handler, and validate returned effects
+///    inside one transaction.
+/// 3. Commit handler-owned SQL and validated effects together.
 ///
 /// Handlers are allowed to observe runtime state, so this is not a
 /// pure-evaluation boundary like projection. The queue lifecycle is still
-/// centralized: only the commit stage deletes handled rows and publishes
-/// effects.
+/// centralized: the queue row is removed only by the same commit boundary that
+/// publishes the handler's SQL writes and returned effects.
 pub(crate) fn dispatch_one_intent(
     store: &Db,
     handlers: &HandlerSet,
@@ -91,16 +92,9 @@ pub(crate) fn dispatch_one_intent(
         None => return Ok(false),
         Some(input) => input,
     };
-    let (queued, effects) = run_loaded_intent(
-        input,
-        allowed_tables,
-        handlers.intent_kinds(),
-        fact_admission,
-    )?;
-    commit_handler_output(
+    run_and_commit_loaded_intent(
         store,
-        &queued,
-        &effects,
+        input,
         allowed_tables,
         handlers.intent_kinds(),
         fact_admission,
@@ -111,7 +105,7 @@ pub(crate) fn dispatch_one_intent(
 // Stages
 // =============================================================================
 
-/// Stage 1: load one queued intent and the facts its handler declared.
+/// Stage 1: load one queued intent and its registered handler.
 ///
 /// Durable and local rows use insertion order. Replay re-emits work in the
 /// order projectors recorded it instead of sorting by handler-owned keys.
@@ -124,35 +118,81 @@ fn load_one_intent_input<'a>(
         return Ok(None);
     };
     let entry = handlers.handler_for_intent(&queued.intent)?;
-    let context = load_handler_context(store, entry.handler.as_ref(), &queued.intent, queued.mode)?;
     Ok(Some(IntentInput {
         queued,
         handler: entry.handler.as_ref(),
         storage_requirement: entry.storage_requirement,
-        context,
     }))
 }
 
-/// Stage 2: run the handler and normalize its uncommitted output.
+/// Stage 2/3: run the handler and commit its terminal outcome.
 ///
-/// Run one claimed intent through its handler, but keep queue mutation outside
-/// this stage.
+/// Handler reads and handler-owned SQL writes run inside the same transaction
+/// that consumes the queued row and commits returned runtime effects.
 ///
-/// Successful output is validated before any queue row or runtime effect is
-/// mutated. Handler errors and validation errors never reach commit.
-fn run_loaded_intent(
+/// If the handled row is already gone, nothing commits and the returned value
+/// is `false`.
+fn run_and_commit_loaded_intent(
+    store: &Db,
     input: IntentInput<'_>,
     allowed_tables: &[TableName],
     registered_intent_kinds: &[&str],
     fact_admission: Option<FactAdmissionFn>,
-) -> Result<(QueuedIntent, RuntimeEffects), String> {
+) -> Result<bool, String> {
     let IntentInput {
         queued,
         handler,
         storage_requirement,
-        context,
     } = input;
-    match handler.handle(&queued.intent, &context) {
+    store
+        .write_transaction(|tx| {
+            enforce_handler_storage_requirement(tx, storage_requirement)
+                .map_err(sqlite_string_error)?;
+            if delete_intent_work_row_in_tx(tx, queued.queue.table(), &queued.intent_id)? == 0 {
+                return Ok(false);
+            }
+            let context = load_handler_context(tx, handler, &queued.intent, queued.mode)
+                .map_err(sqlite_string_error)?;
+            let effects = run_loaded_intent(
+                handler,
+                &queued.intent,
+                context,
+                storage_requirement,
+                allowed_tables,
+                registered_intent_kinds,
+                fact_admission,
+            )
+            .map_err(sqlite_string_error)?;
+            commit_runtime_effects_in_tx(
+                tx,
+                &effects,
+                allowed_tables,
+                registered_intent_kinds,
+                fact_admission,
+                queued.mode.is_replay(),
+                false,
+            )?;
+            Ok(true)
+        })
+        .map_err(|err| format!("commit handler output: {err}"))
+}
+
+/// Run one claimed intent through its handler and normalize its uncommitted
+/// runtime effects.
+///
+/// The handler may use transaction-local SQL through the database handle in its
+/// context. Returned runtime effects are still validated before the transaction
+/// commits.
+fn run_loaded_intent(
+    handler: &dyn IntentHandler,
+    intent: &Intent,
+    context: HandlerContext<'_>,
+    storage_requirement: StorageRequirement,
+    allowed_tables: &[TableName],
+    registered_intent_kinds: &[&str],
+    fact_admission: Option<FactAdmissionFn>,
+) -> Result<RuntimeEffects, String> {
+    match handler.handle(intent, &context) {
         Ok(effects) => {
             let effects = effects.with_storage_requirement(storage_requirement);
             validate_runtime_effects_for_admission(
@@ -161,9 +201,19 @@ fn run_loaded_intent(
                 registered_intent_kinds,
                 fact_admission,
             )?;
-            Ok((queued, effects))
+            Ok(effects)
         }
         Err(err) => Err(err.to_string()),
+    }
+}
+
+fn enforce_handler_storage_requirement(
+    tx: &Db,
+    requirement: StorageRequirement,
+) -> Result<(), String> {
+    match requirement {
+        StorageRequirement::MaintenanceBypass => Ok(()),
+        StorageRequirement::Current(version) => tx.require_storage_version(version),
     }
 }
 
@@ -191,7 +241,8 @@ fn next_queued_intent_in_queue(
         .transpose()
 }
 
-/// Build the fact/database view a stored-intent handler requested.
+/// Build the transaction-local fact/database view a stored-intent handler
+/// requested.
 fn load_handler_context<'a>(
     store: &'a Db,
     handler: &(impl IntentHandler + ?Sized),
@@ -222,49 +273,6 @@ fn load_retained_fact(store: &Db, id: &FactId) -> Result<Option<Fact>, String> {
         )
         .optional()
         .map_err(|err| format!("load handler fact: {err}"))
-}
-
-// =============================================================================
-// Commit Stage Helpers
-// =============================================================================
-
-/// Commit the complete output of one handled intent in a single transaction.
-///
-/// This is the boundary for intent dispatch, not a second implementation of
-/// effect commits. Dispatch owns deleting the handled queued intent and
-/// `commit_effects` owns purging facts, admitting emitted facts, applying row
-/// mutations, and recording follow-up intents. Keeping those steps in one
-/// transaction means a handler output is visible exactly when its input queue
-/// row is consumed.
-///
-/// If the handled row is already gone, nothing commits and the returned value
-/// is `false`.
-fn commit_handler_output(
-    store: &Db,
-    queued: &QueuedIntent,
-    effects: &RuntimeEffects,
-    allowed_tables: &[TableName],
-    registered_intent_kinds: &[&str],
-    fact_admission: Option<FactAdmissionFn>,
-) -> Result<bool, String> {
-    store
-        .write_transaction(|tx| {
-            if delete_intent_work_row_in_tx(tx, queued.queue.table(), &queued.intent_id)? == 0 {
-                return Ok(false);
-            }
-
-            commit_runtime_effects_in_tx(
-                tx,
-                effects,
-                allowed_tables,
-                registered_intent_kinds,
-                fact_admission,
-                queued.mode.is_replay(),
-                false,
-            )?;
-            Ok(true)
-        })
-        .map_err(|err| format!("commit handler output: {err}"))
 }
 
 // =============================================================================
@@ -565,6 +573,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     const TEST_TABLE: TableName = TableName::new("test.rows");
+    const TEST_HANDLER_STATE_TABLE: &str = "\"test.handler_state\"";
 
     static AFTER_FACT_CALLS: AtomicUsize = AtomicUsize::new(0);
 
@@ -699,6 +708,48 @@ mod tests {
                 .key,
             b"first".to_vec(),
             "validation errors should not consume the row"
+        );
+    }
+
+    #[test]
+    fn validation_error_rolls_back_handler_owned_sql() {
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
+        store
+            .conn()
+            .execute(
+                &format!(
+                    "CREATE TABLE {TEST_HANDLER_STATE_TABLE} (
+                         intent_key BLOB NOT NULL
+                     )"
+                ),
+                [],
+            )
+            .expect("create handler state table");
+        submit_intent_to_table(&store, INTENTS, test_intent("write_then_invalid", b"first"))
+            .expect("submit invalid-output intent");
+
+        let err = dispatch_one_intent(
+            &store,
+            &HandlerSet::new(WRITE_THEN_INVALID_ROUTES),
+            IntentQueue::Durable,
+            &[],
+            None,
+        )
+        .expect_err("invalid handler output should roll back direct handler sql");
+
+        assert!(
+            err.contains("row mutation table test.rows is not registered"),
+            "{err}"
+        );
+        assert_eq!(
+            handler_state_row_count(&store),
+            0,
+            "handler-owned sql should share the dispatch transaction"
+        );
+        assert_eq!(
+            store.table_row_count(INTENTS).expect("durable count"),
+            1,
+            "validation errors should not consume the source row"
         );
     }
 
@@ -887,6 +938,13 @@ mod tests {
         recurrence: None,
     }];
 
+    const WRITE_THEN_INVALID_ROUTES: &[HandlerRoute] = &[HandlerRoute {
+        intent_kind: "write_then_invalid",
+        factory: write_then_invalid_handler,
+        storage_requirement: StorageRequirement::MaintenanceBypass,
+        recurrence: None,
+    }];
+
     const EMIT_FACT_ROUTES: &[HandlerRoute] = &[
         HandlerRoute {
             intent_kind: "emit_fact",
@@ -943,6 +1001,31 @@ mod tests {
         }
     }
 
+    struct WriteThenInvalidHandler;
+
+    impl IntentHandler for WriteThenInvalidHandler {
+        fn handle(&self, intent: &Intent, context: &HandlerContext<'_>) -> HandlerResult {
+            context
+                .db()?
+                .conn()
+                .execute(
+                    &format!(
+                        "INSERT INTO {TEST_HANDLER_STATE_TABLE} (intent_key)
+                         VALUES (?1)"
+                    ),
+                    params![intent.key.as_slice()],
+                )
+                .map_err(|err| HandlerError::fatal(format!("write handler state: {err}")))?;
+            Ok(
+                RuntimeEffects::new().row_mutation(RowMutation::InsertValues(TableInsert {
+                    table: TEST_TABLE,
+                    columns: &["owner"],
+                    values: vec![Value::Bytes(b"row-key".to_vec())],
+                })),
+            )
+        }
+    }
+
     struct EmitFactHandler;
 
     impl IntentHandler for EmitFactHandler {
@@ -980,6 +1063,10 @@ mod tests {
         Box::new(InvalidOutputHandler)
     }
 
+    fn write_then_invalid_handler() -> Box<dyn IntentHandler> {
+        Box::new(WriteThenInvalidHandler)
+    }
+
     fn emit_fact_handler() -> Box<dyn IntentHandler> {
         Box::new(EmitFactHandler)
     }
@@ -1002,6 +1089,17 @@ mod tests {
 
     fn emitted_fact() -> Fact {
         Fact::new(FactScope::Global, 42, b"handler-emitted-fact".to_vec())
+    }
+
+    fn handler_state_row_count(store: &Db) -> usize {
+        store
+            .conn()
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {TEST_HANDLER_STATE_TABLE}"),
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("handler state count") as usize
     }
 
     #[test]

@@ -323,7 +323,7 @@ impl IntentHandler for SendFactsOnConnectionHandler {
             )?;
             outgoing.push(OutgoingNetworkRow::new(target, frame));
         }
-        network::enqueue_outgoing(context.db()?, &outgoing).map_err(|err| {
+        network::enqueue_outgoing_in_tx(context.db()?, &outgoing).map_err(|err| {
             HandlerError::fatal(format!("send_facts_on_connection queue outgoing: {err}"))
         })?;
         Ok(RuntimeEffects::new())

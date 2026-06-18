@@ -176,6 +176,17 @@ pub fn queue_outgoing(
     enqueue_outgoing(store, std::slice::from_ref(&row)).map(|_| ())
 }
 
+/// Queue one outgoing frame inside the caller's transaction.
+pub fn queue_outgoing_in_tx(
+    tx: &Db,
+    target: NetworkTarget,
+    frame: OutgoingFrame,
+) -> rusqlite::Result<()> {
+    let OutgoingFrame { bytes } = frame;
+    let row = OutgoingNetworkRow::new(target, bytes);
+    enqueue_outgoing_in_tx(tx, std::slice::from_ref(&row)).map(|_| ())
+}
+
 /// Insert outgoing rows idempotently.
 ///
 /// Frame rows and their active-target index rows become visible in one database
@@ -184,12 +195,15 @@ pub fn queue_outgoing(
 /// their own "sent" bookkeeping at the right boundary.
 pub fn enqueue_outgoing(store: &Db, rows: &[OutgoingNetworkRow]) -> Result<usize, String> {
     store
-        .write_transaction(|tx| {
-            let inserted_frames = insert_outgoing_rows_in_tx(tx, rows)?;
-            insert_outgoing_targets_in_tx(tx, rows)?;
-            Ok(inserted_frames)
-        })
+        .write_transaction(|tx| enqueue_outgoing_in_tx(tx, rows))
         .map_err(|err| format!("enqueue outgoing network rows: {err}"))
+}
+
+/// Insert outgoing rows idempotently inside the caller's transaction.
+pub fn enqueue_outgoing_in_tx(tx: &Db, rows: &[OutgoingNetworkRow]) -> rusqlite::Result<usize> {
+    let inserted_frames = insert_outgoing_rows_in_tx(tx, rows)?;
+    insert_outgoing_targets_in_tx(tx, rows)?;
+    Ok(inserted_frames)
 }
 
 /// Insert incoming rows idempotently.

@@ -355,7 +355,7 @@ fn poc10_pipeline_work_items_live_in_named_core_files() {
 
     for required in [
         "Run one claimed intent through its handler",
-        "commit_handler_output",
+        "run_and_commit_loaded_intent",
         "next_queued_intent",
         "insert_intent_work_row_in_tx",
     ] {
