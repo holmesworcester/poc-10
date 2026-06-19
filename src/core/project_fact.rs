@@ -267,9 +267,10 @@ fn evaluate_loaded_projection_input(
 /// newly visible context wakes dependent facts, and runtime effects are admitted
 /// last.
 ///
-/// Accepted commits are deliberately written as substages inside the transaction:
-/// settle this input's lifecycle, publish retained owner state, wake projection
-/// work from new context, then commit projector-emitted effects.
+/// Accepted commits are written as substages inside the transaction so the
+/// projection loop is visible here: settle this input's lifecycle, publish
+/// retained owner state, wake projection work from new context, then commit
+/// projector-emitted effects.
 fn commit_projection_outcome(
     store: &Db,
     outcome: &ProjectionOutcome,
@@ -280,14 +281,30 @@ fn commit_projection_outcome(
     perf::measure_result("projection_commit_effects", || {
         store
             .write_transaction(|tx| {
-                perf::measure_result("projection_commit_tx_body", || {
-                    commit_projection_outcome_in_tx(
-                        tx,
-                        outcome,
-                        allowed_tables,
-                        registered_intent_kinds,
-                        fact_admission,
-                    )
+                perf::measure_result("projection_commit_tx_body", || match outcome {
+                    ProjectionOutcome::RetireStaleInput { source, fact_id } => {
+                        commit_stale_projection_input_in_tx(tx, *source, *fact_id)
+                    }
+                    ProjectionOutcome::RetireRejectedInput { source, fact_id } => {
+                        commit_rejected_projection_input_in_tx(tx, *source, *fact_id)
+                    }
+                    ProjectionOutcome::Accepted(projection) => {
+                        let fact_id = projection.fact.id;
+
+                        let retained =
+                            settle_projected_input_lifecycle_in_tx(tx, projection, fact_id)?;
+                        let new_context = publish_retained_projection_state_in_tx(
+                            tx, projection, fact_id, retained,
+                        )?;
+                        wake_projection_work_from_new_context_in_tx(tx, &new_context)?;
+                        commit_projector_emitted_runtime_effects_in_tx(
+                            tx,
+                            projection,
+                            allowed_tables,
+                            registered_intent_kinds,
+                            fact_admission,
+                        )
+                    }
                 })
             })
             .map_err(|err| format!("commit projection effects: {err}"))
@@ -555,36 +572,6 @@ fn enforce_projected_owner(label: &str, owner: FactId, fact_id: FactId) -> Resul
 // Commit Stage Helpers
 // =============================================================================
 
-/// Commit one projection outcome.
-///
-/// This function is the only stage that mutates SQL after selection. A stale
-/// input retires owner-scoped broken work. A rejected input retires the selected
-/// work without publishing projector state. An accepted projection commits the
-/// projector's complete output.
-fn commit_projection_outcome_in_tx(
-    tx: &Db,
-    outcome: &ProjectionOutcome,
-    allowed_tables: &[TableName],
-    registered_intent_kinds: &[&str],
-    fact_admission: Option<FactAdmissionFn>,
-) -> rusqlite::Result<()> {
-    match outcome {
-        ProjectionOutcome::RetireStaleInput { source, fact_id } => {
-            commit_stale_projection_input_in_tx(tx, *source, *fact_id)
-        }
-        ProjectionOutcome::RetireRejectedInput { source, fact_id } => {
-            commit_rejected_projection_input_in_tx(tx, *source, *fact_id)
-        }
-        ProjectionOutcome::Accepted(projection) => commit_projected_fact_in_tx(
-            tx,
-            projection,
-            allowed_tables,
-            registered_intent_kinds,
-            fact_admission,
-        ),
-    }
-}
-
 /// Retire selected work whose backing bytes disappeared between selection and load.
 ///
 /// Durable stale rows are purged as corrupt owner-scoped state. Incoming stale
@@ -613,48 +600,6 @@ fn commit_rejected_projection_input_in_tx(
         ProjectionSource::Durable => clear_pending_projection_work_in_tx(tx, fact_id),
         ProjectionSource::Incoming => delete_incoming_fact_in_tx(tx, fact_id).map(|_| ()),
     }
-}
-
-/// Commit one accepted fact's complete projection result.
-///
-/// This is the projection boundary, the same way intent dispatch owns the
-/// handler boundary. The transaction consumes this fact's selected input and
-/// makes the projector's output visible. Durable projection rows and retained
-/// incoming facts can publish owner state; dropped incoming facts cannot.
-///
-/// Transaction contents:
-///
-/// - Settle the selected input's lifecycle.
-/// - Replace retained needs and append retained offers.
-/// - Replace retained time wakes.
-/// - Wake facts unblocked by newly visible context.
-/// - Commit projector-emitted facts, rows, purges, and intents.
-///
-/// Incoming rows are volatile one-shot intake. They may emit needs as transient
-/// probes, but they cannot leave standing offers or time wakes behind unless
-/// projection explicitly retains them as normal facts.
-fn commit_projected_fact_in_tx(
-    tx: &Db,
-    projection: &PreparedProjection,
-    allowed_tables: &[TableName],
-    registered_intent_kinds: &[&str],
-    fact_admission: Option<FactAdmissionFn>,
-) -> rusqlite::Result<()> {
-    let fact_id = projection.fact.id;
-
-    let retained = settle_projected_input_lifecycle_in_tx(tx, projection, fact_id)?;
-    let new_context =
-        replace_needs_and_append_offers_if_retained_in_tx(tx, projection, fact_id, retained)?;
-    replace_time_wakes_if_retained_in_tx(tx, projection, fact_id, retained)?;
-    wake_projection_work_from_new_context_in_tx(tx, &new_context)?;
-    commit_projector_emitted_runtime_effects_in_tx(
-        tx,
-        projection,
-        allowed_tables,
-        registered_intent_kinds,
-        fact_admission,
-    )?;
-    Ok(())
 }
 
 fn projection_retains_fact_after_commit(projection: &PreparedProjection) -> bool {
@@ -698,6 +643,22 @@ fn settle_projected_input_lifecycle_in_tx(
         }
     };
     Ok(retained)
+}
+
+/// Publish standing owner state for a retained projection.
+///
+/// Incoming facts that are not retained are volatile one-shot inputs, so they
+/// cannot leave context or time wake rows behind.
+fn publish_retained_projection_state_in_tx(
+    tx: &Db,
+    projection: &PreparedProjection,
+    fact_id: FactId,
+    retained: bool,
+) -> rusqlite::Result<ContextSetAdditions> {
+    let context_additions =
+        replace_needs_and_append_offers_if_retained_in_tx(tx, projection, fact_id, retained)?;
+    replace_time_wakes_if_retained_in_tx(tx, projection, fact_id, retained)?;
+    Ok(context_additions)
 }
 
 /// Replace retained needs and append retained offers.
