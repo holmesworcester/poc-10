@@ -200,32 +200,40 @@ fn core_local_intents_table_is_temp() {
 }
 
 #[test]
-fn core_incoming_facts_table_is_temp() {
+fn core_incoming_tables_are_temp() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("incoming-facts-store.db");
     let incoming_facts = TableName::new("incoming_facts");
+    let pending_incoming_projection = TableName::new("pending_incoming_projection");
 
     let store = Db::open_disk_with_schema_sources(&path, &[CORE_SCHEMA_SOURCE])
         .expect("open db with core schema");
-    assert_eq!(
-        store
-            .table_row_count(incoming_facts)
-            .expect("count temp rows"),
-        0
-    );
-    assert!(
-        !sqlite_table_names(&path).contains("incoming_facts"),
-        "incoming_facts should not be durable"
-    );
+    for table in [incoming_facts, pending_incoming_projection] {
+        assert_eq!(
+            store.table_row_count(table).expect("count temp rows"),
+            0,
+            "{} should be queryable on the live connection",
+            table.as_str()
+        );
+        assert!(
+            !sqlite_table_names(&path).contains(table.as_str()),
+            "{} should not be durable",
+            table.as_str()
+        );
+    }
 
     let reopened = Db::open_disk_with_schema_sources(&path, &[CORE_SCHEMA_SOURCE])
         .expect("reopen db with core schema");
-    assert_eq!(
-        reopened
-            .table_row_count(incoming_facts)
-            .expect("count temp rows after reopen"),
-        0
-    );
+    for table in [incoming_facts, pending_incoming_projection] {
+        assert_eq!(
+            reopened
+                .table_row_count(table)
+                .expect("count temp rows after reopen"),
+            0,
+            "{} should reopen empty",
+            table.as_str()
+        );
+    }
 }
 
 #[test]
