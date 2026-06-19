@@ -308,18 +308,13 @@ impl IntentHandler for SendFactsOnConnectionHandler {
 
         let mut outgoing = Vec::new();
         for batch in batches {
-            let fact_ids = batch.iter().map(|fact| fact.id).collect::<Vec<_>>();
-            let payloads = batch
-                .iter()
-                .map(|fact| connection_fact::queries::sendable_fact_body(fact).map(Vec::from))
-                .collect::<Result<Vec<_>, _>>()?;
             let frame = seal_batch(
                 connection_id,
                 sender_endpoint,
                 receiver_endpoint,
                 connection.connection_secret,
-                &fact_ids,
-                &payloads,
+                &batch.fact_ids,
+                &batch.payloads,
             )?;
             outgoing.push(OutgoingNetworkRow::new(target, frame));
         }
@@ -361,18 +356,33 @@ fn facts_for_work(
     }
 }
 
-fn fact_batches(facts: Vec<Fact>) -> Result<Vec<Vec<Fact>>, String> {
-    let mut batches = Vec::new();
-    let mut batch = Vec::new();
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FactBatch {
+    fact_ids: Vec<HandlerId>,
+    payloads: Vec<Vec<u8>>,
+}
+
+fn fact_batches(facts: Vec<Fact>) -> Result<Vec<FactBatch>, String> {
+    let mut batches: Vec<FactBatch> = Vec::new();
+    let mut fact_ids = Vec::new();
+    let mut payloads = Vec::new();
     let mut packed_len = frame_small::author::INNER_BUNDLE_HEADER_BYTES;
     for fact in facts {
-        let fact_len = connection_fact::queries::sendable_fact_body(&fact)?.len();
+        let fact_id = fact.id;
+        let payload = connection_fact::queries::sendable_fact_body(&fact)?.to_vec();
+        let fact_len = payload.len();
         if fact_len == crate::protocol::content::file_slice::encode::CONTENT_FILE_SLICE_BYTES {
-            if !batch.is_empty() {
-                batches.push(std::mem::take(&mut batch));
+            if !payloads.is_empty() {
+                batches.push(FactBatch {
+                    fact_ids: std::mem::take(&mut fact_ids),
+                    payloads: std::mem::take(&mut payloads),
+                });
                 packed_len = frame_small::author::INNER_BUNDLE_HEADER_BYTES;
             }
-            batches.push(vec![fact]);
+            batches.push(FactBatch {
+                fact_ids: vec![fact_id],
+                payloads: vec![payload],
+            });
             continue;
         }
         if fact_len > frame_bundle::encode::CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES {
@@ -384,16 +394,20 @@ fn fact_batches(facts: Vec<Fact>) -> Result<Vec<Vec<Fact>>, String> {
         let would_fit_small =
             packed_len + item_len <= frame_small::encode::CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES;
         let would_fit_bundle =
-            batch.len() < frame_bundle::encode::CONNECTION_FRAME_BUNDLE_FACT_SLOTS;
-        if !batch.is_empty() && !would_fit_small && !would_fit_bundle {
-            batches.push(std::mem::take(&mut batch));
+            payloads.len() < frame_bundle::encode::CONNECTION_FRAME_BUNDLE_FACT_SLOTS;
+        if !payloads.is_empty() && !would_fit_small && !would_fit_bundle {
+            batches.push(FactBatch {
+                fact_ids: std::mem::take(&mut fact_ids),
+                payloads: std::mem::take(&mut payloads),
+            });
             packed_len = frame_small::author::INNER_BUNDLE_HEADER_BYTES;
         }
         packed_len += item_len;
-        batch.push(fact);
+        fact_ids.push(fact_id);
+        payloads.push(payload);
     }
-    if !batch.is_empty() {
-        batches.push(batch);
+    if !payloads.is_empty() {
+        batches.push(FactBatch { fact_ids, payloads });
     }
     Ok(batches)
 }
@@ -463,6 +477,10 @@ fn inner_bundle_packed_len(payloads: &[Vec<u8>]) -> Result<usize, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::facts::FactScope;
+    use crate::protocol::content::file_slice::encode::{
+        CONTENT_FILE_SLICE_BYTES, TYPE_CONTENT_FILE_SLICE,
+    };
 
     #[test]
     fn shareable_bucket_intent_identity_includes_trigger_fact() {
@@ -476,5 +494,33 @@ mod tests {
 
         assert_ne!(first.key, second.key);
         assert_eq!(first.kind, second.kind);
+    }
+
+    #[test]
+    fn fact_batches_keep_file_slices_in_dedicated_frames() {
+        let small_before = global_fact(64, 0x7f);
+        let file_slice = global_fact(CONTENT_FILE_SLICE_BYTES, TYPE_CONTENT_FILE_SLICE);
+        let small_after = global_fact(65, 0x7e);
+
+        let batches = fact_batches(vec![
+            small_before.clone(),
+            file_slice.clone(),
+            small_after.clone(),
+        ])
+        .expect("batches");
+
+        assert_eq!(batches.len(), 3);
+        assert_eq!(batches[0].fact_ids, vec![small_before.id]);
+        assert_eq!(batches[0].payloads, vec![small_before.bytes]);
+        assert_eq!(batches[1].fact_ids, vec![file_slice.id]);
+        assert_eq!(batches[1].payloads, vec![file_slice.bytes]);
+        assert_eq!(batches[2].fact_ids, vec![small_after.id]);
+        assert_eq!(batches[2].payloads, vec![small_after.bytes]);
+    }
+
+    fn global_fact(len: usize, tag: u8) -> Fact {
+        let mut bytes = vec![tag; len];
+        bytes[0] = tag;
+        Fact::new(FactScope::Global, 1, bytes)
     }
 }

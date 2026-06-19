@@ -36,6 +36,7 @@ use topo::protocol::connection::frame_small::project::decode::ConnectionFrameHea
 use topo::protocol::connection::frame_small::{
     author as frame_small_author, project as frame_small_project,
 };
+use topo::protocol::connection::queue_outgoing_frame;
 use topo::protocol::content::file::encode::CONTENT_FILE_BYTES;
 use topo::protocol::content::file_slice::encode::CONTENT_FILE_SLICE_BYTES;
 
@@ -139,6 +140,10 @@ fn connection_frame_constants_match_architecture_shape() {
     assert_eq!(
         CONNECTION_FRAME_FILE_SLICE_WIRE_BYTES,
         CONNECTION_FRAME_HEADER_BYTES + 4 + CONNECTION_FRAME_FILE_SLICE_CIPHERTEXT_BYTES
+    );
+    assert!(
+        CONNECTION_FRAME_FILE_SLICE_WIRE_BYTES <= queue_outgoing_frame::MAX_FRAME_BYTES,
+        "file-slice frame must remain queueable by the outgoing frame handler"
     );
     assert_eq!(
         CONNECTION_FRAME_BUNDLE_WIRE_BYTES,

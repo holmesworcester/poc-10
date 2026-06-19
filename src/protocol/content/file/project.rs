@@ -58,6 +58,7 @@ pub mod decode {
             encode_fact, CONTENT_FILE_BYTES, TYPE_CONTENT_FILE,
         };
         use crate::protocol::content::file::fact::FILE_ROOT_HASH_BYTES;
+        use crate::protocol::content::file_slice::fact::FILE_SLICE_PLAINTEXT_BYTES;
 
         fn fact() -> ContentFileFact {
             ContentFileFact {
@@ -68,9 +69,9 @@ pub mod decode {
                 signer_id: [9; 32],
                 signer_public_key: [10; 32],
                 file_id: [4; 32],
-                blob_bytes: 1_048_576,
+                blob_bytes: (FILE_SLICE_PLAINTEXT_BYTES * 4) as u64,
                 total_slices: 4,
-                slice_bytes: 262_144,
+                slice_bytes: FILE_SLICE_PLAINTEXT_BYTES as u32,
                 root_hash: [5; FILE_ROOT_HASH_BYTES],
                 sealed_metadata: crate::protocol::content::file::fact::SealedMetadata::new(
                     b"sealed-filename-and-mime",
@@ -196,6 +197,7 @@ pub mod authenticate {
         use crate::core::project_fact::ProjectionContext;
         use crate::protocol::content::file::author::authored_file_fact;
         use crate::protocol::content::file::fact::{ContentFileFact, SealedMetadata};
+        use crate::protocol::content::file_slice::fact::FILE_SLICE_PLAINTEXT_BYTES;
 
         const PRIVATE_KEY: [u8; 32] = [7; 32];
 
@@ -207,9 +209,9 @@ pub mod authenticate {
                 [3; 32],
                 [4; 32],
                 [5; 32],
-                1_048_576,
+                (FILE_SLICE_PLAINTEXT_BYTES * 4) as u64,
                 4,
-                262_144,
+                FILE_SLICE_PLAINTEXT_BYTES as u32,
                 [6; 32],
                 SealedMetadata::new(b"sealed-filename-and-mime").expect("sealed metadata"),
                 PRIVATE_KEY,

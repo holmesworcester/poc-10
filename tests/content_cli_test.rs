@@ -16,6 +16,7 @@ use std::time::Duration;
 use cli_harness::*;
 use rusqlite::{params, Connection};
 use topo::core::crypto;
+use topo::protocol::content::file_slice::fact::FILE_SLICE_PLAINTEXT_BYTES;
 
 #[test]
 fn cli_send_then_messages_lists_authored_messages() {
@@ -713,9 +714,11 @@ fn cli_files_listing_counts_verified_slice_rows_as_progress() {
     let _daemon = spawn_daemon(&db, free_port());
     create_local_content_key(&db, &workspace_id);
 
-    // Four fixed 256 KiB slices. Delete two verified rows after projection so
+    // Two fixed slices. Delete one verified row after projection so
     // the listing has a deterministic 50% partial state without racing sync.
-    let payload: Vec<u8> = (0..(1024 * 1024u32)).map(|byte| byte as u8).collect();
+    let payload: Vec<u8> = (0..(FILE_SLICE_PLAINTEXT_BYTES * 2))
+        .map(|byte| byte as u8)
+        .collect();
     let in_path = tmp.path().join("big.bin");
     fs::write(&in_path, &payload).expect("write input");
     assert_success(topo(&[
@@ -728,7 +731,7 @@ fn cli_files_listing_counts_verified_slice_rows_as_progress() {
         in_path.to_str().expect("path"),
     ]));
     wait_for_files_count(&db, &workspace_id, "1");
-    delete_verified_file_slices_from(&db, 2);
+    delete_verified_file_slices_from(&db, 1);
 
     let partial = assert_success(topo(&["--db", &db, "files", &workspace_id]));
     let progress = parse_first_progress_row(&partial)
@@ -755,7 +758,9 @@ fn cli_save_file_rejects_incomplete_download() {
     let _daemon = spawn_daemon(&db, free_port());
     create_local_content_key(&db, &workspace_id);
 
-    let payload: Vec<u8> = (0..(512 * 1024u32)).map(|byte| byte as u8).collect();
+    let payload: Vec<u8> = (0..(FILE_SLICE_PLAINTEXT_BYTES * 2))
+        .map(|byte| byte as u8)
+        .collect();
     let in_path = tmp.path().join("big.bin");
     fs::write(&in_path, &payload).expect("write input");
     assert_success(topo(&[
@@ -800,13 +805,12 @@ fn cli_save_file_assembles_slices_by_index() {
     let _daemon = spawn_daemon(&db, free_port());
     create_local_content_key(&db, &workspace_id);
 
-    // 2 slices @ 256 KiB = 512 KiB. Vary the byte pattern by slice index so a
+    // Two fixed slices. Vary the byte pattern by slice index so a
     // wrong-order assembly would fail the equality check, not just length.
-    const SLICE_BYTES: usize = 256 * 1024;
     const NUM_SLICES: usize = 2;
-    let mut payload = Vec::with_capacity(NUM_SLICES * SLICE_BYTES);
+    let mut payload = Vec::with_capacity(NUM_SLICES * FILE_SLICE_PLAINTEXT_BYTES);
     for slice_idx in 0..NUM_SLICES as u8 {
-        for offset in 0..SLICE_BYTES {
+        for offset in 0..FILE_SLICE_PLAINTEXT_BYTES {
             // Pattern depends on (slice_idx, offset) so any reordered or
             // duplicated slice would corrupt the hash.
             payload.push(slice_idx.wrapping_add((offset % 251) as u8));

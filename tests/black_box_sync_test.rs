@@ -14,6 +14,7 @@ use topo::core::cli::decode_hex_32;
 use topo::core::db::Db;
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::protocol::auth::{admin, workspace as auth_workspace};
+use topo::protocol::content::file_slice::fact::FILE_SLICE_PLAINTEXT_BYTES;
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 
 #[test]
@@ -518,7 +519,8 @@ fn cli_cable_bound_download_perf_isolates_authoring_sync_and_save() {
         .unwrap_or_else(|| download_timeout_ms(payload_mib, cable_mbps));
 
     let payload_create_started = Instant::now();
-    let payload = patterned_payload(payload_mib * 4);
+    let payload_bytes = payload_mib * 1024 * 1024;
+    let payload = patterned_payload(payload_bytes.div_ceil(FILE_SLICE_PLAINTEXT_BYTES));
     let in_path = tmp.path().join("download-perf.bin");
     std::fs::write(&in_path, &payload).expect("write perf payload");
     let payload_create_elapsed = payload_create_started.elapsed();
@@ -1309,10 +1311,9 @@ fn env_u64(name: &str) -> Option<u64> {
 }
 
 fn patterned_payload(slices: usize) -> Vec<u8> {
-    const SLICE_BYTES: usize = 256 * 1024;
-    let mut payload = Vec::with_capacity(SLICE_BYTES * slices);
+    let mut payload = Vec::with_capacity(FILE_SLICE_PLAINTEXT_BYTES * slices);
     for slice_idx in 0..slices {
-        for offset in 0..SLICE_BYTES {
+        for offset in 0..FILE_SLICE_PLAINTEXT_BYTES {
             payload.push(
                 (slice_idx as u8)
                     .wrapping_mul(17)

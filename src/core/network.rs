@@ -810,15 +810,20 @@ fn pump_outgoing_target(
         Ok(stream) => stream,
         Err(_) => return Ok(TargetPumpOutcome::Deferred { sent_frames: 0 }),
     };
-    let mut sent_frames = 0;
+    let mut sent_rows = Vec::with_capacity(rows.len());
     for row in rows {
         ensure_target(target, std::slice::from_ref(&row))?;
         if write_frame(&mut stream, &row.bytes).is_err() {
+            let sent_frames = sent_rows.len();
+            if !sent_rows.is_empty() {
+                delete_outgoing(store, &sent_rows)?;
+            }
             return Ok(TargetPumpOutcome::Deferred { sent_frames });
         }
-        delete_outgoing(store, std::slice::from_ref(&row))?;
-        sent_frames += 1;
+        sent_rows.push(row);
     }
+    let sent_frames = sent_rows.len();
+    delete_outgoing(store, &sent_rows)?;
     let _ = stream.shutdown(Shutdown::Both);
     Ok(TargetPumpOutcome::Drained { sent_frames })
 }
