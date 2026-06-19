@@ -111,7 +111,7 @@ mod tests {
     use super::*;
     use crate::core::intents::IntentHandler;
     use crate::core::runtime::Runtime;
-    use crate::protocol::app::MATCH_RUNTIME;
+    use crate::protocol::app::CONTEXT_RUNTIME;
     use crate::protocol::versioning::local_update::encode::decode_update_fact;
     use rusqlite::params;
 
@@ -141,7 +141,7 @@ mod tests {
 
     #[test]
     fn check_version_handler_emits_priority_update_fact() {
-        let runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
+        let runtime = Runtime::open_memory(&CONTEXT_RUNTIME).expect("runtime");
         replace_stored_version_for_test(runtime.db(), CURRENT_PROTOCOL_VERSION - 1);
         let intent = check_version_intent(55);
         let context = HandlerContext::new().with_db(runtime.db());
@@ -160,7 +160,7 @@ mod tests {
 
     #[test]
     fn missing_storage_marker_queues_and_emits_update_fact() {
-        let runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
+        let runtime = Runtime::open_memory(&CONTEXT_RUNTIME).expect("runtime");
         delete_stored_version_for_test(runtime.db());
 
         assert!(build_check_version_intent(

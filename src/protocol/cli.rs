@@ -24,13 +24,13 @@ use crate::protocol::sync;
 use crate::protocol::{auth, content, versioning};
 use std::path::PathBuf;
 
-pub struct MatchCliContext {
+pub struct ContextCliContext {
     db: Option<PathBuf>,
     explicit_at_ms: Option<u64>,
     runtime: Runtime,
 }
 
-impl MatchCliContext {
+impl ContextCliContext {
     pub fn new(runtime: Runtime, db: Option<PathBuf>, explicit_at_ms: Option<u64>) -> Self {
         Self {
             db,
@@ -102,7 +102,7 @@ impl MatchCliContext {
     }
 }
 
-pub(crate) fn accept(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
+pub(crate) fn accept(ctx: &mut ContextCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
     let from_listen_addr = daemon::current_listen_addr(ctx.db_path("accept")?)?;
     let output = ctx.with_command_inputs(|store, clock| {
         auth::invite_secret::cli::accept(store, clock, args, from_listen_addr)
@@ -112,7 +112,7 @@ pub(crate) fn accept(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<Cli
 }
 
 pub(crate) fn accept_invite_server(
-    ctx: &mut MatchCliContext,
+    ctx: &mut ContextCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     let from_listen_addr = daemon::current_listen_addr(ctx.db_path("accept-invite-server")?)?;
@@ -124,7 +124,7 @@ pub(crate) fn accept_invite_server(
 }
 
 pub(crate) fn accept_link(
-    ctx: &mut MatchCliContext,
+    ctx: &mut ContextCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     let from_listen_addr = daemon::current_listen_addr(ctx.db_path("accept-link")?)?;
@@ -135,7 +135,7 @@ pub(crate) fn accept_link(
     Ok(auth::invite_secret::cli::accept_output(&receipt))
 }
 
-pub(crate) fn connect(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
+pub(crate) fn connect(ctx: &mut ContextCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
     args.require_len(2, connection::request::api::CONNECT_USAGE)?;
     let target_endpoint = decode_hex_32(
         args.get(0).ok_or(connection::request::api::CONNECT_USAGE)?,
@@ -165,15 +165,18 @@ pub(crate) fn connect(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<Cl
     )))
 }
 
-pub(crate) fn identity(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
+pub(crate) fn identity(
+    ctx: &mut ContextCliContext,
+    args: CliArgs<'_>,
+) -> Result<CliOutput, String> {
     ctx.query_db(|store| auth::endpoint_shared::cli::identity(store, args))
 }
 
-pub(crate) fn peers(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
+pub(crate) fn peers(ctx: &mut ContextCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
     ctx.query_db(|store| auth::endpoint_shared::cli::peers(store, args))
 }
 
-pub(crate) fn invite(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
+pub(crate) fn invite(ctx: &mut ContextCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
     let output = ctx
         .with_command_inputs(|store, clock| auth::invite_secret::cli::invite(store, clock, args))?;
     let receipt = ctx.submit_authored_facts(output)?;
@@ -181,7 +184,7 @@ pub(crate) fn invite(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<Cli
 }
 
 pub(crate) fn invite_server(
-    ctx: &mut MatchCliContext,
+    ctx: &mut ContextCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     let output = ctx.with_command_inputs(|store, clock| {
@@ -191,7 +194,7 @@ pub(crate) fn invite_server(
     Ok(auth::invite_secret::cli::invite_output(&receipt))
 }
 
-pub(crate) fn link(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
+pub(crate) fn link(ctx: &mut ContextCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
     let output =
         ctx.with_command_inputs(|store, clock| auth::invite_secret::cli::link(store, clock, args))?;
     let receipt = ctx.submit_authored_facts(output)?;
@@ -199,7 +202,7 @@ pub(crate) fn link(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOu
 }
 
 pub(crate) fn create_workspace(
-    ctx: &mut MatchCliContext,
+    ctx: &mut ContextCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     let output = ctx.with_command_inputs(|store, clock| {
@@ -210,26 +213,26 @@ pub(crate) fn create_workspace(
 }
 
 pub(crate) fn workspaces(
-    ctx: &mut MatchCliContext,
+    ctx: &mut ContextCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     let output = ctx.query_db(|store| auth::workspace::cli::workspaces(store, args))?;
     Ok(auth::workspace::cli::workspaces_output(&output))
 }
 
-pub(crate) fn count(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
+pub(crate) fn count(ctx: &mut ContextCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
     args.require_len(0, auth::workspace::cli::COUNT_USAGE)?;
     let report = ctx.query_runtime(auth::workspace::queries::runtime_count_report)?;
     Ok(auth::workspace::cli::count_report_output(&report))
 }
 
-pub(crate) fn users(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
+pub(crate) fn users(ctx: &mut ContextCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
     let output = ctx.query_db(|store| auth::user::cli::users(store, args))?;
     Ok(auth::user::cli::users_output(&output))
 }
 
 pub(crate) fn key_recipient(
-    ctx: &mut MatchCliContext,
+    ctx: &mut ContextCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     let output = ctx.with_command_inputs(|store, clock| {
@@ -240,7 +243,7 @@ pub(crate) fn key_recipient(
 }
 
 pub(crate) fn key_recipient_rotation(
-    ctx: &mut MatchCliContext,
+    ctx: &mut ContextCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     let workspace_id = args
@@ -262,7 +265,7 @@ pub(crate) fn key_recipient_rotation(
 }
 
 pub(crate) fn key_frontier(
-    ctx: &mut MatchCliContext,
+    ctx: &mut ContextCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     let output = ctx.with_command_inputs(|store, clock| {
@@ -272,7 +275,10 @@ pub(crate) fn key_frontier(
     Ok(auth::key_wrap::cli::key_frontier_output(&receipt))
 }
 
-pub(crate) fn key_wrap(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
+pub(crate) fn key_wrap(
+    ctx: &mut ContextCliContext,
+    args: CliArgs<'_>,
+) -> Result<CliOutput, String> {
     let query = auth::key_wrap::cli::key_wrap_args(args)?;
     let lookup =
         ctx.query_runtime(|runtime| auth::key_wrap::queries::lookup_key_wrap(runtime, query))?;
@@ -280,7 +286,7 @@ pub(crate) fn key_wrap(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<C
 }
 
 pub(crate) fn key_access(
-    ctx: &mut MatchCliContext,
+    ctx: &mut ContextCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     let query = auth::key_wrap::cli::key_access_args(args)?;
@@ -291,7 +297,7 @@ pub(crate) fn key_access(
 }
 
 pub(crate) fn key_derive(
-    ctx: &mut MatchCliContext,
+    ctx: &mut ContextCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     let _limit = auth::key_wrap::cli::key_derive_limit(args)?;
@@ -303,7 +309,10 @@ pub(crate) fn key_derive(
     ]))
 }
 
-pub(crate) fn key_node(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
+pub(crate) fn key_node(
+    ctx: &mut ContextCliContext,
+    args: CliArgs<'_>,
+) -> Result<CliOutput, String> {
     let args = auth::key_wrap::cli::key_node_args(args)?;
     let created_at_ms = ctx.command_timestamp()?;
     let output = auth::key_wrap::api::create_history_node(
@@ -322,7 +331,7 @@ pub(crate) fn key_node(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<C
     Ok(auth::key_wrap::cli::history_node_output(&receipt))
 }
 
-pub(crate) fn keys(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
+pub(crate) fn keys(ctx: &mut ContextCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
     let workspace_id = auth::key_wrap::cli::keys_workspace_id(args)?;
     let report = ctx.query_runtime(|runtime| {
         auth::key_wrap::queries::key_status_report(runtime, workspace_id)
@@ -331,7 +340,7 @@ pub(crate) fn keys(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOu
 }
 
 pub(crate) fn disappearing_set(
-    ctx: &mut MatchCliContext,
+    ctx: &mut ContextCliContext,
     cli_args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     let args = content::retention_policy::cli::parse_disappearing_set_args(cli_args.values())?;
@@ -359,7 +368,7 @@ pub(crate) fn disappearing_set(
 }
 
 pub(crate) fn disappearing_status(
-    ctx: &mut MatchCliContext,
+    ctx: &mut ContextCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     let workspace_id = content::retention_policy::cli::status_workspace_id(args)?;
@@ -371,7 +380,7 @@ pub(crate) fn disappearing_status(
 }
 
 pub(crate) fn disappearing_tighten(
-    ctx: &mut MatchCliContext,
+    ctx: &mut ContextCliContext,
     cli_args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     let args = content::retention_policy::cli::parse_disappearing_tighten_args(cli_args.values())?;
@@ -397,7 +406,7 @@ pub(crate) fn disappearing_tighten(
 }
 
 pub(crate) fn disappearing_compact(
-    ctx: &mut MatchCliContext,
+    ctx: &mut ContextCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     let workspace_id = content::retention_policy::cli::compact_workspace_id(args)?;
@@ -422,7 +431,7 @@ pub(crate) fn disappearing_compact(
     ]))
 }
 
-pub(crate) fn send(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
+pub(crate) fn send(ctx: &mut ContextCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
     let _workspace_id = args
         .get(0)
         .ok_or_else(|| content::message::cli::SEND_USAGE.to_string())
@@ -438,7 +447,7 @@ pub(crate) fn send(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOu
     Ok(content::message::cli::send_output(&receipt, &text))
 }
 
-pub(crate) fn react(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
+pub(crate) fn react(ctx: &mut ContextCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
     let _workspace_id = args
         .get(0)
         .ok_or_else(|| content::message::cli::REACT_USAGE.to_string())
@@ -450,7 +459,10 @@ pub(crate) fn react(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliO
     Ok(content::message::cli::react_output(&receipt))
 }
 
-pub(crate) fn send_file(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
+pub(crate) fn send_file(
+    ctx: &mut ContextCliContext,
+    args: CliArgs<'_>,
+) -> Result<CliOutput, String> {
     let _workspace_id = args
         .get(0)
         .ok_or_else(|| content::message::cli::SEND_FILE_USAGE.to_string())
@@ -462,16 +474,19 @@ pub(crate) fn send_file(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<
     Ok(content::message::cli::send_file_output(&receipt))
 }
 
-pub(crate) fn files(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
+pub(crate) fn files(ctx: &mut ContextCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
     ctx.query_db(|store| content::message::cli::files(store, args))
 }
 
-pub(crate) fn save_file(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
+pub(crate) fn save_file(
+    ctx: &mut ContextCliContext,
+    args: CliArgs<'_>,
+) -> Result<CliOutput, String> {
     ctx.query_db(|store| content::message::cli::save_file(store, args))
 }
 
 pub(crate) fn delete_file(
-    ctx: &mut MatchCliContext,
+    ctx: &mut ContextCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     if args.values().len() != 2 {
@@ -499,7 +514,7 @@ pub(crate) fn delete_file(
 }
 
 pub(crate) fn delete_message(
-    ctx: &mut MatchCliContext,
+    ctx: &mut ContextCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     let _workspace_id = args
@@ -513,16 +528,19 @@ pub(crate) fn delete_message(
     Ok(content::message::cli::delete_message_output(&receipt))
 }
 
-pub(crate) fn messages(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
+pub(crate) fn messages(
+    ctx: &mut ContextCliContext,
+    args: CliArgs<'_>,
+) -> Result<CliOutput, String> {
     ctx.query_db(|store| content::message::cli::messages(store, args))
 }
 
-pub(crate) fn view(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
+pub(crate) fn view(ctx: &mut ContextCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
     ctx.query_db(|store| content::message::cli::view(store, args))
 }
 
 pub(crate) fn grant_admin(
-    ctx: &mut MatchCliContext,
+    ctx: &mut ContextCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     let output =
@@ -531,7 +549,10 @@ pub(crate) fn grant_admin(
     Ok(auth::admin::cli::grant_admin_output(&receipt))
 }
 
-pub(crate) fn generate(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
+pub(crate) fn generate(
+    ctx: &mut ContextCliContext,
+    args: CliArgs<'_>,
+) -> Result<CliOutput, String> {
     let parse_started = std::time::Instant::now();
     args.require_len(3, content::message::cli::GENERATE_USAGE)?;
     let _workspace_id = args
@@ -569,7 +590,7 @@ pub(crate) fn generate(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<C
 }
 
 pub(crate) fn sync_status(
-    ctx: &mut MatchCliContext,
+    ctx: &mut ContextCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     sync::shared_fact::cli::require_sync_status_args(args)?;
@@ -577,7 +598,7 @@ pub(crate) fn sync_status(
     Ok(sync::shared_fact::cli::sync_status_output(&status))
 }
 
-pub(crate) fn sync(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
+pub(crate) fn sync(ctx: &mut ContextCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
     match sync::local_setting::parse_sync_args(args)? {
         sync::local_setting::SyncCliCommand::Show => {
             let setting = ctx.query_db(sync::local_setting::current_setting)?;
@@ -594,7 +615,7 @@ pub(crate) fn sync(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOu
 }
 
 pub(crate) fn content_count(
-    ctx: &mut MatchCliContext,
+    ctx: &mut ContextCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     let output = ctx.query_db(|store| content::message::cli::content_count(store, args))?;
@@ -609,7 +630,7 @@ pub(crate) fn content_count(
 
 pub const INTENT_REGISTRY_USAGE: &str = "intent-registry";
 
-pub(crate) fn update(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
+pub(crate) fn update(ctx: &mut ContextCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
     args.require_len(0, versioning::local_update::cli::UPDATE_USAGE)?;
     let clock = FixedClock(ctx.command_timestamp()?);
     let output = versioning::local_update::api::author_update(&clock)?;
@@ -627,7 +648,7 @@ pub(crate) fn update(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<Cli
 }
 
 pub(crate) fn state_summary(
-    ctx: &mut MatchCliContext,
+    ctx: &mut ContextCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     args.require_len(0, versioning::local_update::cli::STATE_SUMMARY_USAGE)?;
@@ -638,7 +659,7 @@ pub(crate) fn state_summary(
 }
 
 pub(crate) fn intent_registry(
-    ctx: &mut MatchCliContext,
+    ctx: &mut ContextCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     args.require_len(0, INTENT_REGISTRY_USAGE)?;

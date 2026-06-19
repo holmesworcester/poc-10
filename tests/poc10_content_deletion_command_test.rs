@@ -7,7 +7,7 @@ mod runtime_test_support;
 use topo::core::command::{CommandClock, WorkspaceId};
 use topo::core::db::Db;
 use topo::core::runtime::Runtime;
-use topo::protocol::app::MATCH_RUNTIME;
+use topo::protocol::app::CONTEXT_RUNTIME;
 use topo::protocol::auth::signature::project::{
     authenticate as signature_authenticate, decode as signature_decode,
 };
@@ -17,7 +17,7 @@ use topo::protocol::content::file_deletion::project::decode as file_deletion_lay
 use topo::protocol::content::message_deletion::api::delete_message;
 use topo::protocol::content::message_deletion::project::decode as message_deletion_layout_decode;
 
-use runtime_test_support::{drain_runtime_work_for_test, initialize_match_runtime};
+use runtime_test_support::{drain_runtime_work_for_test, initialize_context_runtime};
 
 struct FixedClock(Cell<u64>);
 
@@ -30,8 +30,8 @@ impl CommandClock for FixedClock {
 }
 
 fn runtime_with_workspace() -> (Runtime, WorkspaceId) {
-    let mut runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
-    initialize_match_runtime(&mut runtime);
+    let mut runtime = Runtime::open_memory(&CONTEXT_RUNTIME).expect("runtime");
+    initialize_context_runtime(&mut runtime);
     let clock = FixedClock(Cell::new(1_000));
     let workspace = create_workspace_with_identity(
         runtime.db(),

@@ -31,7 +31,7 @@ use crate::core::runtime::{HandlerRoute, RecurringIntentSpec};
 use crate::protocol::cli as command;
 use crate::protocol::{auth, connection, content, sync, versioning};
 
-pub use crate::protocol::cli::MatchCliContext;
+pub use crate::protocol::cli::ContextCliContext;
 
 pub(crate) mod read_models {
     use super::{TableName, TypedTableSchema};
@@ -868,6 +868,13 @@ CREATE TABLE IF NOT EXISTS sync_negentropy_context_have_rows (
     PRIMARY KEY (workspace_id, owner_fact_id, context_fact_id)
 );
 
+CREATE TABLE IF NOT EXISTS sync_negentropy_context_closure_rows (
+    workspace_id BLOB NOT NULL,
+    owner_fact_id BLOB NOT NULL,
+    context_fact_id BLOB NOT NULL,
+    PRIMARY KEY (workspace_id, owner_fact_id, context_fact_id)
+);
+
 CREATE TABLE IF NOT EXISTS sync_negentropy_node_rows (
     workspace_id BLOB NOT NULL,
     level INTEGER NOT NULL,
@@ -1000,7 +1007,7 @@ macro_rules! cli_command {
     };
 }
 
-pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
+pub const CONTEXT_COMMANDS: &[CliCommand<ContextCliContext>] = &[
     cli_command!(
         "create-workspace",
         auth::workspace::cli::CREATE_WORKSPACE_USAGE,

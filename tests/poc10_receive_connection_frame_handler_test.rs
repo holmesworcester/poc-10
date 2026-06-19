@@ -15,7 +15,7 @@ use topo::core::network;
 use topo::core::project_fact::{IncomingMetadata, MatchedContext, ProjectionContext, Projector};
 use topo::core::runtime::Runtime;
 use topo::core::wire::{FixedBytes, FixedSlot};
-use topo::protocol::app::{MATCH_PROTOCOL, MATCH_RUNTIME};
+use topo::protocol::app::{CONTEXT_PROTOCOL, CONTEXT_RUNTIME};
 use topo::protocol::auth::endpoint::encode as endpoint_layout;
 use topo::protocol::auth::endpoint::fact::EndpointFact;
 use topo::protocol::auth::invite_secret::fact::InviteSecretFact;
@@ -318,7 +318,7 @@ fn daemon_runtime_turn_admits_wire_frame_without_inbound_rows_or_receive_intents
     let (frame, _, _, _, _) = encrypted_small_frame();
     let tmp = tempfile::tempdir().expect("tempdir");
     let db_path = tmp.path().join("runtime.db");
-    let mut runtime = Runtime::open_disk(&MATCH_RUNTIME, &db_path).expect("runtime");
+    let mut runtime = Runtime::open_disk(&CONTEXT_RUNTIME, &db_path).expect("runtime");
     let listener = network::listen("127.0.0.1:0".parse().expect("listen addr")).expect("listen");
     let addr = listener.local_addr();
     let sent_frame = frame.clone();
@@ -333,9 +333,9 @@ fn daemon_runtime_turn_admits_wire_frame_without_inbound_rows_or_receive_intents
     });
     std::thread::sleep(Duration::from_millis(50));
 
-    let mut scheduler = daemon::RecurringScheduler::install(MATCH_RUNTIME.handlers);
+    let mut scheduler = daemon::RecurringScheduler::install(CONTEXT_RUNTIME.handlers);
     let status = daemon::runtime_turn(
-        MATCH_PROTOCOL.daemon,
+        CONTEXT_PROTOCOL.daemon,
         &mut runtime,
         RuntimeTurnHost::daemon(&listener),
         &mut scheduler,

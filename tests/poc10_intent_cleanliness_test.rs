@@ -1519,7 +1519,7 @@ fn target_protocol_registry_owns_protocol_tables_without_runtime_io() {
     let text = source_text(&path);
 
     for required in [
-        "pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>]",
+        "pub const CONTEXT_COMMANDS: &[CliCommand<ContextCliContext>]",
         "pub(crate) const SCHEMA_SOURCES: &[SchemaSource]",
         "pub(crate) const ROW_MUTATION_TABLES: &[TableName]",
         "pub(crate) const HANDLER_ROUTES: &[HandlerRoute]",
@@ -2506,7 +2506,7 @@ fn context_app_selects_protocol_description() {
     let production = strip_line_comments(&production_text_before_unit_tests(&text));
 
     assert!(
-        production.contains("core::app::run(&crate::protocol::app::MATCH_PROTOCOL"),
+        production.contains("core::app::run(&crate::protocol::app::CONTEXT_PROTOCOL"),
         "context_app.rs should only choose the concrete protocol description"
     );
     assert!(
@@ -2514,7 +2514,7 @@ fn context_app_selects_protocol_description() {
         "context_app.rs must not restore the broad manual command-name router"
     );
     assert!(
-        !production.contains("MATCH_COMMANDS") && !production.contains("MATCH_CLI_COMMANDS"),
+        !production.contains("CONTEXT_COMMANDS") && !production.contains("MATCH_CLI_COMMANDS"),
         "context_app.rs should not manually wire the protocol command table"
     );
     for command in [

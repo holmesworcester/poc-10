@@ -354,7 +354,7 @@ mod tests {
     use crate::core::command::FnClock;
     use crate::core::daemon::{self, RuntimeTurnHost};
     use crate::core::runtime::Runtime;
-    use crate::protocol::app::{MATCH_PROTOCOL, MATCH_RUNTIME};
+    use crate::protocol::app::{CONTEXT_PROTOCOL, CONTEXT_RUNTIME};
 
     fn drain_runtime_work_for_test(runtime: &mut Runtime, max_rounds: usize, limit: usize) {
         for _ in 0..max_rounds {
@@ -378,9 +378,9 @@ mod tests {
     }
 
     fn initialize_runtime_for_test(runtime: &mut Runtime) {
-        let mut scheduler = daemon::RecurringScheduler::install(MATCH_RUNTIME.handlers);
+        let mut scheduler = daemon::RecurringScheduler::install(CONTEXT_RUNTIME.handlers);
         daemon::runtime_turn(
-            MATCH_PROTOCOL.daemon,
+            CONTEXT_PROTOCOL.daemon,
             runtime,
             RuntimeTurnHost::local(),
             &mut scheduler,
@@ -391,7 +391,7 @@ mod tests {
 
     #[test]
     fn generate_messages_reuses_store_queried_authoring_snapshot() {
-        let mut runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
+        let mut runtime = Runtime::open_memory(&CONTEXT_RUNTIME).expect("runtime");
         initialize_runtime_for_test(&mut runtime);
         let workspace_clock = FnClock(|| 1_000);
         let workspace = crate::protocol::auth::workspace::api::create_workspace_with_identity(

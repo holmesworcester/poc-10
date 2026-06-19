@@ -9,7 +9,7 @@
 //! projector, handler routes, daemon time wakes, and inbound-network intake
 //! conversion. If a new protocol capability needs to be
 //! visible to core, it is usually declared in the registry and wired into the
-//! `MATCH_RUNTIME` or `MATCH_PROTOCOL` constants here.
+//! `CONTEXT_RUNTIME` or `CONTEXT_PROTOCOL` constants here.
 //!
 //! Keep executable protocol policy out of this file. The conversion from a TCP
 //! frame to incoming facts is a small adapter; connection receive admission
@@ -24,10 +24,10 @@ use crate::protocol::registry::{
     authenticate_fact_for_admission, protocol_projector, FACT_ROUTES, HANDLER_ROUTES,
     ROW_MUTATION_TABLES, SCHEMA_SOURCES,
 };
-use crate::protocol::registry::{MatchCliContext, MATCH_COMMANDS};
+use crate::protocol::registry::{ContextCliContext, CONTEXT_COMMANDS};
 use crate::protocol::{connection, content};
 
-pub const MATCH_RUNTIME: RuntimeDescription = RuntimeDescription {
+pub const CONTEXT_RUNTIME: RuntimeDescription = RuntimeDescription {
     schema_sources: SCHEMA_SOURCES,
     row_mutation_tables: ROW_MUTATION_TABLES,
     projector: protocol_projector,
@@ -36,17 +36,17 @@ pub const MATCH_RUNTIME: RuntimeDescription = RuntimeDescription {
     handlers: HANDLER_ROUTES,
 };
 
-pub const MATCH_PROTOCOL: ProtocolDescription<MatchCliContext> = ProtocolDescription {
+pub const CONTEXT_PROTOCOL: ProtocolDescription<ContextCliContext> = ProtocolDescription {
     display_name: "Context",
     command_name: "con",
-    runtime: MATCH_RUNTIME,
+    runtime: CONTEXT_RUNTIME,
     daemon: DaemonDescription {
         inbound_network_intake: Some(receive_network_frame_facts),
-        time_wakes: MATCH_DAEMON_TIME_WAKES,
+        time_wakes: CONTEXT_DAEMON_TIME_WAKES,
         storage_ready: Some(crate::protocol::versioning::check_version::storage_ready),
     },
-    commands: MATCH_COMMANDS,
-    context: MatchCliContext::new,
+    commands: CONTEXT_COMMANDS,
+    context: ContextCliContext::new,
 };
 
 /// Live daemon time wakes.
@@ -54,7 +54,7 @@ pub const MATCH_PROTOCOL: ProtocolDescription<MatchCliContext> = ProtocolDescrip
 /// These wakes are driven by the daemon's current wall time. Replay does not
 /// run daemon wall-clock work; it reprojects retained facts and leaves standing
 /// time wakes for the next live daemon tick.
-const MATCH_DAEMON_TIME_WAKES: &[DaemonTimeWake] = &[DaemonTimeWake {
+const CONTEXT_DAEMON_TIME_WAKES: &[DaemonTimeWake] = &[DaemonTimeWake {
     timeline: content::message::expiration_timeline,
     end_inclusive: current_message_expiration_minute,
 }];

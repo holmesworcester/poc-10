@@ -100,6 +100,45 @@ fn documentation_layout_keeps_current_docs_live_and_old_notes_archived() {
 // has been removed deliberately; do not reintroduce one.
 
 #[test]
+fn architecture_diagrams_cover_current_runtime_relationships() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+
+    let diagrams = source_text(&root.join("ARCHITECTURE_DIAGRAMS.md"));
+    let normalized = normalize_whitespace(&diagrams);
+    for required in [
+        "`pending_time_ranges` is not an independent queue",
+        "A global `time_now` context would make projection order and replay depend on the current clock",
+        "Purges are also not a queue",
+        "the standing need parks the owner until matching context re-queues it",
+        "Durable emitted facts re-enter the loop through `facts` plus `pending_projection` in the same transaction",
+        "`incoming_facts` is only the temp outside-origin staging path",
+        "## 6) Connection Bootstrap",
+        "`receive_network_frame_facts` only classifies raw bytes into incoming request or connection facts",
+        "emit durable `frame_observation` and `connection_fact_receipt` facts",
+        "There is no `send_network_frame` handler",
+        "Both paths add opaque bytes to network_outgoing",
+        "The runtime and bootstrap diagrams above describe one node's loop",
+    ] {
+        assert!(
+            normalized.contains(required),
+            "ARCHITECTURE_DIAGRAMS.md is missing current runtime relationship {required:?}"
+        );
+    }
+    assert!(
+        !diagrams.contains("The previous three diagrams"),
+        "ARCHITECTURE_DIAGRAMS.md should not retain stale section counts"
+    );
+    assert!(
+        !diagrams.contains("A parked in pending_projection"),
+        "ARCHITECTURE_DIAGRAMS.md should not show context needs as retained pending work"
+    );
+    assert!(
+        !root.join("ARCHITECTURE_DIAGRAMS_ALT.md").exists(),
+        "alternate architecture diagram doc should remain folded into ARCHITECTURE_DIAGRAMS.md"
+    );
+}
+
+#[test]
 fn root_readme_describes_context_project_aims() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let readme = source_text(&root.join("README.md"));

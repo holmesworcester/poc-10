@@ -10,7 +10,7 @@ use topo::core::command::CommandClock;
 use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::runtime::Runtime;
-use topo::protocol::app::MATCH_RUNTIME;
+use topo::protocol::app::CONTEXT_RUNTIME;
 use topo::protocol::auth::endpoint::{encode as endpoint_layout, fact::EndpointFact};
 use topo::protocol::auth::invite_secret::project::decode as invite_layout;
 use topo::protocol::connection::close::api::close;
@@ -30,7 +30,7 @@ use topo::protocol::connection::request::api::{
 use topo::protocol::connection::request::project::decode as request_layout;
 
 use runtime_test_support::{
-    drain_projection_for_test, drain_runtime_work_for_test, initialize_match_runtime,
+    drain_projection_for_test, drain_runtime_work_for_test, initialize_context_runtime,
 };
 
 struct FixedClock(Cell<u64>);
@@ -47,8 +47,8 @@ impl CommandClock for FixedClock {
 fn closing_connection_purges_connection_fact_and_row() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let db_path = tmp.path().join("runtime.db");
-    let mut runtime = Runtime::open_disk(&MATCH_RUNTIME, &db_path).expect("runtime");
-    initialize_match_runtime(&mut runtime);
+    let mut runtime = Runtime::open_disk(&CONTEXT_RUNTIME, &db_path).expect("runtime");
+    initialize_context_runtime(&mut runtime);
     let alice = endpoint([11; 32], [12; 32]);
     let bob = endpoint([21; 32], [22; 32]);
     let alice_endpoint_fact = Fact::new(

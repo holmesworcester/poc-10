@@ -35,7 +35,8 @@ does not inherit daemon temp rows or daemon network adapters (see diagram 3):
 facts (+ local_fact_admissions)   immutable fact store
 network_incoming                  raw inbound frame bytes awaiting classification (temp)
 incoming_facts                    incoming facts staged for projection (temp)
-pending_projection                pending facts waiting to be projected
+pending_projection                scheduled projection attempts for retained facts
+pending_time_ranges               due time context attached to pending owners
 context_edges                     standing needs and offers
 pending_projection_matches        offers that matched a parked need
 time_wakes                        facts scheduled to reproject at a time
@@ -43,6 +44,21 @@ intents (+ local_intents)         bounded work waiting for a handler (local is t
 network_outgoing                  sealed bytes waiting for the TCP pump
 <scope>_rows                      materialized state, read by queries and handlers, never by projectors
 ```
+
+`pending_time_ranges` is not an independent queue. `pending_projection` is keyed
+only by owner, so several causes can coalesce into one pending owner row.
+`pending_time_ranges` carries the due timeline interval that woke that owner.
+Keeping that cause separate lets a projector see which declared wake fired
+without making every projector depend on ambient wall-clock time. A global
+`time_now` context would make projection order and replay depend on the current
+clock, require broad re-queues just because time moved, and hide the fact-owned
+subscription that asked to be woken. A time wake is instead a standing
+fact-owned request; daemon time merely turns due requests into explicit
+projection context.
+
+Purges are also not a queue. A projector or handler may return exact purged
+fact ids in `RuntimeEffects`; core removes those facts and core-owned derived
+rows inside the same commit that applies rows, facts, and intents.
 
 The sections below isolate the main queue transitions and runtime boundaries.
 
@@ -53,7 +69,11 @@ reaches projection through `incoming_facts`. Projector output can add context,
 rows, time wakes, intents, emitted durable facts, emitted incoming facts, or a
 decision to retain the incoming input. Core matches new offers against parked
 needs, re-queues woken owners, and dispatches intents to handlers; handler
-output re-enters the same queues.
+output re-enters the same queues. Durable emitted facts re-enter the loop
+through `facts` plus `pending_projection` in the same transaction. Emitting a
+need does not keep an owner in `pending_projection`; after that projection
+attempt commits, the standing need parks the owner until matching context
+re-queues it. `incoming_facts` is only the temp outside-origin staging path.
 
 Materialized rows are read-model and planning state, not part of the projection
 and context-match cycle. Projectors and context matching never read them.
@@ -92,7 +112,7 @@ flowchart TD
     PROJECTOR -->|emitted incoming facts| INCOMING
     PROJECTOR -->|intents| INTENTS
     PROJECTOR -.may retain incoming fact.-> FACTS
-    PROJECTOR -.context needs keep owner pending.-> PENDING
+    PROJECTOR -.context needs park owner.-> CONTEXT
     PROJECTOR -->|rows| ROWS
 
     CONTEXT -->|core matches range overlap| MATCHES
@@ -389,8 +409,9 @@ scheduling mechanism; the work itself is plain facts and handlers.
 
 Context matching is the one mechanism that lets facts wake each other without
 core understanding them. A projector that lacks proof emits a **need** and
-parks; any fact may publish an **offer**. The match is not a background scan: it
-runs inside the projection commit in `project_fact.rs`. When a projector's
+parks as standing context; the pending work row for that projection attempt is
+cleared. Any fact may publish an **offer**. The match is not a background scan:
+it runs inside the projection commit in `project_fact.rs`. When a projector's
 output commits, core takes the needs and offers that output just added (the
 context delta) and matches them against the already-stored set on `(role, scope,
 range)` overlap — symmetrically, a newly committed offer wakes the owners of
@@ -403,7 +424,7 @@ whether that payload actually proves what it needed.
 %%{init: {"flowchart": {"wrappingWidth": 300}} }%%
 flowchart TD
     A["fact A projector: missing proof"] -->|emit need role/scope/range| NEED[("context_edges: need (A)")]
-    NEED --> PARK["A parked in pending_projection"]
+    NEED --> PARK["A parked as standing need<br/>(no pending row)"]
 
     B["fact B projector: accepted"] -->|emit offer role/scope/range| OFFER[("context_edges: offer (B)")]
 
@@ -423,7 +444,44 @@ replace the prior set) while offers are append-only evidence until the owner
 fact is purged. The concrete role/range catalog lives beside each scope's
 projector docs, not here.
 
-## 6) Queued Cause Chain
+## 6) Connection Bootstrap
+
+Connection bootstrap is the live-session setup path. The wire exchange is sealed
+request and connection bytes plus receive metadata from `network_incoming`.
+`receive_network_frame_facts` only classifies raw bytes into incoming request or
+connection facts. The request and connection projectors consume incoming origin
+metadata or matched `frame_observation` context, then emit durable
+`frame_observation` and `connection_fact_receipt` facts when that receive path
+must survive replay.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as Initiator
+    participant B as Responder
+
+    Note over A: A command or maintain_connections creates local ephemeral material,<br/>a sealed request fact, and request retry rows. maintain_connections queues<br/>the sealed request bytes directly into network_outgoing.
+    A->>B: sealed request bytes
+
+    Note over B: daemon intake classifies bytes into an incoming request fact<br/>with origin and receive-time metadata.
+    Note over B: request projector opens the request using local endpoint,<br/>invite or membership context, and receive metadata or frame_observation context.<br/>It emits frame_observation if the receive metadata must be durable,<br/>then emits connection_fact_receipt and create_connection.
+    Note over B: create_connection handler creates responder ephemeral_secret<br/>and sealed connection facts.
+    Note over B: connection projector writes connection_rows, offers connection<br/>and connection_for_request, emits seed_connection_sync, and emits local<br/>queue_outgoing_frame for the sealed response bytes.
+
+    B->>A: sealed connection bytes
+
+    Note over A: daemon intake classifies bytes into an incoming connection fact<br/>with origin and receive-time metadata.
+    Note over A: initiator connection projector consumes original request,<br/>initiator ephemeral secret, local endpoint/invite or membership context,<br/>and receive metadata or frame_observation context. It writes connection_rows,<br/>emits frame_observation if needed, emits connection_fact_receipt,<br/>and emits seed_connection_sync.
+
+    Note over A,B: After both sides have connection_rows, sync seed or recurring<br/>maintain_sync creates compare facts. Later payload sends use<br/>send_facts_on_connection; projection-created response bytes use queue_outgoing_frame.<br/>Both paths add opaque bytes to network_outgoing for the core TCP pump.
+```
+
+There is no `send_network_frame` handler. Outbound protocol handlers that know
+the route add opaque frame rows to `network_outgoing`; `queue_outgoing_frame` is
+the local-intent bridge for projection-created bytes that still need route
+lookup.
+
+## 7) Queued Cause Chain
 
 A runtime turn is one exclusive period under `RuntimeTurnLock`, but a causal
 chain can span many turns. Entry points commit work to queues; the same or a
@@ -469,7 +527,7 @@ projector that emits intents does not run their handlers before committing.
 Any host can advance projection and local intents. Daemon-host turns add durable
 handler dispatch and network adapters.
 
-## 7) Daemon Network Flow
+## 8) Daemon Network Flow
 
 The daemon owns background network progress. Incoming bytes are accepted by core
 into `network_incoming`, then drained through the protocol inbound classifier
@@ -513,11 +571,14 @@ flowchart LR
 handler. It chooses the incoming fact family from frame bytes and lets that
 fact's projector decide whether to retain or drop the fact. Origin and
 receive-time metadata stay on the incoming queue/context path; projectors use
-that metadata only when emitting durable observation or receipt facts.
+that metadata only when emitting durable observation or receipt facts. There is
+no `send_network_frame` handler on the outbound side; protocol handlers just add
+opaque bytes to `network_outgoing` for the TCP pump.
 
-## 8) Sync: The Convergence Loop
+## 9) Sync: The Convergence Loop
 
-The previous sections describe one node's loop. Sync is the same loop
+The runtime and bootstrap diagrams above describe one node's loop and how a
+live session starts. Sync is the same loop
 alternating between peers over time. The network adds no separate runtime
 machinery: every message on the wire is an ordinary fact, so each step is the
 same `admit -> project (writes a row) -> emit intent -> handler emits the next
