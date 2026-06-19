@@ -1,7 +1,10 @@
 mod cli_harness;
 
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::process::Child;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -349,19 +352,23 @@ fn cli_sync_setting_range_delivers_transitive_admin_and_message_context() {
 }
 
 #[test]
-fn cli_two_long_running_daemons_download_multislice_file_via_sync_setting() {
+fn cli_two_long_running_daemons_download_multislice_file_via_proxied_invite_path() {
     // This is the poc-10 replacement for the basic simulated download proof:
-    // drive only the product CLI plus daemon networking, then assert the peer
-    // can save the exact multi-slice bytes after daemon sync observes the
-    // sender's local sync setting.
+    // drive only the product CLI plus daemon networking, with the sender's bulk
+    // path forced through a measured TCP proxy, then assert the receiver can
+    // save the exact multi-slice bytes.
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice-file.db");
     let bob = temp_db(&tmp, "bob-file.db");
     let alice_port = free_port();
     let bob_port = free_port();
+    let proxy = ThrottledTcpProxy::start(
+        format!("127.0.0.1:{alice_port}").parse().unwrap(),
+        125_000_000,
+    );
 
     let workspace = create_workspace(&alice, "file-shared", "alice", "alice-laptop");
-    let invite = workspace_invite_for_addr(&alice, &workspace, alice_port);
+    let invite = workspace_invite_for_addr(&alice, &workspace, proxy.port());
 
     let mut alice_daemon = spawn_daemon(&alice, alice_port);
     let mut bob_daemon = spawn_daemon(&bob, bob_port);
@@ -389,36 +396,55 @@ fn cli_two_long_running_daemons_download_multislice_file_via_sync_setting() {
     );
     poll_for_key_access(&bob, &workspace, &removal_frontier_id, "yes", 30_000);
 
+    set_sync_range_until_visible(&bob, &workspace, "0", "18446744073709551615", 60_000);
+
     // Two fixed file slices keep this as a real multislice network transfer
-    // without turning the daemon integration suite into a throughput fixture.
+    // without turning the default daemon integration suite into a throughput
+    // fixture.
     let payload = patterned_payload(2);
-    let in_path = tmp.path().join("network-download.bin");
+    let in_path = tmp.path().join("proxied-network-download.bin");
     std::fs::write(&in_path, &payload).expect("write source payload");
 
+    let proxied_before = proxy.client_to_server_bytes();
     let sent = assert_success(topo(&[
         "--db",
-        &alice,
+        &bob,
         "send-file",
         &workspace,
-        "network download",
+        "proxied network download",
         "--file",
         in_path.to_str().expect("source path"),
     ]));
     assert_eq!(line_value(&sent, "blob_bytes"), payload.len().to_string());
-    set_sync_range_until_visible(&alice, &workspace, "0", "18446744073709551615", 60_000);
 
-    let listing = poll_for_file_complete(&bob, &workspace, "network-download.bin", 60_000);
+    let listing =
+        poll_for_file_complete(&alice, &workspace, "proxied-network-download.bin", 60_000);
     assert!(listing.contains("\u{2714}"), "{listing}");
+    let proxied_bytes = proxy
+        .client_to_server_bytes()
+        .saturating_sub(proxied_before);
+    assert!(
+        proxy.accepted_connections() > 0,
+        "proxy never accepted a connection"
+    );
+    assert!(
+        proxied_bytes >= payload.len() as u64,
+        "bulk file bytes did not cross the measured proxy: proxied_bytes={proxied_bytes} payload_bytes={}",
+        payload.len()
+    );
 
-    let out_path = tmp.path().join("saved-network-download.bin");
+    let out_path = tmp.path().join("saved-proxied-network-download.bin");
     let saved = poll_for_saved_file(
-        &bob,
+        &alice,
         &workspace,
         "#1",
         out_path.to_str().expect("output path"),
         60_000,
     );
-    assert_eq!(line_value(&saved, "filename"), "network-download.bin");
+    assert_eq!(
+        line_value(&saved, "filename"),
+        "proxied-network-download.bin"
+    );
     assert_eq!(
         line_value(&saved, "bytes_written"),
         payload.len().to_string()
@@ -430,16 +456,21 @@ fn cli_two_long_running_daemons_download_multislice_file_via_sync_setting() {
 }
 
 #[test]
-#[ignore = "download throughput fixture is manual; run with --ignored when measuring daemon transfer speed"]
-fn cli_daemon_download_perf_times_send_to_peer_receipt() {
+#[ignore = "manual cable-bound download throughput fixture; run with --ignored when measuring daemon transfer speed"]
+fn cli_cable_bound_download_perf_isolates_authoring_sync_and_save() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice-download-perf.db");
     let bob = temp_db(&tmp, "bob-download-perf.db");
     let alice_port = free_port();
     let bob_port = free_port();
+    let cable_mbps = env_f64("TOPO_DOWNLOAD_PERF_MBPS").unwrap_or(25.0);
+    let proxy = ThrottledTcpProxy::start(
+        format!("127.0.0.1:{alice_port}").parse().unwrap(),
+        bytes_per_second(cable_mbps),
+    );
 
     let workspace = create_workspace(&alice, "download-perf", "alice", "alice-laptop");
-    let invite = workspace_invite_for_addr(&alice, &workspace, alice_port);
+    let invite = workspace_invite_for_addr(&alice, &workspace, proxy.port());
 
     let mut alice_daemon = spawn_daemon(&alice, alice_port);
     let mut bob_daemon = spawn_daemon(&bob, bob_port);
@@ -466,8 +497,14 @@ fn cli_daemon_download_perf_times_send_to_peer_receipt() {
         10_000,
     );
     poll_for_key_access(&bob, &workspace, &removal_frontier_id, "yes", 10_000);
+    set_sync_range_until_visible(&bob, &workspace, "0", "18446744073709551615", 60_000);
+
+    assert_success(topo(&["--db", &alice, "stop"]));
     drop(alice_daemon);
+    wait_for_daemon_lock_release(&alice);
+    assert_success(topo(&["--db", &bob, "stop"]));
     drop(bob_daemon);
+    wait_for_daemon_lock_release(&bob);
 
     let payload_mib = std::env::var("TOPO_DOWNLOAD_PERF_MIB")
         .ok()
@@ -477,14 +514,19 @@ fn cli_daemon_download_perf_times_send_to_peer_receipt() {
                 .expect("parse TOPO_DOWNLOAD_PERF_MIB")
         })
         .unwrap_or(8);
+    let timeout_ms = env_u64("TOPO_DOWNLOAD_PERF_TIMEOUT_MS")
+        .unwrap_or_else(|| download_timeout_ms(payload_mib, cable_mbps));
+
+    let payload_create_started = Instant::now();
     let payload = patterned_payload(payload_mib * 4);
     let in_path = tmp.path().join("download-perf.bin");
     std::fs::write(&in_path, &payload).expect("write perf payload");
+    let payload_create_elapsed = payload_create_started.elapsed();
 
     let authoring_started = Instant::now();
     let sent = assert_success(topo(&[
         "--db",
-        &alice,
+        &bob,
         "send-file",
         &workspace,
         "download perf",
@@ -494,12 +536,13 @@ fn cli_daemon_download_perf_times_send_to_peer_receipt() {
     let authoring_elapsed = authoring_started.elapsed();
     assert_eq!(line_value(&sent, "blob_bytes"), payload.len().to_string());
 
-    let before_sync = assert_success(topo(&["--db", &bob, "files", &workspace]));
+    let before_sync = assert_success(topo(&["--db", &alice, "files", &workspace]));
     assert!(
         !before_sync.contains("download-perf.bin"),
         "file arrived before sync was enabled:\n{before_sync}"
     );
 
+    let proxied_before = proxy.client_to_server_bytes();
     let sync_started = Instant::now();
     let mut alice_daemon = spawn_daemon(&alice, alice_port);
     let mut bob_daemon = spawn_daemon(&bob, bob_port);
@@ -507,33 +550,57 @@ fn cli_daemon_download_perf_times_send_to_peer_receipt() {
     alice_daemon.assert_running();
     bob_daemon.assert_running();
 
-    let listing = poll_for_file_complete(&bob, &workspace, "download-perf.bin", 60_000);
-    let sync_elapsed = sync_started.elapsed();
-    let ready_elapsed = daemons_ready_at.elapsed();
+    let first_proxy_byte_at =
+        wait_for_proxy_client_to_server_above(&proxy, proxied_before, timeout_ms);
+    let listing = poll_for_file_complete(&alice, &workspace, "download-perf.bin", timeout_ms);
+    let completed_at = Instant::now();
+    let sync_elapsed = completed_at.duration_since(sync_started);
+    let ready_elapsed = completed_at.duration_since(daemons_ready_at);
+    let first_proxy_byte_elapsed = completed_at.duration_since(first_proxy_byte_at);
     assert!(listing.contains("\u{2714}"), "{listing}");
 
-    let seconds = sync_elapsed.as_secs_f64().max(0.001);
-    let mib_per_second = payload.len() as f64 / seconds / (1024.0 * 1024.0);
-    let mbit_per_second = payload.len() as f64 * 8.0 / seconds / 1_000_000.0;
-    eprintln!(
-        "black_box_download_perf bytes={} authoring_ms={} sync_enable_to_receive_ms={} daemons_ready_to_receive_ms={} mib_per_s={:.2} mbit_per_s={:.2}",
-        payload.len(),
-        authoring_elapsed.as_millis(),
-        sync_elapsed.as_millis(),
-        ready_elapsed.as_millis(),
-        mib_per_second,
-        mbit_per_second
+    let proxied_bytes = proxy
+        .client_to_server_bytes()
+        .saturating_sub(proxied_before);
+    assert!(
+        proxy.accepted_connections() > 0,
+        "proxy never accepted a connection"
     );
-    assert!(mib_per_second.is_finite() && mib_per_second > 0.0);
+    assert!(
+        proxied_bytes >= payload.len() as u64,
+        "bulk file bytes did not cross the measured proxy: proxied_bytes={proxied_bytes} payload_bytes={}",
+        payload.len()
+    );
+    let network_seconds = first_proxy_byte_elapsed.as_secs_f64().max(0.001);
+    let payload_mbit_per_second = payload.len() as f64 * 8.0 / network_seconds / 1_000_000.0;
+    let proxy_mbit_per_second = proxied_bytes as f64 * 8.0 / network_seconds / 1_000_000.0;
 
     let out_path = tmp.path().join("saved-download-perf.bin");
+    let save_started = Instant::now();
     let saved = poll_for_saved_file(
-        &bob,
+        &alice,
         &workspace,
         "#1",
         out_path.to_str().expect("output path"),
         30_000,
     );
+    let save_elapsed = save_started.elapsed();
+    eprintln!(
+        "black_box_cable_download_perf sender=bob receiver=alice path=bob_to_alice_proxy configured_mbps={:.2} payload_bytes={} proxy_client_to_server_bytes={} payload_create_ms={} send_file_authoring_ms={} sync_restart_to_complete_ms={} daemons_ready_to_complete_ms={} first_proxy_byte_to_complete_ms={} save_file_ms={} payload_mbit_per_s={:.2} proxy_mbit_per_s={:.2}",
+        cable_mbps,
+        payload.len(),
+        proxied_bytes,
+        payload_create_elapsed.as_millis(),
+        authoring_elapsed.as_millis(),
+        sync_elapsed.as_millis(),
+        ready_elapsed.as_millis(),
+        first_proxy_byte_elapsed.as_millis(),
+        save_elapsed.as_millis(),
+        payload_mbit_per_second,
+        proxy_mbit_per_second
+    );
+    assert!(payload_mbit_per_second.is_finite() && payload_mbit_per_second > 0.0);
+
     assert_eq!(line_value(&saved, "filename"), "download-perf.bin");
     assert_eq!(
         line_value(&saved, "bytes_written"),
@@ -1021,6 +1088,224 @@ fn poll_for_saved_file(
         thread::sleep(Duration::from_millis(250));
     }
     panic!("save-file in {db} never completed {selector}; last error:\n{last}");
+}
+
+#[derive(Default)]
+struct ProxyCounters {
+    accepted_connections: AtomicUsize,
+    client_to_server_bytes: AtomicU64,
+    server_to_client_bytes: AtomicU64,
+}
+
+struct ThrottledTcpProxy {
+    addr: SocketAddr,
+    stop: Arc<AtomicBool>,
+    counters: Arc<ProxyCounters>,
+    accept_thread: Option<JoinHandle<()>>,
+}
+
+impl ThrottledTcpProxy {
+    fn start(target: SocketAddr, bytes_per_second_per_connection: u64) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind throttled proxy");
+        listener
+            .set_nonblocking(true)
+            .expect("set throttled proxy nonblocking");
+        let addr = listener.local_addr().expect("proxy local addr");
+        let stop = Arc::new(AtomicBool::new(false));
+        let counters = Arc::new(ProxyCounters::default());
+        let thread_stop = Arc::clone(&stop);
+        let thread_counters = Arc::clone(&counters);
+        let accept_thread = thread::spawn(move || {
+            while !thread_stop.load(Ordering::SeqCst) {
+                let (client, _) = match listener.accept() {
+                    Ok(accepted) => accepted,
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(err) if thread_stop.load(Ordering::SeqCst) => {
+                        eprintln!("throttled proxy stopped after accept error: {err}");
+                        break;
+                    }
+                    Err(err) => panic!("throttled proxy accept: {err}"),
+                };
+                let server = match TcpStream::connect(target) {
+                    Ok(server) => server,
+                    Err(_) => continue,
+                };
+                let _ = client.set_nodelay(true);
+                let _ = server.set_nodelay(true);
+                thread_counters
+                    .accepted_connections
+                    .fetch_add(1, Ordering::Relaxed);
+                spawn_proxy_pipes(
+                    client,
+                    server,
+                    bytes_per_second_per_connection.max(1),
+                    Arc::clone(&thread_counters),
+                );
+            }
+        });
+        Self {
+            addr,
+            stop,
+            counters,
+            accept_thread: Some(accept_thread),
+        }
+    }
+
+    fn port(&self) -> u16 {
+        self.addr.port()
+    }
+
+    fn accepted_connections(&self) -> usize {
+        self.counters.accepted_connections.load(Ordering::Relaxed)
+    }
+
+    fn client_to_server_bytes(&self) -> u64 {
+        self.counters.client_to_server_bytes.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for ThrottledTcpProxy {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        let _ = TcpStream::connect(self.addr);
+        if let Some(handle) = self.accept_thread.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ProxyDirection {
+    ClientToServer,
+    ServerToClient,
+}
+
+fn spawn_proxy_pipes(
+    client: TcpStream,
+    server: TcpStream,
+    bytes_per_second: u64,
+    counters: Arc<ProxyCounters>,
+) {
+    let client_reader = client.try_clone().expect("clone proxy client reader");
+    let server_writer = server.try_clone().expect("clone proxy server writer");
+    let c2s_counters = Arc::clone(&counters);
+    thread::spawn(move || {
+        copy_throttled(
+            client_reader,
+            server_writer,
+            bytes_per_second,
+            c2s_counters,
+            ProxyDirection::ClientToServer,
+        );
+    });
+    thread::spawn(move || {
+        copy_throttled(
+            server,
+            client,
+            bytes_per_second,
+            counters,
+            ProxyDirection::ServerToClient,
+        );
+    });
+}
+
+fn copy_throttled(
+    mut reader: TcpStream,
+    mut writer: TcpStream,
+    bytes_per_second: u64,
+    counters: Arc<ProxyCounters>,
+    direction: ProxyDirection,
+) {
+    let started = Instant::now();
+    let mut copied = 0u64;
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        let read = match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        };
+        if writer.write_all(&buf[..read]).is_err() {
+            break;
+        }
+        copied = copied.saturating_add(read as u64);
+        match direction {
+            ProxyDirection::ClientToServer => {
+                counters
+                    .client_to_server_bytes
+                    .fetch_add(read as u64, Ordering::Relaxed);
+            }
+            ProxyDirection::ServerToClient => {
+                counters
+                    .server_to_client_bytes
+                    .fetch_add(read as u64, Ordering::Relaxed);
+            }
+        }
+        throttle_copy(started, copied, bytes_per_second);
+    }
+    let _ = writer.shutdown(Shutdown::Write);
+}
+
+fn throttle_copy(started: Instant, copied: u64, bytes_per_second: u64) {
+    let expected = Duration::from_secs_f64(copied as f64 / bytes_per_second as f64);
+    if let Some(delay) = expected.checked_sub(started.elapsed()) {
+        if delay > Duration::from_millis(1) {
+            thread::sleep(delay);
+        }
+    }
+}
+
+fn wait_for_proxy_client_to_server_above(
+    proxy: &ThrottledTcpProxy,
+    baseline: u64,
+    timeout_ms: u64,
+) -> Instant {
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    while Instant::now() < deadline {
+        if proxy.client_to_server_bytes() > baseline {
+            return Instant::now();
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    panic!("proxy client-to-server bytes never advanced above {baseline}");
+}
+
+fn bytes_per_second(mbps: f64) -> u64 {
+    ((mbps * 1_000_000.0) / 8.0).round().max(1.0) as u64
+}
+
+fn download_timeout_ms(payload_mib: usize, mbps: f64) -> u64 {
+    let payload_bytes = payload_mib as f64 * 1024.0 * 1024.0;
+    let expected_transfer_ms = payload_bytes * 8.0 / (mbps * 1_000_000.0) * 1000.0;
+    (expected_transfer_ms * 8.0).round().max(120_000.0) as u64
+}
+
+fn env_f64(name: &str) -> Option<f64> {
+    std::env::var(name).ok().map(|value| {
+        let parsed = value
+            .parse::<f64>()
+            .unwrap_or_else(|_| panic!("{name} must be a positive number"));
+        assert!(
+            parsed.is_finite() && parsed > 0.0,
+            "{name} must be a positive finite number"
+        );
+        parsed
+    })
+}
+
+fn env_u64(name: &str) -> Option<u64> {
+    std::env::var(name)
+        .ok()
+        .map(|value| {
+            value
+                .parse()
+                .unwrap_or_else(|_| panic!("{name} must be a positive integer"))
+        })
+        .filter(|value| *value > 0)
 }
 
 fn patterned_payload(slices: usize) -> Vec<u8> {
