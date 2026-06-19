@@ -51,7 +51,7 @@ use self::context_db::{
     wake_context_matches_in_tx,
 };
 use crate::core::command::AuthoredFacts;
-use crate::core::context::ContextSet;
+use crate::core::context::{ContextSet, ContextSetAdditions};
 use crate::core::db::{quoted_identifier, quoted_table_name, Db, TableName};
 use crate::core::effects::RuntimeEffects;
 use crate::core::facts::{
@@ -259,7 +259,7 @@ fn evaluate_loaded_projection_input(
     Ok(ProjectionOutcome::Accepted(projection))
 }
 
-/// Stage 3: commit one projection outcome as a single durable boundary.
+/// Stage 3: commit one projection outcome as a single SQL transaction.
 ///
 /// Commit owns every SQL mutation after selection. Stale inputs are cleaned,
 /// rejected inputs are retired, and accepted projector output becomes visible:
@@ -267,8 +267,9 @@ fn evaluate_loaded_projection_input(
 /// newly visible context wakes dependent facts, and runtime effects are admitted
 /// last.
 ///
-/// This is the `commit_projection_effects` boundary from the old pipeline shape,
-/// kept as a named stage so the central procedure stays load -> evaluate -> commit.
+/// Accepted commits are deliberately written as substages inside the transaction:
+/// settle this input's lifecycle, publish retained owner state, wake projection
+/// work from new context, then commit projector-emitted effects.
 fn commit_projection_outcome(
     store: &Db,
     outcome: &ProjectionOutcome,
@@ -617,21 +618,17 @@ fn commit_rejected_projection_input_in_tx(
 /// Commit one accepted fact's complete projection result.
 ///
 /// This is the projection boundary, the same way intent dispatch owns the
-/// handler boundary. The transaction consumes this fact's pending row and makes
-/// the projector's output visible: replacement needs, append-only offers,
-/// replacement time wakes, newly woken dependent facts, protocol row mutations,
-/// and follow-up intents. If anything fails inside this transaction, SQLite
-/// rolls the whole boundary back.
+/// handler boundary. The transaction consumes this fact's selected input and
+/// makes the projector's output visible. Durable projection rows and retained
+/// incoming facts can publish owner state; dropped incoming facts cannot.
 ///
 /// Transaction contents:
 ///
-/// - Clear this fact's pending row.
-/// - Replace this fact's standing context.
-/// - Replace this fact's time wakes.
-/// - Wake context matches directly.
-/// - Apply row mutations.
-/// - Record durable intents.
-/// - Record ephemeral intents in the temp local queue.
+/// - Settle the selected input's lifecycle.
+/// - Replace retained needs and append retained offers.
+/// - Replace retained time wakes.
+/// - Wake facts unblocked by newly visible context.
+/// - Commit projector-emitted facts, rows, purges, and intents.
 ///
 /// Incoming rows are volatile one-shot intake. They may emit needs as transient
 /// probes, but they cannot leave standing offers or time wakes behind unless
@@ -644,23 +641,118 @@ fn commit_projected_fact_in_tx(
     fact_admission: Option<FactAdmissionFn>,
 ) -> rusqlite::Result<()> {
     let fact_id = projection.fact.id;
-    let keep_projection_state = projection_keeps_standing_state(projection);
 
-    // First consume the source marker. Durable inputs clear pending work.
-    // Volatile incoming inputs either move into retained fact storage or
-    // disappear. No projected state is published before this boundary is settled.
-    commit_projection_source_boundary_in_tx(tx, projection, fact_id, keep_projection_state)?;
+    let retained = settle_projected_input_lifecycle_in_tx(tx, projection, fact_id)?;
+    let new_context =
+        replace_needs_and_append_offers_if_retained_in_tx(tx, projection, fact_id, retained)?;
+    replace_time_wakes_if_retained_in_tx(tx, projection, fact_id, retained)?;
+    wake_projection_work_from_new_context_in_tx(tx, &new_context)?;
+    commit_projector_emitted_runtime_effects_in_tx(
+        tx,
+        projection,
+        allowed_tables,
+        registered_intent_kinds,
+        fact_admission,
+    )?;
+    Ok(())
+}
 
-    if keep_projection_state {
-        // Then publish standing projection state. Context replacement computes
-        // additions against the transaction's current `context_edges`; only those
-        // additions can wake dependent owners.
-        commit_standing_projection_state_in_tx(tx, projection, fact_id)?;
+fn projection_retains_fact_after_commit(projection: &PreparedProjection) -> bool {
+    let fact_id = projection.fact.id;
+    let purges_self = projection.runtime_effects.purged_facts.contains(&fact_id);
+    match projection.source {
+        ProjectionSource::Durable => !purges_self,
+        ProjectionSource::Incoming => projection.retain_self && !purges_self,
     }
+}
 
-    // Finally commit ordinary runtime effects. Facts, row mutations, and intents
-    // become visible only after the queue/intake row and projection-owned state
-    // have committed successfully.
+/// Settle the selected input before publishing projection-owned state.
+///
+/// Durable inputs clear pending work. Incoming inputs are volatile: projection
+/// either retains them as ordinary facts or drops them. The returned boolean is
+/// whether this fact remains retained and may publish standing context/time rows.
+fn settle_projected_input_lifecycle_in_tx(
+    tx: &Db,
+    projection: &PreparedProjection,
+    fact_id: FactId,
+) -> rusqlite::Result<bool> {
+    let retained = projection_retains_fact_after_commit(projection);
+    match projection.source {
+        ProjectionSource::Durable => perf::measure_result("projection_clear_pending_work", || {
+            clear_pending_projection_work_in_tx(tx, fact_id)
+        })?,
+        ProjectionSource::Incoming if retained => {
+            // Retention is the only path from volatile intake to durable fact
+            // storage. `move_incoming_to_retained_in_tx` also clears transient
+            // owner rows before the retained projection state is written below.
+            move_incoming_to_retained_in_tx(tx, &projection.fact).map(|_| ())?
+        }
+        ProjectionSource::Incoming => {
+            // A dropped incoming row is allowed to produce effects only when it
+            // has no unresolved transient needs and leaves no durable projection
+            // state behind.
+            validate_dropped_incoming_projection(projection).map_err(sqlite_string_error)?;
+            perf::measure_result("projection_delete_incoming_fact", || {
+                delete_incoming_fact_in_tx(tx, fact_id).map(|_| ())
+            })?
+        }
+    };
+    Ok(retained)
+}
+
+/// Replace retained needs and append retained offers.
+///
+/// The returned additions are computed inside the commit transaction against the
+/// current `context_edges` view. Only those new relationships can wake other
+/// projection work.
+fn replace_needs_and_append_offers_if_retained_in_tx(
+    tx: &Db,
+    projection: &PreparedProjection,
+    fact_id: FactId,
+    retained: bool,
+) -> rusqlite::Result<ContextSetAdditions> {
+    if !retained {
+        return Ok(ContextSetAdditions::default());
+    }
+    perf::measure_result("projection_replace_context", || {
+        replace_context_for_owner_in_tx(tx, fact_id, &projection.projected_context)
+    })
+}
+
+/// Replace retained time wakes. Time wakes do not participate in context wake fanout.
+fn replace_time_wakes_if_retained_in_tx(
+    tx: &Db,
+    projection: &PreparedProjection,
+    fact_id: FactId,
+    retained: bool,
+) -> rusqlite::Result<()> {
+    if !retained {
+        return Ok(());
+    }
+    perf::measure_result("projection_replace_time_wakes", || {
+        replace_stored_time_wake_owner_rows(tx, fact_id, &projection.time_wakes)
+    })
+}
+
+/// Queue facts unblocked by the context this projection just made visible.
+fn wake_projection_work_from_new_context_in_tx(
+    tx: &Db,
+    context_additions: &ContextSetAdditions,
+) -> rusqlite::Result<()> {
+    perf::measure_result("projection_wake_context_matches", || {
+        wake_context_matches_in_tx(tx, &context_additions).map_err(sqlite_string_error)
+    })
+    .map(|_| ())
+}
+
+/// Commit projector-emitted facts, purges, rows, and intents after owner state.
+fn commit_projector_emitted_runtime_effects_in_tx(
+    tx: &Db,
+    projection: &PreparedProjection,
+    allowed_tables: &[TableName],
+    registered_intent_kinds: &[&str],
+    fact_admission: Option<FactAdmissionFn>,
+) -> rusqlite::Result<()> {
     perf::measure_result("projection_commit_runtime_effects", || {
         commit_runtime_effects_in_tx(
             tx,
@@ -671,72 +763,8 @@ fn commit_projected_fact_in_tx(
             projection.mode.is_replay(),
             true,
         )
-    })?;
-    Ok(())
-}
-
-fn projection_keeps_standing_state(projection: &PreparedProjection) -> bool {
-    let fact_id = projection.fact.id;
-    let purges_self = projection.runtime_effects.purged_facts.contains(&fact_id);
-    match projection.source {
-        ProjectionSource::Durable => !purges_self,
-        ProjectionSource::Incoming => projection.retain_self && !purges_self,
-    }
-}
-
-/// Consume the input source row without publishing projection-owned state yet.
-///
-/// Durable inputs clear pending work. Incoming inputs are volatile: projection
-/// either retains them as ordinary facts or drops them. Dropping validates that
-/// no durable context/time state escapes from the volatile row.
-fn commit_projection_source_boundary_in_tx(
-    tx: &Db,
-    projection: &PreparedProjection,
-    fact_id: FactId,
-    keep_projection_state: bool,
-) -> rusqlite::Result<()> {
-    match projection.source {
-        ProjectionSource::Durable => perf::measure_result("projection_clear_pending_work", || {
-            clear_pending_projection_work_in_tx(tx, fact_id)
-        }),
-        ProjectionSource::Incoming if keep_projection_state => {
-            // Retention is the only path from volatile intake to durable fact
-            // storage. `move_incoming_to_retained_in_tx` also clears transient
-            // owner rows before the retained projection state is written below.
-            move_incoming_to_retained_in_tx(tx, &projection.fact).map(|_| ())
-        }
-        ProjectionSource::Incoming => {
-            // A dropped incoming row is allowed to produce effects only when it
-            // has no unresolved transient needs and leaves no durable projection
-            // state behind.
-            validate_dropped_incoming_projection(projection).map_err(sqlite_string_error)?;
-            perf::measure_result("projection_delete_incoming_fact", || {
-                delete_incoming_fact_in_tx(tx, fact_id).map(|_| ())
-            })
-        }
-    }
-}
-
-/// Publish owner-scoped projection state and wake dependents from additions.
-///
-/// Context comes first because wake fanout needs the current `context_edges`
-/// view. Time wakes are also replacement state, but they do not influence
-/// context fanout.
-fn commit_standing_projection_state_in_tx(
-    tx: &Db,
-    projection: &PreparedProjection,
-    fact_id: FactId,
-) -> rusqlite::Result<()> {
-    let context_additions = perf::measure_result("projection_replace_context", || {
-        replace_context_for_owner_in_tx(tx, fact_id, &projection.projected_context)
-    })?;
-    perf::measure_result("projection_replace_time_wakes", || {
-        replace_stored_time_wake_owner_rows(tx, fact_id, &projection.time_wakes)
-    })?;
-    perf::measure_result("projection_wake_context_matches", || {
-        wake_context_matches_in_tx(tx, &context_additions).map_err(sqlite_string_error)
-    })?;
-    Ok(())
+    })
+    .map(|_| ())
 }
 
 fn validate_dropped_incoming_projection(projection: &PreparedProjection) -> Result<(), String> {
