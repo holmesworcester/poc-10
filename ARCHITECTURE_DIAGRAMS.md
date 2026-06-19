@@ -66,14 +66,16 @@ The sections below isolate the main queue transitions and runtime boundaries.
 
 A durable fact reaches projection through `pending_projection`. A network fact
 reaches projection through `incoming_facts`. Projector output can add context,
-rows, time wakes, intents, emitted durable facts, emitted incoming facts, or a
-decision to retain the incoming input. Core matches new offers against parked
-needs, re-queues woken owners, and dispatches intents to handlers; handler
-output re-enters the same queues. Durable emitted facts re-enter the loop
-through `facts` plus `pending_projection` in the same transaction. Emitting a
-need does not keep an owner in `pending_projection`; after that projection
-attempt commits, the standing need parks the owner until matching context
-re-queues it. `incoming_facts` is only the temp outside-origin staging path.
+rows, time wakes, intents, emitted durable facts, or a decision to retain the
+incoming input. Connection-frame projectors may also open encrypted inbound
+payloads and stage their child facts back into `incoming_facts`. Core matches
+new offers against parked needs, re-queues woken owners, and dispatches intents
+to handlers; handler output re-enters the same queues. Durable emitted facts
+re-enter the loop through `facts` plus `pending_projection` in the same
+transaction. Emitting a need does not keep an owner in `pending_projection`;
+after that projection attempt commits, the standing need parks the owner until
+matching context re-queues it. `incoming_facts` is only the temp outside-origin
+staging path.
 
 Materialized rows are read-model and planning state, not part of the projection
 and context-match cycle. Projectors and context matching never read them.
@@ -109,7 +111,7 @@ flowchart TD
     PROJECTOR -->|needs + offers| CONTEXT
     PROJECTOR -->|time wakes| WAKES
     PROJECTOR -->|emitted durable facts| FACTS
-    PROJECTOR -->|emitted incoming facts| INCOMING
+    PROJECTOR -->|connection_frame emits opened child facts| INCOMING
     PROJECTOR -->|intents| INTENTS
     PROJECTOR -.may retain incoming fact.-> FACTS
     PROJECTOR -.context needs park owner.-> CONTEXT
@@ -189,8 +191,8 @@ from process-local `incoming_facts`. Incoming rows project once. The projector
 may retain the incoming fact as durable evidence, retain it while parked on
 context, or drop it after opening it into incoming child facts. Emitted facts
 are not projected inline: durable emitted facts go to `facts` and
-`pending_projection`, incoming emitted facts go to `incoming_facts`, and a later
-projection item handles each one.
+`pending_projection`; connection-frame-opened child facts go to
+`incoming_facts`; and a later projection item handles each one.
 
 ## 2.1) Project One Fact: Queues And Phases
 
@@ -248,7 +250,7 @@ flowchart TD
     COMMIT -->|apply row mutations| ROWS
     COMMIT -->|admit emitted durable facts| FACTS
     COMMIT -->|queue emitted durable facts| PENDING
-    COMMIT -->|stage emitted incoming facts| INCOMING
+    COMMIT -->|stage connection_frame-opened child facts| INCOMING
     COMMIT -->|record durable intents| INTENTS
     COMMIT -->|record local intents| LOCAL_INTENTS
     COMMIT -->|purge exact facts| FACTS

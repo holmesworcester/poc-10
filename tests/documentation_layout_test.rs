@@ -111,6 +111,8 @@ fn architecture_diagrams_cover_current_runtime_relationships() {
         "Purges are also not a queue",
         "the standing need parks the owner until matching context re-queues it",
         "Durable emitted facts re-enter the loop through `facts` plus `pending_projection` in the same transaction",
+        "Connection-frame projectors may also open encrypted inbound payloads and stage their child facts back into `incoming_facts`",
+        "connection_frame emits opened child facts",
         "`incoming_facts` is only the temp outside-origin staging path",
         "## 6) Connection Bootstrap",
         "`receive_network_frame_facts` only classifies raw bytes into incoming request or connection facts",
