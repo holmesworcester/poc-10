@@ -649,13 +649,21 @@ mod tests {
     fn range_query_includes_context_only_when_requested() {
         let store = store();
         let workspace_id = [9; 32];
+        let other_workspace_id = [10; 32];
         let connection_id = seed_authorized_connection(&store, workspace_id);
         let context = fact(workspace_id, 10, 1);
         let owner = fact(workspace_id, 20, 2);
+        let same_range_unauthorized = fact(other_workspace_id, 20, 3);
+        let later = fact(workspace_id, 30, 4);
         store
             .write_transaction(|tx| {
                 crate::core::project_fact::insert_fact_and_pending_in_tx(tx, &context)?;
                 crate::core::project_fact::insert_fact_and_pending_in_tx(tx, &owner)?;
+                crate::core::project_fact::insert_fact_and_pending_in_tx(
+                    tx,
+                    &same_range_unauthorized,
+                )?;
+                crate::core::project_fact::insert_fact_and_pending_in_tx(tx, &later)?;
                 Ok(())
             })
             .expect("persist facts");
@@ -671,6 +679,18 @@ mod tests {
             Some(&owner),
         )
         .expect("owner contribution");
+        record_sync_contribution(
+            &store,
+            &upsert(other_workspace_id, &same_range_unauthorized, Vec::new()),
+            Some(&same_range_unauthorized),
+        )
+        .expect("unauthorized contribution");
+        record_sync_contribution(
+            &store,
+            &upsert(workspace_id, &later, Vec::new()),
+            Some(&later),
+        )
+        .expect("later contribution");
 
         let without = shareable_facts_for_connection_range(&store, connection_id, 20, 20, false)
             .expect("without deps");
@@ -783,10 +803,7 @@ mod tests {
             expand_fact_ids_with_context_for_connection(&store, connection_id, &[owner.id])
                 .expect("expand exact owner");
 
-        assert_eq!(
-            expanded.into_iter().collect::<BTreeSet<_>>(),
-            BTreeSet::from([context.id, owner.id])
-        );
+        assert_eq!(expanded, vec![context.id, owner.id]);
     }
 
     #[test]
@@ -1072,6 +1089,41 @@ fn shareable_fact_entries_for_connection_fact_ids(
     Ok(facts)
 }
 
+fn shareable_fact_entries_for_connection_range(
+    store: &Db,
+    connection_id: FactId,
+    start_timestamp_ms: u64,
+    end_timestamp_ms: u64,
+) -> Result<Vec<ShareableFactEntry>, String> {
+    let workspaces = authorized_workspaces_for_connection(store, connection_id)?;
+    if workspaces.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut facts = Vec::new();
+    let mut seen = BTreeSet::<(FactId, FactId)>::new();
+    for workspace_id in workspaces {
+        for row in shareable_fact_rows_for_workspace_range(
+            store,
+            workspace_id,
+            start_timestamp_ms,
+            end_timestamp_ms,
+        )? {
+            if !seen.insert((row.workspace_id, row.fact_id)) {
+                continue;
+            }
+            let Some(fact) = fact_for_shareable_row(store, &row)? else {
+                continue;
+            };
+            facts.push(ShareableFactEntry {
+                workspace_id: row.workspace_id,
+                fact,
+            });
+        }
+    }
+    facts.sort_by_key(|entry| (entry.fact.timestamp, entry.fact.id, entry.workspace_id));
+    Ok(facts)
+}
+
 fn authorized_workspaces_for_connection(
     store: &Db,
     connection_id: FactId,
@@ -1102,15 +1154,16 @@ pub fn shareable_facts_for_connection_range(
     end_timestamp_ms: u64,
     include_deps: bool,
 ) -> Result<Vec<Fact>, String> {
-    let available = shareable_fact_entries_for_connection(store, connection_id)?;
+    let available = shareable_fact_entries_for_connection_range(
+        store,
+        connection_id,
+        start_timestamp_ms,
+        end_timestamp_ms,
+    )?;
     if !include_deps {
         let mut by_id = BTreeMap::<FactId, Fact>::new();
         for entry in available {
-            if start_timestamp_ms <= entry.fact.timestamp
-                && entry.fact.timestamp <= end_timestamp_ms
-            {
-                by_id.entry(entry.fact.id).or_insert(entry.fact);
-            }
+            by_id.entry(entry.fact.id).or_insert(entry.fact);
         }
         let mut facts = by_id.into_values().collect::<Vec<_>>();
         facts.sort_by_key(|fact| (fact.timestamp, fact.id));
@@ -1127,13 +1180,12 @@ pub fn shareable_facts_for_connection_range(
         by_id.entry(entry.fact.id).or_insert(entry.fact);
     }
     let mut selected = BTreeSet::<FactId>::new();
-    for fact in by_id.values() {
-        if start_timestamp_ms <= fact.timestamp && fact.timestamp <= end_timestamp_ms {
-            selected.insert(fact.id);
-        }
+    for fact_id in by_id.keys() {
+        selected.insert(*fact_id);
     }
 
     let range_owner_ids = selected.iter().copied().collect::<Vec<_>>();
+    let mut dep_ids = BTreeSet::<FactId>::new();
     for fact_id in range_owner_ids {
         let Some(workspace_ids) = workspaces_by_id.get(&fact_id) else {
             continue;
@@ -1145,10 +1197,13 @@ pub fn shareable_facts_for_connection_range(
             .into_iter()
             .flatten()
         {
-            if by_id.contains_key(&dep_id) {
-                selected.insert(dep_id);
-            }
+            dep_ids.insert(dep_id);
         }
+    }
+    let dep_ids = dep_ids.into_iter().collect::<Vec<_>>();
+    for entry in shareable_fact_entries_for_connection_fact_ids(store, connection_id, &dep_ids)? {
+        selected.insert(entry.fact.id);
+        by_id.entry(entry.fact.id).or_insert(entry.fact);
     }
 
     let mut facts = selected
@@ -1172,17 +1227,17 @@ pub fn expand_fact_ids_with_context_for_connection(
         return Ok(fact_ids.to_vec());
     };
     let mut workspaces_by_id = BTreeMap::<FactId, BTreeSet<FactId>>::new();
-    let mut selected = BTreeSet::<FactId>::new();
+    let mut selected_owners = BTreeSet::<FactId>::new();
     for entry in entries {
         workspaces_by_id
             .entry(entry.fact.id)
             .or_default()
             .insert(entry.workspace_id);
-        selected.insert(entry.fact.id);
+        selected_owners.insert(entry.fact.id);
     }
 
     let mut dep_ids = BTreeSet::<FactId>::new();
-    for fact_id in selected.iter().copied().collect::<Vec<_>>() {
+    for fact_id in selected_owners.iter().copied().collect::<Vec<_>>() {
         let Some(workspace_ids) = workspaces_by_id.get(&fact_id) else {
             continue;
         };
@@ -1198,13 +1253,20 @@ pub fn expand_fact_ids_with_context_for_connection(
     }
 
     let dep_ids = dep_ids.into_iter().collect::<Vec<_>>();
-    for entry in shareable_fact_entries_for_connection_fact_ids(store, connection_id, &dep_ids)? {
-        selected.insert(entry.fact.id);
-    }
+    let dep_entries =
+        shareable_fact_entries_for_connection_fact_ids(store, connection_id, &dep_ids)?;
 
-    let mut expanded = selected.into_iter().collect::<Vec<_>>();
-    expanded.sort();
-    expanded.dedup();
+    let mut expanded = Vec::new();
+    for entry in dep_entries {
+        if !selected_owners.contains(&entry.fact.id) && !expanded.contains(&entry.fact.id) {
+            expanded.push(entry.fact.id);
+        }
+    }
+    for fact_id in fact_ids {
+        if selected_owners.contains(fact_id) && !expanded.contains(fact_id) {
+            expanded.push(*fact_id);
+        }
+    }
     Ok(expanded)
 }
 
@@ -1437,6 +1499,34 @@ fn shareable_fact_rows_for_fact(
         .map_err(|err| format!("load shareable fact rows for fact: {err}"))?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|err| format!("decode shareable fact rows for fact: {err}"))
+}
+
+fn shareable_fact_rows_for_workspace_range(
+    store: &Db,
+    workspace_id: FactId,
+    start_timestamp_ms: u64,
+    end_timestamp_ms: u64,
+) -> Result<Vec<ShareableFactRow>, String> {
+    let start = i64::try_from(start_timestamp_ms).unwrap_or(i64::MAX);
+    let end = i64::try_from(end_timestamp_ms).unwrap_or(i64::MAX);
+    let mut stmt = store
+        .conn()
+        .prepare(
+            "SELECT workspace_id, fact_id, timestamp_ms
+             FROM sync_shareable_fact_rows
+             WHERE workspace_id = ?1 AND timestamp_ms >= ?2 AND timestamp_ms <= ?3
+             ORDER BY timestamp_ms, fact_id
+             LIMIT ?4",
+        )
+        .map_err(|err| format!("load shareable fact rows for range: {err}"))?;
+    let rows = stmt
+        .query_map(
+            params![workspace_id, start, end, DEFAULT_QUERY_LIMIT as i64],
+            decode_shareable_fact_row,
+        )
+        .map_err(|err| format!("load shareable fact rows for range: {err}"))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|err| format!("decode shareable fact rows for range: {err}"))
 }
 
 pub fn negentropy_leaf_rows(store: &Db) -> Result<Vec<NegentropyLeafRow>, String> {

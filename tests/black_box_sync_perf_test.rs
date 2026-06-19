@@ -23,6 +23,7 @@ fn black_box_generated_content_sync_perf_uses_daemon_restart_boundary() {
     // `TOPO_SYNC_PERF_MESSAGES=100000` or `500000` for large catch-up runs.
     let message_count = env_usize("TOPO_SYNC_PERF_MESSAGES").unwrap_or(100);
     let message_text_bytes = env_usize("TOPO_SYNC_PERF_MESSAGE_TEXT_BYTES").unwrap_or(128);
+    let preindex_alice = env_bool("TOPO_SYNC_PERF_PREINDEX_ALICE");
     let timeout_ms = env_u64("TOPO_SYNC_PERF_TIMEOUT_MS")
         .unwrap_or_else(|| 120_000_u64.max(message_count as u64 * 120));
 
@@ -41,6 +42,7 @@ fn black_box_generated_content_sync_perf_uses_daemon_restart_boundary() {
     alice_daemon.stop_with_cli();
     bob_daemon.stop_with_cli();
 
+    let alice_indexed_before_generate = sync_indexed_facts(&alice);
     let generated = generate_profiled(&alice, &workspace, message_count, message_text_bytes);
     assert_eq!(
         line_value(&generated.stdout, "generated_facts"),
@@ -48,6 +50,16 @@ fn black_box_generated_content_sync_perf_uses_daemon_restart_boundary() {
     );
 
     assert_content_count(&bob, &workspace, 0);
+
+    let preindex_started = Instant::now();
+    let mut alice_sync_index_ready_ms = 0;
+    if preindex_alice {
+        let mut alice_daemon = spawn_daemon(&alice, alice_port);
+        alice_daemon.assert_running();
+        poll_for_sync_indexed_facts(&alice, message_count, Duration::from_millis(timeout_ms));
+        alice_sync_index_ready_ms = preindex_started.elapsed().as_millis();
+        alice_daemon.stop_with_cli();
+    }
 
     let sync_started = Instant::now();
     let mut alice_daemon = spawn_daemon(&alice, alice_port);
@@ -71,10 +83,13 @@ fn black_box_generated_content_sync_perf_uses_daemon_restart_boundary() {
     let seconds = sync_elapsed.as_secs_f64().max(0.001);
     let messages_per_second = message_count as f64 / seconds;
     eprintln!(
-        "black_box_generated_content_sync_perf messages={} message_text_bytes={} timeout_ms={} authoring_ms={} sync_enable_to_first_projected_ms={} daemons_ready_to_first_projected_ms={} first_projected_to_full_projected_ms={} sync_enable_to_projected_ms={} daemons_ready_to_projected_ms={} messages_per_s={:.2} generate_profile={}",
+        "black_box_generated_content_sync_perf messages={} message_text_bytes={} timeout_ms={} preindex_alice={} alice_indexed_before_generate={} alice_sync_index_ready_ms={} authoring_ms={} sync_enable_to_first_projected_ms={} daemons_ready_to_first_projected_ms={} first_projected_to_full_projected_ms={} sync_enable_to_projected_ms={} daemons_ready_to_projected_ms={} messages_per_s={:.2} generate_profile={}",
         message_count,
         message_text_bytes,
         timeout_ms,
+        preindex_alice,
+        alice_indexed_before_generate,
+        alice_sync_index_ready_ms,
         generated.elapsed.as_millis(),
         sync_to_first_projected.as_millis(),
         ready_to_first_projected.as_millis(),
@@ -85,6 +100,84 @@ fn black_box_generated_content_sync_perf_uses_daemon_restart_boundary() {
         one_line(&generated.stderr)
     );
     assert!(messages_per_second.is_finite() && messages_per_second > 0.0);
+}
+
+#[test]
+#[ignore = "manual live-tail throughput fixture; run with --ignored when measuring two-daemon projection without message catch-up"]
+fn black_box_generated_content_live_tail_perf_skips_message_catchup() {
+    // This fixture keeps both daemons connected before generating messages.
+    // The measured message window therefore uses live-tail sends emitted by
+    // `share_fact_with_sync`, not initial compare/catch-up for the message set.
+    let tmp = tempfile::tempdir().unwrap();
+    let alice = temp_db(&tmp, "alice-live-tail-perf.db");
+    let bob = temp_db(&tmp, "bob-live-tail-perf.db");
+    let alice_port = free_port();
+    let bob_port = free_port();
+    let message_count = env_usize("TOPO_SYNC_PERF_MESSAGES").unwrap_or(100);
+    let message_text_bytes = env_usize("TOPO_SYNC_PERF_MESSAGE_TEXT_BYTES").unwrap_or(128);
+    let timeout_ms = env_u64("TOPO_SYNC_PERF_TIMEOUT_MS")
+        .unwrap_or_else(|| 120_000_u64.max(message_count as u64 * 120));
+
+    let workspace = create_workspace(&alice, "live-tail-perf", "alice", "alice-laptop");
+    let invite = workspace_invite_for_addr(&alice, &workspace, alice_port);
+
+    let setup_started = Instant::now();
+    let mut alice_daemon = spawn_daemon(&alice, alice_port);
+    let mut bob_daemon = spawn_daemon(&bob, bob_port);
+    let accepted = accept_with_identity_retry(&bob, &invite, "bob", "bob-phone");
+    assert_eq!(line_value(&accepted, "workspace_id"), workspace);
+    alice_daemon.assert_running();
+    bob_daemon.assert_running();
+    poll_for_workspace_member(&bob, &workspace, "bob", 10_000);
+    let removal_frontier = create_local_content_key(&alice, &workspace);
+    poll_for_key_access(&bob, &workspace, &removal_frontier, "yes", 30_000);
+    assert_content_count(&bob, &workspace, 0);
+    let setup_ms = setup_started.elapsed().as_millis();
+
+    let generate_started = Instant::now();
+    let generated = generate_profiled(&alice, &workspace, message_count, message_text_bytes);
+    let generate_finished = Instant::now();
+    assert_eq!(
+        line_value(&generated.stdout, "generated_facts"),
+        message_count.to_string()
+    );
+
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let first_projected = poll_for_content_count(&bob, &workspace, 1, deadline);
+    let first_projected_at = Instant::now();
+    let projected = poll_for_content_count(&bob, &workspace, message_count, deadline);
+    let full_projected_at = Instant::now();
+    assert!(first_projected.content_messages >= 1);
+    assert_eq!(projected.content_messages, message_count);
+
+    let generate_start_to_first = first_projected_at.duration_since(generate_started);
+    let generate_return_to_first = first_projected_at.saturating_duration_since(generate_finished);
+    let generate_return_to_full = full_projected_at.saturating_duration_since(generate_finished);
+    let end_to_end = full_projected_at.duration_since(generate_started);
+    let live_tail_seconds = generate_return_to_full.as_secs_f64().max(0.001);
+    let end_to_end_seconds = end_to_end.as_secs_f64().max(0.001);
+    let live_tail_messages_per_second = message_count as f64 / live_tail_seconds;
+    let end_to_end_messages_per_second = message_count as f64 / end_to_end_seconds;
+
+    eprintln!(
+        "black_box_generated_content_live_tail_perf messages={} message_text_bytes={} timeout_ms={} setup_ms={} authoring_ms={} generate_start_to_first_projected_ms={} generate_return_to_first_projected_ms={} generate_return_to_projected_ms={} generate_start_to_projected_ms={} live_tail_messages_per_s={:.2} end_to_end_messages_per_s={:.2} generate_profile={}",
+        message_count,
+        message_text_bytes,
+        timeout_ms,
+        setup_ms,
+        generated.elapsed.as_millis(),
+        generate_start_to_first.as_millis(),
+        generate_return_to_first.as_millis(),
+        generate_return_to_full.as_millis(),
+        end_to_end.as_millis(),
+        live_tail_messages_per_second,
+        end_to_end_messages_per_second,
+        one_line(&generated.stderr)
+    );
+    assert!(live_tail_messages_per_second.is_finite() && live_tail_messages_per_second > 0.0);
+
+    alice_daemon.stop_with_cli();
+    bob_daemon.stop_with_cli();
 }
 
 struct RunningDaemon {
@@ -295,6 +388,52 @@ fn wait_for_keys_value(db: &str, workspace_id: &str, key: &str, expected: &str) 
     panic!("keys {key} never reached {expected}: {last}");
 }
 
+fn sync_indexed_facts(db: &str) -> usize {
+    let out = assert_success(topo(&["--db", db, "sync-status"]));
+    line_value(&out, "indexed_facts")
+        .parse::<usize>()
+        .expect("indexed_facts usize")
+}
+
+fn poll_for_sync_indexed_facts(db: &str, expected: usize, timeout: Duration) -> usize {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let indexed = sync_indexed_facts(db);
+        if indexed >= expected {
+            return indexed;
+        }
+        if Instant::now() >= deadline {
+            panic!("sync-status indexed_facts >= {expected} timed out, last observed {indexed}");
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn poll_for_key_access(
+    db: &str,
+    workspace_id: &str,
+    removal_frontier_id: &str,
+    expected: &str,
+    timeout_ms: u64,
+) {
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let mut last = String::new();
+    while Instant::now() < deadline {
+        let out = topo(&["--db", db, "key-access", workspace_id, removal_frontier_id]);
+        if out.status.success() {
+            let text = stdout(&out);
+            if line_value(&text, "access") == expected {
+                return;
+            }
+            last = text;
+        } else {
+            last = stderr(&out);
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    panic!("key-access did not reach {expected} in {db}; last output:\n{last}");
+}
+
 #[derive(Debug)]
 struct GenerateRun {
     stdout: String,
@@ -419,4 +558,14 @@ fn env_u64(name: &str) -> Option<u64> {
                 .unwrap_or_else(|_| panic!("{name} must be a positive integer"))
         })
         .filter(|value| *value > 0)
+}
+
+fn env_bool(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            !(normalized.is_empty() || normalized == "0" || normalized == "false")
+        })
+        .unwrap_or(false)
 }

@@ -2,9 +2,9 @@
 //!
 //! A compare response is deferred because the available shareable facts and the
 //! triggering compare fact are runtime state, not fields of the compare itself.
-//! The handler loads the connection-visible fact set, asks compare planning for
-//! child compares or exact ids, persists any generated compare facts, and queues
-//! connection sends when there is something to send.
+//! The handler loads the connection-visible facts for the compare range, asks
+//! compare planning for child compares or exact ids, persists any generated
+//! compare facts, and queues connection sends when there is something to send.
 
 use crate::core::effects::RuntimeEffects;
 use crate::core::intents::{HandlerContext, HandlerResult, IntentHandler};
@@ -82,10 +82,14 @@ impl IntentHandler for SendSyncCompareResponseHandler {
             crate::protocol::sync::compare::project::decode::decode_fact(&compare_fact.bytes)?;
         let mut output = RuntimeEffects::new();
         let store = context.db()?;
-        let available_facts = crate::protocol::sync::shared_fact::shareable_facts_for_connection(
-            store,
-            compare.connection_id,
-        )?;
+        let available_facts =
+            crate::protocol::sync::shared_fact::shareable_facts_for_connection_range(
+                store,
+                compare.connection_id,
+                compare.range.start,
+                compare.range.end,
+                false,
+            )?;
         let plan = crate::protocol::sync::compare::author::response_plan_with_summaries(
             compare_fact,
             available_facts.iter(),
@@ -104,9 +108,11 @@ impl IntentHandler for SendSyncCompareResponseHandler {
                 &plan.send_fact_ids,
             )?;
         let mut fact_ids = plan.facts.iter().map(|fact| fact.id).collect::<Vec<_>>();
-        fact_ids.extend(expanded_send_fact_ids);
-        fact_ids.sort();
-        fact_ids.dedup();
+        for fact_id in expanded_send_fact_ids {
+            if !fact_ids.contains(&fact_id) {
+                fact_ids.push(fact_id);
+            }
+        }
         for fact in plan.facts {
             output = output.fact(fact);
         }
