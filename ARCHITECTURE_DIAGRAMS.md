@@ -265,21 +265,21 @@ flowchart TD
     LOCK["acquire <db>.runtime.lock"]
 
     LOCK --> HOST{"host entry"}
-    HOST -- "command/query/maintenance" --> LOCAL_PREFLIGHT["runtime_turn(local host)<br/>no listener, no outgoing pump,<br/>no durable handler dispatch"]
-    HOST -- daemon --> DAEMON_PREFLIGHT["runtime_turn(daemon host)<br/>listener, durable handlers,<br/>outgoing pump"]
+    HOST -->|command/query/control| LOCAL_PREFLIGHT["runtime_turn(local host)<br/>no listener, no outgoing pump,<br/>no durable handler dispatch"]
+    HOST -->|daemon| DAEMON_PREFLIGHT["runtime_turn(daemon host)<br/>listener, durable handlers,<br/>outgoing pump"]
 
     LOCAL_PREFLIGHT --> CLI_DISPATCH["dispatch registered protocol CLI command"]
     CLI_DISPATCH --> CLI_KIND{"command policy"}
-    CLI_KIND -- "ordinary write" --> CMD_READY["require storage_ready"]
+    CLI_KIND -->|ordinary write| CMD_READY["require storage_ready"]
     CMD_READY --> READ_INPUTS["read current projected rows"]
     READ_INPUTS --> AUTHOR["author facts"]
     AUTHOR --> COMMIT_FACTS["commit authored facts -> pending_projection"]
     COMMIT_FACTS --> RECEIPT["return receipt"]
 
-    CLI_KIND -- "ordinary query" --> Q_READY["require storage_ready"]
+    CLI_KIND -->|ordinary query| Q_READY["require storage_ready"]
     Q_READY --> READ["read materialized rows"]
 
-    CLI_KIND -- "explicit maintenance / diagnostic" --> CONTROL["run command-owned policy:<br/>update, state-summary, registry"]
+    CLI_KIND -->|explicit control policy| CONTROL["run command-owned policy:<br/>update, state-summary, registry"]
     CONTROL --> CONTROL_RETURN["return output"]
 
     DAEMON_PREFLIGHT --> DAEMON_LOOP["release lock, yield/sleep, repeat"]
