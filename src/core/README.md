@@ -107,7 +107,7 @@ opaque outgoing rows from `network`.
 ```text
 CLI command / daemon / handler
   -> authored facts or RuntimeEffects
-  -> durable fact admission or incoming_facts staging
+  -> durable fact admission or incoming_facts + pending_incoming_projection staging
   -> projector
   -> context needs/offers, time wakes, rows, intents
   -> intent queue
@@ -118,12 +118,13 @@ CLI command / daemon / handler
 Facts can enter through commands, handlers, sync, or incoming daemon input.
 Core records durable fact bytes with admission metadata and retained
 `pending_projection` work; outside-origin bytes are staged in the temporary
-`incoming_facts` queue until runtime loads them into the owning projector.
+`incoming_facts` table and marked ready in `pending_incoming_projection` until
+runtime loads them into the owning projector.
 Projection is the only path from fact bytes to standing context, read-model
 rows, time wakes, and follow-up work. Runtime work can stage incoming facts in
-`incoming_facts`, submit local (ephemeral, not-replayed) intents to
-`local_intents`, and mark facts whose scheduled wake-up time has arrived as
-pending projection work.
+`incoming_facts` plus `pending_incoming_projection`, submit local (ephemeral,
+not-replayed) intents to `local_intents`, and mark facts whose scheduled wake-up
+time has arrived as pending projection work.
 
 Network bytes enter through the TCP listener and are first staged in the
 temporary `network_incoming` queue with origin and receive-time metadata.
@@ -168,9 +169,9 @@ the owning projector decide whether that time proves anything.
 - Rejected durable projection items do not stall the batch. Context-free
   rejection purges the fact; context-dependent rejection keeps the fact bytes as
   evidence and clears only the pending row.
-- Incoming facts start as temp rows. A projector may keep an incoming fact
-  retained while parked on standing context needs, retain it as protocol
-  evidence, or drop it.
+- Incoming facts start as temp storage plus a temp ready queue row. A projector
+  may keep an incoming fact retained while parked on standing context needs,
+  retain it as protocol evidence, or drop it.
 - Typed-table inserts are idempotent only when the existing row matches every
   supplied column; changing typed projection state is expressed as
   `DeleteWhere` followed by `InsertValues`.
@@ -420,7 +421,7 @@ One handler commit performs this ordered unit:
 delete claimed intent row
 purge exact facts
 admit emitted durable facts and mark them pending
-stage emitted incoming facts
+stage emitted incoming facts and mark them ready
 apply row mutations
 record durable follow-up intents
 record local follow-up intents

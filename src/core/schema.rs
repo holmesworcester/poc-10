@@ -2,7 +2,8 @@
 //!
 //! This file is the durable and memory table inventory for the generic
 //! runtime: facts, local admissions, standing context, time wakes, pending
-//! projection, pending projection matches, incoming facts, and intent queues. It
+//! projection, pending projection matches, incoming facts, incoming projection
+//! readiness, and intent queues. It
 //! exposes one executable `SchemaSource` plus typed `TableName` constants so the
 //! rest of core does not repeat string literals.
 //!
@@ -11,9 +12,9 @@
 //! `project_fact.rs`.
 //! `facts` and `local_fact_admissions` store immutable inputs and their local
 //! visibility metadata. `context_edges`, `time_wakes`, `pending_projection`,
-//! and `pending_projection_matches` drive fact projection. `intents`,
-//! `intent_context`, `local_intents`, and `local_intent_context` drive handler
-//! dispatch.
+//! `pending_projection_matches`, and `pending_incoming_projection` drive fact
+//! projection. `intents`, `intent_context`, `local_intents`, and
+//! `local_intent_context` drive handler dispatch.
 //!
 //! Core schema is deliberately small and mechanical. It records the runtime
 //! queues and indexes needed to move work; it does not encode protocol policy
@@ -52,6 +53,9 @@ pub(crate) const LOCAL_INTENTS: TableName = TableName::new("local_intents");
 pub(crate) const LOCAL_INTENT_CONTEXT: TableName = TableName::new("local_intent_context");
 /// Volatile fact table for outside-origin incoming inputs.
 pub(crate) const INCOMING_FACTS: TableName = TableName::new("incoming_facts");
+/// Volatile ready queue for outside-origin incoming inputs.
+pub(crate) const PENDING_INCOMING_PROJECTION: TableName =
+    TableName::new("pending_incoming_projection");
 const CORE_REPLAY_PROTECTED_TABLES: &[TableName] = &[FACTS, LOCAL_FACT_ADMISSIONS];
 
 const CORE_REPLAY_RESET_TABLES: &[TableName] = &[
@@ -65,6 +69,7 @@ const CORE_REPLAY_RESET_TABLES: &[TableName] = &[
     LOCAL_INTENTS,
     LOCAL_INTENT_CONTEXT,
     INCOMING_FACTS,
+    PENDING_INCOMING_PROJECTION,
 ];
 
 const CORE_REPLAY_SUMMARY_TABLES: &[TableName] = &[FACTS, CONTEXT_EDGES, TIME_WAKES];
@@ -210,6 +215,13 @@ CREATE TEMP TABLE IF NOT EXISTS incoming_facts (
 );
 CREATE INDEX IF NOT EXISTS incoming_facts_by_received_at
     ON incoming_facts (received_at, id);
+
+CREATE TEMP TABLE IF NOT EXISTS pending_incoming_projection (
+    owner BLOB PRIMARY KEY NOT NULL,
+    queued_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS pending_incoming_projection_by_queue
+    ON pending_incoming_projection (queued_at, owner);
 
 "#,
     storage_version: None,

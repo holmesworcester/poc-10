@@ -222,9 +222,10 @@ changes durable facts, not the handler queue.
 Network input is accepted by core's TCP listener into memory-local
 `network_incoming` rows with origin metadata. The daemon drains those rows
 through the protocol-declared inbound classifier, which returns typed facts for
-the temporary `incoming_facts` queue. Projectors decide what, if anything,
-becomes durable. If receive metadata must survive parking or replay, the
-projector emits ordinary durable observation or receipt facts that encode it.
+temporary `incoming_facts` storage and marks them ready in
+`pending_incoming_projection`. Projectors decide what, if anything, becomes
+durable. If receive metadata must survive parking or replay, the projector emits
+ordinary durable observation or receipt facts that encode it.
 Network output is produced by protocol handlers as opaque frame bytes addressed
 to a `SocketAddr`. Core stores those bytes in memory-local `network_outgoing`
 rows, keeps active peer addresses in `network_outgoing_targets`, and lets the
