@@ -103,11 +103,11 @@ Connection-specific visibility combines three pieces of state:
 
 A fact is considered for sending only when the connection authorizes the
 workspace directly or the remote endpoint is a workspace member. Dependency
-closure uses the same connection filter, so recursive `context_have` expansion
-cannot cross into local/private facts, unauthorized workspaces, or purged facts
-that no longer have sendable rows. Live-tail sends also use connection receipts
-to skip the origin connection that supplied a fact while still advertising the
-fact to other authorized connections.
+closure uses the same connection filter, so retained `context_have` closure
+rows cannot cross into local/private facts, unauthorized workspaces, or purged
+facts that no longer have sendable rows. Live-tail sends also use connection
+receipts to skip the origin connection that supplied a fact while still
+advertising the fact to other authorized connections.
 
 ## Live Tail
 
@@ -115,7 +115,7 @@ Live tail is the latency path after initial connection seeding. When
 `share_fact_with_sync` records a changed upsert, sync asks the connection
 visibility index which live connections may see that owner fact. It
 removes any origin connection recorded by `connection_fact_receipt`,
-recursively expands the owner through stored `context_have` edges for each
+expands the owner through retained `context_have` closure rows for each
 remaining connection, and queues `send_facts_on_connection`.
 
 Live tail does not create authority and does not bypass projection. Connection
@@ -158,7 +158,10 @@ connections:
    which context has actually been validated.
 2. The `share_fact_with_sync` handler records that contribution in sync rows.
    It rejects local/private bytes, stores the owner as shareable, stores the
-   direct `context_have` edges, and refreshes the affected range-summary path.
+   direct `context_have` edges, and stores the owner's current transitive
+   `context_have` closure. Range summaries are computed from the durable leaf
+   rows when a compare needs them instead of rebuilding ancestor rows on every
+   share.
    If this is a changed upsert, the same handler starts the live-tail path for
    already-established authorized connections. Sync does not infer dependencies
    by parsing fact bytes or scanning protocol rows.
@@ -169,9 +172,9 @@ connections:
    If a range is too broad to answer exactly, it creates child `compare` facts.
    If exact ids are useful, it sends `have_id` facts or asks connection to send
    selected fact bytes. Before selected bytes are handed to connection, sync
-   recursively expands the selected owner ids through stored `context_have`
-   edges, so the send set includes authorized dependencies of dependencies as
-   well as the in-range owners.
+   expands the selected owner ids through retained `context_have` closure rows,
+   so the send set includes authorized dependencies of dependencies as well as
+   the in-range owners without searching the graph recursively for each send.
 5. A peer that receives `have_id` checks whether it already has the named fact.
    If not, it creates and sends a `need_id` fact on the same connection.
 6. A peer that receives `need_id` checks the shareable index for that
@@ -182,11 +185,11 @@ connections:
    emit more sync contributions. Convergence is the repeated application of
    this loop until summaries match.
 
-The recursive walk includes each in-range owner, then that owner's
-projector-supplied `context_have` facts, then each dependency's own
-`context_have` facts until the authorized shareable graph is exhausted. The
-walk stops at missing, purged, unauthorized, or local-only facts because those
-facts have no sendable shareable row for the connection.
+The retained closure includes each in-range owner, that owner's
+projector-supplied `context_have` facts, and each dependency's already retained
+`context_have` closure. Expansion stops at missing, purged, unauthorized, or
+local-only facts because those facts have no sendable shareable row for the
+connection.
 
 ## Share Contributions
 
@@ -227,7 +230,7 @@ Removal uses the same ownership boundary. When the owner projector observes
 deletion, expiry, supersession, or retirement context for its own fact, it
 emits a `share_fact_with_sync` retraction along with ordinary row deletion or
 self-purge effects. Sync removes that owner's contribution and refreshes
-ancestor summaries; it does not rediscover purged ids from broad fact scans.
+retained closure rows; it does not rediscover purged ids from broad fact scans.
 
 ## Invariants And Responsibility
 
@@ -246,9 +249,9 @@ semantic admission remains in the fact family that owns the payload.
 ## Intent Handlers
 
 `share_fact_with_sync` implements the contribution path described above. It
-upserts or retracts one owner fact's durable sync visibility, refreshes the
-affected range-summary rows, and triggers live-tail advertisement while
-skipping the origin connection that supplied the fact.
+upserts or retracts one owner fact's durable sync visibility, refreshes retained
+dependency closure rows, and triggers live-tail advertisement while skipping the
+origin connection that supplied the fact.
 
 `seed_connection_sync` is emitted by `connection` projection after
 `connection` context proves the live connection row exists. It

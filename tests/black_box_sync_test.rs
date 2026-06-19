@@ -14,6 +14,10 @@ use topo::core::cli::decode_hex_32;
 use topo::core::db::Db;
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::protocol::auth::{admin, workspace as auth_workspace};
+use topo::protocol::connection::frame_file_slice::encode::{
+    CONNECTION_FRAME_FILE_SLICE_WIRE_BYTES, CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE,
+    CONNECTION_FRAME_VERSION,
+};
 use topo::protocol::content::file_slice::fact::FILE_SLICE_PLAINTEXT_BYTES;
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 
@@ -554,11 +558,17 @@ fn cli_cable_bound_download_perf_isolates_authoring_sync_and_save() {
 
     let first_proxy_byte_at =
         wait_for_proxy_client_to_server_above(&proxy, proxied_before, timeout_ms);
+    let first_file_slice_proxy_byte_at =
+        wait_for_proxy_first_file_slice_client_to_server(&proxy, timeout_ms);
     let listing = poll_for_file_complete(&alice, &workspace, "download-perf.bin", timeout_ms);
     let completed_at = Instant::now();
     let sync_elapsed = completed_at.duration_since(sync_started);
     let ready_elapsed = completed_at.duration_since(daemons_ready_at);
     let first_proxy_byte_elapsed = completed_at.duration_since(first_proxy_byte_at);
+    let ready_to_first_file_slice_elapsed =
+        first_file_slice_proxy_byte_at.duration_since(daemons_ready_at);
+    let first_file_slice_proxy_byte_elapsed =
+        completed_at.duration_since(first_file_slice_proxy_byte_at);
     assert!(listing.contains("\u{2714}"), "{listing}");
 
     let proxied_bytes = proxy
@@ -588,7 +598,7 @@ fn cli_cable_bound_download_perf_isolates_authoring_sync_and_save() {
     );
     let save_elapsed = save_started.elapsed();
     eprintln!(
-        "black_box_cable_download_perf sender=bob receiver=alice path=bob_to_alice_proxy configured_mbps={:.2} payload_bytes={} proxy_client_to_server_bytes={} payload_create_ms={} send_file_authoring_ms={} sync_restart_to_complete_ms={} daemons_ready_to_complete_ms={} first_proxy_byte_to_complete_ms={} save_file_ms={} payload_mbit_per_s={:.2} proxy_mbit_per_s={:.2}",
+        "black_box_cable_download_perf sender=bob receiver=alice path=bob_to_alice_proxy configured_mbps={:.2} payload_bytes={} proxy_client_to_server_bytes={} payload_create_ms={} send_file_authoring_ms={} sync_restart_to_complete_ms={} daemons_ready_to_complete_ms={} first_proxy_byte_to_complete_ms={} daemons_ready_to_first_file_slice_proxy_byte_ms={} first_file_slice_proxy_byte_to_complete_ms={} save_file_ms={} payload_mbit_per_s={:.2} proxy_mbit_per_s={:.2}",
         cable_mbps,
         payload.len(),
         proxied_bytes,
@@ -597,6 +607,8 @@ fn cli_cable_bound_download_perf_isolates_authoring_sync_and_save() {
         sync_elapsed.as_millis(),
         ready_elapsed.as_millis(),
         first_proxy_byte_elapsed.as_millis(),
+        ready_to_first_file_slice_elapsed.as_millis(),
+        first_file_slice_proxy_byte_elapsed.as_millis(),
         save_elapsed.as_millis(),
         payload_mbit_per_second,
         proxy_mbit_per_second
@@ -1096,6 +1108,7 @@ fn poll_for_saved_file(
 struct ProxyCounters {
     accepted_connections: AtomicUsize,
     client_to_server_bytes: AtomicU64,
+    first_file_slice_client_to_server_bytes: AtomicU64,
     server_to_client_bytes: AtomicU64,
 }
 
@@ -1167,6 +1180,12 @@ impl ThrottledTcpProxy {
     fn client_to_server_bytes(&self) -> u64 {
         self.counters.client_to_server_bytes.load(Ordering::Relaxed)
     }
+
+    fn first_file_slice_client_to_server_bytes(&self) -> u64 {
+        self.counters
+            .first_file_slice_client_to_server_bytes
+            .load(Ordering::Relaxed)
+    }
 }
 
 impl Drop for ThrottledTcpProxy {
@@ -1224,6 +1243,10 @@ fn copy_throttled(
     let started = Instant::now();
     let mut copied = 0u64;
     let mut buf = [0u8; 16 * 1024];
+    let mut frame_tracker = match direction {
+        ProxyDirection::ClientToServer => Some(ClientToServerFrameTracker::default()),
+        ProxyDirection::ServerToClient => None,
+    };
     loop {
         let read = match reader.read(&mut buf) {
             Ok(0) => break,
@@ -1240,6 +1263,13 @@ fn copy_throttled(
                 counters
                     .client_to_server_bytes
                     .fetch_add(read as u64, Ordering::Relaxed);
+                if let Some(tracker) = frame_tracker.as_mut() {
+                    if tracker.observe(&buf[..read]) {
+                        let _ = counters
+                            .first_file_slice_client_to_server_bytes
+                            .compare_exchange(0, copied, Ordering::Relaxed, Ordering::Relaxed);
+                    }
+                }
             }
             ProxyDirection::ServerToClient => {
                 counters
@@ -1250,6 +1280,73 @@ fn copy_throttled(
         throttle_copy(started, copied, bytes_per_second);
     }
     let _ = writer.shutdown(Shutdown::Write);
+}
+
+#[derive(Default)]
+struct ClientToServerFrameTracker {
+    buffered: Vec<u8>,
+}
+
+impl ClientToServerFrameTracker {
+    fn observe(&mut self, bytes: &[u8]) -> bool {
+        self.buffered.extend_from_slice(bytes);
+        let mut saw_file_slice = false;
+        loop {
+            if self.buffered.len() < 4 {
+                break;
+            }
+            let frame_len = u32::from_be_bytes(self.buffered[..4].try_into().unwrap()) as usize;
+            if frame_len > CONNECTION_FRAME_FILE_SLICE_WIRE_BYTES {
+                self.buffered.clear();
+                break;
+            }
+            let frame_end = 4 + frame_len;
+            if self.buffered.len() < frame_end {
+                break;
+            }
+            if is_file_slice_connection_frame(&self.buffered[4..frame_end]) {
+                saw_file_slice = true;
+            }
+            self.buffered.drain(..frame_end);
+        }
+        saw_file_slice
+    }
+}
+
+fn is_file_slice_connection_frame(frame: &[u8]) -> bool {
+    frame.len() == CONNECTION_FRAME_FILE_SLICE_WIRE_BYTES
+        && frame.get(..4) == Some(b"TRNS".as_slice())
+        && frame.get(4).copied() == Some(CONNECTION_FRAME_VERSION)
+        && frame.get(5).copied() == Some(CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE)
+}
+
+#[test]
+fn client_to_server_frame_tracker_detects_file_slice_frames_across_chunks() {
+    let mut tracker = ClientToServerFrameTracker::default();
+    let small_frame = length_prefixed_test_frame(64, 0);
+    let file_slice_frame = length_prefixed_test_frame(
+        CONNECTION_FRAME_FILE_SLICE_WIRE_BYTES,
+        CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE,
+    );
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&small_frame);
+    bytes.extend_from_slice(&file_slice_frame);
+
+    assert!(!tracker.observe(&bytes[..3]));
+    assert!(!tracker.observe(&bytes[3..small_frame.len() + 12]));
+    assert!(tracker.observe(&bytes[small_frame.len() + 12..]));
+}
+
+fn length_prefixed_test_frame(frame_len: usize, size_class: u8) -> Vec<u8> {
+    let mut frame = vec![0; frame_len];
+    frame[..4].copy_from_slice(b"TRNS");
+    frame[4] = CONNECTION_FRAME_VERSION;
+    frame[5] = size_class;
+
+    let mut out = Vec::with_capacity(4 + frame.len());
+    out.extend_from_slice(&(frame.len() as u32).to_be_bytes());
+    out.extend_from_slice(&frame);
+    out
 }
 
 fn throttle_copy(started: Instant, copied: u64, bytes_per_second: u64) {
@@ -1274,6 +1371,20 @@ fn wait_for_proxy_client_to_server_above(
         thread::sleep(Duration::from_millis(10));
     }
     panic!("proxy client-to-server bytes never advanced above {baseline}");
+}
+
+fn wait_for_proxy_first_file_slice_client_to_server(
+    proxy: &ThrottledTcpProxy,
+    timeout_ms: u64,
+) -> Instant {
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    while Instant::now() < deadline {
+        if proxy.first_file_slice_client_to_server_bytes() > 0 {
+            return Instant::now();
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    panic!("proxy client-to-server stream never observed a file-slice connection frame");
 }
 
 fn bytes_per_second(mbps: f64) -> u64 {
