@@ -214,10 +214,10 @@ of querying its own writes. Handler-created facts remain daemon/replay work, not
 part of a command-local settle loop.
 
 Local operational settings follow the same rule. For example, `sync range`
-authors a local sync-setting fact and commits it; a daemon tick later projects
-the setting, and recurring daemon sync reads that projected row to perform
-compare/have/need/fact-send work. A setting command changes durable facts, not
-the handler queue.
+authors a local sync-setting fact and commits it; a later runtime turn projects
+the setting, and the recurring sync loop reads that projected row during a
+daemon-host turn to perform compare/have/need/fact-send work. A setting command
+changes durable facts, not the handler queue.
 
 Network input is accepted by core's TCP listener into memory-local
 `network_incoming` rows with origin metadata. The daemon drains those rows

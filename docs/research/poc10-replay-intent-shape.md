@@ -67,7 +67,7 @@ presence refresh, sync polling, or network sends.
 ## Handler Registry And Replay Context
 
 Keep the existing `HandlerRoute` registry as the dispatch table and recurring
-schedule source:
+work source:
 
 ```rust
 pub struct HandlerRoute {
@@ -110,16 +110,14 @@ wakes and not in projectors.
 
 ```rust
 pub struct RecurringIntentSpec {
-    pub interval_ms: u64,
-    pub initial_delay_ms: u64,
-    pub build_intent: fn(&Db) -> Result<Option<Intent>, String>,
+    pub build_intent: fn(&Db, RecurringIntentContext) -> Result<Option<Intent>, String>,
 }
 ```
 
-Daemon startup installs in-memory schedules for handler routes with recurrence.
-The schedules are not persisted. There is nothing to wipe on upgrade and
-nothing to replay. Recurring intents do not fire until replay has completed and
-the daemon is running normally.
+Runtime setup installs in-memory entries for handler routes with recurrence.
+Those entries are not persisted. There is nothing to wipe on upgrade and
+nothing to replay. Each turn offers recurring builders; builders decide from
+database state, clock, and host context whether to queue work.
 
 Use recurring intents for live operational loops:
 

@@ -57,7 +57,7 @@ fn fresh_runtime_initializes_protocol_marker_through_runtime_turn() {
         None
     );
 
-    let mut scheduler = daemon::RecurringScheduler::install(MATCH_RUNTIME.handlers, 0);
+    let mut scheduler = daemon::RecurringScheduler::install(MATCH_RUNTIME.handlers);
     daemon::runtime_turn(
         MATCH_PROTOCOL.daemon,
         &mut runtime,

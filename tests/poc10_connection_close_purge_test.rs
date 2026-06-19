@@ -3,13 +3,14 @@
 use std::cell::Cell;
 use std::path::Path;
 
+mod runtime_test_support;
+
 use rusqlite::{params, Connection, OptionalExtension};
 use topo::core::command::CommandClock;
 use topo::core::crypto;
-use topo::core::daemon::{self, RuntimeTurnHost};
 use topo::core::facts::{Fact, FactScope};
 use topo::core::runtime::Runtime;
-use topo::protocol::app::{MATCH_PROTOCOL, MATCH_RUNTIME};
+use topo::protocol::app::MATCH_RUNTIME;
 use topo::protocol::auth::endpoint::{encode as endpoint_layout, fact::EndpointFact};
 use topo::protocol::auth::invite_secret::project::decode as invite_layout;
 use topo::protocol::connection::close::api::close;
@@ -28,6 +29,10 @@ use topo::protocol::connection::request::api::{
 };
 use topo::protocol::connection::request::project::decode as request_layout;
 
+use runtime_test_support::{
+    drain_projection_for_test, drain_runtime_work_for_test, initialize_match_runtime,
+};
+
 struct FixedClock(Cell<u64>);
 
 impl CommandClock for FixedClock {
@@ -38,60 +43,12 @@ impl CommandClock for FixedClock {
     }
 }
 
-fn drain_projection_for_test(runtime: &mut Runtime, max_rounds: usize, limit: usize) {
-    for _ in 0..max_rounds {
-        runtime
-            .drain_durable_projection(limit)
-            .expect("drain durable projection batch");
-        runtime
-            .drain_incoming_projection(limit)
-            .expect("drain incoming projection batch");
-        if runtime.pending_projection_count() == 0 {
-            return;
-        }
-    }
-    panic!("projection work did not become idle within {max_rounds} rounds");
-}
-
-fn drain_runtime_work_for_test(runtime: &mut Runtime, max_rounds: usize, limit: usize) {
-    for _ in 0..max_rounds {
-        runtime
-            .drain_durable_projection(limit)
-            .expect("drain durable projection batch");
-        runtime
-            .drain_incoming_projection(limit)
-            .expect("drain incoming projection batch");
-        runtime
-            .drain_durable_intents(limit)
-            .expect("drain durable intent batch");
-        runtime
-            .drain_local_intents(limit)
-            .expect("drain local intent batch");
-        if runtime.pending_projection_count() == 0 && runtime.pending_intent_count() == 0 {
-            return;
-        }
-    }
-    panic!("runtime work did not become idle within {max_rounds} rounds");
-}
-
-fn initialize_runtime_for_test(runtime: &mut Runtime) {
-    let mut scheduler = daemon::RecurringScheduler::install(MATCH_RUNTIME.handlers, 0);
-    daemon::runtime_turn(
-        MATCH_PROTOCOL.daemon,
-        runtime,
-        RuntimeTurnHost::local(),
-        &mut scheduler,
-        4096,
-    )
-    .expect("initialize runtime through local turn");
-}
-
 #[test]
 fn closing_connection_purges_connection_fact_and_row() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let db_path = tmp.path().join("runtime.db");
     let mut runtime = Runtime::open_disk(&MATCH_RUNTIME, &db_path).expect("runtime");
-    initialize_runtime_for_test(&mut runtime);
+    initialize_match_runtime(&mut runtime);
     let alice = endpoint([11; 32], [12; 32]);
     let bob = endpoint([21; 32], [22; 32]);
     let alice_endpoint_fact = Fact::new(

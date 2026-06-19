@@ -130,18 +130,17 @@ fn run_start<C: 'static>(
         .db
         .ok_or_else(|| usage(description, "start requires --db PATH"))?;
     let mut runtime = Runtime::open_disk(&description.runtime, &db)?;
-    // Recurring operational loops are not durable state. The daemon tick fires
-    // due schedules from this in-memory scheduler after startup.
-    let mut scheduler =
-        daemon::RecurringScheduler::install(description.runtime.handlers, daemon::now_ms());
+    // Recurring operational loops are not durable state. Runtime turns offer
+    // them from this in-memory scheduler after startup.
+    let mut scheduler = daemon::RecurringScheduler::install(description.runtime.handlers);
     daemon::start(
         &db,
         CliArgs::new(&parsed.command[1..]),
         |listener, limit| {
-            daemon::tick(
+            daemon::runtime_turn(
                 description.daemon,
                 &mut runtime,
-                listener,
+                daemon::RuntimeTurnHost::daemon(listener),
                 &mut scheduler,
                 limit,
             )
@@ -243,8 +242,7 @@ fn run_protocol_command<C: 'static>(
         .ok_or_else(|| format!("{command_name} requires --db PATH"))?;
     let _turn = daemon::RuntimeTurnLock::acquire(&db)?;
     let mut runtime = Runtime::open_disk(&description.runtime, &db)?;
-    let mut scheduler =
-        daemon::RecurringScheduler::install(description.runtime.handlers, daemon::now_ms());
+    let mut scheduler = daemon::RecurringScheduler::install(description.runtime.handlers);
     daemon::runtime_turn(
         description.daemon,
         &mut runtime,

@@ -8,7 +8,7 @@ use std::time::Duration;
 use rusqlite::{params, Connection, OptionalExtension};
 use topo::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use topo::core::crypto;
-use topo::core::daemon;
+use topo::core::daemon::{self, RuntimeTurnHost};
 use topo::core::db::TableName;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::network;
@@ -314,7 +314,7 @@ fn receive_handler_emits_ephemeral_connection_frame_small() {
 }
 
 #[test]
-fn daemon_tick_admits_wire_frame_without_inbound_rows_or_receive_intents() {
+fn daemon_runtime_turn_admits_wire_frame_without_inbound_rows_or_receive_intents() {
     let (frame, _, _, _, _) = encrypted_small_frame();
     let tmp = tempfile::tempdir().expect("tempdir");
     let db_path = tmp.path().join("runtime.db");
@@ -333,15 +333,15 @@ fn daemon_tick_admits_wire_frame_without_inbound_rows_or_receive_intents() {
     });
     std::thread::sleep(Duration::from_millis(50));
 
-    let mut scheduler = daemon::RecurringScheduler::install(MATCH_RUNTIME.handlers, u64::MAX);
-    let status = daemon::tick(
+    let mut scheduler = daemon::RecurringScheduler::install(MATCH_RUNTIME.handlers);
+    let status = daemon::runtime_turn(
         MATCH_PROTOCOL.daemon,
         &mut runtime,
-        &listener,
+        RuntimeTurnHost::daemon(&listener),
         &mut scheduler,
         16,
     )
-    .expect("daemon tick");
+    .expect("daemon runtime turn");
     writer.join().expect("writer thread");
 
     assert!(status);

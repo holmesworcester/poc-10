@@ -69,12 +69,12 @@ pub struct StartOptions {
     pub work_limit: usize,
 }
 
-/// Protocol declarations needed by the generic daemon tick.
+/// Protocol declarations needed by daemon-host runtime turns.
 #[derive(Clone, Copy)]
 pub struct DaemonDescription {
     /// Classifier from inbound network bytes to protocol-owned incoming facts.
     pub inbound_network_intake: Option<InboundNetworkIntake>,
-    /// Time-wake schedules the daemon should admit each tick.
+    /// Time-wake schedules daemon-host runtime turns should admit.
     pub time_wakes: &'static [DaemonTimeWake],
     /// Optional protocol-owned guard for derived-state readiness.
     pub storage_ready: Option<StorageReadyCheck>,
@@ -136,29 +136,6 @@ impl<'a> RuntimeTurnHost<'a> {
     fn runs_durable_handlers(self) -> bool {
         self.listener.is_some()
     }
-}
-
-/// Run one bounded daemon tick.
-///
-/// The order is fixed: fire the first recurring intent, require storage
-/// readiness, fire the remaining recurring intents, require readiness again,
-/// accept TCP, admit time wakes, drain projection/intents, then pump outgoing
-/// TCP rows.
-/// Protocols should change their declarations rather than reordering this loop.
-pub fn tick(
-    description: DaemonDescription,
-    runtime: &mut Runtime,
-    listener: &network::Listener,
-    scheduler: &mut RecurringScheduler,
-    work_limit: usize,
-) -> Result<bool, String> {
-    runtime_turn(
-        description,
-        runtime,
-        RuntimeTurnHost::daemon(listener),
-        scheduler,
-        work_limit,
-    )
 }
 
 /// Run one bounded runtime turn.
@@ -233,8 +210,8 @@ fn fire_recurring_intents(
     local_addr: Option<SocketAddr>,
     start_index: usize,
 ) -> Result<bool, String> {
-    let fired = scheduler.fire_due_from(runtime, now_ms(), local_addr, start_index)?;
-    Ok(fired > 0)
+    let offered = scheduler.offer(runtime, now_ms(), local_addr, start_index, false)?;
+    Ok(offered.queued > 0)
 }
 
 fn fire_first_recurring_intent(
@@ -242,7 +219,7 @@ fn fire_first_recurring_intent(
     scheduler: &mut RecurringScheduler,
     local_addr: Option<SocketAddr>,
 ) -> Result<RecurringFire, String> {
-    scheduler.fire_due_until_queued_with_resume(runtime, now_ms(), local_addr)
+    scheduler.offer(runtime, now_ms(), local_addr, 0, true)
 }
 
 fn run_readiness_gate(
@@ -434,7 +411,7 @@ struct RecurringFire {
 
 impl RecurringScheduler {
     /// Install in-memory recurring entries for every handler route with a recurrence.
-    pub fn install(routes: &'static [HandlerRoute], _now_ms: u64) -> Self {
+    pub fn install(routes: &'static [HandlerRoute]) -> Self {
         let schedules = routes
             .iter()
             .filter_map(|route| {
@@ -456,64 +433,13 @@ impl RecurringScheduler {
         self.schedules.is_empty()
     }
 
-    /// Give every recurring entry a chance to queue work.
-    ///
-    /// Each entry builds its current intent from database state and queues it as
-    /// live local work for the same turn's drain to dispatch. The builder may
-    /// return `None` when its own state says there is nothing to do. Returns the
-    /// number of intents queued.
-    pub fn fire_due(
-        &mut self,
-        runtime: &mut Runtime,
-        now_ms: u64,
-        local_addr: Option<SocketAddr>,
-    ) -> Result<usize, String> {
-        self.fire_due_from(runtime, now_ms, local_addr, 0)
-    }
-
-    fn fire_due_from(
+    fn offer(
         &mut self,
         runtime: &mut Runtime,
         now_ms: u64,
         local_addr: Option<SocketAddr>,
         start_index: usize,
-    ) -> Result<usize, String> {
-        self.fire_due_inner(runtime, now_ms, local_addr, false, start_index)
-            .map(|result| result.queued)
-    }
-
-    /// Give recurring entries a chance in registry order until one intent queues.
-    ///
-    /// Entries that return `None` do not block later entries. This lets a
-    /// protocol put a cheap readiness check first: if it queues repair work, the
-    /// runtime turn can drain that work before later recurring loops read old
-    /// state.
-    pub fn fire_due_until_queued(
-        &mut self,
-        runtime: &mut Runtime,
-        now_ms: u64,
-        local_addr: Option<SocketAddr>,
-    ) -> Result<usize, String> {
-        self.fire_due_until_queued_with_resume(runtime, now_ms, local_addr)
-            .map(|result| result.queued)
-    }
-
-    fn fire_due_until_queued_with_resume(
-        &mut self,
-        runtime: &mut Runtime,
-        now_ms: u64,
-        local_addr: Option<SocketAddr>,
-    ) -> Result<RecurringFire, String> {
-        self.fire_due_inner(runtime, now_ms, local_addr, true, 0)
-    }
-
-    fn fire_due_inner(
-        &mut self,
-        runtime: &mut Runtime,
-        now_ms: u64,
-        local_addr: Option<SocketAddr>,
         stop_after_queue: bool,
-        start_index: usize,
     ) -> Result<RecurringFire, String> {
         let mut fired = 0;
         let mut resume_at = self.schedules.len();
@@ -568,7 +494,7 @@ impl DaemonReport {
 pub fn start(
     db_path: &Path,
     args: CliArgs<'_>,
-    mut tick: impl FnMut(&network::Listener, usize) -> Result<bool, String>,
+    mut run_turn: impl FnMut(&network::Listener, usize) -> Result<bool, String>,
 ) -> Result<CliOutput, String> {
     let options = parse_start_options(args)?;
     SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
@@ -585,11 +511,11 @@ pub fn start(
         ..DaemonReport::default()
     };
     while !SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
-        let tick_activity = {
+        let turn_activity = {
             let _turn = RuntimeTurnLock::acquire(db_path)?;
-            tick(&listener, options.work_limit)?
+            run_turn(&listener, options.work_limit)?
         };
-        let sleep_after_tick = sleep_after_tick(&options, tick_activity);
+        let sleep_after_tick = sleep_after_tick(&options, turn_activity);
         report.ticks += 1;
         std::thread::yield_now();
         if let Some(duration) = sleep_after_tick {
@@ -1030,7 +956,7 @@ mod tests {
     ) -> Result<Option<Intent>, String> {
         assert!(
             context.local_addr.is_some(),
-            "daemon tick should pass its listen address to recurring builders"
+            "daemon-host runtime turn should pass its listen address to recurring builders"
         );
         Ok(Some(Intent::new(
             IntentKind::new("recurring_tick").expect("intent kind"),
@@ -1089,8 +1015,6 @@ mod tests {
         factory: recurring_handler,
         storage_requirement: StorageRequirement::MaintenanceBypass,
         recurrence: Some(RecurringIntentSpec {
-            interval_ms: 60_000,
-            initial_delay_ms: 0,
             build_intent: recurring_builder,
         }),
     }];
@@ -1168,8 +1092,6 @@ mod tests {
             factory: version_repair_handler,
             storage_requirement: StorageRequirement::MaintenanceBypass,
             recurrence: Some(RecurringIntentSpec {
-                interval_ms: 60_000,
-                initial_delay_ms: 0,
                 build_intent: version_repair_builder,
             }),
         },
@@ -1178,8 +1100,6 @@ mod tests {
             factory: normal_recurring_handler,
             storage_requirement: StorageRequirement::MaintenanceBypass,
             recurrence: Some(RecurringIntentSpec {
-                interval_ms: 60_000,
-                initial_delay_ms: 0,
                 build_intent: normal_recurring_builder,
             }),
         },
@@ -1260,7 +1180,7 @@ mod tests {
     }
 
     #[test]
-    fn tick_pumps_queued_outgoing_rows_after_runtime_work() {
+    fn runtime_turn_pumps_queued_outgoing_rows_after_runtime_work() {
         let peer = TcpListener::bind("127.0.0.1:0").expect("bind outgoing peer");
         let peer_addr = peer.local_addr().expect("peer addr");
         let reader = thread::spawn(move || {
@@ -1278,20 +1198,20 @@ mod tests {
             },
         )
         .expect("queue outgoing frame");
-        let mut scheduler = RecurringScheduler::install(TEST_RUNTIME.handlers, now_ms());
+        let mut scheduler = RecurringScheduler::install(TEST_RUNTIME.handlers);
 
-        let active = tick(
+        let active = runtime_turn(
             DaemonDescription {
                 inbound_network_intake: None,
                 time_wakes: &[],
                 storage_ready: None,
             },
             &mut runtime,
-            &listener,
+            RuntimeTurnHost::daemon(&listener),
             &mut scheduler,
             16,
         )
-        .expect("daemon tick");
+        .expect("daemon runtime turn");
 
         assert!(active);
         assert_eq!(reader.join().expect("reader thread"), b"tick queued frame");
@@ -1305,11 +1225,11 @@ mod tests {
     }
 
     #[test]
-    fn tick_uses_high_local_derivation_budget_for_projection() {
+    fn runtime_turn_uses_high_local_derivation_budget_for_projection() {
         let listener =
             network::listen("127.0.0.1:0".parse().expect("listen addr")).expect("daemon listener");
         let mut runtime = Runtime::open_memory(&TEST_RUNTIME).expect("runtime");
-        let mut scheduler = RecurringScheduler::install(TEST_RUNTIME.handlers, now_ms());
+        let mut scheduler = RecurringScheduler::install(TEST_RUNTIME.handlers);
         runtime.submit_fact(Fact::new(
             crate::core::facts::FactScope::Global,
             7,
@@ -1321,18 +1241,18 @@ mod tests {
             b"two".to_vec(),
         ));
 
-        tick(
+        runtime_turn(
             DaemonDescription {
                 inbound_network_intake: None,
                 time_wakes: &[],
                 storage_ready: None,
             },
             &mut runtime,
-            &listener,
+            RuntimeTurnHost::daemon(&listener),
             &mut scheduler,
             1,
         )
-        .expect("daemon tick");
+        .expect("daemon runtime turn");
 
         assert_eq!(
             runtime.pending_projection_count(),
@@ -1354,7 +1274,7 @@ mod tests {
                 Vec::new(),
             ))
             .expect("submit durable intent");
-        let mut scheduler = RecurringScheduler::install(DURABLE_RUNTIME.handlers, now_ms());
+        let mut scheduler = RecurringScheduler::install(DURABLE_RUNTIME.handlers);
 
         let local_active = runtime_turn(
             DaemonDescription {
@@ -1396,80 +1316,95 @@ mod tests {
     }
 
     #[test]
-    fn tick_fires_recurring_intents_before_drain_steps() {
+    fn runtime_turn_fires_recurring_intents_before_drain_steps() {
         RECURRING_HANDLER_CALLS.store(0, Ordering::SeqCst);
         let listener =
             network::listen("127.0.0.1:0".parse().expect("listen addr")).expect("daemon listener");
         let mut runtime = Runtime::open_memory(&RECURRING_RUNTIME).expect("runtime");
-        let mut scheduler = RecurringScheduler::install(RECURRING_RUNTIME.handlers, 0);
+        let mut scheduler = RecurringScheduler::install(RECURRING_RUNTIME.handlers);
 
-        let active = tick(
+        let active = runtime_turn(
             DaemonDescription {
                 inbound_network_intake: None,
                 time_wakes: &[],
                 storage_ready: None,
             },
             &mut runtime,
-            &listener,
+            RuntimeTurnHost::daemon(&listener),
             &mut scheduler,
             16,
         )
-        .expect("daemon tick");
+        .expect("daemon runtime turn");
 
         assert!(active);
         assert_eq!(RECURRING_HANDLER_CALLS.load(Ordering::SeqCst), 1);
         assert_eq!(
             runtime.pending_intent_count(),
             0,
-            "the same daemon tick should dispatch the recurring intent it fired"
+            "the same runtime turn should dispatch the recurring intent it offered"
         );
     }
 
     #[test]
-    fn recurring_scheduler_skips_kind_with_pending_local_work() {
+    fn runtime_turn_does_not_duplicate_pending_recurring_local_work() {
+        RECURRING_HANDLER_CALLS.store(0, Ordering::SeqCst);
+        let listener =
+            network::listen("127.0.0.1:0".parse().expect("listen addr")).expect("daemon listener");
         let mut runtime = Runtime::open_memory(&RECURRING_RUNTIME).expect("runtime");
-        let mut scheduler = RecurringScheduler::install(RECURRING_RUNTIME.handlers, 0);
-        let addr = Some("127.0.0.1:41000".parse().expect("addr"));
+        let mut scheduler = RecurringScheduler::install(RECURRING_RUNTIME.handlers);
+        runtime
+            .submit_local_intent(Intent::new(
+                IntentKind::new("recurring_tick").expect("intent kind"),
+                b"cycle".to_vec(),
+                Vec::new(),
+            ))
+            .expect("queue existing local recurring work");
+        assert_eq!(runtime.pending_intent_count(), 1);
 
+        let active = runtime_turn(
+            DaemonDescription {
+                inbound_network_intake: None,
+                time_wakes: &[],
+                storage_ready: None,
+            },
+            &mut runtime,
+            RuntimeTurnHost::daemon(&listener),
+            &mut scheduler,
+            16,
+        )
+        .expect("daemon runtime turn");
+
+        assert!(active);
         assert_eq!(
-            scheduler
-                .fire_due(&mut runtime, 0, addr)
-                .expect("first fire"),
-            1
+            RECURRING_HANDLER_CALLS.load(Ordering::SeqCst),
+            1,
+            "pending recurring work should block the builder from queuing a duplicate"
         );
-        assert_eq!(runtime.pending_intent_count(), 1);
-        assert_eq!(
-            scheduler
-                .fire_due(&mut runtime, 60_000, addr)
-                .expect("second fire"),
-            0,
-            "pending recurring work should backpressure the next tick"
-        );
-        assert_eq!(runtime.pending_intent_count(), 1);
+        assert_eq!(runtime.pending_intent_count(), 0);
     }
 
     #[test]
-    fn tick_gives_first_recurring_repair_work_the_storage_ready_barrier() {
+    fn runtime_turn_gives_first_recurring_repair_work_the_storage_ready_barrier() {
         VERSION_REPAIR_HANDLER_CALLS.store(0, Ordering::SeqCst);
         NORMAL_RECURRING_HANDLER_CALLS.store(0, Ordering::SeqCst);
         VERSION_STORAGE_READY.store(false, Ordering::SeqCst);
         let listener =
             network::listen("127.0.0.1:0".parse().expect("listen addr")).expect("daemon listener");
         let mut runtime = Runtime::open_memory(&VERSION_GATED_RUNTIME).expect("runtime");
-        let mut scheduler = RecurringScheduler::install(VERSION_GATED_RUNTIME.handlers, 0);
+        let mut scheduler = RecurringScheduler::install(VERSION_GATED_RUNTIME.handlers);
 
-        let status = tick(
+        let status = runtime_turn(
             DaemonDescription {
                 inbound_network_intake: None,
                 time_wakes: &[],
                 storage_ready: Some(version_storage_ready),
             },
             &mut runtime,
-            &listener,
+            RuntimeTurnHost::daemon(&listener),
             &mut scheduler,
             16,
         )
-        .expect("daemon tick");
+        .expect("daemon runtime turn");
 
         assert!(status);
         assert_eq!(VERSION_REPAIR_HANDLER_CALLS.load(Ordering::SeqCst), 1);

@@ -255,7 +255,7 @@ use core syntax and contracts, but core must not import their semantic rules.
   local intent, loads only handler-declared fact inputs, calls the registered
   handler, and commits successful handler output atomically with queue-row
   deletion. It also owns handler route metadata, handler sets, recurring intent
-  schedules, and dispatch context.
+  declarations, and dispatch context.
 - `perf_profile.rs`: env-gated performance instrumentation. It records coarse
   phase timings in thread-local state only when explicitly enabled, preserving
   normal CLI output by default. It is for runtime profiling, not protocol
