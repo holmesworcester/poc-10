@@ -852,6 +852,10 @@ CREATE TABLE IF NOT EXISTS sync_shareable_fact_rows (
     timestamp_ms INTEGER NOT NULL,
     PRIMARY KEY (workspace_id, fact_id)
 );
+CREATE INDEX IF NOT EXISTS sync_shareable_fact_rows_by_fact
+    ON sync_shareable_fact_rows (fact_id, workspace_id);
+CREATE INDEX IF NOT EXISTS sync_shareable_fact_rows_by_workspace_timestamp
+    ON sync_shareable_fact_rows (workspace_id, timestamp_ms, fact_id);
 
 CREATE TABLE IF NOT EXISTS sync_negentropy_leaf_rows (
     workspace_id BLOB NOT NULL,
@@ -860,6 +864,8 @@ CREATE TABLE IF NOT EXISTS sync_negentropy_leaf_rows (
     contribution_fingerprint BLOB NOT NULL,
     PRIMARY KEY (workspace_id, owner_fact_id)
 );
+CREATE INDEX IF NOT EXISTS sync_negentropy_leaf_rows_by_workspace_timestamp
+    ON sync_negentropy_leaf_rows (workspace_id, timestamp_ms, owner_fact_id);
 
 CREATE TABLE IF NOT EXISTS sync_negentropy_context_have_rows (
     workspace_id BLOB NOT NULL,

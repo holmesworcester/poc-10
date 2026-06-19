@@ -62,6 +62,17 @@ fn sqlite_table_names(path: &std::path::Path) -> BTreeSet<String> {
         .expect("collect table names")
 }
 
+fn sqlite_index_names(path: &std::path::Path) -> BTreeSet<String> {
+    let conn = Connection::open(path).expect("open sqlite");
+    let mut stmt = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'index'")
+        .expect("prepare index name query");
+    stmt.query_map([], |row| row.get::<_, String>(0))
+        .expect("query index names")
+        .collect::<Result<BTreeSet<_>, _>>()
+        .expect("collect index names")
+}
+
 #[test]
 fn schema_sources_execute_declared_ddl() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -83,6 +94,63 @@ fn schema_sources_execute_declared_ddl() {
     }
 
     Db::open_disk_with_schema_sources(&path, &sources).expect("reopen executes idempotent DDL");
+}
+
+#[test]
+fn protocol_schema_indexes_sync_hot_paths() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("sync-index-schema.db");
+
+    Db::open_disk_with_schema_sources(&path, &[FACTS_SCHEMA_SOURCE]).expect("open protocol schema");
+    let actual = sqlite_index_names(&path);
+
+    for expected in [
+        "sync_shareable_fact_rows_by_fact",
+        "sync_shareable_fact_rows_by_workspace_timestamp",
+        "sync_negentropy_leaf_rows_by_workspace_timestamp",
+    ] {
+        assert!(actual.contains(expected), "missing sync index {expected}");
+    }
+
+    let conn = Connection::open(&path).expect("open sqlite");
+    let shareable_by_fact_plan = query_plan_details(
+        &conn,
+        "EXPLAIN QUERY PLAN
+         SELECT workspace_id, fact_id, timestamp_ms
+         FROM sync_shareable_fact_rows
+         WHERE fact_id = ?1
+         ORDER BY workspace_id, fact_id
+         LIMIT ?2",
+        params![&[1u8; 32][..], 16_i64],
+    );
+    assert!(
+        shareable_by_fact_plan.contains("sync_shareable_fact_rows_by_fact"),
+        "fact-id shareable lookup should use sync index: {shareable_by_fact_plan}"
+    );
+
+    let leaf_range_plan = query_plan_details(
+        &conn,
+        "EXPLAIN QUERY PLAN
+         SELECT workspace_id, owner_fact_id, timestamp_ms, contribution_fingerprint
+         FROM sync_negentropy_leaf_rows
+         WHERE workspace_id = ?1 AND timestamp_ms >= ?2 AND timestamp_ms <= ?3
+         ORDER BY timestamp_ms, owner_fact_id
+         LIMIT ?4",
+        params![&[2u8; 32][..], 10_i64, 20_i64, 16_i64],
+    );
+    assert!(
+        leaf_range_plan.contains("sync_negentropy_leaf_rows_by_workspace_timestamp"),
+        "workspace timestamp leaf lookup should use sync index: {leaf_range_plan}"
+    );
+}
+
+fn query_plan_details<P: rusqlite::Params>(conn: &Connection, sql: &str, params: P) -> String {
+    let mut stmt = conn.prepare(sql).expect("prepare query plan");
+    stmt.query_map(params, |row| row.get::<_, String>(3))
+        .expect("query plan")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect query plan")
+        .join("\n")
 }
 
 #[test]
