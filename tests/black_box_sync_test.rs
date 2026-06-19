@@ -469,7 +469,15 @@ fn cli_daemon_download_perf_times_send_to_peer_receipt() {
     drop(alice_daemon);
     drop(bob_daemon);
 
-    let payload = patterned_payload(32);
+    let payload_mib = std::env::var("TOPO_DOWNLOAD_PERF_MIB")
+        .ok()
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .expect("parse TOPO_DOWNLOAD_PERF_MIB")
+        })
+        .unwrap_or(8);
+    let payload = patterned_payload(payload_mib * 4);
     let in_path = tmp.path().join("download-perf.bin");
     std::fs::write(&in_path, &payload).expect("write perf payload");
 
@@ -1018,10 +1026,10 @@ fn poll_for_saved_file(
 fn patterned_payload(slices: usize) -> Vec<u8> {
     const SLICE_BYTES: usize = 256 * 1024;
     let mut payload = Vec::with_capacity(SLICE_BYTES * slices);
-    for slice_idx in 0..slices as u8 {
+    for slice_idx in 0..slices {
         for offset in 0..SLICE_BYTES {
             payload.push(
-                slice_idx
+                (slice_idx as u8)
                     .wrapping_mul(17)
                     .wrapping_add((offset % 251) as u8),
             );
