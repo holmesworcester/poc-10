@@ -8,10 +8,9 @@
 //! - `local_fact_admissions` stores the local metadata needed to interpret
 //!   those bytes: scope, scope kind/id, and admission time. Loading a durable
 //!   `Fact` always joins these two tables.
-//! - `incoming_facts` is temp, process-local storage for outside-origin intake.
-//!   `pending_incoming_projection` is the temp ready queue for incoming rows.
-//!   Incoming rows project once; projection either moves them into durable
-//!   `facts` plus `local_fact_admissions`, or drops them.
+//! - `incoming_facts` is temp, process-local first-pass intake. Incoming rows
+//!   project once; projection either moves them into durable `facts` plus
+//!   `local_fact_admissions`, or drops them.
 //! - `pending_projection` is the work queue keyed by fact id (`owner`) plus the
 //!   time the owner entered the queue.
 //! - `pending_projection_matches` and `pending_time_ranges` are pending input
@@ -22,13 +21,13 @@
 //!
 //! SQL atomicity is the safety mechanism. Submitting a fact inserts bytes,
 //! admission metadata, the pending row, and any already matched context in one
-//! transaction. Staging an outside-origin incoming fact inserts both the
-//! volatile storage row and its ready queue row. Projecting a queued fact then
-//! consumes that pending work, replaces owned needs/time wakes, appends offers,
-//! compares the output with current standing context, records newly woken
-//! owners, applies row mutations, records intents, and moves/drops incoming rows
-//! in one transaction. If SQLite rolls back, the old queue state remains. If it
-//! commits, the projector output is visible as a complete unit.
+//! transaction. Staging an outside-origin incoming fact inserts a volatile
+//! first-pass intake row. Projecting a queued fact then consumes that pending
+//! work, replaces owned needs/time wakes, appends offers, compares the output
+//! with current standing context, records newly woken owners, applies row
+//! mutations, records intents, and moves/drops incoming rows in one transaction.
+//! If SQLite rolls back, the old queue state remains. If it commits, the
+//! projector output is visible as a complete unit.
 //!
 //! Projectors do not query the database for missing context during a run. Matched
 //! payload facts arrive through `ProjectionContext` because the pending row
@@ -60,8 +59,8 @@ use crate::core::facts::{
 };
 use crate::core::perf_profile as perf;
 use crate::core::schema::{
-    CONTEXT_EDGES, FACTS, INCOMING_FACTS, LOCAL_FACT_ADMISSIONS, PENDING_INCOMING_PROJECTION,
-    PENDING_PROJECTION, PENDING_PROJECTION_MATCHES, PENDING_TIME_RANGES, TIME_WAKES,
+    CONTEXT_EDGES, FACTS, INCOMING_FACTS, LOCAL_FACT_ADMISSIONS, PENDING_PROJECTION,
+    PENDING_PROJECTION_MATCHES, PENDING_TIME_RANGES, TIME_WAKES,
 };
 use crate::core::wire::Writer;
 use rusqlite::{params, OptionalExtension};
@@ -395,19 +394,19 @@ fn next_durable_projection_item(store: &Db) -> Result<Option<PendingProjectionIt
         .map_err(|err| format!("load pending projection: {err}"))
 }
 
-/// Read the next incoming fact whose volatile storage row is marked ready.
+/// Read the oldest incoming first-pass fact id without mutating intake.
 ///
-/// `incoming_facts` is storage, not the projection queue. Loading incoming work
-/// does not infer readiness from standing needs or pending context matches; only
-/// rows in `pending_incoming_projection` are runnable.
+/// Incoming rows have not projected yet, so every row is runnable. If first-pass
+/// projection needs context and retains the fact, the commit moves it into
+/// durable fact storage where later wakeups use `pending_projection`.
 fn next_incoming_projection_item(store: &Db) -> Result<Option<PendingProjectionItem>, String> {
     store
         .conn()
         .query_row(
             r#"
-            SELECT q.owner
-            FROM pending_incoming_projection q
-            ORDER BY q.queued_at, q.owner
+            SELECT id
+            FROM incoming_facts
+            ORDER BY received_at, id
             LIMIT 1
             "#,
             [],
@@ -596,9 +595,7 @@ fn commit_stale_projection_input_in_tx(
 ) -> rusqlite::Result<()> {
     match source {
         ProjectionSource::Durable => purge_fact_in_tx(tx, fact_id).map(|_| ()),
-        ProjectionSource::Incoming => {
-            clear_pending_incoming_projection_work_in_tx(tx, fact_id).map(|_| ())
-        }
+        ProjectionSource::Incoming => delete_incoming_fact_in_tx(tx, fact_id).map(|_| ()),
     }
 }
 
@@ -2385,7 +2382,6 @@ const OWNER_KEYED_FACT_CLEANUP_TABLES: &[TableName] = &[
     PENDING_TIME_RANGES,
     PENDING_PROJECTION_MATCHES,
     PENDING_PROJECTION,
-    PENDING_INCOMING_PROJECTION,
 ];
 const CONTROL_PROJECTION_PRIORITY: i64 = 0;
 const NORMAL_PROJECTION_PRIORITY: i64 = 100;
@@ -2597,46 +2593,21 @@ fn insert_incoming_fact_with_metadata_in_tx(
             origin_received_at,
         ],
     )?;
-    let inserted = verify_idempotent_insert(
+    verify_idempotent_insert(
         changed,
         || incoming_fact_by_id_in_tx(store, &fact.id),
         |existing| existing.bytes == fact.bytes,
         "conflicting row for incoming fact",
-    )?;
-    if inserted {
-        insert_pending_incoming_owner_in_tx(store, fact.id, fact.timestamp)?;
-    }
-    Ok(inserted)
-}
-
-fn insert_pending_incoming_owner_in_tx(
-    store: &Db,
-    owner: FactId,
-    queued_at: u64,
-) -> rusqlite::Result<usize> {
-    store.conn().execute(
-        "INSERT OR IGNORE INTO pending_incoming_projection (owner, queued_at)
-         VALUES (?1, ?2)",
-        params![
-            owner.as_slice(),
-            sqlite_u64(queued_at, "incoming projection queued_at")?
-        ],
     )
-}
-
-fn clear_pending_incoming_projection_work_in_tx(
-    store: &Db,
-    owner: FactId,
-) -> rusqlite::Result<usize> {
-    delete_rows_by_owner_in_tx(store, PENDING_INCOMING_PROJECTION, owner)
 }
 
 fn delete_incoming_fact_in_tx(store: &Db, owner: FactId) -> rusqlite::Result<bool> {
     let changed =
         delete_rows_by_blob_column_in_tx(store, INCOMING_FACTS, "id", owner.as_slice())? > 0;
-    let owner_rows_deleted =
-        delete_owner_rows_from_tables(store, OWNER_KEYED_FACT_CLEANUP_TABLES, owner)? > 0;
-    Ok(changed || owner_rows_deleted)
+    if changed {
+        delete_owner_rows_from_tables(store, OWNER_KEYED_FACT_CLEANUP_TABLES, owner)?;
+    }
+    Ok(changed)
 }
 
 fn move_incoming_to_retained_in_tx(store: &Db, fact: &Fact) -> rusqlite::Result<bool> {
@@ -2829,8 +2800,8 @@ pub(crate) fn pending_projection_input_count(store: &Db) -> usize {
         .table_row_count(PENDING_PROJECTION)
         .expect("pending projection count should load from database")
         + store
-            .table_row_count(PENDING_INCOMING_PROJECTION)
-            .expect("pending incoming projection count should load from database")
+            .table_row_count(INCOMING_FACTS)
+            .expect("incoming fact count should load from database")
 }
 
 /// Admit one fact after the runtime's protocol admission check.
@@ -4674,37 +4645,23 @@ mod tests {
     }
 
     #[test]
-    fn next_incoming_projection_item_reads_only_ready_queue() {
+    fn next_incoming_projection_item_reads_oldest_incoming_fact_without_context_filter() {
         let db = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
-        let ready = Fact::new(FactScope::Local, 1, b"ready incoming".to_vec());
-        let parked = Fact::new(FactScope::Local, 0, b"parked incoming".to_vec());
+        let oldest = Fact::new(FactScope::Local, 0, b"oldest incoming".to_vec());
+        let newer = Fact::new(FactScope::Local, 1, b"newer incoming".to_vec());
 
         db.write_transaction(|tx| {
-            insert_incoming_fact_in_tx(tx, &ready)?;
-            insert_incoming_fact_in_tx(tx, &parked)?;
-            delete_rows_by_owner_in_tx(tx, PENDING_INCOMING_PROJECTION, parked.id)?;
+            insert_incoming_fact_in_tx(tx, &oldest)?;
+            insert_incoming_fact_in_tx(tx, &newer)?;
             tx.conn().execute(
                 "INSERT INTO context_edges
                     (owner, direction, role, scope_key, start_key, end_key)
                  VALUES (?1, 'need', 'incoming_context', ?2, ?3, ?4)",
                 params![
-                    parked.id.as_slice(),
+                    oldest.id.as_slice(),
                     b"scope".as_slice(),
                     b"a".as_slice(),
                     b"z".as_slice()
-                ],
-            )?;
-            tx.conn().execute(
-                "INSERT INTO pending_projection_matches
-                    (owner, need_role, need_scope_key, need_start_key, need_end_key,
-                     offer_owner, offer_start_key, offer_end_key)
-                 VALUES (?1, 'incoming_context', ?2, ?3, ?4, ?5, ?3, ?4)",
-                params![
-                    parked.id.as_slice(),
-                    b"scope".as_slice(),
-                    b"a".as_slice(),
-                    b"z".as_slice(),
-                    ready.id.as_slice()
                 ],
             )?;
             Ok(())
@@ -4715,20 +4672,7 @@ mod tests {
             next_incoming_projection_item(&db)
                 .expect("next incoming")
                 .map(|item| item.owner),
-            Some(ready.id)
-        );
-
-        db.write_transaction(|tx| {
-            delete_incoming_fact_in_tx(tx, ready.id)?;
-            Ok(())
-        })
-        .expect("consume ready incoming");
-
-        assert!(
-            next_incoming_projection_item(&db)
-                .expect("no queued incoming")
-                .is_none(),
-            "pending context matches must not make incoming storage runnable without a ready row"
+            Some(oldest.id)
         );
     }
 
@@ -4753,44 +4697,6 @@ mod tests {
             .expect("load incoming fact")
             .is_none());
         assert_owner_keyed_fact_rows(&db, fact.id, 0);
-    }
-
-    #[test]
-    fn stale_pending_incoming_queue_row_does_not_clear_retained_owner_state() {
-        let db = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
-        let fact = Fact::new(
-            FactScope::Local,
-            1,
-            b"retained with stale incoming queue".to_vec(),
-        );
-        let offer = Fact::new(FactScope::Local, 2, b"retained offer".to_vec());
-
-        db.write_transaction(|tx| {
-            insert_retained_fact_in_tx(tx, &fact)?;
-            seed_owner_keyed_fact_rows(tx, fact.id, offer.id)
-        })
-        .expect("seed retained owner state");
-        assert_eq!(owner_row_count(&db, CONTEXT_EDGES, fact.id), 1);
-        assert_eq!(owner_row_count(&db, PENDING_PROJECTION, fact.id), 1);
-        assert_eq!(
-            owner_row_count(&db, PENDING_INCOMING_PROJECTION, fact.id),
-            1
-        );
-
-        db.write_transaction(|tx| {
-            commit_stale_projection_input_in_tx(tx, ProjectionSource::Incoming, fact.id)
-        })
-        .expect("retire stale incoming queue row");
-
-        assert!(retained_fact(&db, &fact.id)
-            .expect("load retained fact")
-            .is_some());
-        assert_eq!(owner_row_count(&db, CONTEXT_EDGES, fact.id), 1);
-        assert_eq!(owner_row_count(&db, PENDING_PROJECTION, fact.id), 1);
-        assert_eq!(
-            owner_row_count(&db, PENDING_INCOMING_PROJECTION, fact.id),
-            0
-        );
     }
 
     #[test]
@@ -4882,11 +4788,6 @@ mod tests {
         )?;
         store.conn().execute(
             "INSERT INTO pending_projection (owner, queued_at)
-             VALUES (?1, 0)",
-            params![owner.as_slice()],
-        )?;
-        store.conn().execute(
-            "INSERT OR IGNORE INTO pending_incoming_projection (owner, queued_at)
              VALUES (?1, 0)",
             params![owner.as_slice()],
         )?;

@@ -129,8 +129,8 @@ impl Runtime {
     /// Count projection inputs still waiting in SQL.
     ///
     /// This is queue depth, not fact storage. It includes durable
-    /// `pending_projection` rows and volatile `pending_incoming_projection` rows
-    /// because both are ready inputs to fact projection.
+    /// `pending_projection` rows and volatile `incoming_facts` rows because both
+    /// are inputs to fact projection.
     pub fn pending_projection_count(&self) -> usize {
         project_fact::pending_projection_input_count(&self.db)
     }
@@ -511,7 +511,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_projection_count_reports_durable_and_ready_incoming_queues() {
+    fn pending_projection_count_reports_durable_queue_and_incoming_intake() {
         let mut runtime = Runtime::open_memory(&TEST_RUNTIME).expect("runtime");
         let durable = Fact::new(FactScope::Global, 7, b"durable queued".to_vec());
         let incoming = Fact::new(FactScope::Local, 8, b"incoming queued".to_vec());
@@ -527,7 +527,7 @@ mod tests {
         assert_eq!(
             runtime.pending_projection_count(),
             2,
-            "pending projection count should include durable and ready incoming queue rows"
+            "pending projection count should include durable queue rows and volatile incoming intake"
         );
     }
 
