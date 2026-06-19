@@ -2,11 +2,12 @@
 
 use std::cell::Cell;
 
+mod runtime_test_support;
+
 use topo::core::command::{CommandClock, WorkspaceId};
-use topo::core::daemon::{self, RuntimeTurnHost};
 use topo::core::db::Db;
 use topo::core::runtime::Runtime;
-use topo::protocol::app::{MATCH_PROTOCOL, MATCH_RUNTIME};
+use topo::protocol::app::MATCH_RUNTIME;
 use topo::protocol::auth::signature::project::{
     authenticate as signature_authenticate, decode as signature_decode,
 };
@@ -15,6 +16,8 @@ use topo::protocol::content::file_deletion::api::delete_file;
 use topo::protocol::content::file_deletion::project::decode as file_deletion_layout_decode;
 use topo::protocol::content::message_deletion::api::delete_message;
 use topo::protocol::content::message_deletion::project::decode as message_deletion_layout_decode;
+
+use runtime_test_support::{drain_runtime_work_for_test, initialize_match_runtime};
 
 struct FixedClock(Cell<u64>);
 
@@ -26,42 +29,9 @@ impl CommandClock for FixedClock {
     }
 }
 
-fn drain_runtime_work_for_test(runtime: &mut Runtime, max_rounds: usize, limit: usize) {
-    for _ in 0..max_rounds {
-        runtime
-            .drain_durable_projection(limit)
-            .expect("drain durable projection batch");
-        runtime
-            .drain_incoming_projection(limit)
-            .expect("drain incoming projection batch");
-        runtime
-            .drain_durable_intents(limit)
-            .expect("drain durable intent batch");
-        runtime
-            .drain_local_intents(limit)
-            .expect("drain local intent batch");
-        if runtime.pending_projection_count() == 0 && runtime.pending_intent_count() == 0 {
-            return;
-        }
-    }
-    panic!("runtime work did not become idle within {max_rounds} rounds");
-}
-
-fn initialize_runtime_for_test(runtime: &mut Runtime) {
-    let mut scheduler = daemon::RecurringScheduler::install(MATCH_RUNTIME.handlers, 0);
-    daemon::runtime_turn(
-        MATCH_PROTOCOL.daemon,
-        runtime,
-        RuntimeTurnHost::local(),
-        &mut scheduler,
-        4096,
-    )
-    .expect("initialize runtime through local turn");
-}
-
 fn runtime_with_workspace() -> (Runtime, WorkspaceId) {
     let mut runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
-    initialize_runtime_for_test(&mut runtime);
+    initialize_match_runtime(&mut runtime);
     let clock = FixedClock(Cell::new(1_000));
     let workspace = create_workspace_with_identity(
         runtime.db(),

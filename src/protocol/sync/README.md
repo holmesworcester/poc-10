@@ -5,7 +5,7 @@ converge between endpoints so other scopes can rely on eventual consistency for
 admitted shared facts. Sync starts once per live connection with an
 initial seed compare, continues with live-tail sends for newly indexed facts on
 established authorized connections, and, where catch-up work remains, uses
-periodic daemon tick catch-up (`--sync-ms`/`--tick-ms`) to drain queued
+recurring runtime-turn catch-up (`--sync-ms`/`--tick-ms`) to drain queued
 compare/have/need/fact-send work and due time wakes. A secondary goal is fast
 wall-clock display of fact state in a requested range, such as latest messages;
 that requires syncing the range's dependency closure, not only the owner facts
@@ -123,7 +123,7 @@ still rejects unsendable local/private facts and carries sealed frames; the
 receiver admits the opened bytes as ordinary facts and runs the owning
 projectors. Its purpose is wall-clock latency: peers that are already
 connected see new shareable facts without waiting for another compare round.
-Compare/have/need rounds and periodic daemon tick catch-up still repair peers
+Compare/have/need rounds and recurring runtime-turn catch-up still repair peers
 that were disconnected, missed a send, or learned a dependency after the first
 live-tail send.
 
@@ -255,10 +255,11 @@ skipping the origin connection that supplied the fact.
 computes the active configured range summary for facts visible on that
 connection, creates a `compare` fact, and asks connection to send it.
 
-`maintain_sync` is a live-only recurring daemon intent. It scans existing
-connection rows, reads the active local sync setting, and reseeds compare work
-for each connection. This is the ongoing-sync path; user commands influence it
-only by changing projected local state.
+`maintain_sync` is a live-only recurring intent. Daemon-host turns give it the
+listener context it needs to scan existing connection rows, read the active
+local sync setting, and reseed compare work for each connection. This is the
+ongoing-sync path; user commands influence it only by changing projected local
+state.
 
 `send_sync_compare_response` handles one `compare` fact. It loads connection
 visible shareable facts, computes local summaries for the requested range,

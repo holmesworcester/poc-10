@@ -378,7 +378,7 @@ mod tests {
     }
 
     fn initialize_runtime_for_test(runtime: &mut Runtime) {
-        let mut scheduler = daemon::RecurringScheduler::install(MATCH_RUNTIME.handlers, 0);
+        let mut scheduler = daemon::RecurringScheduler::install(MATCH_RUNTIME.handlers);
         daemon::runtime_turn(
             MATCH_PROTOCOL.daemon,
             runtime,

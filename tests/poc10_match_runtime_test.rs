@@ -2,12 +2,13 @@
 
 use std::{cell::Cell, collections::BTreeSet};
 
+mod runtime_test_support;
+
 use topo::core::command::CommandClock;
 use topo::core::crypto;
-use topo::core::daemon::{self, RuntimeTurnHost};
 use topo::core::facts::{Fact, FactScope, ScopeKind};
 use topo::core::runtime::Runtime;
-use topo::protocol::app::{MATCH_PROTOCOL, MATCH_RUNTIME};
+use topo::protocol::app::MATCH_RUNTIME;
 use topo::protocol::auth::local_key_secret::encode as local_key_secret_layout;
 use topo::protocol::auth::local_key_secret::fact::LocalKeySecretFact;
 use topo::protocol::auth::removal_frontier::encode as removal_frontier_layout;
@@ -17,6 +18,8 @@ use topo::protocol::auth::workspace::{
     queries as workspace_queries,
 };
 use topo::protocol::content::message as content_message;
+
+use runtime_test_support::{drain_projection_for_test, initialize_match_runtime};
 
 struct FixedClock(Cell<u64>);
 
@@ -28,40 +31,10 @@ impl CommandClock for FixedClock {
     }
 }
 
-fn drain_projection_for_test(runtime: &mut Runtime, max_rounds: usize, limit: usize) -> bool {
-    let mut progressed = false;
-    for _ in 0..max_rounds {
-        let status = runtime
-            .drain_durable_projection(limit)
-            .expect("drain durable projection batch");
-        progressed |= status;
-        let status = runtime
-            .drain_incoming_projection(limit)
-            .expect("drain incoming projection batch");
-        progressed |= status;
-        if runtime.pending_projection_count() == 0 {
-            return progressed;
-        }
-    }
-    panic!("projection work did not become idle within {max_rounds} rounds");
-}
-
-fn initialize_runtime_for_test(runtime: &mut Runtime) {
-    let mut scheduler = daemon::RecurringScheduler::install(MATCH_RUNTIME.handlers, 0);
-    daemon::runtime_turn(
-        MATCH_PROTOCOL.daemon,
-        runtime,
-        RuntimeTurnHost::local(),
-        &mut scheduler,
-        4096,
-    )
-    .expect("initialize runtime through local turn");
-}
-
 #[test]
 fn runtime_submits_authored_facts_and_projects_workspace_rows() {
     let mut runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
-    initialize_runtime_for_test(&mut runtime);
+    initialize_match_runtime(&mut runtime);
     let clock = FixedClock(Cell::new(123_000));
     let output = create_workspace_with_identity(
         runtime.db(),
@@ -115,7 +88,7 @@ fn runtime_routes_signature_evidenced_content_message_to_projector() {
         text: "runtime signature-evidenced message",
     });
     let mut runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
-    initialize_runtime_for_test(&mut runtime);
+    initialize_match_runtime(&mut runtime);
 
     runtime.submit_fact(frontier);
     runtime.submit_fact(local_key_secret_fact(

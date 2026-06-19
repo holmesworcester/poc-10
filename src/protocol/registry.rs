@@ -1305,8 +1305,6 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
         versioning::check_version::CheckVersionHandler,
         storage = versioning::check_version::STORAGE_REQUIREMENT,
         recurring = RecurringIntentSpec {
-            interval_ms: 250,
-            initial_delay_ms: 0,
             build_intent: versioning::check_version::build_check_version_intent,
         }
     ),
@@ -1353,8 +1351,6 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
         sync::maintain_sync::MaintainSyncHandler,
         storage = sync::maintain_sync::STORAGE_REQUIREMENT,
         recurring = RecurringIntentSpec {
-            interval_ms: 250,
-            initial_delay_ms: 0,
             build_intent: sync::maintain_sync::build_maintain_sync_intent,
         }
     ),
@@ -1367,8 +1363,6 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
         connection::maintain_connections::MaintainConnectionsHandler,
         storage = connection::maintain_connections::STORAGE_REQUIREMENT,
         recurring = RecurringIntentSpec {
-            interval_ms: 250,
-            initial_delay_ms: 0,
             build_intent: connection::maintain_connections::build_maintain_connections_intent,
         }
     ),

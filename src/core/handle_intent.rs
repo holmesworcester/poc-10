@@ -299,10 +299,6 @@ pub struct RecurringIntentContext {
 /// operational repetition belongs here, not in durable time wakes or projectors.
 #[derive(Debug, Clone, Copy)]
 pub struct RecurringIntentSpec {
-    /// Legacy registry cadence hint; builders still self-gate from state.
-    pub interval_ms: u64,
-    /// Legacy initial-delay hint; builders still self-gate from state.
-    pub initial_delay_ms: u64,
     /// Build this turn's intent from current database state, or `None` to skip.
     pub build_intent: RecurringIntentBuilder,
 }
@@ -312,7 +308,7 @@ pub struct RecurringIntentSpec {
 /// `intent_kind` is the queue routing key that selects this handler for both
 /// durable and ephemeral intents.
 /// `recurrence` marks live-only operational repetition. A route with a
-/// recurrence is installed as an in-memory daemon schedule.
+/// recurrence is offered by each runtime turn.
 #[derive(Debug, Clone, Copy)]
 pub struct HandlerRoute {
     /// Intent kind handled by this route.
@@ -321,7 +317,7 @@ pub struct HandlerRoute {
     pub factory: HandlerFactory,
     /// Storage version required by this handler's committed effects.
     pub storage_requirement: StorageRequirement,
-    /// Live-only recurring schedule installed by the daemon, if any.
+    /// Live-only recurring work offered by runtime turns, if any.
     pub recurrence: Option<RecurringIntentSpec>,
 }
 
