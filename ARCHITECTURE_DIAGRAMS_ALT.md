@@ -31,16 +31,19 @@ flowchart TD
     COMMIT --> EFFECTS["commit RuntimeEffects"]
 
     EFFECTS --> PURGES["purge exact facts"]
-    EFFECTS --> CHILD_FACTS["admit emitted child facts as pending"]
+    EFFECTS --> CHILD_FACTS["admit durable emitted facts -> facts + pending_projection"]
     EFFECTS --> ROWS["apply row mutations"]
     EFFECTS --> INTENTS["record durable and local intents"]
 ```
 
 Newly emitted needs do not cause an in-memory projector fixed point. If a new
 need overlaps an existing offer, core records the match and queues the owner for
-a later projection item. Child facts emitted by a projector follow the same
-rule: they are admitted and marked pending, not projected inline inside the
-parent's commit.
+a later projection item. Until that match happens, the owner is parked by its
+standing need, not kept in `pending_projection`. Durable child facts emitted by
+a projector are admitted to `facts` and marked in `pending_projection` in the
+same transaction; they are not projected inline inside the parent's commit.
+`RuntimeEffects::incoming_facts` is the separate temp staging path for
+outside-origin inputs.
 
 ## Daemon Queue Steps
 
@@ -87,17 +90,17 @@ emit more facts, so later turns may keep moving the same causal chain forward.
 %%{init: {"flowchart": {"wrappingWidth": 300}} }%%
 flowchart LR
     subgraph TURN_ONE["runtime turn N"]
-        SOURCE["command, handler, sync, network, or time wake"] --> FACT["admit fact or mark owner pending"]
-        FACT --> PROJECT["project pending fact"]
-        PROJECT --> NEEDS["standing needs"]
+        SOURCE["command, handler, sync, network, or time wake"] --> FACT["admit durable fact -> pending_projection, or stage incoming fact"]
+        FACT --> PROJECT["project scheduled fact or incoming input"]
+        PROJECT --> NEEDS["standing needs<br/>(parked, not pending)"]
         PROJECT --> OFFERS["standing offers"]
         OFFERS --> MATCH["context overlap match"]
         NEEDS --> MATCH
-        MATCH --> WAKE["wake dependent owner into pending_projection"]
+        MATCH --> WAKE["matching offer re-queues owner into pending_projection"]
         PROJECT --> INTENT["durable or local intent"]
         INTENT --> HANDLER["dispatch registered handler"]
         HANDLER --> EFFECTS["RuntimeEffects"]
-        EFFECTS --> EMITTED_FACTS["emitted facts"]
+        EFFECTS --> EMITTED_FACTS["durable emitted facts -> facts + pending_projection"]
         EFFECTS --> FOLLOWUPS["follow-up intents"]
     end
 

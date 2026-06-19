@@ -99,6 +99,9 @@ fn architecture_diagrams_cover_current_runtime_relationships() {
         "`pending_time_ranges` is not an independent queue",
         "A global `time_now` context would make projection order and replay depend on the current clock",
         "Purges are also not a queue",
+        "the standing need parks the owner until matching context re-queues it",
+        "durable emitted facts re-enter the loop through `facts` plus `pending_projection` in the same transaction",
+        "`incoming_facts` is only the temp outside-origin staging path",
         "## 4) Connection Bootstrap",
         "Intake creates the observation fact",
         "there is no `send_network_frame` handler",
@@ -114,10 +117,17 @@ fn architecture_diagrams_cover_current_runtime_relationships() {
         !diagrams.contains("The previous three diagrams"),
         "ARCHITECTURE_DIAGRAMS.md should not retain stale section counts"
     );
+    assert!(
+        !diagrams.contains("A parked in pending_projection"),
+        "ARCHITECTURE_DIAGRAMS.md should not show context needs as retained pending work"
+    );
 
     let alternate = source_text(&root.join("ARCHITECTURE_DIAGRAMS_ALT.md"));
     let normalized_alternate = normalize_whitespace(&alternate);
     for required in [
+        "standing need, not kept in `pending_projection`",
+        "Durable child facts emitted by a projector are admitted to `facts` and marked in `pending_projection` in the same transaction",
+        "`RuntimeEffects::incoming_facts` is the separate temp staging path for outside-origin inputs",
         "receive_network_frame_effects intake",
         "frame_observation fact",
         "incoming connection frame fact",

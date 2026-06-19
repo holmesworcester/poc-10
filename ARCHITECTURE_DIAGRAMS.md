@@ -36,7 +36,7 @@ diagram 2):
 ```text
 facts (+ local_fact_admissions)   immutable fact store
 incoming_facts                    outside-origin facts staged for projection (temp)
-pending_projection                facts waiting to be projected
+pending_projection                scheduled projection attempts for retained facts
 pending_time_ranges               due time context attached to pending owners
 context_edges                     standing needs and offers
 pending_projection_matches        offers that matched a parked need
@@ -68,9 +68,13 @@ Each diagram below is one zoom level on that loop.
 
 A fact lands in `pending_projection` and the projector runs. Its output fans
 into the other queues; core matches new offers against parked needs, re-queues
-the woken owners, and dispatches intents to handlers, whose facts re-enter the
-loop. Materialized rows are read-model and planning state, not part of the
-projection→match cycle: projectors and context matching never read them.
+the woken owners, and dispatches intents to handlers, whose durable emitted
+facts re-enter the loop through `facts` plus `pending_projection` in the same
+transaction. Emitting a need does not keep an owner in `pending_projection`;
+after that projection attempt commits, the standing need parks the owner until
+matching context re-queues it. `incoming_facts` is only the temp outside-origin
+staging path. Materialized rows are read-model and planning state, not part of
+the projection->match cycle: projectors and context matching never read them.
 Queries read rows, and handlers may read them when planning work (for example,
 sync computing range summaries).
 
@@ -107,7 +111,7 @@ flowchart TD
     PROJECTOR -->|needs + offers| CONTEXT
     PROJECTOR -->|time wakes| WAKES
     PROJECTOR -->|intents| INTENTS
-    PROJECTOR -->|follow-up facts| FACTS
+    PROJECTOR -->|durable emitted facts| FACTS
     PROJECTOR -->|rows| ROWS
 
     CONTEXT -->|core matches range overlap| MATCHES
@@ -116,7 +120,7 @@ flowchart TD
     WAKES -->|due interval| TIME_CTX
 
     INTENTS --> HANDLER
-    HANDLER -->|facts| FACTS
+    HANDLER -->|durable emitted facts| FACTS
     HANDLER -->|rows| ROWS
     HANDLER -->|sealed bytes| OUT
 
@@ -188,8 +192,9 @@ the scheduling mechanism; the work itself is plain facts and handlers.
 
 Context matching is the one mechanism that lets facts wake each other without
 core understanding them. A projector that lacks proof emits a **need** and
-parks; any fact may publish an **offer**. The match is not a background scan: it
-runs inside the projection commit in `project_fact.rs`. When a projector's
+parks as standing context; the pending work row for that projection attempt is
+cleared. Any fact may publish an **offer**. The match is not a background scan:
+it runs inside the projection commit in `project_fact.rs`. When a projector's
 output commits, core takes the needs and offers that output just added (the
 context delta) and matches them against the already-stored set on `(role, scope,
 range)` overlap — symmetrically, a newly committed offer wakes the owners of
@@ -202,7 +207,7 @@ whether that payload actually proves what it needed.
 %%{init: {"flowchart": {"wrappingWidth": 300}} }%%
 flowchart TD
     A["fact A projector: missing proof"] -->|emit need role/scope/range| NEED[("context_edges: need (A)")]
-    NEED --> PARK["A parked in pending_projection"]
+    NEED --> PARK["A parked as standing need<br/>(no pending row)"]
 
     B["fact B projector: accepted"] -->|emit offer role/scope/range| OFFER[("context_edges: offer (B)")]
 
