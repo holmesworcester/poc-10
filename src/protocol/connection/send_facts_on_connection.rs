@@ -369,8 +369,8 @@ fn fact_batches(facts: Vec<Fact>) -> Result<Vec<FactBatch>, String> {
     let mut packed_len = frame_small::author::INNER_BUNDLE_HEADER_BYTES;
     for fact in facts {
         let fact_id = fact.id;
-        let payload = connection_fact::queries::sendable_fact_body(&fact)?.to_vec();
-        let fact_len = payload.len();
+        let fact_len = connection_fact::queries::sendable_fact_body(&fact)?.len();
+        let payload = fact.bytes;
         if fact_len == crate::protocol::content::file_slice::encode::CONTENT_FILE_SLICE_BYTES {
             if !payloads.is_empty() {
                 batches.push(FactBatch {
