@@ -9,10 +9,7 @@ use crate::core::effects::RuntimeEffects;
 use crate::core::{
     db::Db,
     facts::{Fact, FactId},
-    intents::{
-        HandlerContext, HandlerError, HandlerFactId, HandlerResult, Intent, IntentHandler,
-        IntentKind,
-    },
+    intents::{HandlerContext, HandlerError, HandlerResult, Intent, IntentHandler, IntentKind},
 };
 use crate::protocol::connection::send_facts_on_connection::{
     send_facts_on_connection_intent, SendFactsOnConnection,
@@ -78,11 +75,6 @@ impl SeedConnectionSyncHandler {
 }
 
 impl IntentHandler for SeedConnectionSyncHandler {
-    fn input_fact_ids(&self, intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
-        decode_seed_connection_sync(intent)?;
-        Ok(Vec::new())
-    }
-
     fn handle(&self, raw: &Intent, context: &HandlerContext) -> HandlerResult {
         let input = decode_seed_connection_sync(raw)?;
         if context.is_replay() {
@@ -218,7 +210,7 @@ mod tests {
         let intent = seed_connection_sync_intent(SeedConnectionSync { connection_id });
         let handler = SeedConnectionSyncHandler::new();
 
-        assert!(handler.input_fact_ids(&intent).expect("inputs").is_empty());
+        assert!(intent.context_fact_ids.is_empty());
         let output = handler
             .handle(&intent, &HandlerContext::new().with_db(&store))
             .expect("handle seed");

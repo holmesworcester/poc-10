@@ -10,9 +10,7 @@
 //! frame-family selection, route lookup from connection rows, and outgoing
 //! queueing. Each frame fact family owns sealing.
 
-use crate::core::intents::{
-    HandlerContext, HandlerError, HandlerFactId, HandlerResult, IntentHandler,
-};
+use crate::core::intents::{HandlerContext, HandlerError, HandlerResult, IntentHandler};
 use crate::core::intents::{Intent, IntentKind};
 use crate::core::network::{self, NetworkTarget, OutgoingNetworkRow};
 use crate::core::wire::{
@@ -67,6 +65,7 @@ pub fn send_facts_on_connection_intent(input: SendFactsOnConnection) -> Intent {
         connection_fact_ids_key(input.connection_id, &input.fact_ids),
         payload.finish(),
     )
+    .with_context_fact_ids(input.fact_ids.clone())
 }
 
 pub fn send_shareable_bucket_on_connection_intent(
@@ -255,13 +254,6 @@ impl SendFactsOnConnectionHandler {
 }
 
 impl IntentHandler for SendFactsOnConnectionHandler {
-    fn input_fact_ids(&self, intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
-        Ok(match decode_send_facts_on_connection_work(intent)? {
-            SendFactsOnConnectionWork::Explicit(input) => input.fact_ids,
-            SendFactsOnConnectionWork::ShareableRange(_) => Vec::new(),
-        })
-    }
-
     fn handle(&self, intent: &Intent, context: &HandlerContext) -> HandlerResult {
         let work = decode_send_facts_on_connection_work(intent)?;
         if context.is_replay() {

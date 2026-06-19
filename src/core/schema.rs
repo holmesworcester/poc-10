@@ -11,8 +11,9 @@
 //! `project_fact.rs`.
 //! `facts` and `local_fact_admissions` store immutable inputs and their local
 //! visibility metadata. `context_edges`, `time_wakes`, `pending_projection`,
-//! and `pending_projection_matches` drive fact projection. `intents` and
-//! `local_intents` drive handler dispatch.
+//! and `pending_projection_matches` drive fact projection. `intents`,
+//! `intent_context`, `local_intents`, and `local_intent_context` drive handler
+//! dispatch.
 //!
 //! Core schema is deliberately small and mechanical. It records the runtime
 //! queues and indexes needed to move work; it does not encode protocol policy
@@ -43,8 +44,12 @@ pub(crate) const PENDING_PROJECTION_MATCHES: TableName =
 pub(crate) const PENDING_TIME_RANGES: TableName = TableName::new("pending_time_ranges");
 /// Durable intent queue table.
 pub(crate) const INTENTS: TableName = TableName::new("intents");
+/// Durable intent context fact table.
+pub(crate) const INTENT_CONTEXT: TableName = TableName::new("intent_context");
 /// Ephemeral intent queue table.
 pub(crate) const LOCAL_INTENTS: TableName = TableName::new("local_intents");
+/// Ephemeral intent context fact table.
+pub(crate) const LOCAL_INTENT_CONTEXT: TableName = TableName::new("local_intent_context");
 /// Volatile fact table for outside-origin incoming inputs.
 pub(crate) const INCOMING_FACTS: TableName = TableName::new("incoming_facts");
 const CORE_REPLAY_PROTECTED_TABLES: &[TableName] = &[FACTS, LOCAL_FACT_ADMISSIONS];
@@ -56,7 +61,9 @@ const CORE_REPLAY_RESET_TABLES: &[TableName] = &[
     PENDING_PROJECTION_MATCHES,
     PENDING_TIME_RANGES,
     INTENTS,
+    INTENT_CONTEXT,
     LOCAL_INTENTS,
+    LOCAL_INTENT_CONTEXT,
     INCOMING_FACTS,
 ];
 
@@ -165,6 +172,15 @@ CREATE TABLE IF NOT EXISTS intents (
     replay INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS intent_context (
+    intent_id BLOB NOT NULL,
+    ordinal INTEGER NOT NULL,
+    fact_id BLOB NOT NULL,
+    PRIMARY KEY (intent_id, ordinal)
+);
+CREATE INDEX IF NOT EXISTS intent_context_by_fact
+    ON intent_context (fact_id);
+
 CREATE TEMP TABLE IF NOT EXISTS local_intents (
     intent_id BLOB PRIMARY KEY NOT NULL,
     kind TEXT NOT NULL,
@@ -172,6 +188,15 @@ CREATE TEMP TABLE IF NOT EXISTS local_intents (
     payload BLOB NOT NULL,
     replay INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TEMP TABLE IF NOT EXISTS local_intent_context (
+    intent_id BLOB NOT NULL,
+    ordinal INTEGER NOT NULL,
+    fact_id BLOB NOT NULL,
+    PRIMARY KEY (intent_id, ordinal)
+);
+CREATE INDEX IF NOT EXISTS local_intent_context_by_fact
+    ON local_intent_context (fact_id);
 
 CREATE TEMP TABLE IF NOT EXISTS incoming_facts (
     id BLOB PRIMARY KEY NOT NULL,

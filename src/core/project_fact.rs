@@ -888,7 +888,6 @@ pub(crate) mod commit_effects {
     use crate::core::effects::{RuntimeEffects, StorageRequirement};
     use crate::core::facts::Fact;
     use crate::core::intents::{Intent, RowMutation};
-    use crate::core::schema::{INTENTS, LOCAL_INTENTS};
 
     /// Counts of follow-up work recorded after an effect commit.
     ///
@@ -1133,9 +1132,18 @@ pub(crate) mod commit_effects {
             .map_err(sqlite_string_error)?;
         tx.apply_row_mutations_in_tx(&effects.row_mutations)?;
 
-        let intents = insert_intents_in_tx(tx, INTENTS, &effects.intents, replay)?;
-        let local_intents =
-            insert_intents_in_tx(tx, LOCAL_INTENTS, &effects.local_intents, replay)?;
+        let intents = insert_intents_in_tx(
+            tx,
+            crate::core::handle_intent::IntentQueue::Durable,
+            &effects.intents,
+            replay,
+        )?;
+        let local_intents = insert_intents_in_tx(
+            tx,
+            crate::core::handle_intent::IntentQueue::Local,
+            &effects.local_intents,
+            replay,
+        )?;
 
         Ok(RuntimeEffectCounts {
             facts,
@@ -1181,17 +1189,18 @@ pub(crate) mod commit_effects {
 
     fn insert_intents_in_tx(
         tx: &Db,
-        table: TableName,
+        queue: crate::core::handle_intent::IntentQueue,
         intents: &[Intent],
         replay: bool,
     ) -> rusqlite::Result<usize> {
         let mut inserted = 0usize;
         for intent in intents {
-            crate::core::handle_intent::insert_intent_work_row_in_tx(
-                tx,
-                table,
-                &intent.work_row_with_mode(replay),
-            )?;
+            let mode = if replay {
+                crate::core::intents::HandlerMode::Replay
+            } else {
+                crate::core::intents::HandlerMode::Live
+            };
+            crate::core::handle_intent::insert_intent_in_tx(tx, queue, intent, mode)?;
             inserted += 1;
         }
         Ok(inserted)

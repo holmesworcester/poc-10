@@ -158,6 +158,7 @@ fn core_local_intents_table_is_temp() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("schema-memory-store.db");
     let local_intents = TableName::new("local_intents");
+    let local_intent_context = TableName::new("local_intent_context");
 
     let store = Db::open_disk_with_schema_sources(&path, &[CORE_SCHEMA_SOURCE])
         .expect("open db with core schema");
@@ -167,9 +168,19 @@ fn core_local_intents_table_is_temp() {
             .expect("count temp rows"),
         0
     );
+    assert_eq!(
+        store
+            .table_row_count(local_intent_context)
+            .expect("count local context rows"),
+        0
+    );
     assert!(
         !sqlite_table_names(&path).contains("local_intents"),
         "local_intents should not be durable"
+    );
+    assert!(
+        !sqlite_table_names(&path).contains("local_intent_context"),
+        "local_intent_context should not be durable"
     );
 
     let reopened = Db::open_disk_with_schema_sources(&path, &[CORE_SCHEMA_SOURCE])
@@ -178,6 +189,12 @@ fn core_local_intents_table_is_temp() {
         reopened
             .table_row_count(local_intents)
             .expect("count temp rows after reopen"),
+        0
+    );
+    assert_eq!(
+        reopened
+            .table_row_count(local_intent_context)
+            .expect("count local context rows after reopen"),
         0
     );
 }

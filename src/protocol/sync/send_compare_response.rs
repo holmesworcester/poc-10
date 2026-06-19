@@ -7,7 +7,7 @@
 //! connection sends when there is something to send.
 
 use crate::core::effects::RuntimeEffects;
-use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};
+use crate::core::intents::{HandlerContext, HandlerResult, IntentHandler};
 use crate::core::intents::{Intent, IntentKind};
 use crate::protocol::connection::send_facts_on_connection::{
     send_facts_on_connection_intent, SendFactsOnConnection,
@@ -35,6 +35,7 @@ pub fn send_sync_compare_response_intent(input: SendSyncCompareResponse) -> Inte
         send_sync_compare_response_key(&input),
         payload,
     )
+    .with_context_fact_ids([input.compare_fact_id])
 }
 
 pub fn decode_send_sync_compare_response(
@@ -71,11 +72,6 @@ impl SendSyncCompareResponseHandler {
 }
 
 impl IntentHandler for SendSyncCompareResponseHandler {
-    fn input_fact_ids(&self, intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
-        let input = decode_send_sync_compare_response(intent)?;
-        Ok(vec![input.compare_fact_id])
-    }
-
     fn handle(&self, raw: &Intent, context: &HandlerContext) -> HandlerResult {
         let input = decode_send_sync_compare_response(raw)?;
         if context.is_replay() {
@@ -85,39 +81,28 @@ impl IntentHandler for SendSyncCompareResponseHandler {
         let compare =
             crate::protocol::sync::compare::project::decode::decode_fact(&compare_fact.bytes)?;
         let mut output = RuntimeEffects::new();
-        let (plan, expanded_send_fact_ids) = if let Ok(store) = context.db() {
-            let available_facts =
-                crate::protocol::sync::shared_fact::shareable_facts_for_connection(
+        let store = context.db()?;
+        let available_facts = crate::protocol::sync::shared_fact::shareable_facts_for_connection(
+            store,
+            compare.connection_id,
+        )?;
+        let plan = crate::protocol::sync::compare::author::response_plan_with_summaries(
+            compare_fact,
+            available_facts.iter(),
+            |range| {
+                crate::protocol::sync::shared_fact::range_summary_for_connection(
                     store,
                     compare.connection_id,
-                )?;
-            let plan = crate::protocol::sync::compare::author::response_plan_with_summaries(
-                compare_fact,
-                available_facts.iter(),
-                |range| {
-                    crate::protocol::sync::shared_fact::range_summary_for_connection(
-                        store,
-                        compare.connection_id,
-                        range,
-                    )
-                },
+                    range,
+                )
+            },
+        )?;
+        let expanded_send_fact_ids =
+            crate::protocol::sync::shared_fact::expand_fact_ids_with_context_for_connection(
+                store,
+                compare.connection_id,
+                &plan.send_fact_ids,
             )?;
-            let expanded =
-                crate::protocol::sync::shared_fact::expand_fact_ids_with_context_for_connection(
-                    store,
-                    compare.connection_id,
-                    &plan.send_fact_ids,
-                )?;
-            (plan, expanded)
-        } else {
-            let available_facts = context.facts().cloned().collect::<Vec<_>>();
-            let plan = crate::protocol::sync::compare::author::response_plan(
-                compare_fact,
-                available_facts.iter(),
-            )?;
-            let expanded = plan.send_fact_ids.clone();
-            (plan, expanded)
-        };
         let mut fact_ids = plan.facts.iter().map(|fact| fact.id).collect::<Vec<_>>();
         fact_ids.extend(expanded_send_fact_ids);
         fact_ids.sort();

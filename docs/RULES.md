@@ -27,7 +27,7 @@ in `src/core` or `src/protocol`.
   (including the context matching done as part of each projection commit), row
   mutations, deferred intent queueing, handler dispatch, and persistence.
 - Intent handlers own bounded stateful work. They consume intents and exact
-  declared fact inputs, then return facts, purged fact ids, and follow-up
+  attached input facts, then return facts, purged fact ids, and follow-up
   intents. They must not own protocol fact layouts or read-model projection
   rows.
 - Intents are flat: an intent does not chain another intent. A handler whose job
@@ -105,7 +105,7 @@ include `facts` versus `local_fact_admissions`, durable versus local intents,
 network bytes versus connection facts, and scope rows versus cross-scope
 context. The prose should say why both forms exist and what each one owns.
 
-Keep mechanism concrete. Prefer "claims one queued intent, loads declared fact
+Keep mechanism concrete. Prefer "claims one queued intent, loads attached fact
 inputs, calls the handler, and commits output atomically with queue deletion" to
 "handles dispatch." Inline comments should attach to real invariants,
 non-obvious matching semantics, ownership rules, and security conditions; they
@@ -250,9 +250,9 @@ Patterns to avoid in projector files:
 
 ## Intents And Handlers
 
-- Intent payloads are small, fixed or bounded wire records plus an idempotence
-  key. The payload must name exact fact inputs when the handler needs fact
-  context.
+- Intent payloads are small, fixed or bounded wire records plus a handler-owned
+  key. Exact fact inputs live in attached intent context rows when the handler
+  needs fact context.
 - Intent type determines whether work is atomic or deferred.
 - Row mutations are bounded read-model mutations and are applied by
   the core projection worker during projection drain.
@@ -269,14 +269,14 @@ Patterns to avoid in projector files:
 
 ### Intent Handler Style
 
-Handlers are the only place for bounded stateful protocol work. A handler
-decodes its own intent payload, asks core for exact input fact ids through
-`input_fact_ids`, reads those facts through `HandlerContext`, performs one
-bounded effect, and returns `RuntimeEffects`. Missing declared inputs are
-handler errors; local stale IO attempts should return empty effects so dispatch
-can consume the ephemeral row. Any durable or local intent emitted by a command,
-projector, handler, daemon intake, or recurring builder must name an intent kind
-registered by the active runtime.
+Handlers are the only place for bounded stateful protocol work. A queued intent
+attaches exact input fact ids beside its payload; core reads those facts into
+`HandlerContext`, and the handler decodes its payload to interpret them,
+performs one bounded effect, and returns `RuntimeEffects`. Missing declared
+inputs are handler errors; local stale IO attempts should return empty effects
+so dispatch can consume the ephemeral row. Any durable or local intent emitted
+by a command, projector, handler, daemon intake, or recurring builder must name
+an intent kind registered by the active runtime.
 
 Handlers may call deterministic `author.rs` constructors owned by the fact
 module they are emitting. They must not inline shared fact wire layouts, mutate

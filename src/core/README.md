@@ -83,8 +83,8 @@ Protocol code enters core through declarations and effect values:
   returns a `ProjectionOutput`; fact families keep decode, authenticate, adapt,
   and semantic projection helpers inside their owning `project.rs`.
 - `intents::IntentHandler` receives one queued `Intent` plus a
-  `HandlerContext` containing only declared input facts and returns
-  `RuntimeEffects`.
+  `HandlerContext` containing only the intent's attached input facts and
+  returns `RuntimeEffects`.
 - `command` defines the protocol-neutral command clock, local capability value
   types, and authored fact bundles. User-facing commands receive `Db` and
   `CommandClock` directly when they need current projected state before
@@ -242,8 +242,8 @@ use core syntax and contracts, but core must not import their semantic rules.
   `Global`, `Local`, and protocol-defined `Scoped` visibility model. It does
   not interpret fact tags, signatures, messages, keys, or sync payloads.
 - `intents.rs`: queued work and handler contract types. It defines durable and
-  local intent identity, opaque payloads, row mutation values, handler input
-  declarations, handler errors, and the rule that handlers return
+  local intent identity, attached context fact ids, opaque payloads, row
+  mutation values, handler errors, and the rule that handlers return
   `RuntimeEffects` instead of mutating runtime state directly.
 - `network.rs`: opaque network IO boundary. It owns listener setup, inbound
   length-prefixed frame reading into memory-local `network_incoming`, memory-local
@@ -252,10 +252,10 @@ use core syntax and contracts, but core must not import their semantic rules.
   cleanup. It does not classify bootstrap frames, connection frames, auth facts,
   sync facts, or content facts.
 - `handle_intent.rs`: one queued intent transaction. It claims one durable or
-  local intent, loads only handler-declared fact inputs, calls the registered
-  handler, and commits successful handler output atomically with queue-row
-  deletion. It also owns handler route metadata, handler sets, recurring intent
-  declarations, and dispatch context.
+  local intent, loads only the intent's attached fact inputs, calls the
+  registered handler, and commits successful handler output atomically with
+  queue-row deletion. It also owns handler route metadata, handler sets,
+  recurring intent declarations, and dispatch context.
 - `perf_profile.rs`: env-gated performance instrumentation. It records coarse
   phase timings in thread-local state only when explicitly enabled, preserving
   normal CLI output by default. It is for runtime profiling, not protocol
@@ -313,7 +313,7 @@ mode.
   deltas by owner, and fans out pending projection rows when new needs and
   offers overlap.
 - `handle_intent.rs`: intent queue worker. It claims one durable or local
-  intent, loads only the handler-declared fact inputs, calls the registered
+  intent, loads only the intent's attached fact inputs, calls the registered
   handler, and commits successful handler output atomically with queue-row
   deletion.
 - `project_fact.rs`: one queued fact projection item. It loads matched context

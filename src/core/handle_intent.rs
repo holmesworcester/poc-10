@@ -12,15 +12,16 @@
 //! queues with the same columns: durable `intents` rows and process-local
 //! `local_intents` rows. Every insert gets a fresh row id; `kind` only selects
 //! the handler, while `intent_key` and `payload` remain handler-owned bytes.
-//! Runtime admission rejects intent kinds that are not in the handler registry;
-//! if a stale unregistered row is already present, dispatch reports an invariant
-//! error and leaves the row untouched. Durable and local rows are both selected
-//! by SQLite insertion order so projection, replay, and live IO all preserve the
-//! order in which work was queued.
+//! `intent_context` and `local_intent_context` attach exact fact inputs to that
+//! row. Runtime admission rejects intent kinds that are not in the handler
+//! registry; if a stale unregistered row is already present, dispatch reports
+//! an invariant error and leaves the row untouched. Durable and local rows are
+//! both selected by SQLite insertion order so projection, replay, and live IO
+//! all preserve the order in which work was queued.
 //!
-//! A handler declares exact fact inputs. Dispatch loads those inputs by joining
-//! durable `facts` bytes with `local_fact_admissions` metadata and places them
-//! in `HandlerContext`; handlers that require an input call
+//! Dispatch loads an intent's attached context fact ids by joining durable
+//! `facts` bytes with `local_fact_admissions` metadata and places them in
+//! `HandlerContext`; handlers that require an input call
 //! `HandlerContext::require_fact`.
 //!
 //! This transaction boundary is why dispatch matters. Handler-owned SQL and
@@ -36,8 +37,8 @@
 use crate::core::db::{quoted_table_name, Db, TableName};
 use crate::core::effects::{RuntimeEffects, StorageRequirement};
 use crate::core::facts::{fact_from_storage_row, Fact, FactId};
-use crate::core::intents::{HandlerContext, HandlerMode, Intent, IntentHandler, IntentWorkRow};
-use crate::core::schema::{INTENTS, LOCAL_INTENTS};
+use crate::core::intents::{HandlerContext, HandlerMode, Intent, IntentHandler, IntentKind};
+use crate::core::schema::{INTENTS, INTENT_CONTEXT, LOCAL_INTENTS, LOCAL_INTENT_CONTEXT};
 
 use crate::core::crypto;
 use crate::core::project_fact::commit_effects::{
@@ -154,10 +155,11 @@ fn run_and_commit_loaded_intent(
         .write_transaction(|tx| {
             enforce_handler_storage_requirement(tx, storage_requirement)
                 .map_err(sqlite_string_error)?;
-            if delete_intent_work_row_in_tx(tx, queued.queue.table(), &queued.intent_id)? == 0 {
+            if delete_intent_row_in_tx(tx, queued.queue, &queued.intent_id)? == 0 {
                 return Ok(false);
             }
-            let context = load_handler_context(tx, handler, &queued.intent, queued.mode)
+            delete_intent_context_rows_in_tx(tx, queued.queue, &queued.intent_id)?;
+            let context = load_handler_context(tx, &queued.intent, queued.mode)
                 .map_err(sqlite_string_error)?;
             let effects = run_loaded_intent(
                 handler,
@@ -239,31 +241,39 @@ fn next_queued_intent_in_queue(
     store: &Db,
     queue: IntentQueue,
 ) -> Result<Option<QueuedIntent>, String> {
-    next_intent_work_row(store, queue.table(), queue.order_by_sql())
+    next_intent_row(store, queue)
         .map_err(|err| format!("load queued intent: {err}"))?
         .map(|row| {
-            let QueuedIntentWorkRow { intent_id, work } = row;
-            let mode = work.mode;
-            Intent::from_work_row(work).map(|intent| QueuedIntent {
+            let QueuedIntentRow {
+                intent_id,
+                kind,
+                intent_key,
+                payload,
+                mode,
+            } = row;
+            let context_fact_ids = intent_context_fact_ids(store, queue, &intent_id)
+                .map_err(|err| format!("load queued intent context: {err}"))?;
+            let kind = IntentKind::new(kind)
+                .map_err(|err| format!("invalid queued intent kind: {err}"))?;
+            Ok(QueuedIntent {
                 intent_id,
                 queue,
-                intent,
+                intent: Intent::new(kind, intent_key, payload)
+                    .with_context_fact_ids(context_fact_ids),
                 mode,
             })
         })
         .transpose()
 }
 
-/// Build the transaction-local fact/database view a stored-intent handler
-/// requested.
+/// Build the transaction-local fact/database view attached to a queued intent.
 fn load_handler_context<'a>(
     store: &'a Db,
-    handler: &(impl IntentHandler + ?Sized),
     intent: &Intent,
     mode: HandlerMode,
 ) -> Result<HandlerContext<'a>, String> {
     let mut facts = Vec::new();
-    for id in handler.input_fact_ids(intent)? {
+    for id in &intent.context_fact_ids {
         if let Some(fact) = load_retained_fact(store, &id)? {
             facts.push(fact);
         }
@@ -420,8 +430,11 @@ impl IntentQueue {
         }
     }
 
-    fn order_by_sql(self) -> &'static str {
-        "rowid"
+    fn context_table(self) -> TableName {
+        match self {
+            Self::Durable => INTENT_CONTEXT,
+            Self::Local => LOCAL_INTENT_CONTEXT,
+        }
     }
 
     fn label(self) -> &'static str {
@@ -477,24 +490,14 @@ fn intent_queue_error(message: impl Into<String>) -> rusqlite::Error {
     rusqlite::Error::InvalidParameterName(message.into())
 }
 
-fn quoted_intent_work_table_name(table: TableName) -> rusqlite::Result<String> {
-    if table == INTENTS || table == LOCAL_INTENTS {
-        quoted_table_name(table)
-    } else {
-        Err(intent_queue_error(format!(
-            "table {} is not an intent work table",
-            table.as_str()
-        )))
-    }
-}
-
-/// Insert one raw intent work row inside the caller's transaction.
-pub(crate) fn insert_intent_work_row_in_tx(
+/// Insert one queued intent inside the caller's transaction.
+pub(crate) fn insert_intent_in_tx(
     db: &Db,
-    table: TableName,
-    row: &IntentWorkRow,
+    queue: IntentQueue,
+    intent: &Intent,
+    mode: HandlerMode,
 ) -> rusqlite::Result<()> {
-    let table_name = quoted_intent_work_table_name(table)?;
+    let table_name = quoted_table_name(queue.table())?;
     for _ in 0..8 {
         let intent_id = random_intent_id();
         let changed = db.conn().execute(
@@ -504,13 +507,14 @@ pub(crate) fn insert_intent_work_row_in_tx(
             ),
             params![
                 intent_id.as_slice(),
-                row.kind.as_str(),
-                row.intent_key.as_slice(),
-                row.payload.as_slice(),
-                replay_flag_for_handler_mode(row.mode)
+                intent.kind.as_str(),
+                intent.key.as_slice(),
+                intent.payload.as_slice(),
+                replay_flag_for_handler_mode(mode)
             ],
         )?;
         if changed == 1 {
+            insert_intent_context_rows_in_tx(db, queue, &intent_id, &intent.context_fact_ids)?;
             return Ok(());
         }
     }
@@ -528,6 +532,25 @@ fn random_intent_id() -> [u8; 16] {
     id
 }
 
+fn insert_intent_context_rows_in_tx(
+    db: &Db,
+    queue: IntentQueue,
+    intent_id: &[u8],
+    fact_ids: &[FactId],
+) -> rusqlite::Result<()> {
+    let table_name = quoted_table_name(queue.context_table())?;
+    for (ordinal, fact_id) in fact_ids.iter().enumerate() {
+        db.conn().execute(
+            &format!(
+                "INSERT INTO {table_name} (intent_id, ordinal, fact_id)
+                 VALUES (?1, ?2, ?3)"
+            ),
+            params![intent_id, ordinal as i64, fact_id.as_slice()],
+        )?;
+    }
+    Ok(())
+}
+
 fn replay_flag_for_handler_mode(mode: HandlerMode) -> i64 {
     if mode.is_replay() {
         1
@@ -536,53 +559,80 @@ fn replay_flag_for_handler_mode(mode: HandlerMode) -> i64 {
     }
 }
 
-/// Delete one raw intent work row by its queue row id.
-fn delete_intent_work_row_in_tx(
+/// Delete one queued intent row by its queue row id.
+fn delete_intent_row_in_tx(
     db: &Db,
-    table: TableName,
+    queue: IntentQueue,
     intent_id: &[u8],
 ) -> rusqlite::Result<usize> {
-    let table_name = quoted_intent_work_table_name(table)?;
+    let table_name = quoted_table_name(queue.table())?;
     db.conn().execute(
         &format!("DELETE FROM {table_name} WHERE intent_id = ?1"),
         params![intent_id],
     )
 }
 
-/// Select the next raw intent work row in queue order.
-fn next_intent_work_row(
+fn delete_intent_context_rows_in_tx(
     db: &Db,
-    table: TableName,
-    order_by_sql: &str,
-) -> rusqlite::Result<Option<QueuedIntentWorkRow>> {
-    let table_name = quoted_intent_work_table_name(table)?;
+    queue: IntentQueue,
+    intent_id: &[u8],
+) -> rusqlite::Result<usize> {
+    let table_name = quoted_table_name(queue.context_table())?;
+    db.conn().execute(
+        &format!("DELETE FROM {table_name} WHERE intent_id = ?1"),
+        params![intent_id],
+    )
+}
+
+/// Select the next queued intent row in queue order.
+fn next_intent_row(db: &Db, queue: IntentQueue) -> rusqlite::Result<Option<QueuedIntentRow>> {
+    let table_name = quoted_table_name(queue.table())?;
     db.conn()
         .query_row(
             &format!(
                 "SELECT intent_id, kind, intent_key, payload, replay
                  FROM {table_name}
-                 ORDER BY {order_by_sql}
+                 ORDER BY rowid
                  LIMIT 1"
             ),
             [],
             |row| {
-                Ok(QueuedIntentWorkRow {
+                Ok(QueuedIntentRow {
                     intent_id: row.get(0)?,
-                    work: IntentWorkRow {
-                        kind: row.get(1)?,
-                        intent_key: row.get(2)?,
-                        payload: row.get(3)?,
-                        mode: handler_mode_from_replay_flag(row.get(4)?),
-                    },
+                    kind: row.get(1)?,
+                    intent_key: row.get(2)?,
+                    payload: row.get(3)?,
+                    mode: handler_mode_from_replay_flag(row.get(4)?),
                 })
             },
         )
         .optional()
 }
 
-struct QueuedIntentWorkRow {
+fn intent_context_fact_ids(
+    db: &Db,
+    queue: IntentQueue,
+    intent_id: &[u8],
+) -> rusqlite::Result<Vec<FactId>> {
+    let table_name = quoted_table_name(queue.context_table())?;
+    let mut stmt = db.conn().prepare(&format!(
+        "SELECT fact_id
+         FROM {table_name}
+         WHERE intent_id = ?1
+         ORDER BY ordinal"
+    ))?;
+    let fact_ids = stmt
+        .query_map(params![intent_id], |row| row.get::<_, FactId>(0))?
+        .collect();
+    fact_ids
+}
+
+struct QueuedIntentRow {
     intent_id: Vec<u8>,
-    work: IntentWorkRow,
+    kind: String,
+    intent_key: Vec<u8>,
+    payload: Vec<u8>,
+    mode: HandlerMode,
 }
 
 fn handler_mode_from_replay_flag(replay: i64) -> HandlerMode {
@@ -595,7 +645,7 @@ fn handler_mode_from_replay_flag(replay: i64) -> HandlerMode {
 
 /// Queue ephemeral handler work on this SQLite connection.
 pub(crate) fn submit_local_intent_to_db(store: &Db, intent: Intent) -> Result<(), String> {
-    submit_intent_to_table(store, LOCAL_INTENTS, intent)
+    submit_intent_to_queue(store, IntentQueue::Local, intent)
 }
 
 /// Insert one intent into the selected queue.
@@ -603,13 +653,13 @@ pub(crate) fn submit_local_intent_to_db(store: &Db, intent: Intent) -> Result<()
 /// Every insert records a distinct queued work item. Repeated semantic work
 /// must be collapsed by the handler's own facts, row writes, network queue, or
 /// in-memory state when that protocol needs backpressure.
-pub(crate) fn submit_intent_to_table(
+pub(crate) fn submit_intent_to_queue(
     store: &Db,
-    table: TableName,
+    queue: IntentQueue,
     intent: Intent,
 ) -> Result<(), String> {
     store
-        .write_transaction(|tx| insert_intent_work_row_in_tx(tx, table, &intent.work_row()))
+        .write_transaction(|tx| insert_intent_in_tx(tx, queue, &intent, HandlerMode::Live))
         .map_err(|err| format!("submit intent: {err}"))
 }
 
@@ -621,7 +671,9 @@ mod tests {
     use crate::core::intents::{
         HandlerError, HandlerResult, IntentKind, RowMutation, TableInsert, Value,
     };
-    use crate::core::schema::{CORE_SCHEMA_SOURCE, INCOMING_FACTS, PENDING_PROJECTION};
+    use crate::core::schema::{
+        CORE_SCHEMA_SOURCE, INCOMING_FACTS, INTENT_CONTEXT, PENDING_PROJECTION,
+    };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     const TEST_TABLE: TableName = TableName::new("test.rows");
@@ -660,8 +712,8 @@ mod tests {
         let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
         let intent = test_intent("handled", b"same-key");
 
-        submit_intent_to_table(&store, LOCAL_INTENTS, intent.clone()).expect("submit local");
-        submit_intent_to_table(&store, INTENTS, intent).expect("submit durable");
+        submit_intent_to_queue(&store, IntentQueue::Local, intent.clone()).expect("submit local");
+        submit_intent_to_queue(&store, IntentQueue::Durable, intent).expect("submit durable");
 
         let dispatched = dispatch_intents_for_test(
             &store,
@@ -687,8 +739,9 @@ mod tests {
         let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
         let first = test_intent("handled", b"first");
         let second = test_intent("handled", b"second");
-        submit_intent_to_table(&store, LOCAL_INTENTS, first.clone()).expect("submit first local");
-        submit_intent_to_table(&store, LOCAL_INTENTS, second).expect("submit second local");
+        submit_intent_to_queue(&store, IntentQueue::Local, first.clone())
+            .expect("submit first local");
+        submit_intent_to_queue(&store, IntentQueue::Local, second).expect("submit second local");
 
         let dispatched = dispatch_intents_for_test(
             &store,
@@ -711,7 +764,7 @@ mod tests {
     #[test]
     fn fatal_handler_error_leaves_row_queued() {
         let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
-        submit_intent_to_table(&store, INTENTS, test_intent("fatal", b"first"))
+        submit_intent_to_queue(&store, IntentQueue::Durable, test_intent("fatal", b"first"))
             .expect("submit fatal intent");
 
         let err = dispatch_one_intent(
@@ -739,8 +792,12 @@ mod tests {
     #[test]
     fn unregistered_queued_intent_errors_without_consuming_row() {
         let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
-        submit_intent_to_table(&store, INTENTS, test_intent("unregistered", b"first"))
-            .expect("submit unregistered intent row");
+        submit_intent_to_queue(
+            &store,
+            IntentQueue::Durable,
+            test_intent("unregistered", b"first"),
+        )
+        .expect("submit unregistered intent row");
 
         let err = dispatch_one_intent(
             &store,
@@ -761,8 +818,12 @@ mod tests {
     #[test]
     fn validation_error_leaves_row_queued_without_committing_effects() {
         let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
-        submit_intent_to_table(&store, INTENTS, test_intent("invalid_output", b"first"))
-            .expect("submit invalid-output intent");
+        submit_intent_to_queue(
+            &store,
+            IntentQueue::Durable,
+            test_intent("invalid_output", b"first"),
+        )
+        .expect("submit invalid-output intent");
 
         let err = dispatch_one_intent(
             &store,
@@ -803,8 +864,12 @@ mod tests {
                 [],
             )
             .expect("create handler state table");
-        submit_intent_to_table(&store, INTENTS, test_intent("write_then_invalid", b"first"))
-            .expect("submit invalid-output intent");
+        submit_intent_to_queue(
+            &store,
+            IntentQueue::Durable,
+            test_intent("write_then_invalid", b"first"),
+        )
+        .expect("submit invalid-output intent");
 
         let err = dispatch_one_intent(
             &store,
@@ -834,8 +899,12 @@ mod tests {
     #[test]
     fn handler_output_with_unregistered_followup_intent_errors_before_commit() {
         let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
-        submit_intent_to_table(&store, INTENTS, test_intent("emit_unknown", b"first"))
-            .expect("submit emitting intent");
+        submit_intent_to_queue(
+            &store,
+            IntentQueue::Durable,
+            test_intent("emit_unknown", b"first"),
+        )
+        .expect("submit emitting intent");
 
         let err = dispatch_one_intent(
             &store,
@@ -862,10 +931,18 @@ mod tests {
         AFTER_FACT_CALLS.store(0, Ordering::SeqCst);
         let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
         let emitted = emitted_fact();
-        submit_intent_to_table(&store, INTENTS, test_intent("emit_fact", b"first"))
-            .expect("submit emitting intent");
-        submit_intent_to_table(&store, INTENTS, test_intent("zz_after_fact", b"second"))
-            .expect("submit following intent");
+        submit_intent_to_queue(
+            &store,
+            IntentQueue::Durable,
+            test_intent("emit_fact", b"first"),
+        )
+        .expect("submit emitting intent");
+        submit_intent_to_queue(
+            &store,
+            IntentQueue::Durable,
+            test_intent("zz_after_fact", b"second"),
+        )
+        .expect("submit following intent");
 
         let dispatched = dispatch_intents_for_test(
             &store,
@@ -906,23 +983,95 @@ mod tests {
     }
 
     #[test]
-    fn intent_work_rows_preserve_repeated_keys_as_distinct_work() {
+    fn intent_context_rows_load_handler_facts_and_commit_with_queue_row() {
         let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
-        let row = IntentWorkRow::new("send", b"key".to_vec(), b"one".to_vec());
+        let fact = Fact::new(FactScope::Global, 42, b"handler-context".to_vec());
+        crate::core::project_fact::submit_fact_with_admission(&store, fact.clone(), None)
+            .expect("retain context fact");
+        let intent = test_intent("requires_fact", b"context").with_context_fact_ids([fact.id]);
+        submit_intent_to_queue(&store, IntentQueue::Durable, intent)
+            .expect("submit context intent");
+
+        assert_eq!(
+            store
+                .table_row_count(INTENT_CONTEXT)
+                .expect("intent context count"),
+            1
+        );
+
+        let dispatched = dispatch_intents_for_test(
+            &store,
+            &HandlerSet::new(REQUIRE_CONTEXT_ROUTES),
+            IntentQueue::Durable,
+            &[],
+            None,
+            1,
+        )
+        .expect("dispatch context intent");
+
+        assert_eq!(dispatched, 1);
+        assert_eq!(store.table_row_count(INTENTS).expect("durable count"), 0);
+        assert_eq!(
+            store
+                .table_row_count(INTENT_CONTEXT)
+                .expect("intent context count"),
+            0,
+            "committing handler output should clear attached context rows"
+        );
+    }
+
+    #[test]
+    fn intent_context_rows_roll_back_with_queue_row_on_handler_error() {
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
+        let fact = Fact::new(FactScope::Global, 42, b"handler-context".to_vec());
+        crate::core::project_fact::submit_fact_with_admission(&store, fact.clone(), None)
+            .expect("retain context fact");
+        let intent = test_intent("fatal", b"context").with_context_fact_ids([fact.id]);
+        submit_intent_to_queue(&store, IntentQueue::Durable, intent)
+            .expect("submit context intent");
+
+        dispatch_one_intent(
+            &store,
+            &HandlerSet::new(FATAL_ROUTES),
+            IntentQueue::Durable,
+            &[],
+            None,
+        )
+        .expect_err("fatal handler error should roll back");
+
+        assert_eq!(store.table_row_count(INTENTS).expect("durable count"), 1);
+        assert_eq!(
+            store
+                .table_row_count(INTENT_CONTEXT)
+                .expect("intent context count"),
+            1,
+            "failed handler commit should leave attached context rows queued"
+        );
+    }
+
+    #[test]
+    fn intent_rows_preserve_repeated_keys_as_distinct_work() {
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
+        let intent = test_intent_with_payload("send", b"key", b"one");
 
         store
-            .write_transaction(|tx| insert_intent_work_row_in_tx(tx, INTENTS, &row))
+            .write_transaction(|tx| {
+                insert_intent_in_tx(tx, IntentQueue::Durable, &intent, HandlerMode::Live)
+            })
             .expect("insert first intent row");
         store
-            .write_transaction(|tx| insert_intent_work_row_in_tx(tx, INTENTS, &row))
+            .write_transaction(|tx| {
+                insert_intent_in_tx(tx, IntentQueue::Durable, &intent, HandlerMode::Live)
+            })
             .expect("insert repeated intent row");
 
         store
             .write_transaction(|tx| {
-                insert_intent_work_row_in_tx(
+                insert_intent_in_tx(
                     tx,
-                    INTENTS,
-                    &IntentWorkRow::new("send", b"key".to_vec(), b"two".to_vec()),
+                    IntentQueue::Durable,
+                    &test_intent_with_payload("send", b"key", b"two"),
+                    HandlerMode::Live,
                 )
             })
             .expect("insert repeated key with different payload");
@@ -931,43 +1080,46 @@ mod tests {
     }
 
     #[test]
-    fn intent_work_rows_select_durable_by_insertion_order() {
+    fn intent_rows_select_durable_by_insertion_order() {
         let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
-        for row in [
-            IntentWorkRow::new("z_kind", b"2".to_vec(), b"z".to_vec()),
-            IntentWorkRow::new("a_kind", b"2".to_vec(), b"a2".to_vec()),
-            IntentWorkRow::new("a_kind", b"1".to_vec(), b"a1".to_vec()),
+        for intent in [
+            test_intent_with_payload("z_kind", b"2", b"z"),
+            test_intent_with_payload("a_kind", b"2", b"a2"),
+            test_intent_with_payload("a_kind", b"1", b"a1"),
         ] {
             store
-                .write_transaction(|tx| insert_intent_work_row_in_tx(tx, INTENTS, &row))
+                .write_transaction(|tx| {
+                    insert_intent_in_tx(tx, IntentQueue::Durable, &intent, HandlerMode::Live)
+                })
                 .expect("insert durable row");
         }
 
-        let selected = next_intent_work_row(&store, INTENTS, "rowid")
+        let selected = next_intent_row(&store, IntentQueue::Durable)
             .expect("select durable row")
             .expect("durable row");
 
-        assert_eq!(selected.work.kind, "z_kind");
-        assert_eq!(selected.work.intent_key, b"2");
-        assert_eq!(selected.work.payload, b"z");
+        assert_eq!(selected.kind, "z_kind");
+        assert_eq!(selected.intent_key, b"2");
+        assert_eq!(selected.payload, b"z");
     }
 
     #[test]
-    fn local_intent_work_rows_select_by_insertion() {
+    fn local_intent_rows_select_by_insertion() {
         let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
-        let first = IntentWorkRow::new("work", b"first".to_vec(), b"1".to_vec());
-        let second = IntentWorkRow::new("work", b"second".to_vec(), b"2".to_vec());
-        for row in [&first, &second] {
+        let first = test_intent_with_payload("work", b"first", b"1");
+        let second = test_intent_with_payload("work", b"second", b"2");
+        for intent in [&first, &second] {
             store
-                .write_transaction(|tx| insert_intent_work_row_in_tx(tx, LOCAL_INTENTS, row))
+                .write_transaction(|tx| {
+                    insert_intent_in_tx(tx, IntentQueue::Local, intent, HandlerMode::Live)
+                })
                 .expect("insert local row");
         }
 
         assert_eq!(
-            next_intent_work_row(&store, LOCAL_INTENTS, "rowid",)
+            next_intent_row(&store, IntentQueue::Local)
                 .expect("select first local")
                 .expect("first local")
-                .work
                 .intent_key,
             b"first"
         );
@@ -1041,6 +1193,13 @@ mod tests {
     const EMIT_UNKNOWN_ROUTES: &[HandlerRoute] = &[HandlerRoute {
         intent_kind: "emit_unknown",
         factory: emit_unknown_handler,
+        storage_requirement: StorageRequirement::MaintenanceBypass,
+        recurrence: None,
+    }];
+
+    const REQUIRE_CONTEXT_ROUTES: &[HandlerRoute] = &[HandlerRoute {
+        intent_kind: "requires_fact",
+        factory: require_context_fact_handler,
         storage_requirement: StorageRequirement::MaintenanceBypass,
         recurrence: None,
     }];
@@ -1120,6 +1279,22 @@ mod tests {
         }
     }
 
+    struct RequireContextFactHandler;
+
+    impl IntentHandler for RequireContextFactHandler {
+        fn handle(&self, intent: &Intent, context: &HandlerContext<'_>) -> HandlerResult {
+            let fact_id = intent
+                .context_fact_ids
+                .first()
+                .ok_or_else(|| HandlerError::fatal("missing test context id"))?;
+            let fact = context.require_fact(fact_id)?;
+            if fact.bytes != b"handler-context" {
+                return Err(HandlerError::fatal("loaded wrong test context fact"));
+            }
+            Ok(RuntimeEffects::new())
+        }
+    }
+
     struct AfterFactHandler;
 
     impl IntentHandler for AfterFactHandler {
@@ -1153,15 +1328,23 @@ mod tests {
         Box::new(EmitUnknownHandler)
     }
 
+    fn require_context_fact_handler() -> Box<dyn IntentHandler> {
+        Box::new(RequireContextFactHandler)
+    }
+
     fn after_fact_handler() -> Box<dyn IntentHandler> {
         Box::new(AfterFactHandler)
     }
 
     fn test_intent(kind: &'static str, key: &[u8]) -> Intent {
+        test_intent_with_payload(kind, key, &[1])
+    }
+
+    fn test_intent_with_payload(kind: &'static str, key: &[u8], payload: &[u8]) -> Intent {
         Intent::new(
             IntentKind::new(kind).expect("valid test kind"),
             key.to_vec(),
-            vec![1],
+            payload.to_vec(),
         )
     }
 
@@ -1183,8 +1366,12 @@ mod tests {
     #[test]
     fn intent_storage_mismatch_rolls_back_queue_consumption() {
         let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
-        submit_intent_to_table(&store, INTENTS, test_intent("handled", b"guarded"))
-            .expect("submit guarded intent");
+        submit_intent_to_queue(
+            &store,
+            IntentQueue::Durable,
+            test_intent("handled", b"guarded"),
+        )
+        .expect("submit guarded intent");
 
         let err = dispatch_one_intent(
             &store,

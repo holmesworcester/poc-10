@@ -121,14 +121,6 @@ impl MaintainSyncHandler {
 }
 
 impl IntentHandler for MaintainSyncHandler {
-    fn input_fact_ids(
-        &self,
-        intent: &Intent,
-    ) -> Result<Vec<crate::core::intents::HandlerFactId>, String> {
-        decode_maintain_sync(intent)?;
-        Ok(Vec::new())
-    }
-
     fn handle(&self, raw: &Intent, context: &HandlerContext) -> HandlerResult {
         let input = decode_maintain_sync(raw)?;
         if context.is_replay() {

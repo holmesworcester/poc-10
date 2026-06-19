@@ -86,14 +86,6 @@ impl CheckVersionHandler {
 }
 
 impl IntentHandler for CheckVersionHandler {
-    fn input_fact_ids(
-        &self,
-        intent: &Intent,
-    ) -> Result<Vec<crate::core::intents::HandlerFactId>, String> {
-        decode_check_version(intent)?;
-        Ok(Vec::new())
-    }
-
     fn handle(&self, intent: &Intent, context: &HandlerContext<'_>) -> HandlerResult {
         let update = decode_check_version(intent)?;
         if context.is_replay() {

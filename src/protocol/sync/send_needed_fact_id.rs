@@ -7,7 +7,7 @@
 //! the requested payload.
 
 use crate::core::effects::RuntimeEffects;
-use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};
+use crate::core::intents::{HandlerContext, HandlerResult, IntentHandler};
 use crate::core::intents::{Intent, IntentKind};
 use crate::protocol::connection::send_facts_on_connection::{
     send_facts_on_connection_intent, SendFactsOnConnection,
@@ -36,6 +36,7 @@ pub fn send_needed_fact_id_intent(input: SendNeededFactId) -> Intent {
         send_needed_fact_id_key(&input),
         payload,
     )
+    .with_context_fact_ids([input.have_fact_id])
 }
 
 pub fn decode_send_needed_fact_id(intent: &Intent) -> Result<SendNeededFactId, String> {
@@ -70,11 +71,6 @@ impl SendNeededFactIdHandler {
 }
 
 impl IntentHandler for SendNeededFactIdHandler {
-    fn input_fact_ids(&self, intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
-        let input = decode_send_needed_fact_id(intent)?;
-        Ok(vec![input.have_fact_id])
-    }
-
     fn handle(&self, raw: &Intent, context: &HandlerContext) -> HandlerResult {
         let input = decode_send_needed_fact_id(raw)?;
         if context.is_replay() {

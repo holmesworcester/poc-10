@@ -87,9 +87,7 @@ fn payload_error(err: PayloadError) -> String {
     format!("invalid queue_outgoing_frame payload: {err}")
 }
 
-use crate::core::intents::{
-    HandlerContext, HandlerError, HandlerFactId, HandlerResult, IntentHandler,
-};
+use crate::core::intents::{HandlerContext, HandlerError, HandlerResult, IntentHandler};
 use crate::core::network::{self, NetworkTarget, OutgoingFrame};
 use crate::protocol::{auth::endpoint, connection};
 
@@ -103,11 +101,6 @@ impl QueueOutgoingFrameHandler {
 }
 
 impl IntentHandler for QueueOutgoingFrameHandler {
-    fn input_fact_ids(&self, intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
-        decode_queue_outgoing_frame(intent)?;
-        Ok(Vec::new())
-    }
-
     fn handle(&self, intent: &Intent, context: &HandlerContext) -> HandlerResult {
         let input = decode_queue_outgoing_frame(intent)?;
         validate_frame(&input)?;

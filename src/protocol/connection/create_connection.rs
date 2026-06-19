@@ -40,6 +40,11 @@ pub fn create_connection_intent(input: CreateConnection) -> Intent {
         key,
         payload,
     )
+    .with_context_fact_ids([
+        input.request_id,
+        input.initiator_endpoint_shared_id,
+        input.receive_id,
+    ])
 }
 
 pub fn decode_create_connection_intent(intent: &Intent) -> Result<CreateConnection, String> {
@@ -125,9 +130,7 @@ mod tests {
 // The handler proves the queued dependency ids still name the expected facts,
 // then delegates DH handshake construction to `connection::create`.
 
-use crate::core::intents::{
-    HandlerContext, HandlerError, HandlerFactId, HandlerResult, IntentHandler,
-};
+use crate::core::intents::{HandlerContext, HandlerError, HandlerResult, IntentHandler};
 use crate::protocol::auth::endpoint::author as local_endpoint;
 use crate::protocol::auth::endpoint_shared;
 use crate::protocol::connection::connection::author::{
@@ -152,15 +155,6 @@ impl CreateConnectionHandler {
 }
 
 impl IntentHandler for CreateConnectionHandler {
-    fn input_fact_ids(&self, raw_intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
-        let input = decode_create_connection_intent(raw_intent)?;
-        Ok(vec![
-            input.request_id,
-            input.initiator_endpoint_shared_id,
-            input.receive_id,
-        ])
-    }
-
     fn handle(&self, intent: &Intent, context: &HandlerContext) -> HandlerResult {
         let input = decode_create_connection_intent(intent)?;
         if context.is_replay() {

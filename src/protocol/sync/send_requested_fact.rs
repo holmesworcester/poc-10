@@ -6,7 +6,7 @@
 //! work for the fact bytes. Authorization remains in the shareable-fact index.
 
 use crate::core::effects::RuntimeEffects;
-use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};
+use crate::core::intents::{HandlerContext, HandlerResult, IntentHandler};
 use crate::core::intents::{Intent, IntentKind};
 use crate::protocol::connection::send_facts_on_connection::{
     send_facts_on_connection_intent, SendFactsOnConnection,
@@ -35,6 +35,7 @@ pub fn send_requested_fact_intent(input: SendRequestedFact) -> Intent {
         send_requested_fact_key(&input),
         payload,
     )
+    .with_context_fact_ids([input.need_fact_id])
 }
 
 pub fn decode_send_requested_fact(intent: &Intent) -> Result<SendRequestedFact, String> {
@@ -69,11 +70,6 @@ impl SendRequestedFactHandler {
 }
 
 impl IntentHandler for SendRequestedFactHandler {
-    fn input_fact_ids(&self, intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
-        let input = decode_send_requested_fact(intent)?;
-        Ok(vec![input.need_fact_id])
-    }
-
     fn handle(&self, raw: &Intent, context: &HandlerContext) -> HandlerResult {
         let input = decode_send_requested_fact(raw)?;
         if context.is_replay() {

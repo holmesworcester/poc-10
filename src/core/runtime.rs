@@ -193,7 +193,11 @@ impl Runtime {
             &intent,
             self.handlers.intent_kinds(),
         )?;
-        crate::core::handle_intent::submit_intent_to_table(&self.db, INTENTS, intent)
+        crate::core::handle_intent::submit_intent_to_queue(
+            &self.db,
+            crate::core::handle_intent::IntentQueue::Durable,
+            intent,
+        )
     }
 
     /// Queue ephemeral work for this runtime connection.

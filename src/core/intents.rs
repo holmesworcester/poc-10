@@ -4,7 +4,9 @@
 //! in `intents`, stores ephemeral intents in `local_intents`, and dispatches
 //! both through the same handler contract. The intent kind selects a handler;
 //! the key is handler-owned semantic metadata; the payload is opaque bytes
-//! owned by the protocol module that registered the handler.
+//! owned by the protocol module that registered the handler. Context fact ids
+//! are core-visible queue metadata attached beside the payload so dispatch can
+//! load exact committed facts without parsing handler bytes.
 //!
 //! Intents are the runtime's "do this later" language. Projection emits an
 //! intent when it discovers work that should not run inside a projector, such
@@ -21,10 +23,10 @@
 //! protocol rows, network queues, or handler-local state when a handler needs
 //! backpressure.
 //!
-//! Handlers are reactive runtime code, not user-facing commands. They may ask
-//! core to load specific facts, use the transaction-local `Db` for
+//! Handlers are reactive runtime code, not user-facing commands. They receive
+//! facts declared by the queued intent, use the transaction-local `Db` for
 //! handler-owned SQL, and return `RuntimeEffects` for runtime workers to commit
-//! atomically. Missing declared inputs or semantic violations are handler
+//! atomically. Missing attached inputs or semantic violations are handler
 //! errors: dispatch does not commit output or consume the queue row. Runtime
 //! effect validation rejects any emitted intent whose kind is not registered by
 //! the active runtime.
@@ -69,7 +71,10 @@ impl IntentKind {
 ///
 /// Core uses `kind` for routing and treats every enqueued row as distinct work.
 /// The `key` remains available to handlers as a stable semantic key for their
-/// own protocol checks, payload validation, and row writes.
+/// own protocol checks, payload validation, and row writes. Context fact ids are
+/// exact inputs that core loads into `HandlerContext` before calling the
+/// handler; handlers still decode the payload to interpret what those facts
+/// mean.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Intent {
     /// Handler routing key.
@@ -78,42 +83,8 @@ pub struct Intent {
     pub key: Vec<u8>,
     /// Opaque handler-owned payload bytes.
     pub payload: Vec<u8>,
-}
-
-/// One raw row in the durable or local intent work table.
-///
-/// `core::intents` owns converting between this mechanical queue row and an
-/// `Intent`; `handle_intent` owns the SQL lifecycle for rows with this shape.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct IntentWorkRow {
-    pub(crate) kind: String,
-    pub(crate) intent_key: Vec<u8>,
-    pub(crate) payload: Vec<u8>,
-    pub(crate) mode: HandlerMode,
-}
-
-impl IntentWorkRow {
-    pub(crate) fn new(
-        kind: impl Into<String>,
-        intent_key: impl Into<Vec<u8>>,
-        payload: impl Into<Vec<u8>>,
-    ) -> Self {
-        Self {
-            kind: kind.into(),
-            intent_key: intent_key.into(),
-            payload: payload.into(),
-            mode: HandlerMode::Live,
-        }
-    }
-
-    pub(crate) fn with_replay(mut self, replay: bool) -> Self {
-        self.mode = if replay {
-            HandlerMode::Replay
-        } else {
-            HandlerMode::Live
-        };
-        self
-    }
+    /// Exact fact inputs dispatch should preload for the handler.
+    pub context_fact_ids: Vec<FactId>,
 }
 
 impl Intent {
@@ -122,33 +93,17 @@ impl Intent {
             kind,
             key: key.into(),
             payload: payload.into(),
+            context_fact_ids: Vec::new(),
         }
     }
 
-    pub(crate) fn work_row(&self) -> IntentWorkRow {
-        self.work_row_with_mode(false)
-    }
-
-    pub(crate) fn work_row_with_mode(&self, replay: bool) -> IntentWorkRow {
-        IntentWorkRow::new(
-            self.kind.as_str().to_string(),
-            self.key.clone(),
-            self.payload.clone(),
-        )
-        .with_replay(replay)
-    }
-
-    pub(crate) fn from_work_row(row: IntentWorkRow) -> Result<Self, String> {
-        let kind = IntentKind::new(row.kind)
-            .map_err(|err| format!("invalid queued intent kind: {err}"))?;
-        Ok(Self::new(kind, row.intent_key, row.payload))
+    pub fn with_context_fact_ids(mut self, fact_ids: impl IntoIterator<Item = FactId>) -> Self {
+        self.context_fact_ids = fact_ids.into_iter().collect();
+        self
     }
 }
 
 // === Intent handler contract ===
-
-/// Fact ids requested by a handler before it runs.
-pub type HandlerFactId = FactId;
 
 /// Handler failure before dispatch commits effects.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,9 +168,9 @@ impl HandlerMode {
 ///
 /// Durable and local queue dispatch both build this immediately before
 /// `handle`.
-/// The handler gets only the facts it requested plus the transaction-local
-/// database handle for explicit handler-owned SQL; it cannot reach runtime
-/// workers directly.
+/// The handler gets only the facts declared by the queued intent plus the
+/// transaction-local database handle for explicit handler-owned SQL; it cannot
+/// reach runtime workers directly.
 #[derive(Clone, Default)]
 pub struct HandlerContext<'a> {
     facts: BTreeMap<FactId, Fact>,
@@ -283,11 +238,6 @@ impl<'a> HandlerContext<'a> {
         self.facts.get(id)
     }
 
-    /// Iterate over all preloaded facts.
-    pub fn facts(&self) -> impl Iterator<Item = &Fact> {
-        self.facts.values()
-    }
-
     /// Require a preloaded fact.
     pub fn require_fact(&self, id: &FactId) -> Result<&Fact, HandlerError> {
         self.fact(id)
@@ -311,15 +261,6 @@ impl<'a> HandlerContext<'a> {
 
 /// A protocol handler for one or more intent kinds.
 pub trait IntentHandler {
-    /// Fact ids core should load before calling `handle`.
-    ///
-    /// Missing facts do not fail dispatch here; a handler that requires a
-    /// missing declared fact returns a handler error and dispatch leaves the row
-    /// queued without committing output.
-    fn input_fact_ids(&self, _intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
-        Ok(Vec::new())
-    }
-
     /// Run one intent against its context and return uncommitted effects.
     fn handle(&self, intent: &Intent, context: &HandlerContext<'_>) -> HandlerResult;
 }
