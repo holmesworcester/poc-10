@@ -24,12 +24,12 @@ schedules wakes, and pumps these queues through the protocol functions. Most
 queues are durable SQLite tables that survive restart; `incoming_facts` and
 `local_intents` are `CREATE TEMP TABLE`, so they last as long as the SQLite
 connection - the whole daemon session, or one CLI command - and a restart
-recreates them empty. The daemon drains them each tick on its own long-lived
-connection. A normal CLI command or query turn does not drain runtime queues. It
-reads currently projected rows or commits authored facts to durable pending
-projection. Because temp tables are connection-local and a CLI command runs on a
-separate connection from the daemon, temp rows from one turn are not handed to
-another turn (see diagram 3):
+recreates them empty. Each entry point runs a bounded runtime turn on its own
+connection before host-specific work. The daemon loops daemon-host turns on its
+long-lived connection, so it can preserve and drain daemon-local temp rows
+between turns. A normal CLI command or query opens a separate connection, so it
+can advance durable projection and local repair work for that command, but it
+does not inherit daemon temp rows or daemon network adapters (see diagram 3):
 
 ```text
 facts (+ local_fact_admissions)   immutable fact store
@@ -242,7 +242,7 @@ separate runtime phases.
 
 ## 3) Serialized Turns And Locks
 
-Commands, queries, and the daemon turn all acquire `<db>.runtime.lock` and run
+Commands, queries, and daemon-host turns all acquire `<db>.runtime.lock` and run
 the same bounded runtime turn before host-specific work. A normal write command
 first gives recurring repair and queued work a chance to run, then verifies
 storage readiness, reads currently projected state, authors facts, commits them
@@ -274,8 +274,8 @@ flowchart TD
     MAINT_PREFLIGHT --> MAINT_WORK["read diagnostics or submit priority update effects"]
     MAINT_WORK --> MAINT_RETURN["return output"]
 
-    LOCK --> TICK["daemon turn"]
-    TICK --> DAEMON_TICK["run bounded runtime turn with network adapters"]
+    LOCK --> DAEMON_HOST["daemon-host turn"]
+    DAEMON_HOST --> DAEMON_TURN["run bounded runtime turn with network adapters"]
 ```
 
 The difference between turns is the host environment. Commands and queries do
@@ -293,14 +293,15 @@ sequenceDiagram
     participant C as CLI process
     participant R as Runtime
 
-    D->>L: acquire for daemon tick
+    D->>L: acquire for daemon-host turn
     L-->>D: granted
-    D->>R: run daemon tick
+    D->>R: run runtime_turn with network adapters
     C->>L: acquire for CLI command
     Note over C,L: OS blocks while daemon holds flock
     D->>L: release
     L-->>C: granted
     C->>R: open runtime
+    C->>R: run runtime_turn without network adapters
     C->>R: run registered protocol CLI command
     alt ordinary query
         C->>R: require storage_ready
@@ -313,12 +314,12 @@ sequenceDiagram
         C->>R: run diagnostic or submit update effects
     end
     C->>L: release
-    D->>L: acquire for next daemon tick
+    D->>L: acquire for next daemon-host turn
 ```
 
 The lock is an OS `flock`. A CLI process that arrives while the daemon is in a
 turn waits in the kernel until the daemon releases the file lock. There is no
-shared in-process command slot inside the daemon tick.
+shared in-process command slot inside the daemon process.
 
 ## 4) Runtime Turn Queue Order
 
@@ -340,7 +341,7 @@ flowchart TD
     FIRST_DRAIN -- no --> READY_ONE{"storage_ready?"}
     DURABLE_REPAIR --> READY_ONE
     READY_ONE -- no --> REPAIR["drain repair queues only"]
-    REPAIR --> RETURN_REPAIR["return from tick"]
+    REPAIR --> RETURN_REPAIR["return from turn"]
 
     READY_ONE -- yes --> RECUR["offer remaining recurring builders"]
     RECUR --> LOCAL["drain local intents"]
@@ -420,10 +421,10 @@ projector docs, not here.
 ## 6) Queued Cause Chain
 
 A runtime turn is one exclusive period under `RuntimeTurnLock`, but a causal
-chain can span many turns. Entry points first commit queued work. Later daemon
-or replay drains project one fact or dispatch one intent. Projection and
-handlers can both emit more queued work, so the same chain moves forward without
-nesting projection or handlers inline.
+chain can span many turns. Entry points commit work to queues; the same or a
+later runtime turn projects one fact or dispatches one eligible intent.
+Projection and handlers can both emit more queued work, so the same chain moves
+forward without nesting projection or handlers inline.
 
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 300}} }%%
@@ -440,7 +441,7 @@ flowchart LR
     WOKEN --> QUEUES
     EFFECTS_IN --> QUEUES
 
-    subgraph DRAIN["same or later daemon/replay queue step"]
+    subgraph DRAIN["same or later runtime-turn queue step"]
         QUEUES --> PROJECT["project one fact"]
         PROJECT --> NEEDS["standing needs"]
         PROJECT --> OFFERS["standing offers"]
@@ -460,6 +461,8 @@ flowchart LR
 The contract is that queue commits, not call-stack nesting, carry the chain
 forward. A handler that emits facts does not project them before returning; a
 projector that emits intents does not run their handlers before committing.
+Any host can advance projection and local intents. Daemon-host turns add durable
+handler dispatch and network adapters.
 
 ## 7) Daemon Network Flow
 
@@ -476,7 +479,7 @@ are produced by protocol handlers and written by the core TCP pump.
 flowchart LR
     PEER["another peer"] --> TCP_IN["TCP listener"]
 
-    subgraph DAEMON["local daemon tick"]
+    subgraph DAEMON["daemon-host runtime turn"]
         TCP_IN --> ACCEPT["accept_available"]
         ACCEPT --> RAW_IN["network_incoming raw bytes + origin metadata"]
         RAW_IN --> INTAKE["receive_network_frame_facts"]
@@ -565,8 +568,9 @@ Two boundaries define the exchange. **Sync vs connection:** sync chooses fact
 ids and their dependency closure; connection decides how to batch, seal,
 address, and write the bytes, and records a `connection_fact_receipt` so
 live-tail can skip the origin peer. **Core vs protocol:** core pumps
-length-prefixed bytes and never parses a frame; recurring drivers
-(`maintain_connections`, `maintain_sync`) are handlers emitting ordinary facts.
+length-prefixed bytes and never parses a frame; recurring builders enqueue
+ordinary local intents, and those handlers (`maintain_connections`,
+`maintain_sync`) emit ordinary facts and follow-up intents.
 The handshake that brings a connection live (request, connection,
 ephemeral-secret context), the established frame types (`frame_small`,
 `frame_file_slice`, `frame_bundle`), and the exact compare/have/need fact
