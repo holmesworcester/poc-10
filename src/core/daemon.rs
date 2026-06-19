@@ -50,6 +50,7 @@ const DEFAULT_TICK_MS: u64 = 250;
 pub(crate) const DEFAULT_WORK_LIMIT: usize = 4096;
 const LOCAL_DERIVATION_WORK_MULTIPLIER: usize = 16;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+const DAEMON_TURN_PROFILE_ENV: &str = "TOPO_PROFILE_DAEMON_TURNS";
 
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -156,45 +157,75 @@ pub fn runtime_turn(
     let local_addr = host.local_addr();
     let runs_durable_handlers = host.runs_durable_handlers();
     let mut recurring_resume_at = 0;
+    let mut profile = DaemonTurnProfile::start(local_addr);
 
-    if !run_readiness_gate(
-        description,
-        runtime,
-        local_addr,
-        runs_durable_handlers,
-        scheduler,
-        work_limit,
-        local_derivation_limit,
-        &mut active,
-        &mut recurring_resume_at,
-    )? {
+    if !profile.measure_bool("readiness_gate", || {
+        run_readiness_gate(
+            description,
+            runtime,
+            local_addr,
+            runs_durable_handlers,
+            scheduler,
+            work_limit,
+            local_derivation_limit,
+            &mut active,
+            &mut recurring_resume_at,
+        )
+    })? {
+        profile.finish(active);
         return Ok(active);
     }
 
-    active |= fire_recurring_intents(runtime, scheduler, local_addr, recurring_resume_at)?;
-    active |= runtime.drain_local_intents(work_limit)?;
-    active |= runtime.drain_durable_projection(local_derivation_limit)?;
-    if !storage_ready_or_drain_repair(
-        description,
-        runtime,
-        runs_durable_handlers,
-        work_limit,
-        local_derivation_limit,
-        &mut active,
-    )? {
+    active |= profile.measure_bool("fire_recurring_intents", || {
+        fire_recurring_intents(runtime, scheduler, local_addr, recurring_resume_at)
+    })?;
+    active |= profile.measure_bool("drain_local_intents_pre", || {
+        runtime.drain_local_intents(work_limit)
+    })?;
+    active |= profile.measure_bool("drain_durable_projection_pre", || {
+        runtime.drain_durable_projection(local_derivation_limit)
+    })?;
+    if !profile.measure_bool("storage_ready_or_drain_repair", || {
+        storage_ready_or_drain_repair(
+            description,
+            runtime,
+            runs_durable_handlers,
+            work_limit,
+            local_derivation_limit,
+            &mut active,
+        )
+    })? {
+        profile.finish(active);
         return Ok(active);
     }
 
-    active |= drain_inbound_listener(description, runtime, host.listener, work_limit)?;
-    active |= drain_inbound_network_queue(description, runtime, work_limit)?;
-    active |= drain_time_wakes(description, runtime, local_derivation_limit)?;
-    active |= runtime.drain_durable_projection(local_derivation_limit)?;
-    active |= runtime.drain_incoming_projection(local_derivation_limit)?;
+    active |= profile.measure_bool("drain_inbound_listener", || {
+        drain_inbound_listener(description, runtime, host.listener, work_limit)
+    })?;
+    active |= profile.measure_bool("drain_inbound_network_queue", || {
+        drain_inbound_network_queue(description, runtime, work_limit)
+    })?;
+    active |= profile.measure_bool("drain_time_wakes", || {
+        drain_time_wakes(description, runtime, local_derivation_limit)
+    })?;
+    active |= profile.measure_bool("drain_durable_projection_post", || {
+        runtime.drain_durable_projection(local_derivation_limit)
+    })?;
+    active |= profile.measure_bool("drain_incoming_projection", || {
+        runtime.drain_incoming_projection(local_derivation_limit)
+    })?;
     if runs_durable_handlers {
-        active |= runtime.drain_durable_intents(work_limit)?;
+        active |= profile.measure_bool("drain_durable_intents", || {
+            runtime.drain_durable_intents(work_limit)
+        })?;
     }
-    active |= runtime.drain_local_intents(work_limit)?;
-    active |= drain_outgoing_network(runtime, host.listener, work_limit)?;
+    active |= profile.measure_bool("drain_local_intents_post", || {
+        runtime.drain_local_intents(work_limit)
+    })?;
+    active |= profile.measure_bool("drain_outgoing_network", || {
+        drain_outgoing_network(runtime, host.listener, work_limit)
+    })?;
+    profile.finish(active);
     Ok(active)
 }
 
@@ -381,6 +412,109 @@ pub(crate) fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
+}
+
+struct DaemonTurnProfile {
+    enabled: bool,
+    include_idle: bool,
+    local_addr: Option<SocketAddr>,
+    started: Instant,
+    stages: Vec<DaemonTurnStageProfile>,
+}
+
+struct DaemonTurnStageProfile {
+    name: &'static str,
+    elapsed: Duration,
+    result: bool,
+}
+
+impl DaemonTurnProfile {
+    fn start(local_addr: Option<SocketAddr>) -> Self {
+        let (enabled, include_idle) = daemon_turn_profile_mode();
+        Self {
+            enabled,
+            include_idle,
+            local_addr,
+            started: Instant::now(),
+            stages: Vec::new(),
+        }
+    }
+
+    #[cfg(test)]
+    fn enabled_for_test(local_addr: Option<SocketAddr>, include_idle: bool) -> Self {
+        Self {
+            enabled: true,
+            include_idle,
+            local_addr,
+            started: Instant::now(),
+            stages: Vec::new(),
+        }
+    }
+
+    fn measure_bool(
+        &mut self,
+        name: &'static str,
+        work: impl FnOnce() -> Result<bool, String>,
+    ) -> Result<bool, String> {
+        if !self.enabled {
+            return work();
+        }
+        let started = Instant::now();
+        let result = work()?;
+        self.stages.push(DaemonTurnStageProfile {
+            name,
+            elapsed: started.elapsed(),
+            result,
+        });
+        Ok(result)
+    }
+
+    fn finish(self, active: bool) {
+        if let Some(line) = self.finish_line(active) {
+            eprintln!("{line}");
+        }
+    }
+
+    fn finish_line(self, active: bool) -> Option<String> {
+        if !self.enabled || (!self.include_idle && !active) {
+            return None;
+        }
+        let mut line = format!(
+            "daemon_turn_profile addr={} active={} total_ms={}",
+            self.local_addr
+                .map(|addr| addr.to_string())
+                .unwrap_or_else(|| "local".to_string()),
+            active,
+            duration_millis(self.started.elapsed())
+        );
+        for stage in self.stages {
+            line.push_str(&format!(
+                " {}_ms={} {}_result={}",
+                stage.name,
+                duration_millis(stage.elapsed),
+                stage.name,
+                usize::from(stage.result)
+            ));
+        }
+        Some(line)
+    }
+}
+
+fn daemon_turn_profile_mode() -> (bool, bool) {
+    std::env::var(DAEMON_TURN_PROFILE_ENV)
+        .ok()
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            (
+                !(normalized.is_empty() || normalized == "0" || normalized == "false"),
+                normalized == "all",
+            )
+        })
+        .unwrap_or((false, false))
+}
+
+fn duration_millis(duration: Duration) -> u128 {
+    duration.as_micros() / 1000
 }
 
 /// In-memory set of protocol recurring operational intents.
@@ -933,6 +1067,22 @@ mod tests {
 
     fn noop_projector() -> Box<dyn Projector> {
         Box::new(NoopProjector)
+    }
+
+    #[test]
+    fn daemon_turn_profile_formats_recorded_stage_timings() {
+        let local_addr = "127.0.0.1:4242".parse().expect("addr");
+        let mut profile = DaemonTurnProfile::enabled_for_test(Some(local_addr), false);
+
+        let result = profile
+            .measure_bool("stage", || Ok(true))
+            .expect("stage result");
+
+        assert!(result);
+        let line = profile.finish_line(true).expect("profile line");
+        assert!(line.contains("daemon_turn_profile addr=127.0.0.1:4242 active=true"));
+        assert!(line.contains("stage_ms="));
+        assert!(line.contains("stage_result=1"));
     }
 
     struct RecurringHandler;

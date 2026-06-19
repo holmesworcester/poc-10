@@ -46,6 +46,9 @@ use crate::core::project_fact::commit_effects::{
 use crate::core::project_fact::route::FactAdmissionFn;
 use rusqlite::{params, OptionalExtension};
 use std::net::SocketAddr;
+use std::time::{Duration, Instant};
+
+const INTENT_DISPATCH_PROFILE_ENV: &str = "TOPO_PROFILE_INTENT_DISPATCH";
 
 struct QueuedIntent {
     /// Random row id for the exact queued work item being dispatched.
@@ -144,7 +147,10 @@ fn run_and_commit_loaded_intent(
         handler,
         storage_requirement,
     } = input;
-    store
+    let queue = queued.queue;
+    let kind = queued.intent.kind.as_str().to_string();
+    let started = Instant::now();
+    let result = store
         .write_transaction(|tx| {
             enforce_handler_storage_requirement(tx, storage_requirement)
                 .map_err(sqlite_string_error)?;
@@ -174,7 +180,14 @@ fn run_and_commit_loaded_intent(
             )?;
             Ok(true)
         })
-        .map_err(|err| format!("commit handler output: {err}"))
+        .map_err(|err| format!("commit handler output: {err}"));
+    if intent_dispatch_profile_enabled() {
+        eprintln!(
+            "{}",
+            intent_dispatch_profile_line(queue, &kind, started.elapsed(), result.as_ref())
+        );
+    }
+    result
 }
 
 /// Run one claimed intent through its handler and normalize its uncommitted
@@ -410,6 +423,50 @@ impl IntentQueue {
     fn order_by_sql(self) -> &'static str {
         "rowid"
     }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Durable => "durable",
+            Self::Local => "local",
+        }
+    }
+}
+
+fn intent_dispatch_profile_enabled() -> bool {
+    std::env::var(INTENT_DISPATCH_PROFILE_ENV)
+        .ok()
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            !(normalized.is_empty() || normalized == "0" || normalized == "false")
+        })
+        .unwrap_or(false)
+}
+
+fn intent_dispatch_profile_line(
+    queue: IntentQueue,
+    kind: &str,
+    elapsed: Duration,
+    result: Result<&bool, &String>,
+) -> String {
+    match result {
+        Ok(committed) => format!(
+            "intent_dispatch_profile queue={} kind={} status=ok committed={} total_ms={}",
+            queue.label(),
+            kind,
+            committed,
+            duration_millis(elapsed)
+        ),
+        Err(_) => format!(
+            "intent_dispatch_profile queue={} kind={} status=error committed=false total_ms={}",
+            queue.label(),
+            kind,
+            duration_millis(elapsed)
+        ),
+    }
+}
+
+fn duration_millis(duration: Duration) -> u128 {
+    duration.as_micros() / 1000
 }
 
 // =============================================================================
@@ -571,6 +628,32 @@ mod tests {
     const TEST_HANDLER_STATE_TABLE: &str = "\"test.handler_state\"";
 
     static AFTER_FACT_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn intent_dispatch_profile_line_includes_queue_kind_status_and_timing() {
+        let ok = intent_dispatch_profile_line(
+            IntentQueue::Durable,
+            "send_facts_on_connection",
+            Duration::from_millis(7),
+            Ok(&true),
+        );
+        assert_eq!(
+            ok,
+            "intent_dispatch_profile queue=durable kind=send_facts_on_connection status=ok committed=true total_ms=7"
+        );
+
+        let err = "boom".to_string();
+        let failed = intent_dispatch_profile_line(
+            IntentQueue::Local,
+            "maintain_sync",
+            Duration::from_millis(3),
+            Err(&err),
+        );
+        assert_eq!(
+            failed,
+            "intent_dispatch_profile queue=local kind=maintain_sync status=error committed=false total_ms=3"
+        );
+    }
 
     #[test]
     fn durable_success_deletes_only_claimed_row() {
