@@ -3,7 +3,7 @@ mod cli_harness;
 use std::io::{BufRead, BufReader};
 use std::process::Child;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cli_harness::*;
 use rusqlite::{params, Connection};
@@ -92,6 +92,68 @@ fn generate_cli_can_profile_runtime_phases_to_stderr() {
     assert!(
         !err.contains("intent_dispatch_ms="),
         "generate command should not dispatch handlers\n{err}"
+    );
+}
+
+#[test]
+#[ignore = "manual bulk generation fixture; run with --ignored when measuring generated message admission"]
+fn generate_cli_bulk_perf_isolates_authoring_and_admission_from_projection() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = temp_db(&tmp, "bulk-generate-perf.db");
+    let workspace_id = create_workspace(&db);
+    let daemon = spawn_daemon(&db, free_port());
+    create_local_content_key(&db, &workspace_id);
+    drop(daemon);
+
+    let message_count = env_usize("TOPO_GENERATE_PERF_MESSAGES").unwrap_or(100_000);
+    let message_text_bytes = env_usize("TOPO_GENERATE_PERF_MESSAGE_TEXT_BYTES").unwrap_or(128);
+    let before_facts = sqlite_count(&db, "facts");
+
+    let started = Instant::now();
+    let output = con_cli_with_env(
+        &[
+            "--db",
+            &db,
+            "--at",
+            "4000000000000",
+            "generate",
+            &workspace_id,
+            &message_count.to_string(),
+            &message_text_bytes.to_string(),
+        ],
+        &[("TOPO_PROFILE_GENERATE", "1")],
+    );
+    let elapsed = started.elapsed();
+
+    assert!(
+        output.status.success(),
+        "command failed\nstdout={}\nstderr={}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let out = stdout(&output);
+    assert_eq!(
+        line_value(&out, "generated_facts"),
+        message_count.to_string()
+    );
+    assert_eq!(line_value(&out, "applied_facts"), message_count.to_string());
+
+    let expected_new_facts = message_count
+        .checked_mul(2)
+        .expect("message/signature fact count fits usize");
+    assert_eq!(
+        sqlite_count(&db, "facts"),
+        before_facts + expected_new_facts
+    );
+    assert_eq!(sqlite_count(&db, "pending_projection"), expected_new_facts);
+    assert_eq!(sqlite_count(&db, "content_messages"), 0);
+
+    eprintln!(
+        "black_box_generate_messages_perf messages={} message_text_bytes={} wall_ms={} profile={}",
+        message_count,
+        message_text_bytes,
+        elapsed.as_millis(),
+        stderr(&output).trim()
     );
 }
 
@@ -342,6 +404,26 @@ fn stored_storage_version(db: &str) -> u32 {
         |row| row.get::<_, i64>(0).map(|value| value as u32),
     )
     .expect("stored protocol version")
+}
+
+fn sqlite_count(db: &str, table: &str) -> usize {
+    assert!(
+        table
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'),
+        "unsafe table name {table}"
+    );
+    let conn = Connection::open(db).expect("open fixture db");
+    conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+        row.get::<_, i64>(0).map(|value| value as usize)
+    })
+    .expect("count rows")
+}
+
+fn env_usize(name: &str) -> Option<usize> {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
 }
 
 struct RunningDaemon {

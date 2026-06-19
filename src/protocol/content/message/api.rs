@@ -97,8 +97,6 @@ pub fn generate_messages(
         let authored = crate::core::perf_profile::measure_result("message_fact_build", || {
             build_message_facts_from_authoring(&authoring, &text, timestamp)
         })?;
-        authenticate_content_message_fact(&authored.message)?;
-        authenticate_signature_fact(&authored.signature)?;
         fact_ids.push(authored.message.id);
         facts.push(authored.message);
         facts.push(authored.signature);

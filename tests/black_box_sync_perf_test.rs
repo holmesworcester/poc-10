@@ -7,6 +7,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use cli_harness::*;
+use rusqlite::{params, Connection};
 
 #[test]
 #[ignore = "manual sync throughput fixture; run with --ignored when measuring two-daemon catch-up"]
@@ -18,7 +19,9 @@ fn black_box_generated_content_sync_perf_uses_daemon_restart_boundary() {
     let bob = temp_db(&tmp, "bob-sync-perf.db");
     let alice_port = free_port();
     let bob_port = free_port();
-    let message_count = env_usize("TOPO_SYNC_PERF_MESSAGES").unwrap_or(10_000);
+    // Keep the ignored fixture quick by default. Use
+    // `TOPO_SYNC_PERF_MESSAGES=100000` or `500000` for large catch-up runs.
+    let message_count = env_usize("TOPO_SYNC_PERF_MESSAGES").unwrap_or(100);
     let message_text_bytes = env_usize("TOPO_SYNC_PERF_MESSAGE_TEXT_BYTES").unwrap_or(128);
     let timeout_ms = env_u64("TOPO_SYNC_PERF_TIMEOUT_MS")
         .unwrap_or_else(|| 120_000_u64.max(message_count as u64 * 120));
@@ -38,11 +41,9 @@ fn black_box_generated_content_sync_perf_uses_daemon_restart_boundary() {
     alice_daemon.stop_with_cli();
     bob_daemon.stop_with_cli();
 
-    let authoring_started = Instant::now();
-    let generated = generate(&alice, &workspace, message_count, message_text_bytes);
-    let authoring_elapsed = authoring_started.elapsed();
+    let generated = generate_profiled(&alice, &workspace, message_count, message_text_bytes);
     assert_eq!(
-        line_value(&generated, "generated_facts"),
+        line_value(&generated.stdout, "generated_facts"),
         message_count.to_string()
     );
 
@@ -55,22 +56,33 @@ fn black_box_generated_content_sync_perf_uses_daemon_restart_boundary() {
     alice_daemon.assert_running();
     bob_daemon.assert_running();
 
-    let projected = poll_for_content_count(&bob, &workspace, message_count, timeout_ms);
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let first_projected = poll_for_content_count(&bob, &workspace, 1, deadline);
+    let first_projected_at = Instant::now();
+    let projected = poll_for_content_count(&bob, &workspace, message_count, deadline);
     let sync_elapsed = sync_started.elapsed();
     let ready_elapsed = daemons_ready_at.elapsed();
+    let sync_to_first_projected = first_projected_at.duration_since(sync_started);
+    let ready_to_first_projected = first_projected_at.duration_since(daemons_ready_at);
+    let first_to_full_projected = sync_elapsed.saturating_sub(sync_to_first_projected);
     assert_eq!(projected.content_messages, message_count);
+    assert!(first_projected.content_messages >= 1);
 
     let seconds = sync_elapsed.as_secs_f64().max(0.001);
     let messages_per_second = message_count as f64 / seconds;
     eprintln!(
-        "black_box_generated_content_sync_perf messages={} message_text_bytes={} timeout_ms={} authoring_ms={} sync_enable_to_projected_ms={} daemons_ready_to_projected_ms={} messages_per_s={:.2}",
+        "black_box_generated_content_sync_perf messages={} message_text_bytes={} timeout_ms={} authoring_ms={} sync_enable_to_first_projected_ms={} daemons_ready_to_first_projected_ms={} first_projected_to_full_projected_ms={} sync_enable_to_projected_ms={} daemons_ready_to_projected_ms={} messages_per_s={:.2} generate_profile={}",
         message_count,
         message_text_bytes,
         timeout_ms,
-        authoring_elapsed.as_millis(),
+        generated.elapsed.as_millis(),
+        sync_to_first_projected.as_millis(),
+        ready_to_first_projected.as_millis(),
+        first_to_full_projected.as_millis(),
         sync_elapsed.as_millis(),
         ready_elapsed.as_millis(),
-        messages_per_second
+        messages_per_second,
+        one_line(&generated.stderr)
     );
     assert!(messages_per_second.is_finite() && messages_per_second > 0.0);
 }
@@ -283,10 +295,33 @@ fn wait_for_keys_value(db: &str, workspace_id: &str, key: &str, expected: &str) 
     panic!("keys {key} never reached {expected}: {last}");
 }
 
-fn generate(db: &str, workspace: &str, count: usize, size: usize) -> String {
+#[derive(Debug)]
+struct GenerateRun {
+    stdout: String,
+    stderr: String,
+    elapsed: Duration,
+}
+
+fn generate_profiled(db: &str, workspace: &str, count: usize, size: usize) -> GenerateRun {
     let count = count.to_string();
     let size = size.to_string();
-    assert_success(topo(&["--db", db, "generate", workspace, &count, &size]))
+    let started = Instant::now();
+    let output = con_cli_with_env(
+        &["--db", db, "generate", workspace, &count, &size],
+        &[("TOPO_PROFILE_GENERATE", "1")],
+    );
+    let elapsed = started.elapsed();
+    assert!(
+        output.status.success(),
+        "generate failed\nstdout={}\nstderr={}",
+        stdout(&output),
+        stderr(&output)
+    );
+    GenerateRun {
+        stdout: stdout(&output),
+        stderr: stderr(&output),
+        elapsed,
+    }
 }
 
 fn assert_content_count(db: &str, workspace: &str, expected: usize) {
@@ -301,30 +336,20 @@ fn poll_for_content_count(
     db: &str,
     workspace: &str,
     expected: usize,
-    timeout_ms: u64,
+    deadline: Instant,
 ) -> ContentCount {
-    let expected = expected.to_string();
-    let timeout_ms = timeout_ms.to_string();
-    let out = assert_success(topo(&[
-        "--db",
-        db,
-        "assert",
-        "eventually",
-        "content-count",
-        workspace,
-        "content_messages",
-        ">=",
-        &expected,
-        "--timeout-ms",
-        &timeout_ms,
-        "--poll-ms",
-        "500",
-    ]));
-    ContentCount {
-        content_messages: line_value(&out, "observed")
-            .parse()
-            .expect("observed content count"),
+    let mut last = content_count(db, workspace);
+    while Instant::now() < deadline {
+        if last.content_messages >= expected {
+            return last;
+        }
+        thread::sleep(Duration::from_millis(500));
+        last = content_count(db, workspace);
     }
+    panic!(
+        "content-count {workspace} content_messages >= {expected} timed out, last observed {}",
+        last.content_messages
+    );
 }
 
 #[derive(Debug)]
@@ -333,12 +358,45 @@ struct ContentCount {
 }
 
 fn content_count(db: &str, workspace: &str) -> ContentCount {
-    let out = assert_success(topo(&["--db", db, "content-count", workspace]));
+    let workspace_id = decode_hex_32(workspace);
+    let conn = Connection::open(db).expect("open content count db");
+    conn.busy_timeout(Duration::from_secs(5))
+        .expect("set busy timeout");
     ContentCount {
-        content_messages: line_value(&out, "content_messages")
-            .parse()
-            .expect("content_messages usize"),
+        content_messages: conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM content_messages
+                 WHERE workspace_id = ?1",
+                params![workspace_id],
+                |row| row.get::<_, i64>(0).map(|value| value as usize),
+            )
+            .expect("query content message count"),
     }
+}
+
+fn decode_hex_32(value: &str) -> Vec<u8> {
+    assert_eq!(value.len(), 64, "workspace id must be hex32");
+    let mut out = Vec::with_capacity(32);
+    for index in 0..32 {
+        let high = hex_nibble(value.as_bytes()[index * 2]);
+        let low = hex_nibble(value.as_bytes()[index * 2 + 1]);
+        out.push((high << 4) | low);
+    }
+    out
+}
+
+fn hex_nibble(byte: u8) -> u8 {
+    match byte {
+        b'0'..=b'9' => byte - b'0',
+        b'a'..=b'f' => byte - b'a' + 10,
+        b'A'..=b'F' => byte - b'A' + 10,
+        _ => panic!("non-hex byte {byte}"),
+    }
+}
+
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn env_usize(name: &str) -> Option<usize> {
