@@ -331,11 +331,11 @@ meaning as opaque protocol state.
 
 Projector and handler routes declare the storage shape their effects expect by
 attaching `StorageRequirement::Current(version)`. During projection and intent
-commit, core reads the schema-declared marker and compares it with the route
-requirement before deleting pending work, running handler-owned SQL, applying
-row mutations, admitting follow-up facts, or queuing intents. A mismatch aborts
-the SQLite transaction, so the pending fact or intent remains available for
-later repair.
+commit, `commit_effects` reads the schema-declared marker and compares it with
+the route requirement before deleting pending work, running handler-owned SQL,
+applying row mutations, admitting follow-up facts, or queuing intents. A
+mismatch aborts the SQLite transaction, so the pending fact or intent remains
+available for later repair.
 
 `StorageRequirement::MaintenanceBypass` is the explicit escape hatch for repair
 work. Core does not decide when a database should be repaired, how the marker is

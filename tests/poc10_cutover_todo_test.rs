@@ -147,12 +147,10 @@ fn matching_lines_with_comment_mode(
 const SCOPE_NAMES: [&str; 4] = ["auth", "connection", "content", "sync"];
 
 /// Verb-named intent handler files that live directly inside each scope dir.
-const INTENT_HANDLER_FILES: [&str; 10] = [
+const INTENT_HANDLER_FILES: [&str; 8] = [
     "src/protocol/connection/create_connection.rs",
     "src/protocol/connection/send_facts_on_connection.rs",
     "src/protocol/connection/queue_outgoing_frame.rs",
-    "src/protocol/auth/create_key_wrap.rs",
-    "src/protocol/auth/unwrap_key_wrap.rs",
     "src/protocol/sync/seed_connection.rs",
     "src/protocol/sync/send_compare_response.rs",
     "src/protocol/sync/send_needed_fact_id.rs",

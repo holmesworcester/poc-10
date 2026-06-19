@@ -4,11 +4,10 @@
 //! It is the raw exception to natural fact signing: projection proves the
 //! signer through recipient/frontier/endpoint context instead of a signature
 //! field, and duplicate production must produce the same fact id. This family
-//! also owns the wrap-source
-//! coordinate scheme and the shared projection helpers that recipient-key,
-//! key-request, and local-material projection consume. Projection validates
-//! signer/recipient/frontier context and emits unwrap work when local recipient
-//! material is present.
+//! also owns the wrap-source coordinate scheme and the shared projection helpers
+//! that recipient-key, key-request, and local-material projection consume.
+//! Projection validates signer/recipient/frontier context and emits local
+//! recovery facts when local recipient material is present.
 
 pub mod api;
 pub mod author;
@@ -19,6 +18,8 @@ pub mod project;
 pub mod queries;
 
 use crate::core::db::{TableInsert, TableName, TypedTableSchema, Value};
+
+pub(crate) use author::{create_validated_key_wrap_fact, unwrap_key_wrap_fact};
 
 pub const TYPE_KEY_WRAP: u8 = encode::TYPE_KEY_WRAP;
 

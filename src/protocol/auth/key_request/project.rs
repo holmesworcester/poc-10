@@ -191,7 +191,7 @@ pub mod adapt {
 //
 // POLICY. A key request is admitted iff its scope matches the workspace.
 // Projection validates requester/responder context, finds eligible wrap
-// sources, and emits create-key-wrap intents once local signer material is
+// sources, and emits local key-wrap creation facts once local signer material is
 // available.
 
 use crate::core::context::ContextNeed;
@@ -199,12 +199,12 @@ use crate::core::facts::Fact;
 use crate::core::project_fact::{
     FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
 };
-use crate::protocol::auth::create_key_wrap::create_key_wrap_intent;
 use crate::protocol::auth::endpoint_shared;
 use crate::protocol::auth::key_wrap::project::{
     add_signer_needs_for_matching_sources, matched_payload_fact, matching_wrap_sources_with_signer,
     requested_wrap_source_need, require_fact_scope,
 };
+use crate::protocol::auth::key_wrap_creation::key_wrap_creation_fact;
 use crate::protocol::auth::recipient_key;
 use crate::protocol::auth::removal_frontier;
 use crate::protocol::auth::signature;
@@ -322,7 +322,7 @@ fn key_request(
     let mut context_have =
         context_have_from_needs(projection_context, [&signature_need, &requester_need]);
 
-    // 3. Materialize: emit create-key-wrap work for eligible sources.
+    // 3. Materialize: emit key-wrap creation facts for eligible sources.
     if let (Some(recipient_fact), Some(frontier_fact)) = (recipient_fact, frontier_fact) {
         if recipient_fact.id != request.recipient_key_id {
             return Err("key request recipient context payload id mismatch".to_string());
@@ -355,12 +355,12 @@ fn key_request(
             if source.owner_endpoint_id != request.responder_endpoint_id {
                 continue;
             }
-            output = output.intent(create_key_wrap_intent(
+            output = output.fact(key_wrap_creation_fact(
                 request.recipient_key_id,
                 source_fact_id,
                 signer_secret_fact_id,
                 source,
-            ));
+            )?);
         }
     }
     Ok(share_fact_with_sync(

@@ -174,7 +174,7 @@ const PROTOCOL_SCOPES: [&str; 4] = ["auth", "connection", "content", "sync"];
 /// directory. Everything else under a scope directory is fact-module code.
 fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
     let handlers: [(&str, &[&str]); 4] = [
-        ("auth", &["create_key_wrap.rs", "unwrap_key_wrap.rs"]),
+        ("auth", &[]),
         (
             "connection",
             &[

@@ -73,13 +73,14 @@ A single proof file per fact family is preferred at first:
 src/protocol/connection/request/proof.rs
 src/protocol/connection/response/proof.rs
 src/protocol/auth/admin/proof.rs
+src/protocol/auth/key_wrap_creation/proof.rs
+src/protocol/auth/key_wrap_recovery/proof.rs
 src/protocol/content/file_slice/proof.rs
 ```
 
-Verb-named intent handlers such as `auth/create_key_wrap.rs` and
-`sync/share_fact_with_sync.rs` should use a sibling proof file such as
-`src/protocol/auth/create_key_wrap_proof.rs` rather than creating handler
-subdirectories.
+Verb-named intent handlers such as `sync/share_fact_with_sync.rs` should use a
+sibling proof file such as `src/protocol/sync/share_fact_with_sync_proof.rs`
+rather than creating handler subdirectories.
 
 Proofs should not live directly in `project.rs`, `commands.rs`, `author.rs`,
 `encode.rs`, `decode.rs`, `authenticate.rs`, `adapt.rs`, `create.rs`,
@@ -332,7 +333,7 @@ before publishing `auth_*`, `content_signer`, or sync-share output.
 ### Auth Key Material And Forward Secrecy
 
 Key-material proofs should cover shared key facts, local secret facts, and the
-handlers that connect them:
+local work facts that connect them:
 
 ```text
 valid_recipient_key_offer(recipient_key_offer, recipient_key_fact, graph)
@@ -346,9 +347,9 @@ Proof obligations:
 
 ```text
 1. Deterministic key-wrap identity excludes request entropy.
-2. `create_key_wrap` validates recipient key, signer secret, source fact,
-   frontier, source coordinate, and workspace before returning a `key_wrap`.
-3. `unwrap_key_wrap` validates recipient private material, recipient public
+2. `key_wrap_creation` validates recipient key, signer secret, source fact,
+   frontier, source coordinate, and workspace before emitting a `key_wrap`.
+3. `key_wrap_recovery` validates recipient private material, recipient public
    fact, frontier, wrap coordinate, AEAD associated data, and output secret id.
 4. `secret_coverage` offers cover only the frontier/minute/target range proved
    by the local key secret or retained history-node secret.

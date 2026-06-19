@@ -17,6 +17,8 @@ fn fact_scope_readmes_document_registered_fact_modules_and_intents() {
                 "invite_server",
                 "key_request",
                 "key_wrap",
+                "key_wrap_creation",
+                "key_wrap_recovery",
                 "local_history_node_secret",
                 "local_key_secret",
                 "local_recipient_key",
@@ -28,7 +30,7 @@ fn fact_scope_readmes_document_registered_fact_modules_and_intents() {
                 "user_invite",
                 "workspace",
             ],
-            handlers: &["create_key_wrap", "unwrap_key_wrap"],
+            handlers: &[],
         },
         ScopeDocs {
             scope: "content",
@@ -174,7 +176,7 @@ fn readme_core_interface_sections_do_not_name_scope_owned_intent_routes() {
         let readme = fs::read_to_string(&readme_path)
             .unwrap_or_else(|err| panic!("read {}: {err}", readme_path.display()));
         let core_interface = section(&readme, "## Interface To Core");
-        for intent in ["share_fact_with_sync", "create_key_wrap", "unwrap_key_wrap"] {
+        for intent in ["share_fact_with_sync"] {
             assert!(
                 !core_interface.contains(intent),
                 "{scope} README should describe {intent} outside Interface To Core"

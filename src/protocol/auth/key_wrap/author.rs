@@ -1,13 +1,14 @@
 //! Pure constructors and validators for derived key-wrap facts.
 //!
-//! Projection and intent handlers use this module when context has already
-//! supplied the exact facts needed to create or admit a key wrap, unwrap a key
-//! wrap into local secret material, or validate derived local material.
+//! Projection uses this module when context has already supplied the exact
+//! facts needed to create or admit a key wrap, unwrap a key wrap into local
+//! secret material, or validate derived local material.
 
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactScope};
 
-use crate::protocol::auth::create_key_wrap::CreateKeyWrapIntent;
+use crate::protocol::auth::key_wrap_creation::fact::KeyWrapCreationFact;
+use crate::protocol::auth::key_wrap_recovery::fact::KeyWrapRecoveryFact;
 use crate::protocol::auth::local_history_node_secret::fact::LocalHistoryNodeSecretFact;
 use crate::protocol::auth::local_key_secret::fact::LocalKeySecretFact;
 use crate::protocol::auth::local_recipient_key::fact::LocalRecipientKeyFact;
@@ -16,10 +17,8 @@ use crate::protocol::auth::local_signer_secret::project::decode as local_signer_
 use crate::protocol::auth::recipient_key::fact::RecipientKeyFact;
 use crate::protocol::auth::recipient_key::project::decode as recipient_key_layout;
 use crate::protocol::auth::removal_frontier::project::decode as removal_frontier_decode;
-use crate::protocol::auth::unwrap_key_wrap::UnwrapKeyWrapIntent;
 
-use super::fact::{KeyWrapFact, WrappedSecretKind, KEY_WRAP_CIPHERTEXT_BYTES};
-use super::project::WrapSourceKind;
+use super::fact::{KeyWrapFact, WrapSourceKind, WrappedSecretKind, KEY_WRAP_CIPHERTEXT_BYTES};
 use super::{encode, project::decode};
 use crate::protocol::auth::local_history_node_secret::encode as local_history_layout_encode;
 use crate::protocol::auth::local_history_node_secret::project::decode as local_history_layout_decode;
@@ -44,30 +43,30 @@ struct WrapMaterial {
 }
 
 pub fn create_key_wrap_fact(
-    intent: &CreateKeyWrapIntent,
+    creation: &KeyWrapCreationFact,
     recipient_fact: &Fact,
     source_fact: &Fact,
 ) -> Result<Fact, String> {
     let recipient = recipient_key_layout::decode_recipient_key(&recipient_fact.bytes)?;
-    if recipient_fact.id != intent.recipient_key_id {
-        return Err("recipient fact id does not match create_key_wrap intent".to_string());
+    if recipient_fact.id != creation.recipient_key_id {
+        return Err("recipient fact id does not match key_wrap_creation fact".to_string());
     }
-    if recipient.workspace_id != intent.workspace_id {
-        return Err("recipient key workspace does not match create_key_wrap intent".to_string());
+    if recipient.workspace_id != creation.workspace_id {
+        return Err("recipient key workspace does not match key_wrap_creation fact".to_string());
     }
     if recipient.recipient_key.iter().all(|byte| *byte == 0) {
         return Err("recipient key material cannot be empty".to_string());
     }
 
-    let material = wrap_material(intent, source_fact)?;
-    let sender_wrap_secret = deterministic_sender_wrap_secret(intent, &recipient, &material);
+    let material = wrap_material(creation, source_fact)?;
+    let sender_wrap_secret = deterministic_sender_wrap_secret(creation, &recipient, &material);
     let sender_wrap_public_key = crypto::x25519_public_key(&sender_wrap_secret);
-    let nonce = deterministic_nonce(intent, &recipient, &material);
+    let nonce = deterministic_nonce(creation, &recipient, &material);
     let mut wrap = KeyWrapFact {
-        workspace_id: intent.workspace_id,
+        workspace_id: creation.workspace_id,
         created_at_ms: material.created_at_ms,
         signer_endpoint_id: material.signer_endpoint_id,
-        frontier_id: intent.frontier_id,
+        frontier_id: creation.frontier_id,
         wrapped_secret_kind: material.wrapped_secret_kind,
         wrapped_secret_id: material.wrapped_secret_id,
         wrapped_source_secret_id: material.wrapped_source_secret_id,
@@ -76,7 +75,7 @@ pub fn create_key_wrap_fact(
         range_width: material.range_width,
         bit_depth: material.bit_depth,
         fact_id_prefix: material.fact_id_prefix,
-        recipient_key_id: intent.recipient_key_id,
+        recipient_key_id: creation.recipient_key_id,
         sender_wrap_public_key,
         nonce,
         ciphertext: [0; KEY_WRAP_CIPHERTEXT_BYTES],
@@ -94,49 +93,51 @@ pub fn create_key_wrap_fact(
         .map_err(|_| "key wrap ciphertext length mismatch".to_string())?;
 
     Ok(Fact::new(
-        crate::protocol::auth::workspace::scope(intent.workspace_id),
+        crate::protocol::auth::workspace::scope(creation.workspace_id),
         wrap.created_at_ms,
         encode::encode_key_wrap(&wrap)?,
     ))
 }
 
 pub fn unwrap_key_wrap_fact(
-    intent: &UnwrapKeyWrapIntent,
+    recovery: &KeyWrapRecoveryFact,
     key_wrap_fact: &Fact,
     local_recipient_key_fact: &Fact,
     recipient_fact: &Fact,
     frontier_fact: &Fact,
 ) -> Result<Fact, String> {
-    if key_wrap_fact.id != intent.key_wrap_id {
-        return Err("key wrap fact id does not match unwrap intent".to_string());
+    if key_wrap_fact.id != recovery.key_wrap_id {
+        return Err("key wrap fact id does not match key_wrap_recovery fact".to_string());
     }
-    if local_recipient_key_fact.id != intent.local_recipient_key_id {
-        return Err("local recipient key fact id does not match unwrap intent".to_string());
+    if local_recipient_key_fact.id != recovery.local_recipient_key_id {
+        return Err(
+            "local recipient key fact id does not match key_wrap_recovery fact".to_string(),
+        );
     }
-    if recipient_fact.id != intent.recipient_key_id {
-        return Err("recipient fact id does not match unwrap intent".to_string());
+    if recipient_fact.id != recovery.recipient_key_id {
+        return Err("recipient fact id does not match key_wrap_recovery fact".to_string());
     }
-    if frontier_fact.id != intent.frontier_id {
-        return Err("frontier fact id does not match unwrap intent".to_string());
+    if frontier_fact.id != recovery.frontier_id {
+        return Err("frontier fact id does not match key_wrap_recovery fact".to_string());
     }
 
     let wrap = decode::decode_key_wrap(&key_wrap_fact.bytes)?;
-    require_unwrap_coordinate(intent, &wrap)?;
+    require_unwrap_coordinate(recovery, &wrap)?;
 
     let recipient = recipient_key_layout::decode_recipient_key(&recipient_fact.bytes)?;
-    if recipient.workspace_id != intent.workspace_id {
-        return Err("recipient key workspace does not match unwrap intent".to_string());
+    if recipient.workspace_id != recovery.workspace_id {
+        return Err("recipient key workspace does not match key_wrap_recovery fact".to_string());
     }
     let frontier = removal_frontier_decode::decode_removal_frontier(&frontier_fact.bytes)?;
-    if frontier.workspace_id != intent.workspace_id {
-        return Err("removal frontier workspace does not match unwrap intent".to_string());
+    if frontier.workspace_id != recovery.workspace_id {
+        return Err("removal frontier workspace does not match key_wrap_recovery fact".to_string());
     }
     if frontier.owner_endpoint_id != wrap.signer_endpoint_id {
         return Err("key wrap signer does not own unwrap frontier".to_string());
     }
     let local =
         local_recipient_layout::decode_local_recipient_key(&local_recipient_key_fact.bytes)?;
-    require_local_recipient_key(intent, &recipient, &local)?;
+    require_local_recipient_key(recovery, &recipient, &local)?;
 
     let plaintext = crypto::x25519_xchacha20poly1305_decrypt(
         &local.recipient_secret,
@@ -161,18 +162,18 @@ pub fn unwrap_key_wrap_fact(
 }
 
 pub fn create_validated_key_wrap_fact(
-    intent: &CreateKeyWrapIntent,
+    creation: &KeyWrapCreationFact,
     recipient_fact: &Fact,
     source_fact: &Fact,
     signer_secret_fact: &Fact,
 ) -> Result<Fact, String> {
-    let wrap = create_key_wrap_fact(intent, recipient_fact, source_fact)?;
+    let wrap = create_key_wrap_fact(creation, recipient_fact, source_fact)?;
     let signer = local_signer_secret_layout::decode_fact(&signer_secret_fact.bytes)?;
-    if signer_secret_fact.id != intent.signer_secret_fact_id {
-        return Err("signer secret fact id does not match create_key_wrap intent".to_string());
+    if signer_secret_fact.id != creation.signer_secret_fact_id {
+        return Err("signer secret fact id does not match key_wrap_creation fact".to_string());
     }
-    if signer.workspace_id != intent.workspace_id {
-        return Err("signer secret workspace does not match create_key_wrap intent".to_string());
+    if signer.workspace_id != creation.workspace_id {
+        return Err("signer secret workspace does not match key_wrap_creation fact".to_string());
     }
     let key_wrap = decode::decode_key_wrap(&wrap.bytes)?;
     if signer.signer_id != key_wrap.signer_endpoint_id {
@@ -190,15 +191,30 @@ pub fn admit_key_wrap_fact(bytes: Vec<u8>) -> Result<Fact, String> {
     ))
 }
 
-fn wrap_material(intent: &CreateKeyWrapIntent, source_fact: &Fact) -> Result<WrapMaterial, String> {
-    if source_fact.id != intent.source_fact_id {
-        return Err("source fact id does not match create_key_wrap intent".to_string());
+fn wrap_material(
+    creation: &KeyWrapCreationFact,
+    source_fact: &Fact,
+) -> Result<WrapMaterial, String> {
+    if source_fact.id != creation.source_fact_id {
+        return Err("source fact id does not match key_wrap_creation fact".to_string());
     }
-    match intent.source {
+    match creation.source {
         WrapSourceKind::FrontierRoot => {
             let source =
                 local_key_secret_layout_decode::decode_local_key_secret(&source_fact.bytes)?;
-            require_source_workspace_and_frontier(intent, source.workspace_id, source.frontier_id)?;
+            require_source_workspace_and_frontier(
+                creation,
+                source.workspace_id,
+                source.frontier_id,
+            )?;
+            if source.owner_endpoint_id != creation.owner_endpoint_id {
+                return Err("root source owner does not match key_wrap_creation fact".to_string());
+            }
+            if source.created_at_ms != creation.frontier_created_at_ms {
+                return Err(
+                    "root source timestamp does not match key_wrap_creation fact".to_string(),
+                );
+            }
             Ok(root_material(source_fact.id, source))
         }
         WrapSourceKind::HistoryNode {
@@ -209,14 +225,23 @@ fn wrap_material(intent: &CreateKeyWrapIntent, source_fact: &Fact) -> Result<Wra
         } => {
             let source =
                 local_history_layout_decode::decode_local_history_node_secret(&source_fact.bytes)?;
-            require_source_workspace_and_frontier(intent, source.workspace_id, source.frontier_id)?;
+            require_source_workspace_and_frontier(
+                creation,
+                source.workspace_id,
+                source.frontier_id,
+            )?;
+            if source.owner_endpoint_id != creation.owner_endpoint_id {
+                return Err(
+                    "history source owner does not match key_wrap_creation fact".to_string()
+                );
+            }
             if source.range_start != range_start
                 || source.range_width != range_width
                 || source.bit_depth != bit_depth
                 || source.fact_id_prefix != fact_id_prefix
             {
                 return Err(
-                    "history source coordinate does not match create_key_wrap intent".to_string(),
+                    "history source coordinate does not match key_wrap_creation fact".to_string(),
                 );
             }
             Ok(history_material(
@@ -265,31 +290,33 @@ fn history_material(
 }
 
 fn require_unwrap_coordinate(
-    intent: &UnwrapKeyWrapIntent,
+    recovery: &KeyWrapRecoveryFact,
     wrap: &KeyWrapFact,
 ) -> Result<(), String> {
-    if wrap.workspace_id != intent.workspace_id {
-        return Err("key wrap workspace does not match unwrap intent".to_string());
+    if wrap.workspace_id != recovery.workspace_id {
+        return Err("key wrap workspace does not match key_wrap_recovery fact".to_string());
     }
-    if wrap.frontier_id != intent.frontier_id {
-        return Err("key wrap frontier does not match unwrap intent".to_string());
+    if wrap.frontier_id != recovery.frontier_id {
+        return Err("key wrap frontier does not match key_wrap_recovery fact".to_string());
     }
-    if wrap.recipient_key_id != intent.recipient_key_id {
-        return Err("key wrap recipient does not match unwrap intent".to_string());
+    if wrap.recipient_key_id != recovery.recipient_key_id {
+        return Err("key wrap recipient does not match key_wrap_recovery fact".to_string());
     }
     Ok(())
 }
 
 fn require_local_recipient_key(
-    intent: &UnwrapKeyWrapIntent,
+    recovery: &KeyWrapRecoveryFact,
     recipient: &RecipientKeyFact,
     local: &LocalRecipientKeyFact,
 ) -> Result<(), String> {
-    if local.workspace_id != intent.workspace_id {
-        return Err("local recipient key workspace does not match unwrap intent".to_string());
+    if local.workspace_id != recovery.workspace_id {
+        return Err(
+            "local recipient key workspace does not match key_wrap_recovery fact".to_string(),
+        );
     }
-    if local.recipient_key_id != intent.recipient_key_id {
-        return Err("local recipient key id does not match unwrap intent".to_string());
+    if local.recipient_key_id != recovery.recipient_key_id {
+        return Err("local recipient key id does not match key_wrap_recovery fact".to_string());
     }
     if local.recipient_key != recipient.recipient_key {
         return Err("local recipient key public key does not match recipient".to_string());
@@ -339,40 +366,40 @@ fn history_secret_fact(
 }
 
 fn require_source_workspace_and_frontier(
-    intent: &CreateKeyWrapIntent,
+    creation: &KeyWrapCreationFact,
     workspace_id: [u8; 32],
     frontier_id: [u8; 32],
 ) -> Result<(), String> {
-    if workspace_id != intent.workspace_id {
-        return Err("source workspace does not match create_key_wrap intent".to_string());
+    if workspace_id != creation.workspace_id {
+        return Err("source workspace does not match key_wrap_creation fact".to_string());
     }
-    if frontier_id != intent.frontier_id {
-        return Err("source frontier does not match create_key_wrap intent".to_string());
+    if frontier_id != creation.frontier_id {
+        return Err("source frontier does not match key_wrap_creation fact".to_string());
     }
     Ok(())
 }
 
 fn deterministic_sender_wrap_secret(
-    intent: &CreateKeyWrapIntent,
+    creation: &KeyWrapCreationFact,
     recipient: &RecipientKeyFact,
     material: &WrapMaterial,
 ) -> crypto::X25519PrivateKey {
     crypto::blake3_keyed_hash(
         &material.secret,
         b"topo key wrap sender x25519 v1",
-        &deterministic_wrap_info(intent, recipient, material),
+        &deterministic_wrap_info(creation, recipient, material),
     )
 }
 
 fn deterministic_nonce(
-    intent: &CreateKeyWrapIntent,
+    creation: &KeyWrapCreationFact,
     recipient: &RecipientKeyFact,
     material: &WrapMaterial,
 ) -> crypto::XChaCha20Poly1305Nonce {
     let full = crypto::blake3_keyed_hash(
         &material.secret,
         b"topo key wrap nonce v1",
-        &deterministic_wrap_info(intent, recipient, material),
+        &deterministic_wrap_info(creation, recipient, material),
     );
     full[..crypto::XCHACHA20_POLY1305_NONCE_BYTES]
         .try_into()
@@ -380,14 +407,14 @@ fn deterministic_nonce(
 }
 
 fn deterministic_wrap_info(
-    intent: &CreateKeyWrapIntent,
+    creation: &KeyWrapCreationFact,
     recipient: &RecipientKeyFact,
     material: &WrapMaterial,
 ) -> Vec<u8> {
     let mut out = Vec::with_capacity(32 * 8 + 1 + 8 + 8 + 2);
-    out.extend_from_slice(&intent.workspace_id);
+    out.extend_from_slice(&creation.workspace_id);
     out.extend_from_slice(&material.signer_endpoint_id);
-    out.extend_from_slice(&intent.frontier_id);
+    out.extend_from_slice(&creation.frontier_id);
     out.push(material.wrapped_secret_kind.as_u8());
     out.extend_from_slice(&material.wrapped_secret_id);
     out.extend_from_slice(&material.wrapped_source_secret_id);
@@ -396,7 +423,7 @@ fn deterministic_wrap_info(
     out.extend_from_slice(&material.range_width.to_be_bytes());
     out.extend_from_slice(&material.bit_depth.to_be_bytes());
     out.extend_from_slice(&material.fact_id_prefix);
-    out.extend_from_slice(&intent.recipient_key_id);
+    out.extend_from_slice(&creation.recipient_key_id);
     out.extend_from_slice(&recipient.recipient_key);
     out
 }

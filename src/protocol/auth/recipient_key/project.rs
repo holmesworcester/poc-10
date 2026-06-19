@@ -200,7 +200,7 @@ pub mod adapt {
 //
 // POLICY. A recipient key is admitted iff its scope matches the workspace and
 // supersession of any previous recipient key validates. Projection shares the
-// fact, publishes recipient context, and emits proactive key-wrap work when
+// fact, publishes recipient context, and emits proactive key-wrap creation facts when
 // eligible local wrap sources and signer secrets are available.
 
 use crate::core::context::{ContextNeed, ContextOffer};
@@ -209,12 +209,12 @@ use crate::core::intents::{RowMutation, TableInsert, Value};
 use crate::core::project_fact::{
     FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
 };
-use crate::protocol::auth::create_key_wrap::create_key_wrap_intent;
 use crate::protocol::auth::endpoint_shared;
 use crate::protocol::auth::key_wrap::project::{
     add_signer_needs_for_matching_sources, matched_payload_fact, matching_wrap_sources_with_signer,
     proactive_wrap_source_need, require_fact_scope,
 };
+use crate::protocol::auth::key_wrap_creation::key_wrap_creation_fact;
 use crate::protocol::auth::signature;
 use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
@@ -343,7 +343,7 @@ fn recipient_key(
     ));
     context_have.extend(context_have_from_needs(projection_context, [&signer_need]));
 
-    // 3. Materialize: publish recipient context and proactive key-wrap work.
+    // 3. Materialize: publish recipient context and proactive key-wrap creation facts.
     output = share_fact_with_sync(
         output.offer(ContextOffer::range(
             fact.id,
@@ -400,12 +400,12 @@ fn recipient_key(
     for (source_fact_id, signer_secret_fact_id, source) in
         matching_wrap_sources_with_signer(projection_context, &wrap_need)?
     {
-        output = output.intent(create_key_wrap_intent(
+        output = output.fact(key_wrap_creation_fact(
             fact.id,
             source_fact_id,
             signer_secret_fact_id,
             source,
-        ));
+        )?);
     }
     Ok(output)
 }

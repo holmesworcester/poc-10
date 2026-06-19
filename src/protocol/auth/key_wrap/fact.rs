@@ -40,6 +40,17 @@ impl WrappedSecretKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WrapSourceKind {
+    FrontierRoot,
+    HistoryNode {
+        range_start: u64,
+        range_width: u64,
+        bit_depth: u16,
+        fact_id_prefix: FactId,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyWrapFact {
     pub workspace_id: WorkspaceId,
     pub created_at_ms: u64,

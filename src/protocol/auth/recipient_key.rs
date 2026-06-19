@@ -2,7 +2,7 @@
 //!
 //! A recipient key names an endpoint public key eligible to receive workspace
 //! auth key material. Projection validates supersession and emits proactive
-//! key-wrap work.
+//! local key-wrap creation facts.
 
 pub mod author;
 pub mod encode;

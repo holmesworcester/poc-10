@@ -9,10 +9,10 @@ production/recovery, and local-only secrets.
 
 ## Interface To Core
 
-Data enters core as immutable facts returned by auth commands, by auth intent
-handlers, or by connection/sync receive paths. Core stores the bytes, assigns
-the BLAKE3 fact id, and routes projection by the first-byte type tag registered
-in `protocol::registry`.
+Data enters core as immutable facts returned by auth commands, emitted by
+projection, or received through connection/sync paths. Core stores the bytes,
+assigns the BLAKE3 fact id, and routes projection by the first-byte type tag
+registered in `protocol::registry`.
 
 Data leaves auth projection as:
 
@@ -75,9 +75,7 @@ proof has already passed. When projection consumes validated context, auth
 passes those dependency fact ids as the same projector-supplied `context_have`
 graph used by other scopes. Sync records that graph without interpreting auth
 semantics. Connection and sync may transport auth facts as ordinary fact bytes,
-but auth admission still happens only when the owning auth projector runs. The
-auth-owned `create_key_wrap` and `unwrap_key_wrap` routes are handler
-registrations with core; other scopes do not call those handlers directly.
+but auth admission still happens only when the owning auth projector runs.
 
 ## Cross-Scope Row Reads
 
@@ -290,25 +288,25 @@ still depend on opened message context.
 If opening requires broad scans, IO, clock reads, or external mutation, that
 step belongs in a bounded intent/handler, not in a generic opening worker.
 
-## Intent Handlers
+## Local Key-Wrap Work Facts
 
-`create_key_wrap` is emitted by recipient-key and key-request projection after
-recipient, source-secret, and local signer context are available. The handler
-loads the recipient fact, source secret fact, and signer secret fact named in
-the intent, validates the coordinate, builds deterministic key-wrap bytes, and
-returns one `key_wrap` fact.
+`key_wrap_creation` is emitted by recipient-key and key-request projection after
+recipient, source-secret, and local signer context are available. It is a local
+fact that names the exact recipient fact, source secret fact, signer secret fact,
+and wrap-source coordinate. Its projector waits for those same facts as context,
+validates the coordinate, builds deterministic key-wrap bytes, and emits one
+shared `key_wrap` fact.
 
-`unwrap_key_wrap` is emitted by key-wrap projection when a matching local
-recipient key is present. The handler loads the key wrap, local recipient key,
-recipient key, and frontier, decrypts the wrapped secret, validates the
-resulting local secret id against the wrap coordinate, and returns either a
-`local_key_secret` or `local_history_node_secret` fact.
+`key_wrap_recovery` is emitted by key-wrap projection when a matching local
+recipient key is present. It is a local fact that names the exact key wrap,
+recipient key, frontier, and local recipient key. Its projector waits for those
+facts as context, decrypts the wrapped secret, validates the resulting local
+secret id against the wrap coordinate, and emits either a `local_key_secret` or
+`local_history_node_secret` fact.
 
-Both handlers use the intent payload as the handler key source. Projectors should
-only emit these intents once their declared input facts are retained; a missing
-input is a dispatch error and commits no output.
-These are auth-owned handler routes registered with core; other scopes do not
-call them directly.
+These work facts keep deterministic key-wrap side effects in normal projection:
+missing context parks the local work fact through ordinary needs, and committed
+projection output owns the resulting facts.
 
 ## Facts
 
@@ -527,7 +525,7 @@ local_signer_secret {
 Publishes the current X25519 recipient public key for an endpoint. Projection
 requires workspace scope, signer context, and optional supersession context.
 It offers `recipient_key`, marks the previous key as `recipient_superseded`,
-shares the fact, and may emit `create_key_wrap` for live wrap sources.
+    shares the fact, and may emit `key_wrap_creation` facts for live wrap sources.
 
 ```text
 recipient_key {
@@ -617,7 +615,7 @@ local_history_node_secret {
 Asks a frontier owner to produce a key wrap for a requester recipient key.
 Projection requires workspace scope, requester signer context, recipient-key
 context, frontier context, and matching wrap-source context. When a local
-signer secret is available it emits `create_key_wrap`.
+    signer secret is available it emits `key_wrap_creation`.
 
 ```text
 key_request {
@@ -636,8 +634,8 @@ key_request {
 Carries deterministic encrypted key material for one recipient and one source
 secret coordinate. Projection requires workspace scope, signer, recipient, and
 frontier context. It writes `key_wrap_rows`, offers `sync_exact_fact` and
-`sync_key_wrap`, shares the fact, and emits `unwrap_key_wrap` if local recipient
-material exists.
+`sync_key_wrap`, shares the fact, and emits `key_wrap_recovery` if local
+recipient material exists.
 
 ```text
 key_wrap {
@@ -657,6 +655,43 @@ key_wrap {
   sender_wrap_public_key: x25519:deterministic_sender_key
   nonce: nonce:wrap_nonce
   ciphertext: bytes:wrapped_secret
+}
+```
+
+### `key_wrap_creation` (tag 158)
+
+Local deterministic work to create one `key_wrap`. Projection requires local
+scope and waits for the exact recipient key, local source secret, and local
+signer secret named by the fact. When those proofs are present, it validates the
+wrap-source coordinate and emits the shared `key_wrap` fact.
+
+```text
+key_wrap_creation {
+  workspace_id: fact:workspace_acme
+  frontier_id: fact:frontier_alice
+  recipient_key_id: fact:recipient_key_phone
+  source_fact_id: fact:local_history_node_leaf
+  signer_secret_fact_id: fact:local_signer_secret_laptop
+  owner_endpoint_id: fact:endpoint_alice_laptop
+  frontier_created_at_ms: 1715000000800
+  source: HistoryNode(range_start=28583333, range_width=1, bit_depth=256)
+}
+```
+
+### `key_wrap_recovery` (tag 159)
+
+Local deterministic work to recover one wrapped secret. Projection requires local
+scope and waits for the exact accepted key wrap, recipient key, removal frontier,
+and local recipient key named by the fact. When those proofs are present, it
+decrypts the wrap and emits the matching local secret fact.
+
+```text
+key_wrap_recovery {
+  workspace_id: fact:workspace_acme
+  frontier_id: fact:frontier_alice
+  recipient_key_id: fact:recipient_key_phone
+  key_wrap_id: fact:key_wrap_for_phone
+  local_recipient_key_id: fact:local_recipient_key_phone
 }
 ```
 
@@ -696,7 +731,7 @@ removal_frontier_alice
   -> key_wrap_for_phone
 
 recipient_key_phone + key_wrap_for_phone + local_recipient_key_phone
-  -> unwrap_key_wrap intent
+  -> key_wrap_recovery
   -> local_history_node_secret_phone
 ```
 

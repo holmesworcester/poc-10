@@ -29,6 +29,8 @@ pub mod invite_secret;
 pub mod invite_server;
 pub mod key_request;
 pub mod key_wrap;
+pub mod key_wrap_creation;
+pub mod key_wrap_recovery;
 pub mod local_history_node_secret;
 pub mod local_key_secret;
 pub mod local_recipient_key;
@@ -40,8 +42,3 @@ pub mod signature;
 pub mod user;
 pub mod user_invite;
 pub mod workspace;
-
-// Intents: work that needs exact fact inputs after projection proves
-// eligibility - create a shared key wrap or unwrap a received wrap.
-pub mod create_key_wrap;
-pub mod unwrap_key_wrap;

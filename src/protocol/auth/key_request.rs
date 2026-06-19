@@ -2,7 +2,7 @@
 //!
 //! A key request asks a frontier owner to produce a wrap for a requester
 //! recipient key. Projection validates requester/responder context and emits
-//! create-key-wrap work.
+//! local key-wrap creation facts.
 
 pub mod encode;
 pub mod fact;

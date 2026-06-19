@@ -87,18 +87,19 @@ wall-clock decisions while `HandlerContext::is_replay()` is true.
 
 Initial poc-10 policy:
 
-| Intent kind | Replay behavior |
+| Work surface | Replay behavior |
 | --- | --- |
 | `share_fact_with_sync` | Rebuilds sync-derived state during replay, but skips live tail advertisements. |
-| `create_key_wrap` | Deterministically creates idempotent `key_wrap` facts from retained recipient/request facts plus retained local source and signer facts. |
-| `unwrap_key_wrap` | Creates deterministic local secret facts from retained wrap, recipient, frontier, and local recipient-key facts. Ordinary purge/retirement rules decide whether those local secret facts survive. |
+| `key_wrap_creation` facts | Project deterministically from retained recipient/request facts plus retained local source and signer facts to recreate `key_wrap` facts. |
+| `key_wrap_recovery` facts | Project deterministically from retained wrap, recipient, frontier, and local recipient-key facts to recreate local secret facts. Ordinary purge/retirement rules decide whether those local secret facts survive. |
 | `create_connection` | Returns no effects during replay. Network-visible response work must be rebuilt from committed request/response facts after replay. |
 | accepted bootstrap peer projection | Rebuilt during replay from retained local `invite_accepted` facts; live maintenance consumes those rows after the replay barrier. |
 | sync compare/have/need/send intents | Do not run during replay. They are live session prompts or send packaging. |
 | bootstrap, connection-frame, network-send, receive-network intents | Do not run during replay. They are operational IO attempts. |
 
-Every handler route should declare this flag. A test should fail if a new
-handler route omits the handler replay decision.
+Replay mode stays out of the route table. A test should fail if routing tries to
+encode replay policy instead of letting the handler or projector own its own
+effect edge.
 
 ## Recurring Intents
 
@@ -184,15 +185,15 @@ The safe shape is:
 
 ## Key Material
 
-`create_key_wrap` can run during replay because it is deterministic fact
-creation. If the recipient/key-request facts and required local source and
-signer facts remain, it emits the same `key_wrap` fact. If the local source was
-purged or retired, ordinary context rules suppress the work.
+`key_wrap_creation` local facts replay because they are deterministic projection
+work. If the recipient/key-request facts and required local source and signer
+facts remain, projection emits the same `key_wrap` fact. If the local source was
+purged or retired, ordinary context rules park or suppress the work.
 
-`unwrap_key_wrap` can run during replay under the same rule: deterministic
-local fact creation only. It must carry ids, not plaintext key material, in the
-intent payload. Opened local secrets are represented by local facts and are
-retained or removed by the normal purge/retirement facts.
+`key_wrap_recovery` local facts replay under the same rule: deterministic local
+fact creation only. They carry ids, not plaintext key material. Opened local
+secrets are represented by local facts and are retained or removed by the normal
+purge/retirement facts.
 
 ## CLI Test Surface
 
@@ -243,11 +244,10 @@ is exercised through ordinary daemon/runtime projection.
   return empty effects before the replay barrier completes.
 - Sync test: shareable-fact rows and negentropy summaries are wiped and rebuilt
   from retained facts.
-- Key-wrap test: replay dispatch of `create_key_wrap` is idempotent and creates
-  no duplicate meaning when the same wrap already exists.
-- Unwrap test: replay dispatch of `unwrap_key_wrap` is idempotent, creates
-  deterministic local secret facts, and respects existing purge/retirement
-  facts.
+- Key-wrap test: replay projection of `key_wrap_creation` recreates the same
+  deterministic `key_wrap` fact without duplicate meaning.
+- Recovery test: replay projection of `key_wrap_recovery` creates deterministic
+  local secret facts and respects existing purge/retirement facts.
 - Connection test: daemon startup installs the recurring
   `maintain_connections` schedule in memory, and no persisted job row exists.
 - Connection test: replay no longer recreates bootstrap retries from old

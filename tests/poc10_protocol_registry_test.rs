@@ -134,8 +134,6 @@ fn projector_and_handler_owner_modules_declare_storage_requirements() {
     );
 
     for handler in [
-        "src/protocol/auth/create_key_wrap.rs",
-        "src/protocol/auth/unwrap_key_wrap.rs",
         "src/protocol/connection/create_connection.rs",
         "src/protocol/connection/maintain_connections.rs",
         "src/protocol/connection/queue_outgoing_frame.rs",

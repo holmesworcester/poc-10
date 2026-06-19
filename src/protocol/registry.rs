@@ -305,6 +305,16 @@ pub(crate) fn authenticate_fact_for_admission(fact: &Fact) -> Result<(), String>
             auth::key_wrap::project::decode::decode_key_wrap,
             auth::key_wrap::project::authenticate::authenticate
         ),
+        auth::key_wrap_creation::encode::TYPE_KEY_WRAP_CREATION => authenticate_admission_arm!(
+            fact,
+            auth::key_wrap_creation::project::decode::decode_fact,
+            auth::key_wrap_creation::project::authenticate::authenticate
+        ),
+        auth::key_wrap_recovery::encode::TYPE_KEY_WRAP_RECOVERY => authenticate_admission_arm!(
+            fact,
+            auth::key_wrap_recovery::project::decode::decode_fact,
+            auth::key_wrap_recovery::project::authenticate::authenticate
+        ),
         auth::local_recipient_key::encode::TYPE_LOCAL_RECIPIENT_KEY => {
             authenticate_admission_arm!(
                 fact,
@@ -1239,6 +1249,8 @@ projector_routes! {
     project_auth_local_secret_retirement => auth::local_secret_retirement::encode::TYPE_LOCAL_SECRET_RETIREMENT, auth::local_secret_retirement::project::LocalSecretRetirementProjector, auth::local_secret_retirement::project::PROJECTOR_INFO, auth::local_secret_retirement::project::STORAGE_REQUIREMENT;
     project_auth_key_request => auth::key_request::encode::TYPE_KEY_REQUEST, auth::key_request::project::KeyRequestProjector, auth::key_request::project::PROJECTOR_INFO, auth::key_request::project::STORAGE_REQUIREMENT;
     project_auth_key_wrap => auth::key_wrap::encode::TYPE_KEY_WRAP, auth::key_wrap::project::KeyWrapProjector, auth::key_wrap::project::PROJECTOR_INFO, auth::key_wrap::project::STORAGE_REQUIREMENT;
+    project_auth_key_wrap_creation => auth::key_wrap_creation::encode::TYPE_KEY_WRAP_CREATION, auth::key_wrap_creation::project::KeyWrapCreationProjector, auth::key_wrap_creation::project::PROJECTOR_INFO, auth::key_wrap_creation::project::STORAGE_REQUIREMENT;
+    project_auth_key_wrap_recovery => auth::key_wrap_recovery::encode::TYPE_KEY_WRAP_RECOVERY, auth::key_wrap_recovery::project::KeyWrapRecoveryProjector, auth::key_wrap_recovery::project::PROJECTOR_INFO, auth::key_wrap_recovery::project::STORAGE_REQUIREMENT;
     project_auth_local_recipient_key => auth::local_recipient_key::encode::TYPE_LOCAL_RECIPIENT_KEY, auth::local_recipient_key::project::LocalRecipientKeyProjector, auth::local_recipient_key::project::PROJECTOR_INFO, auth::local_recipient_key::project::STORAGE_REQUIREMENT;
     project_endpoint => auth::endpoint::encode::TYPE_LOCAL_ENDPOINT, auth::endpoint::project::EndpointProjector, auth::endpoint::project::PROJECTOR_INFO, auth::endpoint::project::STORAGE_REQUIREMENT;
     project_invite_secret => auth::invite_secret::encode::TYPE_INVITE_SECRET, auth::invite_secret::project::InviteSecretProjector, auth::invite_secret::project::PROJECTOR_INFO, auth::invite_secret::project::STORAGE_REQUIREMENT;
@@ -1364,20 +1376,6 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
             initial_delay_ms: 0,
             build_intent: connection::maintain_connections::build_maintain_connections_intent,
         }
-    ),
-    // Key wrap creation is deterministic, idempotent fact creation from retained
-    // recipient/request/source/signer facts.
-    handler_route!(
-        auth::create_key_wrap::CREATE_KEY_WRAP,
-        auth::create_key_wrap::CreateKeyWrapHandler,
-        storage = auth::create_key_wrap::STORAGE_REQUIREMENT
-    ),
-    // Unwrap deterministically creates local secret facts (ids, not plaintext)
-    // from retained wrap/recipient/frontier/local recipient-key facts.
-    handler_route!(
-        auth::unwrap_key_wrap::UNWRAP_KEY_WRAP,
-        auth::unwrap_key_wrap::UnwrapKeyWrapHandler,
-        storage = auth::unwrap_key_wrap::STORAGE_REQUIREMENT
     ),
     // Sending facts over a connection and route-resolved outgoing frame
     // queueing are operational IO over a live session.

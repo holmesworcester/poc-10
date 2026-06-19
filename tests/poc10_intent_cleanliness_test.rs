@@ -202,7 +202,7 @@ fn extra_fact_family_dirs(root: &Path) -> Vec<(String, String, PathBuf)> {
 /// directory; there is no separate `src/protocol/intents` tree.
 fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
     const HANDLERS: &[(&str, &[&str])] = &[
-        ("auth", &["create_key_wrap", "unwrap_key_wrap"]),
+        ("auth", &[]),
         (
             "connection",
             &[

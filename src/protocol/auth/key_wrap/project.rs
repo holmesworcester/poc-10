@@ -214,7 +214,7 @@ pub mod adapt {
 // Key wrap projector plus shared auth key-material wrap-source policy.
 //
 // POLICY. A key wrap is admitted iff signer, recipient, and frontier context
-// validate; if local recipient material exists, an unwrap intent is emitted.
+// validate; if local recipient material exists, a local recovery fact is emitted.
 //
 // This module also owns the wrap-source coordinate scheme and the shared
 // projection helpers (scope checks, signer matching, wrap-source validation)
@@ -228,14 +228,15 @@ use crate::core::project_fact::{
     FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
 };
 use crate::protocol::auth;
+use crate::protocol::auth::key_wrap_recovery::key_wrap_recovery_fact;
 use crate::protocol::auth::local_history_node_secret;
 use crate::protocol::auth::local_key_secret;
 use crate::protocol::auth::recipient_key;
 use crate::protocol::auth::removal_frontier;
-use crate::protocol::auth::unwrap_key_wrap::{unwrap_key_wrap_intent, UnwrapKeyWrapIntent};
 use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
 use super::fact::KeyWrapFact;
+pub use super::fact::WrapSourceKind;
 use super::key_wrap_insert;
 use super::queries::KeyWrapRow;
 
@@ -250,17 +251,6 @@ const ENCODED_WRAP_SOURCE_DESCRIPTOR_LEN: usize = 156;
 
 pub fn wrap_source_role() -> Role {
     Role::expect(WRAP_SOURCE_ROLE)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WrapSourceKind {
-    FrontierRoot,
-    HistoryNode {
-        range_start: u64,
-        range_width: u64,
-        bit_depth: u16,
-        fact_id_prefix: FactId,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -852,7 +842,7 @@ fn key_wrap(
         [&signer_need, &recipient_need, &frontier_need],
     );
 
-    // 3. Materialize: write the accepted wrap row and emit unwrap work.
+    // 3. Materialize: write the accepted wrap row and emit local recovery facts.
     output = share_fact_with_sync(
         output
             .row_mutation(RowMutation::InsertValues(key_wrap_insert(KeyWrapRow {
@@ -895,13 +885,14 @@ fn key_wrap(
         if local.recipient_key != recipient.recipient_key {
             return Err("key wrap local recipient public key does not match recipient".to_string());
         }
-        output = output.intent(unwrap_key_wrap_intent(UnwrapKeyWrapIntent {
-            workspace_id: wrap.workspace_id,
-            frontier_id: wrap.frontier_id,
-            recipient_key_id: wrap.recipient_key_id,
-            key_wrap_id: fact.id,
-            local_recipient_key_id: local_recipient_fact.id,
-        }));
+        output = output.fact(key_wrap_recovery_fact(
+            wrap.workspace_id,
+            wrap.frontier_id,
+            wrap.recipient_key_id,
+            fact.id,
+            local_recipient_fact.id,
+            fact.timestamp,
+        )?);
     }
 
     Ok(output)
