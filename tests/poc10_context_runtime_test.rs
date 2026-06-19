@@ -6,7 +6,7 @@ use topo::core::command::CommandClock;
 use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope, ScopeKind};
 use topo::core::runtime::Runtime;
-use topo::protocol::app::MATCH_RUNTIME;
+use topo::protocol::app::CONTEXT_RUNTIME;
 use topo::protocol::auth::local_key_secret::encode as local_key_secret_layout;
 use topo::protocol::auth::local_key_secret::fact::LocalKeySecretFact;
 use topo::protocol::auth::removal_frontier::encode as removal_frontier_layout;
@@ -43,7 +43,7 @@ fn drain_projection_for_test(runtime: &mut Runtime, max_rounds: usize, limit: us
 
 #[test]
 fn runtime_submits_authored_facts_and_projects_workspace_rows() {
-    let mut runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
+    let mut runtime = Runtime::open_memory(&CONTEXT_RUNTIME).expect("runtime");
     let clock = FixedClock(Cell::new(123_000));
     let output = create_workspace_with_identity(
         runtime.db(),
@@ -96,7 +96,7 @@ fn runtime_routes_signature_evidenced_content_message_to_projector() {
         created_at_ms: 60_000,
         text: "runtime signature-evidenced message",
     });
-    let mut runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
+    let mut runtime = Runtime::open_memory(&CONTEXT_RUNTIME).expect("runtime");
 
     runtime.submit_fact(frontier);
     runtime.submit_fact(local_key_secret_fact(
@@ -129,7 +129,7 @@ fn runtime_routes_signature_evidenced_content_message_to_projector() {
 
 #[test]
 fn runtime_dispatches_every_protocol_handler_registration() {
-    let dispatched = MATCH_RUNTIME
+    let dispatched = CONTEXT_RUNTIME
         .handlers
         .iter()
         .map(|handler| handler.intent_kind.to_string())
@@ -142,7 +142,7 @@ fn runtime_dispatches_every_protocol_handler_registration() {
         "message/content deletion should be projector-owned, not handler-owned"
     );
     assert!(
-        dispatched.len() == MATCH_RUNTIME.handlers.len(),
+        dispatched.len() == CONTEXT_RUNTIME.handlers.len(),
         "HANDLER_ROUTES must not contain duplicate runtime intent kinds"
     );
 }

@@ -13,7 +13,7 @@ use topo::core::command::{CommandClock, WorkspaceId};
 use topo::core::crypto;
 use topo::core::db::Db;
 use topo::core::runtime::Runtime;
-use topo::protocol::app::MATCH_RUNTIME;
+use topo::protocol::app::CONTEXT_RUNTIME;
 use topo::protocol::auth::key_wrap::api::{create_key_frontier, CreateKeyFrontier};
 use topo::protocol::auth::workspace::api::{create_workspace_with_identity, BootstrapIdentity};
 use topo::protocol::content::message::api::{local_encryption_capability, send_message};
@@ -56,7 +56,7 @@ fn open_store() -> Db {
 }
 
 fn runtime_with_workspace_and_key() -> (Runtime, WorkspaceId) {
-    let mut runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
+    let mut runtime = Runtime::open_memory(&CONTEXT_RUNTIME).expect("runtime");
     let workspace_clock = FixedClock::new(1_000);
     let workspace = create_workspace_with_identity(
         runtime.db(),

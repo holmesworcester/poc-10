@@ -37,13 +37,30 @@ diagram 2):
 facts (+ local_fact_admissions)   immutable fact store
 incoming_facts                    outside-origin facts staged for projection (temp)
 pending_projection                facts waiting to be projected
+pending_time_ranges               due time context attached to pending owners
 context_edges                     standing needs and offers
 pending_projection_matches        offers that matched a parked need
 time_wakes                        facts scheduled to reproject at a time
 intents (+ local_intents)         bounded work waiting for a handler (local is temp)
 network_outgoing                  sealed bytes waiting for the TCP pump
+network_outgoing_targets          active target index for the TCP pump
 <scope>_rows                      materialized state — read by queries and handlers, never by projectors
 ```
+
+`pending_time_ranges` is not an independent queue. `pending_projection` is keyed
+only by owner, so several causes can coalesce into one pending owner row.
+`pending_time_ranges` carries the due timeline interval that woke that owner.
+Keeping that cause separate lets a projector see *which declared wake fired*
+without making every projector depend on ambient wall-clock time. A global
+`time_now` context would make projection order and replay depend on the current
+clock, require broad re-queues just because time moved, and hide the fact-owned
+subscription that asked to be woken. A time wake is instead a standing
+fact-owned request; daemon time merely turns due requests into explicit
+projection context.
+
+Purges are also not a queue. A projector or handler may return an exact purged
+fact id in `RuntimeEffects`; core removes that fact and core-owned derived rows
+inside the same commit that applies rows, facts, and intents.
 
 Each diagram below is one zoom level on that loop.
 
@@ -64,22 +81,28 @@ flowchart TD
     PENDING[("pending_projection")]
     NETIN["inbound bytes (from peers)"]
     INCOMING[("incoming_facts (temp)")]
+    OBS[("frame_observation facts")]
     PROJECTOR{{"fact projector (protocol)"}}
     CONTEXT[("context_edges: needs + offers")]
     MATCHES[("pending_projection_matches")]
+    TIME_CTX[("pending_time_ranges")]
     WAKES[("time_wakes")]
     INTENTS[("intents + local_intents")]
     HANDLER{{"intent handler (protocol)"}}
     OUT[("network_outgoing")]
+    TARGETS[("network_outgoing_targets")]
     NETOUT["outbound bytes (to peers)"]
     ROWS[("scope rows: materialized")]
     QUERY["query reads rows"]
 
     NETIN -->|intake| INCOMING
+    NETIN -->|intake metadata| OBS
+    OBS -->|admit| FACTS
     FACTS -->|admit| PENDING
     INCOMING --> PROJECTOR
     PENDING --> PROJECTOR
     MATCHES -.matched offer payload.-> PROJECTOR
+    TIME_CTX -.due time context.-> PROJECTOR
 
     PROJECTOR -->|needs + offers| CONTEXT
     PROJECTOR -->|time wakes| WAKES
@@ -90,13 +113,16 @@ flowchart TD
     CONTEXT -->|core matches range overlap| MATCHES
     MATCHES -->|wake parked owner| PENDING
     WAKES -->|due time admits owner| PENDING
+    WAKES -->|due interval| TIME_CTX
 
     INTENTS --> HANDLER
     HANDLER -->|facts| FACTS
     HANDLER -->|rows| ROWS
     HANDLER -->|sealed bytes| OUT
 
-    OUT -->|TCP pump| NETOUT
+    OUT -->|target index| TARGETS
+    TARGETS -->|TCP pump selects target| NETOUT
+    OUT -->|TCP pump writes frames| NETOUT
     ROWS --> QUERY
     ROWS -.read for planning.-> HANDLER
 ```
@@ -140,15 +166,16 @@ flowchart TD
     T4 --> T5["6. pump network_outgoing"]
 
     T0 -.enqueued intents drained at.-> T4
-    CMD_SETTLE -.same projector loop.-> T3
-    Q_SETTLE -.same projector loop.-> T3
 ```
 
-The only difference between turns is which queues they drain. Queries and
-commands deliberately stop after projection: incoming facts, due time, recurring
-work, and handler-derived state are daemon progress, observed eventually, not
-produced inside a user command. Handler-emitted facts are committed atomically
-with intent dispatch and remain queued for a later projection batch.
+The difference between turns is which queues they drain. Ordinary queries only
+read already projected rows. Ordinary commands read currently projected rows,
+commit authored facts to durable pending projection, and return; they do not
+privately project their writes or dispatch handlers. Incoming facts, due time,
+recurring work, and handler-derived state are daemon progress, observed
+eventually, not produced inside a user command. Handler-emitted facts are
+committed atomically with intent dispatch and remain queued for a later
+projection batch.
 
 The recurring step is daemon-only and is the source of all periodic work.
 Recurring intents are not durable state: an in-memory `RecurringScheduler`,
@@ -195,14 +222,51 @@ replace the prior set) while offers are append-only evidence until the owner
 fact is purged. The concrete role/range catalog lives beside each scope's
 projector docs, not here.
 
-## 4) Sync: The Convergence Loop
+## 4) Connection Bootstrap
 
-The previous three diagrams are the loop running on one node. Sync is what makes
-two nodes' loops converge, and it is best read as a back-and-forth over time
-rather than a flowchart. The crucial point is that the network adds no new
-machinery: every message on the wire is an ordinary fact, so each step is the
-same `admit -> project (writes a row) -> emit intent -> handler emits the next
-message` cycle from diagrams 1-3, just alternating between peers. The summaries
+Connection bootstrap is the live-session setup path. The wire exchange is just
+two sealed facts plus local observation metadata. Intake creates the observation
+fact; the request and connection projectors later consume that observation as
+context and emit `connection_fact_receipt` facts after they have opened and
+checked the path.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as Initiator
+    participant B as Responder
+
+    Note over A: A command or maintain_connections creates local ephemeral material,<br/>a sealed request fact, and request retry rows. maintain_connections queues<br/>the sealed request bytes directly into network_outgoing.
+    A->>B: sealed request bytes
+
+    Note over B: daemon intake classifies the bytes and commits RuntimeEffects:<br/>incoming request fact + local frame_observation fact.
+    Note over B: request projector opens the request using local endpoint,<br/>invite or membership context, and frame_observation context.<br/>It emits connection_fact_receipt and create_connection.
+    Note over B: create_connection handler creates responder ephemeral_secret<br/>and sealed connection facts.
+    Note over B: connection projector writes connection_rows, offers connection<br/>and connection_for_request, emits seed_connection_sync, and emits local<br/>queue_outgoing_frame for the sealed response bytes.
+
+    B->>A: sealed connection bytes
+
+    Note over A: daemon intake commits incoming connection fact + frame_observation fact.
+    Note over A: initiator connection projector consumes original request,<br/>initiator ephemeral secret, local endpoint/invite or membership context,<br/>and frame_observation. It writes connection_rows, emits connection_fact_receipt,<br/>and emits seed_connection_sync.
+
+    Note over A,B: After both sides have connection_rows, sync seed or recurring<br/>maintain_sync creates compare facts. Later payload sends use<br/>send_facts_on_connection; projection-created response bytes use queue_outgoing_frame.<br/>Both paths add opaque bytes to network_outgoing for the core TCP pump.
+```
+
+`receive_network_frame` is not a queued intent in the current runtime, and
+there is no `send_network_frame` handler. Inbound bytes are delivered directly
+to the daemon intake hook. Outbound protocol handlers that already know the
+route add opaque frame rows to `network_outgoing`; `queue_outgoing_frame` is the
+local-intent bridge for projection-created bytes that still need route lookup.
+
+## 5) Sync: The Convergence Loop
+
+The runtime diagrams above describe how one node drains work; the bootstrap
+diagram shows how two nodes establish a live session. Sync is what makes two
+nodes' loops converge, and it is best read as a back-and-forth over time rather
+than a flowchart. The crucial point is that the network adds no new machinery:
+every message on the wire is an ordinary fact, so each step is the same `admit
+-> project (writes a row) -> emit intent -> handler emits the next message`
+cycle from diagrams 1-3, just alternating between peers. The summaries
 exchanged are negentropy range summaries (a `count` and a `fingerprint`) over
 each peer's durable share/leaf/node index.
 

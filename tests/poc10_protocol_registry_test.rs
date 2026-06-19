@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use topo::protocol::app::{MATCH_PROTOCOL, MATCH_RUNTIME};
+use topo::protocol::app::{CONTEXT_PROTOCOL, CONTEXT_RUNTIME};
 
 fn rust_files(root: &Path) -> Vec<PathBuf> {
     let mut pending = vec![root.to_path_buf()];
@@ -21,23 +21,23 @@ fn rust_files(root: &Path) -> Vec<PathBuf> {
 
 #[test]
 fn executable_protocol_tables_name_the_target_surfaces() {
-    assert_eq!(MATCH_PROTOCOL.display_name, "Context");
-    assert_eq!(MATCH_PROTOCOL.command_name, "con");
-    assert_eq!(MATCH_RUNTIME.schema_sources.len(), 2);
-    assert!(MATCH_RUNTIME
+    assert_eq!(CONTEXT_PROTOCOL.display_name, "Context");
+    assert_eq!(CONTEXT_PROTOCOL.command_name, "con");
+    assert_eq!(CONTEXT_RUNTIME.schema_sources.len(), 2);
+    assert!(CONTEXT_RUNTIME
         .schema_sources
         .iter()
         .any(|source| source.ddl.contains("network_outgoing")));
 
-    assert!(MATCH_PROTOCOL
+    assert!(CONTEXT_PROTOCOL
         .commands
         .iter()
         .any(|command| command.name == "send"));
-    assert!(!MATCH_PROTOCOL
+    assert!(!CONTEXT_PROTOCOL
         .commands
         .iter()
         .any(|command| command.name == "assert"));
-    assert!(MATCH_PROTOCOL.daemon.inbound_network_intake.is_some());
+    assert!(CONTEXT_PROTOCOL.daemon.inbound_network_intake.is_some());
 }
 
 #[test]
@@ -53,7 +53,7 @@ fn model_routes_declare_projector_routes() {
 }
 
 fn assert_projector_route(tag: u8, expected_project: &str) {
-    let route = MATCH_RUNTIME
+    let route = CONTEXT_RUNTIME
         .fact_routes
         .iter()
         .find(|route| route.tag == tag)
@@ -151,14 +151,14 @@ fn sync_advertisement_fact_families_stay_retired() {
 
 #[test]
 fn runtime_handler_routes_are_unique_by_intent_kind() {
-    let kinds = MATCH_RUNTIME
+    let kinds = CONTEXT_RUNTIME
         .handlers
         .iter()
         .map(|handler| handler.intent_kind)
         .collect::<BTreeSet<_>>();
     assert_eq!(
         kinds.len(),
-        MATCH_RUNTIME.handlers.len(),
+        CONTEXT_RUNTIME.handlers.len(),
         "runtime handler intent kinds must be unique"
     );
 
@@ -236,7 +236,7 @@ fn live_negotiation_projectors_own_replay_noop_policy() {
         topo::protocol::auth::key_wrap::encode::TYPE_KEY_WRAP,
     ] {
         assert!(
-            MATCH_RUNTIME
+            CONTEXT_RUNTIME
                 .fact_routes
                 .iter()
                 .any(|route| route.tag == truth_tag),

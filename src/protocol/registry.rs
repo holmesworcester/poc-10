@@ -31,7 +31,7 @@ use crate::core::runtime::{HandlerRoute, RecurringIntentSpec};
 use crate::protocol::cli as command;
 use crate::protocol::{auth, connection, content, sync};
 
-pub use crate::protocol::cli::MatchCliContext;
+pub use crate::protocol::cli::ContextCliContext;
 
 pub(crate) mod read_models {
     use super::{TableName, TypedTableSchema};
@@ -920,7 +920,7 @@ macro_rules! cli_command {
     };
 }
 
-pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
+pub const CONTEXT_COMMANDS: &[CliCommand<ContextCliContext>] = &[
     cli_command!(
         "create-workspace",
         auth::workspace::cli::CREATE_WORKSPACE_USAGE,
