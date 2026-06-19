@@ -242,49 +242,54 @@ separate runtime phases.
 
 ## 3) Serialized Turns And Locks
 
-Commands, queries, and daemon-host turns all acquire `<db>.runtime.lock` and run
-the same bounded runtime turn before host-specific work. A normal write command
-first gives recurring repair and queued work a chance to run, then verifies
-storage readiness, reads currently projected state, authors facts, commits them
-to durable pending projection, and returns a receipt. A normal query runs the
-same preflight turn before it verifies storage readiness and reads projected
-rows. The daemon loops the same turn with network host adapters, so it also
-accepts inbound bytes and pumps outgoing frames.
+Commands, queries, and the daemon all acquire `<db>.runtime.lock`. While holding
+the lock, each host first runs the same bounded `runtime_turn`; the host mode
+only decides which adapters are present. Local command/query turns use the local
+host mode, so they have no listener, outgoing pump, or durable handler dispatch.
+Daemon turns use daemon host mode, so the same runtime turn can accept inbound
+bytes, dispatch durable handlers, and pump outgoing frames.
+
+After the local preflight turn, core dispatches the registered protocol CLI
+command. Ordinary write commands verify storage readiness, read currently
+projected state, author facts, commit them to durable pending projection, and
+return a receipt. Ordinary queries verify storage readiness and read projected
+rows. A few protocol control-plane commands deliberately choose a different
+policy: `update` submits a priority local update fact, `state-summary` hashes
+declared summary tables, and `intent-registry` reports handler routes. They are
+commands with explicit maintenance/diagnostic policy, not a separate runtime
+path.
 
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 300}} }%%
 flowchart TD
     LOCK["acquire <db>.runtime.lock"]
 
-    LOCK --> CMD["ordinary write command turn"]
-    CMD --> CMD_PREFLIGHT["run one bounded runtime turn (no network adapters)"]
-    CMD_PREFLIGHT --> CMD_READY["require storage_ready"]
+    LOCK --> HOST{"host entry"}
+    HOST -- "command/query/maintenance" --> LOCAL_PREFLIGHT["runtime_turn(local host)<br/>no listener, no outgoing pump,<br/>no durable handler dispatch"]
+    HOST -- daemon --> DAEMON_PREFLIGHT["runtime_turn(daemon host)<br/>listener, durable handlers,<br/>outgoing pump"]
+
+    LOCAL_PREFLIGHT --> CLI_DISPATCH["dispatch registered protocol CLI command"]
+    CLI_DISPATCH --> CLI_KIND{"command policy"}
+    CLI_KIND -- "ordinary write" --> CMD_READY["require storage_ready"]
     CMD_READY --> READ_INPUTS["read current projected rows"]
     READ_INPUTS --> AUTHOR["author facts"]
     AUTHOR --> COMMIT_FACTS["commit authored facts -> pending_projection"]
     COMMIT_FACTS --> RECEIPT["return receipt"]
 
-    LOCK --> Q["ordinary query turn"]
-    Q --> Q_PREFLIGHT["run one bounded runtime turn (no network adapters)"]
-    Q_PREFLIGHT --> Q_READY["require storage_ready"]
+    CLI_KIND -- "ordinary query" --> Q_READY["require storage_ready"]
     Q_READY --> READ["read materialized rows"]
 
-    LOCK --> MAINT["maintenance or diagnostic command"]
-    MAINT --> MAINT_PREFLIGHT["run one bounded runtime turn (no network adapters)"]
-    MAINT_PREFLIGHT --> MAINT_WORK["read diagnostics or submit priority update effects"]
-    MAINT_WORK --> MAINT_RETURN["return output"]
+    CLI_KIND -- "explicit maintenance / diagnostic" --> CONTROL["run command-owned policy:<br/>update, state-summary, registry"]
+    CONTROL --> CONTROL_RETURN["return output"]
 
-    LOCK --> DAEMON_HOST["daemon-host turn"]
-    DAEMON_HOST --> DAEMON_TURN["run bounded runtime turn with network adapters"]
+    DAEMON_PREFLIGHT --> DAEMON_LOOP["release lock, yield/sleep, repeat"]
 ```
 
-The difference between turns is the host environment. Commands and queries do
-not supply durable handler dispatch, a listener, or an outgoing network pump, so
-network-capable handler work, network intake, and send are no-ops. They still
-give recurring builders, projection, time wakes, and local intent handlers a
-bounded chance to advance before the command reads or writes domain state.
-Handler-emitted facts are committed atomically with intent dispatch and remain
-queued for a later durable projection batch.
+The difference between host entries is the runtime-turn host environment.
+Commands and queries still give recurring builders, projection, time wakes, and
+local intent handlers a bounded chance to advance before they read or write
+domain state. Handler-emitted facts are committed atomically with intent
+dispatch and remain queued for a later durable projection batch.
 
 ```mermaid
 sequenceDiagram
@@ -310,8 +315,8 @@ sequenceDiagram
         C->>R: require storage_ready
         C->>R: read projected state
         C->>R: submit AuthoredFacts
-    else maintenance command
-        C->>R: run diagnostic or submit update effects
+    else explicit maintenance / diagnostic command
+        C->>R: run command-owned policy (update, state-summary, registry)
     end
     C->>L: release
     D->>L: acquire for next daemon-host turn
