@@ -1,3 +1,4 @@
+use topo::core::db::Db;
 use topo::core::effects::RuntimeEffects;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{HandlerContext, HandlerResult, IntentHandler};
@@ -20,6 +21,7 @@ impl IntentHandler for EmitsFactAndFollowup {
 
 #[test]
 fn intent_runtime_output_boundary_is_facts_and_followup_intents_only() {
+    let store = Db::open_memory().expect("open db");
     let input = Intent::new(
         IntentKind::new("incoming_work").unwrap(),
         b"idempotence-key",
@@ -27,7 +29,7 @@ fn intent_runtime_output_boundary_is_facts_and_followup_intents_only() {
     );
 
     let output = EmitsFactAndFollowup
-        .handle(&input, &HandlerContext::new())
+        .handle(&input, &HandlerContext::new(&store))
         .expect("handler output");
 
     let RuntimeEffects {

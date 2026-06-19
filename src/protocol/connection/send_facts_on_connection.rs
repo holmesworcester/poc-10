@@ -261,7 +261,7 @@ impl IntentHandler for SendFactsOnConnectionHandler {
         }
         let connection_id = work.connection_id();
         let Some(connection) =
-            connection_fact::queries::connection_by_id(context.db()?, &connection_id).map_err(
+            connection_fact::queries::connection_by_id(context.db(), &connection_id).map_err(
                 |err| {
                     HandlerError::fatal(format!("send_facts_on_connection connection row: {err}"))
                 },
@@ -271,7 +271,7 @@ impl IntentHandler for SendFactsOnConnectionHandler {
         };
         let batches = fact_batches(facts_for_work(work, context)?)?;
 
-        let local_endpoint = endpoint::author::local_endpoint(context.db()?)?.ok_or_else(|| {
+        let local_endpoint = endpoint::author::local_endpoint(context.db())?.ok_or_else(|| {
             HandlerError::fatal("send_facts_on_connection requires local endpoint state")
         })?;
         let (sender_endpoint, receiver_endpoint, target) = if local_endpoint.endpoint
@@ -310,7 +310,7 @@ impl IntentHandler for SendFactsOnConnectionHandler {
             )?;
             outgoing.push(OutgoingNetworkRow::new(target, frame));
         }
-        network::enqueue_outgoing_in_tx(context.db()?, &outgoing).map_err(|err| {
+        network::enqueue_outgoing_in_tx(context.db(), &outgoing).map_err(|err| {
             HandlerError::fatal(format!("send_facts_on_connection queue outgoing: {err}"))
         })?;
         Ok(RuntimeEffects::new())
@@ -338,7 +338,7 @@ fn facts_for_work(
             .collect(),
         SendFactsOnConnectionWork::ShareableRange(input) => {
             Ok(shared_fact::shareable_facts_for_connection_range(
-                context.db()?,
+                context.db(),
                 input.connection_id,
                 input.start_timestamp_ms,
                 input.end_timestamp_ms,

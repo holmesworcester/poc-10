@@ -1408,6 +1408,7 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::effects::StorageRequirement;
     use std::collections::BTreeSet;
 
     #[test]
@@ -1421,6 +1422,26 @@ mod tests {
         assert!(
             duplicates.is_empty(),
             "fact tags must be globally unique so runtime dispatch never guesses between fact types: {duplicates:?}"
+        );
+    }
+
+    #[test]
+    fn protocol_handler_routes_gate_ordinary_work_on_current_storage() {
+        let bypass = HANDLER_ROUTES
+            .iter()
+            .filter_map(|route| {
+                matches!(
+                    route.storage_requirement,
+                    StorageRequirement::MaintenanceBypass
+                )
+                .then_some(route.intent_kind)
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            bypass,
+            vec![versioning::check_version::CHECK_VERSION],
+            "only the version repair handler should bypass current storage"
         );
     }
 }

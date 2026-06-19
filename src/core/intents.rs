@@ -171,10 +171,10 @@ impl HandlerMode {
 /// The handler gets only the facts declared by the queued intent plus the
 /// transaction-local database handle for explicit handler-owned SQL; it cannot
 /// reach runtime workers directly.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct HandlerContext<'a> {
     facts: BTreeMap<FactId, Fact>,
-    db: Option<&'a Db>,
+    db: &'a Db,
     mode: HandlerMode,
 }
 
@@ -183,31 +183,24 @@ impl fmt::Debug for HandlerContext<'_> {
         formatter
             .debug_struct("HandlerContext")
             .field("facts", &self.facts)
-            .field("has_db", &self.db.is_some())
             .field("mode", &self.mode)
             .finish()
     }
 }
 
 impl<'a> HandlerContext<'a> {
-    /// Build an empty handler context, mostly for tests.
-    pub fn new() -> Self {
-        Self::default()
+    /// Build a handler context with no attached facts.
+    pub fn new(db: &'a Db) -> Self {
+        Self::with_facts(db, [])
     }
 
     /// Build context from preloaded facts.
-    pub fn with_facts(facts: impl IntoIterator<Item = Fact>) -> Self {
+    pub fn with_facts(db: &'a Db, facts: impl IntoIterator<Item = Fact>) -> Self {
         Self {
             facts: facts.into_iter().map(|fact| (fact.id, fact)).collect(),
-            db: None,
+            db,
             mode: HandlerMode::Live,
         }
-    }
-
-    /// Attach the database handle used by handler-owned SQL helpers.
-    pub fn with_db(mut self, db: &'a Db) -> Self {
-        self.db = Some(db);
-        self
     }
 
     /// Mark whether this handler invocation is running in live or replay mode.
@@ -226,11 +219,9 @@ impl<'a> HandlerContext<'a> {
         self.mode.is_replay()
     }
 
-    /// Borrow the transaction-local database or return a fatal handler error if
-    /// none was attached.
-    pub fn db(&self) -> Result<&Db, HandlerError> {
+    /// Borrow the transaction-local database.
+    pub fn db(&self) -> &Db {
         self.db
-            .ok_or_else(|| HandlerError::fatal("handler context missing db"))
     }
 
     /// Return a preloaded fact by id.

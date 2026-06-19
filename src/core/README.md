@@ -48,7 +48,9 @@ deterministic projection: sending bytes, building a response fact, creating a ke
 wrap, seeding sync, or performing any other bounded stateful action. Core claims
 one durable or local intent, loads only the fact inputs declared by that handler,
 calls the registered handler, and commits successful handler output atomically
-with queue consumption. Errors leave the row queued without committing output.
+with queue consumption. Handler rejection consumes the terminal invalid row
+without output; validation errors and storage-version mismatches keep the row
+queued.
 
 Every host runs the same bounded runtime turn before it does host-specific work.
 Each turn gives recurring builders an opportunity, drains local repair work,
@@ -158,7 +160,8 @@ the owning projector decide whether that time proves anything.
   handler; `key` and `payload` are handler-owned bytes. Duplicate suppression
   belongs in facts, protocol rows, network queues, or handler-local state.
 - Handler output commits atomically with deletion of the handled queue row.
-  Handler and validation errors leave the row queued without committing output.
+  Handler rejections consume the invalid row without output; validation errors
+  and storage-version mismatches leave the row queued without committing output.
 - Projection mode is sticky toward replay. If an owner is already queued in
   replay mode, later normal wakes do not downgrade it.
 - Needs are replacement subscriptions. The committed `ProjectionOutput` is the
@@ -255,8 +258,9 @@ use core syntax and contracts, but core must not import their semantic rules.
 - `handle_intent.rs`: one queued intent transaction. It claims one durable or
   local intent, loads only the intent's attached fact inputs, calls the
   registered handler, and commits successful handler output atomically with
-  queue-row deletion. It also owns handler route metadata, handler sets,
-  recurring intent declarations, and dispatch context.
+  queue-row deletion. It also drops terminal invalid intent rows, owns handler
+  route metadata, handler sets, recurring intent declarations, and dispatch
+  context.
 - `perf_profile.rs`: env-gated performance instrumentation. It records coarse
   phase timings in thread-local state only when explicitly enabled, preserving
   normal CLI output by default. It is for runtime profiling, not protocol
@@ -429,10 +433,13 @@ record local follow-up intents
 
 Only validated successful handler output reaches this transaction. If any
 commit step fails, SQLite rolls back the whole unit. This is what makes handler
-replay and process restart safe. Handler errors and validation errors leave the
+replay and process restart safe. Handler errors mean the queued input is
+terminal invalid: dispatch rolls back any handler-owned SQL written during that
+attempt, then commits deletion of the queue row and attached context rows
+without output. Validation errors and storage-version mismatches leave the
 intent row in place. Durable and local intent admission validates handler
 registry membership before queue insertion; a stale unregistered row that is
-already present is an invariant error, not a successful commit.
+already present is dropped as terminal invalid input.
 
 ### Rebuild Mode And Time Wakes
 

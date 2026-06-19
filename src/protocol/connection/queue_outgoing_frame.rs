@@ -109,7 +109,7 @@ impl IntentHandler for QueueOutgoingFrameHandler {
         }
         if let Some(target) = resolve_target(&input.routing_key, context)? {
             network::queue_outgoing_in_tx(
-                context.db()?,
+                context.db(),
                 target,
                 OutgoingFrame { bytes: input.frame },
             )
@@ -144,13 +144,13 @@ fn resolve_connection_row_target(
     context: &HandlerContext,
 ) -> Result<Option<NetworkTarget>, HandlerError> {
     let Some(connection) =
-        connection::connection::queries::connection_by_id(context.db()?, connection_id).map_err(
+        connection::connection::queries::connection_by_id(context.db(), connection_id).map_err(
             |err| HandlerError::fatal(format!("queue_outgoing_frame route row read: {err}")),
         )?
     else {
         return Ok(None);
     };
-    let local_endpoint = endpoint::author::local_endpoint(context.db()?)?
+    let local_endpoint = endpoint::author::local_endpoint(context.db())?
         .ok_or_else(|| HandlerError::fatal("queue_outgoing_frame requires local endpoint state"))?;
     let addr = if local_endpoint.endpoint == connection.from_endpoint {
         connection.initiator_addr

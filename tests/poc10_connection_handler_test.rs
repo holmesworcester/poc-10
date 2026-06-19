@@ -40,12 +40,14 @@ fn create_handler_emits_responder_secret_and_sealed_connection() {
     let output = CreateConnectionHandler::new()
         .handle(
             &scenario.intent,
-            &HandlerContext::with_facts([
-                scenario.request_fact.clone(),
-                scenario.invite_fact.clone(),
-                scenario.receive_fact.clone(),
-            ])
-            .with_db(&store),
+            &HandlerContext::with_facts(
+                &store,
+                [
+                    scenario.request_fact.clone(),
+                    scenario.invite_fact.clone(),
+                    scenario.receive_fact.clone(),
+                ],
+            ),
         )
         .expect("handler produces connection fact");
 
@@ -107,12 +109,14 @@ fn create_handler_duplicate_work_emits_same_facts() {
             &scenario.endpoint,
         )])
         .expect("seed local endpoint");
-    let context = HandlerContext::with_facts([
-        scenario.request_fact.clone(),
-        scenario.invite_fact.clone(),
-        scenario.receive_fact.clone(),
-    ])
-    .with_db(&store);
+    let context = HandlerContext::with_facts(
+        &store,
+        [
+            scenario.request_fact.clone(),
+            scenario.invite_fact.clone(),
+            scenario.receive_fact.clone(),
+        ],
+    );
 
     let first = CreateConnectionHandler::new()
         .handle(&scenario.intent, &context)
@@ -146,12 +150,14 @@ fn handler_rejects_request_addressed_to_a_different_endpoint() {
     let err = CreateConnectionHandler::new()
         .handle(
             &scenario.intent,
-            &HandlerContext::with_facts([
-                scenario.request_fact.clone(),
-                scenario.invite_fact.clone(),
-                scenario.receive_fact.clone(),
-            ])
-            .with_db(&store),
+            &HandlerContext::with_facts(
+                &store,
+                [
+                    scenario.request_fact.clone(),
+                    scenario.invite_fact.clone(),
+                    scenario.receive_fact.clone(),
+                ],
+            ),
         )
         .expect_err("handler rejects mismatched request");
     assert!(

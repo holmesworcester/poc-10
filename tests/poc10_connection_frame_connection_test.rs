@@ -94,7 +94,7 @@ fn send_facts_on_connection_refuses_forged_local_fact_reference() {
         connection_id: connection_fact.id,
         fact_ids: vec![fact.id],
     });
-    let context = HandlerContext::with_facts([connection_fact, fact]).with_db(&store);
+    let context = HandlerContext::with_facts(&store, [connection_fact, fact]);
 
     let err = SendFactsOnConnectionHandler::new()
         .handle(&intent, &context)
@@ -126,7 +126,7 @@ fn send_facts_on_connection_refuses_forged_private_tag_reference() {
             connection_id: connection_fact.id,
             fact_ids: vec![fact.id],
         });
-        let context = HandlerContext::with_facts([connection_fact.clone(), fact]).with_db(&store);
+        let context = HandlerContext::with_facts(&store, [connection_fact.clone(), fact]);
 
         let err = SendFactsOnConnectionHandler::new()
             .handle(&intent, &context)
@@ -157,8 +157,7 @@ fn send_facts_on_connection_accepts_normal_shared_facts() {
         connection_id: connection_fact.id,
         fact_ids: vec![fact.id],
     });
-    let context =
-        HandlerContext::with_facts([connection_fact.clone(), fact.clone()]).with_db(&store);
+    let context = HandlerContext::with_facts(&store, [connection_fact.clone(), fact.clone()]);
 
     let output = SendFactsOnConnectionHandler::new()
         .handle(&intent, &context)

@@ -83,7 +83,7 @@ fn well_formed_send_intent_packs_fixed_frame_into_outgoing_queue() {
     let output = handler
         .handle(
             &intent,
-            &HandlerContext::with_facts([connection_fact.clone(), fact.clone()]).with_db(&store),
+            &HandlerContext::with_facts(&store, [connection_fact.clone(), fact.clone()]),
         )
         .expect("connection::frame packaging succeeds");
 

@@ -182,7 +182,7 @@ impl IntentHandler for MaintainConnectionsHandler {
         if context.is_replay() {
             return Ok(RuntimeEffects::new());
         }
-        let store = context.db()?;
+        let store = context.db();
         record_maintenance_run(store, input.created_at_ms).map_err(HandlerError::fatal)?;
         let mut effects = RuntimeEffects::new();
 
@@ -329,7 +329,7 @@ mod tests {
         .expect("build")
         .expect("maintenance intent");
         let effects = MaintainConnectionsHandler::new()
-            .handle(&intent, &HandlerContext::new().with_db(&store))
+            .handle(&intent, &HandlerContext::new(&store))
             .expect("handle");
 
         assert!(effects.local_intents.is_empty());
@@ -479,7 +479,7 @@ mod tests {
         .expect("build")
         .expect("maintenance intent");
         let effects = MaintainConnectionsHandler::new()
-            .handle(&intent, &HandlerContext::new().with_db(&store))
+            .handle(&intent, &HandlerContext::new(&store))
             .expect("handle");
 
         assert_eq!(effects.facts.len(), 2);

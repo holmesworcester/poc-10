@@ -42,7 +42,7 @@ fn well_formed_frame_resolves_route_and_queues_outbound_row() {
     let output = handler
         .handle(
             &intent,
-            &HandlerContext::with_facts([connection_fact]).with_db(&store),
+            &HandlerContext::with_facts(&store, [connection_fact]),
         )
         .expect("network send should queue frame");
 
@@ -61,13 +61,14 @@ fn well_formed_frame_resolves_route_and_queues_outbound_row() {
 
 #[test]
 fn empty_frame_is_rejected_before_route_lookup() {
+    let store = test_store();
     let intent = queue_outgoing_frame_intent(QueueOutgoingFrame {
         routing_key: [1u8; 32],
         frame: Vec::new(),
     });
     let handler = QueueOutgoingFrameHandler::new();
     let err = handler
-        .handle(&intent, &HandlerContext::new())
+        .handle(&intent, &HandlerContext::new(&store))
         .expect_err("empty frame must be rejected before route lookup");
     assert!(err.contains("empty"), "{err}");
 }
@@ -93,7 +94,7 @@ fn resolved_route_queues_without_opening_tcp_peer() {
     let output = QueueOutgoingFrameHandler::new()
         .handle(
             &intent,
-            &HandlerContext::with_facts([connection_fact]).with_db(&store),
+            &HandlerContext::with_facts(&store, [connection_fact]),
         )
         .expect("queue handler only queues outgoing bytes");
 
@@ -124,7 +125,7 @@ fn missing_route_commits_empty_output_without_queuing_frame() {
     let output = QueueOutgoingFrameHandler::new()
         .handle(
             &intent,
-            &HandlerContext::with_facts([connection_fact]).with_db(&store),
+            &HandlerContext::with_facts(&store, [connection_fact]),
         )
         .expect("missing route should drop stale local send");
 

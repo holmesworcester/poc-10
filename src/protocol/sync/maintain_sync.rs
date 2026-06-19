@@ -126,7 +126,7 @@ impl IntentHandler for MaintainSyncHandler {
         if context.is_replay() {
             return Ok(RuntimeEffects::new());
         }
-        let store = context.db()?;
+        let store = context.db();
         record_maintenance_run(store, input.run_at_ms)?;
         let mut output = RuntimeEffects::new();
         for row in connection::connection::queries::connection_rows(store)? {

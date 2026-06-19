@@ -7,7 +7,7 @@ matched, and projected. Context facts are immutable, fixed-layout records
 admitted locally and exchanged between peers. A fact can be a message, invite,
 membership change, sync request, receipt, key wrap, or connection handshake;
 deterministic projectors validate facts against context and turn them into
-SQLite rows or bounded retryable work.
+SQLite rows or bounded stateful work.
 
 The result is a fact-based protocol runtime meant to be small enough to reason
 about and complete enough to be the backend for a p2p Slack: team chat, invites,
@@ -98,7 +98,7 @@ workspace authority, messages, deletions, and retention policy are admitted and
 projected through the same fact model. This gives the project a consistent way
 to reason about concurrency and network interaction: bytes from another node
 enter as facts, core matches context, the owning projector validates meaning,
-and handlers perform bounded retryable work.
+and handlers perform bounded stateful work.
 
 The current architecture has a small vocabulary:
 
@@ -273,8 +273,8 @@ Projectors are the deterministic derivation path from one fact to local state.
 They decode the primary fact, check scope and structure, declare exact context
 needs, validate matched context, and return replacement needs, append-only
 offers, and materialization effects. They are separate from handlers because
-missing context parks projection, while IO and retryable stateful work belongs
-in queued intents.
+missing context parks projection, while IO and stateful work belong in queued
+intents.
 
 Deletion is target-owned: a target fact keeps the need or time wake that can
 remove it, and when that context appears it deletes only its own rows and may
@@ -285,8 +285,8 @@ purge only itself.
 Intent handlers are the bounded stateful work path. They decode one queued
 intent, name exact fact inputs for core to load, perform one effect, and return
 `RuntimeEffects`. They are separate from projectors so network sends,
-key-wrap creation, sync responses, and other retryable work have an idempotent
-queue identity and an atomic commit boundary with queue consumption.
+key-wrap creation, sync responses, and other stateful work have a distinct queue
+row and an atomic commit boundary with queue consumption.
 
 ### Wire Layouts And Codecs
 

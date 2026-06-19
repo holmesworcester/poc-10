@@ -80,7 +80,7 @@ impl IntentHandler for SeedConnectionSyncHandler {
         if context.is_replay() {
             return Ok(RuntimeEffects::new());
         }
-        let store = context.db()?;
+        let store = context.db();
         let Some(_) =
             connection::connection::queries::connection_by_id(store, &input.connection_id)
                 .map_err(|err| {
@@ -212,7 +212,7 @@ mod tests {
 
         assert!(intent.context_fact_ids.is_empty());
         let output = handler
-            .handle(&intent, &HandlerContext::new().with_db(&store))
+            .handle(&intent, &HandlerContext::new(&store))
             .expect("handle seed");
 
         assert_eq!(output.facts.len(), 1);
@@ -228,7 +228,7 @@ mod tests {
         });
 
         let output = SeedConnectionSyncHandler::new()
-            .handle(&intent, &HandlerContext::new().with_db(&store))
+            .handle(&intent, &HandlerContext::new(&store))
             .expect("handle seed without row");
 
         assert!(output.facts.is_empty());

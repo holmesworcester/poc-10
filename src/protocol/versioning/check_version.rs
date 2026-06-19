@@ -91,7 +91,7 @@ impl IntentHandler for CheckVersionHandler {
         if context.is_replay() {
             return Ok(RuntimeEffects::new());
         }
-        if storage_ready(context.db()?)? {
+        if storage_ready(context.db())? {
             return Ok(RuntimeEffects::new());
         }
         Ok(RuntimeEffects::new().priority_fact(update_fact(update)?))
@@ -136,7 +136,7 @@ mod tests {
         let runtime = Runtime::open_memory(&CONTEXT_RUNTIME).expect("runtime");
         replace_stored_version_for_test(runtime.db(), CURRENT_PROTOCOL_VERSION - 1);
         let intent = check_version_intent(55);
-        let context = HandlerContext::new().with_db(runtime.db());
+        let context = HandlerContext::new(runtime.db());
         let output = CheckVersionHandler::new()
             .handle(&intent, &context)
             .expect("handle check_version");
@@ -166,7 +166,7 @@ mod tests {
         .is_some());
 
         let intent = check_version_intent(77);
-        let context = HandlerContext::new().with_db(runtime.db());
+        let context = HandlerContext::new(runtime.db());
         let output = CheckVersionHandler::new()
             .handle(&intent, &context)
             .expect("handle missing marker");

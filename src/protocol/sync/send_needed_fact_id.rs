@@ -78,7 +78,7 @@ impl IntentHandler for SendNeededFactIdHandler {
         }
         let have_fact = context.require_fact(&input.have_fact_id)?;
         let have = have_id::project::decode::decode_fact(&have_fact.bytes)?;
-        if shared_fact::retained_fact_exists(context.db()?, &have.fact_id)? {
+        if shared_fact::retained_fact_exists(context.db(), &have.fact_id)? {
             return Ok(RuntimeEffects::new());
         }
         let need = need_id::fact::SyncNeedIdFact {
@@ -117,7 +117,7 @@ mod tests {
         let output = SendNeededFactIdHandler::new()
             .handle(
                 &intent,
-                &HandlerContext::with_facts([have_fact.clone()]).with_db(&store),
+                &HandlerContext::with_facts(&store, [have_fact.clone()]),
             )
             .expect("send need id");
 

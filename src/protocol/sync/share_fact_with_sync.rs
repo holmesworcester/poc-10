@@ -198,7 +198,7 @@ impl IntentHandler for ShareFactWithSyncHandler {
                         "share_record_sync_contribution",
                         || -> Result<bool, HandlerError> {
                             shared_fact::record_sync_contribution_in_tx(
-                                context.db()?,
+                                context.db(),
                                 &input,
                                 Some(owner),
                             )
@@ -210,13 +210,13 @@ impl IntentHandler for ShareFactWithSyncHandler {
                     if changed && !context.is_replay() {
                         crate::core::perf_profile::measure_result("share_live_tail", || {
                             let excluded = crate::protocol::connection::fact_receipt::origin_connection_ids_for_fact(
-                                context.db()?,
+                                context.db(),
                                 input.owner_fact_id,
                             )?
                             .into_iter()
                             .collect::<std::collections::BTreeSet<_>>();
                             seed_connection::advertise_indexed_fact_to_connections_except(
-                                context.db()?,
+                                context.db(),
                                 owner,
                                 &excluded,
                             )
@@ -229,7 +229,7 @@ impl IntentHandler for ShareFactWithSyncHandler {
                     crate::core::perf_profile::measure_result(
                         "share_record_sync_contribution",
                         || -> Result<bool, HandlerError> {
-                            shared_fact::record_sync_contribution_in_tx(context.db()?, &input, None)
+                            shared_fact::record_sync_contribution_in_tx(context.db(), &input, None)
                                 .map_err(|err| {
                                     HandlerError::fatal(format!(
                                         "record sync contribution rows: {err}"
@@ -350,7 +350,7 @@ mod tests {
         let output = ShareFactWithSyncHandler::new()
             .handle(
                 &intent,
-                &HandlerContext::with_facts([owner.clone()]).with_db(&store),
+                &HandlerContext::with_facts(&store, [owner.clone()]),
             )
             .expect("share with sync");
 

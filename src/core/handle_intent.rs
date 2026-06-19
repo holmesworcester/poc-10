@@ -14,10 +14,10 @@
 //! the handler, while `intent_key` and `payload` remain handler-owned bytes.
 //! `intent_context` and `local_intent_context` attach exact fact inputs to that
 //! row. Runtime admission rejects intent kinds that are not in the handler
-//! registry; if a stale unregistered row is already present, dispatch reports
-//! an invariant error and leaves the row untouched. Durable and local rows are
-//! both selected by SQLite insertion order so projection, replay, and live IO
-//! all preserve the order in which work was queued.
+//! registry; if a stale unregistered row is already present, dispatch consumes
+//! it as terminal invalid input. Durable and local rows are both selected by
+//! SQLite insertion order so projection, replay, and live IO all preserve the
+//! order in which work was queued.
 //!
 //! Dispatch loads an intent's attached context fact ids by joining durable
 //! `facts` bytes with `local_fact_admissions` metadata and places them in
@@ -27,10 +27,11 @@
 //! This transaction boundary is why dispatch matters. Handler-owned SQL and
 //! returned runtime effects become visible exactly when the input queue row is
 //! consumed: no output without deleting the work item, and no deletion without
-//! committing the output. That delete, the handler's direct SQL, and every
-//! `RuntimeEffects` write happen inside one SQLite transaction. If the
-//! transaction rolls back, the queued row is still there; if it commits, the row
-//! is gone and the output is durable. Queue rows do not collapse by `(kind,
+//! committing the output. Terminal invalid input is the only delete-without-output
+//! case: dispatch drops the queue row and any attached context rows. For handler
+//! rejection, direct handler SQL is rolled back before the delete commits. If
+//! the transaction rolls back, the queued row is still there; if it commits, the
+//! row is gone and the output is durable. Queue rows do not collapse by `(kind,
 //! key)`; protocols that need backpressure express it in their own facts, row
 //! mutations, network queues, or handler-local state.
 
@@ -66,6 +67,20 @@ struct IntentInput<'a> {
     storage_requirement: StorageRequirement,
 }
 
+struct InvalidQueuedIntent {
+    /// Random row id for the exact queued work item being dropped.
+    intent_id: Vec<u8>,
+    /// Queue from which this row was claimed.
+    queue: IntentQueue,
+    /// Raw kind string for profiling and diagnostics.
+    kind: String,
+}
+
+enum LoadedIntent<'a> {
+    Ready(IntentInput<'a>),
+    Invalid(InvalidQueuedIntent),
+}
+
 // =============================================================================
 // Runtime Entry Point
 // =============================================================================
@@ -92,17 +107,20 @@ pub(crate) fn dispatch_one_intent(
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
 ) -> Result<bool, String> {
-    let input = match load_one_intent_input(store, handlers, queue)? {
+    let loaded = match load_one_intent_input(store, handlers, queue)? {
         None => return Ok(false),
-        Some(input) => input,
+        Some(loaded) => loaded,
     };
-    run_and_commit_loaded_intent(
-        store,
-        input,
-        allowed_tables,
-        handlers.intent_kinds(),
-        fact_admission,
-    )
+    match loaded {
+        LoadedIntent::Ready(input) => run_and_commit_loaded_intent(
+            store,
+            input,
+            allowed_tables,
+            handlers.intent_kinds(),
+            fact_admission,
+        ),
+        LoadedIntent::Invalid(invalid) => drop_invalid_queued_intent(store, invalid),
+    }
 }
 
 // =============================================================================
@@ -117,16 +135,49 @@ fn load_one_intent_input<'a>(
     store: &'a Db,
     handlers: &'a HandlerSet,
     queue: IntentQueue,
-) -> Result<Option<IntentInput<'a>>, String> {
-    let Some(queued) = next_queued_intent_in_queue(store, queue)? else {
+) -> Result<Option<LoadedIntent<'a>>, String> {
+    let Some(row) =
+        next_intent_row(store, queue).map_err(|err| format!("load queued intent: {err}"))?
+    else {
         return Ok(None);
     };
-    let entry = handlers.handler_for_intent(&queued.intent)?;
-    Ok(Some(IntentInput {
-        queued,
+    let QueuedIntentRow {
+        intent_id,
+        kind,
+        intent_key,
+        payload,
+        mode,
+    } = row;
+    let context_fact_ids = intent_context_fact_ids(store, queue, &intent_id)
+        .map_err(|err| format!("load queued intent context: {err}"))?;
+    let kind = match IntentKind::new(kind) {
+        Ok(kind) => kind,
+        Err(_) => {
+            return Ok(Some(LoadedIntent::Invalid(InvalidQueuedIntent {
+                intent_id,
+                queue,
+                kind: "<invalid>".to_string(),
+            })));
+        }
+    };
+    let intent = Intent::new(kind, intent_key, payload).with_context_fact_ids(context_fact_ids);
+    let Some(entry) = handlers.handler_for_kind(intent.kind.as_str()) else {
+        return Ok(Some(LoadedIntent::Invalid(InvalidQueuedIntent {
+            intent_id,
+            queue,
+            kind: intent.kind.as_str().to_string(),
+        })));
+    };
+    Ok(Some(LoadedIntent::Ready(IntentInput {
+        queued: QueuedIntent {
+            intent_id,
+            queue,
+            intent,
+            mode,
+        },
         handler: entry.handler.as_ref(),
         storage_requirement: entry.storage_requirement,
-    }))
+    })))
 }
 
 /// Stage 2/3: run the handler and commit its terminal outcome.
@@ -159,9 +210,13 @@ fn run_and_commit_loaded_intent(
                 return Ok(false);
             }
             delete_intent_context_rows_in_tx(tx, queued.queue, &queued.intent_id)?;
-            let context = load_handler_context(tx, &queued.intent, queued.mode)
-                .map_err(sqlite_string_error)?;
-            let effects = run_loaded_intent(
+            let Some(context) = load_handler_context(tx, &queued.intent, queued.mode)
+                .map_err(sqlite_string_error)?
+            else {
+                return Ok(true);
+            };
+            let Some(effects) = run_loaded_intent(
+                tx,
                 handler,
                 &queued.intent,
                 context,
@@ -170,7 +225,10 @@ fn run_and_commit_loaded_intent(
                 registered_intent_kinds,
                 fact_admission,
             )
-            .map_err(sqlite_string_error)?;
+            .map_err(sqlite_string_error)?
+            else {
+                return Ok(true);
+            };
             commit_runtime_effects_in_tx(
                 tx,
                 &effects,
@@ -192,6 +250,29 @@ fn run_and_commit_loaded_intent(
     result
 }
 
+/// Consume a terminal invalid queue row without running protocol code.
+fn drop_invalid_queued_intent(store: &Db, invalid: InvalidQueuedIntent) -> Result<bool, String> {
+    let queue = invalid.queue;
+    let kind = invalid.kind;
+    let started = Instant::now();
+    let result = store
+        .write_transaction(|tx| {
+            if delete_intent_row_in_tx(tx, invalid.queue, &invalid.intent_id)? == 0 {
+                return Ok(false);
+            }
+            delete_intent_context_rows_in_tx(tx, invalid.queue, &invalid.intent_id)?;
+            Ok(true)
+        })
+        .map_err(|err| format!("drop invalid intent: {err}"));
+    if intent_dispatch_profile_enabled() {
+        eprintln!(
+            "{}",
+            intent_dispatch_profile_line(queue, &kind, started.elapsed(), result.as_ref())
+        );
+    }
+    result
+}
+
 /// Run one claimed intent through its handler and normalize its uncommitted
 /// runtime effects.
 ///
@@ -199,6 +280,7 @@ fn run_and_commit_loaded_intent(
 /// context. Returned runtime effects are still validated before the transaction
 /// commits.
 fn run_loaded_intent(
+    tx: &Db,
     handler: &dyn IntentHandler,
     intent: &Intent,
     context: HandlerContext<'_>,
@@ -206,8 +288,8 @@ fn run_loaded_intent(
     allowed_tables: &[TableName],
     registered_intent_kinds: &[&str],
     fact_admission: Option<FactAdmissionFn>,
-) -> Result<RuntimeEffects, String> {
-    match handler.handle(intent, &context) {
+) -> Result<Option<RuntimeEffects>, String> {
+    match run_handler_in_savepoint(tx, || handler.handle(intent, &context))? {
         Ok(effects) => {
             let effects = effects.with_storage_requirement(storage_requirement);
             validate_runtime_effects_for_admission(
@@ -216,10 +298,35 @@ fn run_loaded_intent(
                 registered_intent_kinds,
                 fact_admission,
             )?;
-            Ok(effects)
+            Ok(Some(effects))
         }
-        Err(err) => Err(err.to_string()),
+        Err(_) => Ok(None),
     }
+}
+
+fn run_handler_in_savepoint(
+    tx: &Db,
+    run: impl FnOnce() -> crate::core::intents::HandlerResult,
+) -> Result<crate::core::intents::HandlerResult, String> {
+    tx.conn()
+        .execute_batch("SAVEPOINT intent_handler_run")
+        .map_err(|err| format!("open handler savepoint: {err}"))?;
+    let result = run();
+    match &result {
+        Ok(_) => tx
+            .conn()
+            .execute_batch("RELEASE intent_handler_run")
+            .map_err(|err| format!("release handler savepoint: {err}"))?,
+        Err(_) => {
+            tx.conn()
+                .execute_batch("ROLLBACK TO intent_handler_run")
+                .map_err(|err| format!("rollback handler savepoint: {err}"))?;
+            tx.conn()
+                .execute_batch("RELEASE intent_handler_run")
+                .map_err(|err| format!("release handler savepoint: {err}"))?;
+        }
+    }
+    Ok(result)
 }
 
 fn enforce_handler_storage_requirement(
@@ -237,6 +344,7 @@ fn enforce_handler_storage_requirement(
 // =============================================================================
 
 /// Return the first queued intent in queue order.
+#[cfg(test)]
 fn next_queued_intent_in_queue(
     store: &Db,
     queue: IntentQueue,
@@ -271,15 +379,17 @@ fn load_handler_context<'a>(
     store: &'a Db,
     intent: &Intent,
     mode: HandlerMode,
-) -> Result<HandlerContext<'a>, String> {
+) -> Result<Option<HandlerContext<'a>>, String> {
     let mut facts = Vec::new();
     for id in &intent.context_fact_ids {
-        if let Some(fact) = load_retained_fact(store, &id)? {
-            facts.push(fact);
-        }
+        let Some(fact) = load_retained_fact(store, &id)? else {
+            return Ok(None);
+        };
+        facts.push(fact);
     }
-    let context = HandlerContext::with_facts(facts).with_mode(mode);
-    Ok(context.with_db(store))
+    Ok(Some(
+        HandlerContext::with_facts(store, facts).with_mode(mode),
+    ))
 }
 
 fn load_retained_fact(store: &Db, id: &FactId) -> Result<Option<Fact>, String> {
@@ -387,12 +497,6 @@ impl HandlerSet {
         &self.intent_kinds
     }
 
-    fn handler_for_intent(&self, intent: &Intent) -> Result<&HandlerEntry, String> {
-        let kind = intent.kind.as_str();
-        self.handler_for_kind(kind)
-            .ok_or_else(|| format!("no handler registered for intent kind {kind}"))
-    }
-
     fn handler_for_kind(&self, kind: &str) -> Option<&HandlerEntry> {
         self.entries.iter().find(|entry| entry.intent_kind == kind)
     }
@@ -462,15 +566,15 @@ fn intent_dispatch_profile_line(
     result: Result<&bool, &String>,
 ) -> String {
     match result {
-        Ok(committed) => format!(
-            "intent_dispatch_profile queue={} kind={} status=ok committed={} total_ms={}",
+        Ok(progressed) => format!(
+            "intent_dispatch_profile queue={} kind={} status=ok progressed={} total_ms={}",
             queue.label(),
             kind,
-            committed,
+            progressed,
             duration_millis(elapsed)
         ),
         Err(_) => format!(
-            "intent_dispatch_profile queue={} kind={} status=error committed=false total_ms={}",
+            "intent_dispatch_profile queue={} kind={} status=error progressed=false total_ms={}",
             queue.label(),
             kind,
             duration_millis(elapsed)
@@ -691,7 +795,7 @@ mod tests {
         );
         assert_eq!(
             ok,
-            "intent_dispatch_profile queue=durable kind=send_facts_on_connection status=ok committed=true total_ms=7"
+            "intent_dispatch_profile queue=durable kind=send_facts_on_connection status=ok progressed=true total_ms=7"
         );
 
         let err = "boom".to_string();
@@ -703,7 +807,7 @@ mod tests {
         );
         assert_eq!(
             failed,
-            "intent_dispatch_profile queue=local kind=maintain_sync status=error committed=false total_ms=3"
+            "intent_dispatch_profile queue=local kind=maintain_sync status=error progressed=false total_ms=3"
         );
     }
 
@@ -762,35 +866,26 @@ mod tests {
     }
 
     #[test]
-    fn fatal_handler_error_leaves_row_queued() {
+    fn handler_error_drops_row_without_output() {
         let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
         submit_intent_to_queue(&store, IntentQueue::Durable, test_intent("fatal", b"first"))
             .expect("submit fatal intent");
 
-        let err = dispatch_one_intent(
+        let consumed = dispatch_one_intent(
             &store,
             &HandlerSet::new(FATAL_ROUTES),
             IntentQueue::Durable,
             &[],
             None,
         )
-        .expect_err("fatal handler error should escape dispatch");
+        .expect("invalid intent should be dropped");
 
-        assert!(err.contains("test fatal"), "{err}");
-        assert_eq!(store.table_row_count(INTENTS).expect("durable count"), 1);
-        assert_eq!(
-            next_queued_intent_in_queue(&store, IntentQueue::Durable)
-                .expect("next durable intent")
-                .expect("queued durable intent")
-                .intent
-                .key,
-            b"first".to_vec(),
-            "fatal errors should not consume the row"
-        );
+        assert!(consumed);
+        assert_eq!(store.table_row_count(INTENTS).expect("durable count"), 0);
     }
 
     #[test]
-    fn unregistered_queued_intent_errors_without_consuming_row() {
+    fn unregistered_queued_intent_drops_row() {
         let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
         submit_intent_to_queue(
             &store,
@@ -799,20 +894,48 @@ mod tests {
         )
         .expect("submit unregistered intent row");
 
-        let err = dispatch_one_intent(
+        let consumed = dispatch_one_intent(
             &store,
             &HandlerSet::new(NOOP_ROUTES),
             IntentQueue::Durable,
             &[],
             None,
         )
-        .expect_err("unregistered queued intent should be an invariant error");
+        .expect("unregistered queued intent should be dropped");
 
-        assert!(
-            err.contains("no handler registered for intent kind unregistered"),
-            "{err}"
-        );
-        assert_eq!(store.table_row_count(INTENTS).expect("durable count"), 1);
+        assert!(consumed);
+        assert_eq!(store.table_row_count(INTENTS).expect("durable count"), 0);
+    }
+
+    #[test]
+    fn invalid_queued_intent_kind_drops_row() {
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
+        store
+            .write_transaction(|tx| {
+                tx.conn().execute(
+                    "INSERT INTO intents (intent_id, kind, intent_key, payload, replay)
+                     VALUES (?1, 'InvalidKind', ?2, ?3, 0)",
+                    params![
+                        random_intent_id().as_slice(),
+                        b"key".as_slice(),
+                        b"payload".as_slice()
+                    ],
+                )?;
+                Ok(())
+            })
+            .expect("insert invalid intent row");
+
+        let consumed = dispatch_one_intent(
+            &store,
+            &HandlerSet::new(NOOP_ROUTES),
+            IntentQueue::Durable,
+            &[],
+            None,
+        )
+        .expect("invalid kind should be dropped");
+
+        assert!(consumed);
+        assert_eq!(store.table_row_count(INTENTS).expect("durable count"), 0);
     }
 
     #[test]
@@ -1021,7 +1144,7 @@ mod tests {
     }
 
     #[test]
-    fn intent_context_rows_roll_back_with_queue_row_on_handler_error() {
+    fn intent_context_rows_drop_with_queue_row_on_handler_error() {
         let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
         let fact = Fact::new(FactScope::Global, 42, b"handler-context".to_vec());
         crate::core::project_fact::submit_fact_with_admission(&store, fact.clone(), None)
@@ -1037,16 +1160,81 @@ mod tests {
             &[],
             None,
         )
-        .expect_err("fatal handler error should roll back");
+        .expect("fatal handler error should drop the invalid row");
 
-        assert_eq!(store.table_row_count(INTENTS).expect("durable count"), 1);
+        assert_eq!(store.table_row_count(INTENTS).expect("durable count"), 0);
         assert_eq!(
             store
                 .table_row_count(INTENT_CONTEXT)
                 .expect("intent context count"),
-            1,
-            "failed handler commit should leave attached context rows queued"
+            0,
+            "terminal invalid handler work should clear attached context rows"
         );
+    }
+
+    #[test]
+    fn missing_context_fact_drops_intent_and_context_rows() {
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
+        let intent = test_intent("requires_fact", b"context").with_context_fact_ids([[7; 32]]);
+        submit_intent_to_queue(&store, IntentQueue::Durable, intent)
+            .expect("submit context intent");
+
+        let consumed = dispatch_one_intent(
+            &store,
+            &HandlerSet::new(REQUIRE_CONTEXT_ROUTES),
+            IntentQueue::Durable,
+            &[],
+            None,
+        )
+        .expect("missing attached context should drop the stale row");
+
+        assert!(consumed);
+        assert_eq!(store.table_row_count(INTENTS).expect("durable count"), 0);
+        assert_eq!(
+            store
+                .table_row_count(INTENT_CONTEXT)
+                .expect("intent context count"),
+            0
+        );
+    }
+
+    #[test]
+    fn handler_error_rolls_back_handler_owned_sql_before_dropping_row() {
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
+        store
+            .conn()
+            .execute(
+                &format!(
+                    "CREATE TABLE {TEST_HANDLER_STATE_TABLE} (
+                         intent_key BLOB NOT NULL
+                     )"
+                ),
+                [],
+            )
+            .expect("create handler state table");
+        submit_intent_to_queue(
+            &store,
+            IntentQueue::Durable,
+            test_intent("write_then_fatal", b"first"),
+        )
+        .expect("submit invalid intent");
+
+        let consumed = dispatch_one_intent(
+            &store,
+            &HandlerSet::new(WRITE_THEN_FATAL_ROUTES),
+            IntentQueue::Durable,
+            &[],
+            None,
+        )
+        .expect("handler rejection should drop row");
+
+        assert!(consumed);
+        assert_eq!(
+            handler_state_row_count(&store),
+            0,
+            "handler-owned sql should roll back before invalid intent deletion commits"
+        );
+        assert_eq!(store.table_row_count(INTENTS).expect("durable count"), 0);
     }
 
     #[test]
@@ -1175,6 +1363,13 @@ mod tests {
         recurrence: None,
     }];
 
+    const WRITE_THEN_FATAL_ROUTES: &[HandlerRoute] = &[HandlerRoute {
+        intent_kind: "write_then_fatal",
+        factory: write_then_fatal_handler,
+        storage_requirement: StorageRequirement::MaintenanceBypass,
+        recurrence: None,
+    }];
+
     const EMIT_FACT_ROUTES: &[HandlerRoute] = &[
         HandlerRoute {
             intent_kind: "emit_fact",
@@ -1243,7 +1438,7 @@ mod tests {
     impl IntentHandler for WriteThenInvalidHandler {
         fn handle(&self, intent: &Intent, context: &HandlerContext<'_>) -> HandlerResult {
             context
-                .db()?
+                .db()
                 .conn()
                 .execute(
                     &format!(
@@ -1260,6 +1455,25 @@ mod tests {
                     values: vec![Value::Bytes(b"row-key".to_vec())],
                 })),
             )
+        }
+    }
+
+    struct WriteThenFatalHandler;
+
+    impl IntentHandler for WriteThenFatalHandler {
+        fn handle(&self, intent: &Intent, context: &HandlerContext<'_>) -> HandlerResult {
+            context
+                .db()
+                .conn()
+                .execute(
+                    &format!(
+                        "INSERT INTO {TEST_HANDLER_STATE_TABLE} (intent_key)
+                         VALUES (?1)"
+                    ),
+                    params![intent.key.as_slice()],
+                )
+                .map_err(|err| HandlerError::fatal(format!("write handler state: {err}")))?;
+            Err(HandlerError::fatal("test fatal after write"))
         }
     }
 
@@ -1318,6 +1532,10 @@ mod tests {
 
     fn write_then_invalid_handler() -> Box<dyn IntentHandler> {
         Box::new(WriteThenInvalidHandler)
+    }
+
+    fn write_then_fatal_handler() -> Box<dyn IntentHandler> {
+        Box::new(WriteThenFatalHandler)
     }
 
     fn emit_fact_handler() -> Box<dyn IntentHandler> {
