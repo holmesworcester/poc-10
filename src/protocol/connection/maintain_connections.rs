@@ -142,15 +142,14 @@ fn record_maintenance_run(store: &Db, run_at_ms: u64) -> Result<(), String> {
     let run_at_ms = i64::try_from(run_at_ms)
         .map_err(|_| "connection maintenance timestamp exceeds SQLite integer range".to_string())?;
     store
-        .write_transaction(|tx| {
-            tx.conn().execute(
-                "INSERT INTO connection_maintenance_rows (kind, last_run_ms)
-                 VALUES (?1, ?2)
-                 ON CONFLICT(kind) DO UPDATE SET last_run_ms = excluded.last_run_ms",
-                params![MAINTAIN_CONNECTIONS_MARKER, run_at_ms],
-            )?;
-            Ok(())
-        })
+        .conn()
+        .execute(
+            "INSERT INTO connection_maintenance_rows (kind, last_run_ms)
+             VALUES (?1, ?2)
+             ON CONFLICT(kind) DO UPDATE SET last_run_ms = excluded.last_run_ms",
+            params![MAINTAIN_CONNECTIONS_MARKER, run_at_ms],
+        )
+        .map(|_| ())
         .map_err(|err| format!("record connection maintenance marker: {err}"))
 }
 
@@ -290,8 +289,11 @@ mod tests {
     use super::*;
     use crate::core::crypto;
     use crate::core::db::Db;
+    use crate::core::effects::StorageRequirement;
     use crate::core::intents::IntentHandler;
     use crate::core::network::{self, NetworkTarget};
+    use crate::core::project_fact::{ProjectionContext, ProjectionOutput, Projector};
+    use crate::core::runtime::{HandlerRoute, Runtime, RuntimeDescription};
     use crate::core::schema::CORE_SCHEMA_SOURCE;
     use crate::protocol::auth::endpoint::fact::EndpointFact;
     use crate::protocol::auth::endpoint_shared::fact::EndpointRole;
@@ -411,6 +413,31 @@ mod tests {
     }
 
     #[test]
+    fn maintenance_marker_write_participates_in_handler_transaction() {
+        let mut runtime = Runtime::open_memory(&MAINTAIN_CONNECTIONS_RUNTIME).expect("runtime");
+        let intent = maintain_connections_intent(MaintainConnections {
+            created_at_ms: 1_000,
+            local_addr: Some("127.0.0.1:41001".parse().unwrap()),
+        })
+        .expect("maintenance intent");
+        runtime
+            .submit_local_intent(intent)
+            .expect("queue maintenance intent");
+
+        assert!(
+            runtime
+                .drain_local_intents(1)
+                .expect("dispatch maintenance intent"),
+            "queued maintenance intent should dispatch"
+        );
+        assert_eq!(runtime.pending_intent_count(), 0);
+        assert!(
+            !maintenance_due(runtime.db(), 1_050).expect("read marker"),
+            "handler should record its marker inside the dispatch transaction"
+        );
+    }
+
+    #[test]
     fn accepted_invite_row_replays_enough_state_to_create_bootstrap_attempt() {
         let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
             .expect("store");
@@ -488,4 +515,40 @@ mod tests {
         }));
         assert!(effects.local_intents.is_empty());
     }
+
+    struct NoopProjector;
+
+    impl Projector for NoopProjector {
+        fn project(
+            &self,
+            _fact: &crate::core::facts::Fact,
+            _context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            Ok(ProjectionOutput::new())
+        }
+    }
+
+    fn noop_projector() -> Box<dyn Projector> {
+        Box::new(NoopProjector)
+    }
+
+    fn maintain_connections_handler() -> Box<dyn IntentHandler> {
+        Box::new(MaintainConnectionsHandler::new())
+    }
+
+    const MAINTAIN_CONNECTIONS_HANDLERS: &[HandlerRoute] = &[HandlerRoute {
+        intent_kind: MAINTAIN_CONNECTIONS,
+        factory: maintain_connections_handler,
+        storage_requirement: StorageRequirement::MaintenanceBypass,
+        recurrence: None,
+    }];
+
+    const MAINTAIN_CONNECTIONS_RUNTIME: RuntimeDescription = RuntimeDescription {
+        schema_sources: &[network::SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE],
+        row_mutation_tables: &[],
+        projector: noop_projector,
+        fact_routes: &[],
+        fact_admission: None,
+        handlers: MAINTAIN_CONNECTIONS_HANDLERS,
+    };
 }
