@@ -40,7 +40,8 @@
 //! Runtime later drains that work like any other queued fact.
 
 use self::commit_effects::{
-    commit_runtime_effects_in_tx, sqlite_string_error, validate_runtime_effects_for_admission,
+    commit_runtime_effects_in_tx, sqlite_string_error, storage_requirement_satisfied,
+    validate_runtime_effects_for_admission,
 };
 #[cfg(test)]
 use self::context_db::{
@@ -320,6 +321,18 @@ fn commit_projection_effects(
                     }
                     ProjectionOutcome::Accepted(projection) => {
                         let fact_id = projection.fact.id;
+                        if !storage_requirement_satisfied(
+                            tx,
+                            projection.runtime_effects.storage_requirement,
+                        )
+                        .map_err(sqlite_string_error)?
+                        {
+                            return commit_rejected_projection_input_in_tx(
+                                tx,
+                                projection.source,
+                                fact_id,
+                            );
+                        }
 
                         let retained =
                             settle_projected_input_lifecycle_in_tx(tx, projection, fact_id)?;
@@ -1346,6 +1359,19 @@ pub(crate) mod commit_effects {
         match requirement {
             StorageRequirement::MaintenanceBypass => Ok(()),
             StorageRequirement::Current(version) => tx.require_storage_version(version),
+        }
+    }
+
+    pub(crate) fn storage_requirement_satisfied(
+        tx: &Db,
+        requirement: StorageRequirement,
+    ) -> Result<bool, String> {
+        match requirement {
+            StorageRequirement::MaintenanceBypass => Ok(true),
+            StorageRequirement::Current(version) => tx
+                .current_storage_version()
+                .map(|stored| stored == Some(version))
+                .map_err(|err| format!("read storage version marker: {err}")),
         }
     }
 
@@ -3229,6 +3255,7 @@ mod contract_tests {
     use crate::core::schema::CORE_SCHEMA_SOURCE;
     use rusqlite::OptionalExtension;
     use std::cell::Cell;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     const TEST_REGISTERED_INTENT_KINDS: &[&str] = &[
         "ephemeral_partial",
@@ -3287,11 +3314,20 @@ mod contract_tests {
         }
     }
 
+    static VERSION_GUARD_PROJECTOR_CALLS: AtomicUsize = AtomicUsize::new(0);
+
     fn version_guard_projector(
-        _fact: &Fact,
+        fact: &Fact,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        Ok(ProjectionOutput::new())
+        VERSION_GUARD_PROJECTOR_CALLS.fetch_add(1, Ordering::SeqCst);
+        Ok(ProjectionOutput::new().need(ContextNeed::range(
+            fact.id,
+            "version_guard",
+            FactScope::Global,
+            [7; 32],
+            [7; 32],
+        )))
     }
 
     const VERSION_GUARD_ROUTES: &[FactRoute] = &[FactRoute {
@@ -3302,12 +3338,13 @@ mod contract_tests {
     }];
 
     #[test]
-    fn projection_storage_mismatch_rolls_back_pending_consumption() {
+    fn projection_storage_mismatch_consumes_pending_without_committing_projector_effects() {
+        VERSION_GUARD_PROJECTOR_CALLS.store(0, Ordering::SeqCst);
         let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
         let fact = Fact::new(FactScope::Global, 1, vec![201]);
         submit_fact_to_db(&store, fact.clone()).expect("submit pending fact");
 
-        let err = crate::core::project_fact::project_one(
+        let consumed = crate::core::project_fact::project_one(
             &store,
             &RouterProjector::new(VERSION_GUARD_ROUTES, &[]),
             ProjectionSource::Durable,
@@ -3315,16 +3352,19 @@ mod contract_tests {
             &[],
             None,
         )
-        .expect_err("storage mismatch should abort projection commit");
+        .expect("storage mismatch should consume stale-version projection input");
 
-        assert!(
-            err.contains("required_version=7 stored_version=missing"),
-            "{err}"
-        );
+        assert!(consumed);
+        assert_eq!(VERSION_GUARD_PROJECTOR_CALLS.load(Ordering::SeqCst), 1);
         assert_eq!(
             pending_projection_count(&store, fact.id),
-            1,
-            "failed storage guard must not consume pending projection"
+            0,
+            "stale-version projection input should be consumed"
+        );
+        let stored = stored_context_for_owner(&store, &fact.id).expect("stored context");
+        assert!(
+            stored.needs.is_empty() && stored.offers.is_empty(),
+            "stale-version projector effects must not publish standing context"
         );
     }
 

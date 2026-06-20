@@ -49,17 +49,18 @@ wrap, seeding sync, or performing any other bounded stateful action. Core claims
 one durable or local intent, loads only the fact inputs declared by that handler,
 calls the registered handler, and commits successful handler output atomically
 with queue consumption. Handler rejection consumes the terminal invalid row
-without output; validation errors and storage-version mismatches keep the row
-queued.
+without output. Validation errors keep the row queued. A storage-version
+mismatch consumes the selected row without running handler-owned SQL or
+committing ordinary effects.
 
 Every host runs the same bounded runtime turn before it does host-specific work.
-Each turn gives recurring builders an opportunity, drains local repair work,
-checks storage readiness, admits due time-wake ranges as pending projection,
-drains durable projection, drains incoming projection, drains local intents, and
-leaves any handler-emitted facts queued for later projection work. The daemon
-supplies network host adapters, so daemon turns also dispatch durable handlers,
-accept frames into `network_incoming`, drain those raw rows through the protocol
-classifier into `incoming_facts`, and pump queued outgoing TCP frames.
+Each turn gives recurring builders an opportunity, drains local intents and
+durable projection, admits due time-wake ranges as pending projection, drains
+incoming projection, and leaves any handler-emitted facts queued for later
+projection work. The daemon supplies network host adapters, so daemon turns also
+dispatch durable handlers, accept frames into `network_incoming`, drain those
+raw rows through the protocol classifier into `incoming_facts`, and pump queued
+outgoing TCP frames.
 Command/query turns run without durable handler dispatch or network adapters.
 The runtime lock ensures a daemon turn cannot race with a CLI command that is
 admitting new facts into the same database.
@@ -161,7 +162,8 @@ the owning projector decide whether that time proves anything.
   belongs in facts, protocol rows, network queues, or handler-local state.
 - Handler output commits atomically with deletion of the handled queue row.
   Handler rejections consume the invalid row without output; validation errors
-  and storage-version mismatches leave the row queued without committing output.
+  leave the row queued without committing output. Storage-version mismatches
+  consume the selected row before handler-owned SQL or effects can run.
 - Projection mode is sticky toward replay. If an owner is already queued in
   replay mode, later normal wakes do not downgrade it.
 - Needs are replacement subscriptions. The committed `ProjectionOutput` is the
@@ -183,9 +185,9 @@ the owning projector decide whether that time proves anything.
 - Storage-version requirements are commit guards. A projector or handler route
   can attach `StorageRequirement::Current(version)` to its effects; core reads
   the `StorageVersionSource` declared by the active schema and compares that
-  marker with the required version before it consumes queue rows, runs
-  handler-owned SQL, or commits effects. Mismatch aborts the transaction and
-  leaves the queued work in place.
+  marker with the required version before it runs handler-owned SQL or publishes
+  ordinary effects. Mismatch consumes the selected queue row without those
+  effects.
   `StorageRequirement::MaintenanceBypass` is reserved for repair work that must
   run while the marker is stale.
 - Db is below policy. It applies schemas, transactions, and row helpers; it
@@ -340,10 +342,11 @@ meaning as opaque protocol state.
 Projector and handler routes declare the storage shape their effects expect by
 attaching `StorageRequirement::Current(version)`. During projection and intent
 commit, `commit_effects` reads the schema-declared marker and compares it with
-the route requirement before deleting pending work, running handler-owned SQL,
-applying row mutations, admitting follow-up facts, or queuing intents. A
-mismatch aborts the SQLite transaction, so the pending fact or intent remains
-available for later repair.
+the route requirement before running handler-owned SQL, applying row mutations,
+admitting follow-up facts, queuing intents, or publishing projector context. A
+mismatch consumes the selected projection or intent row without those ordinary
+effects. Retained facts remain in fact storage and can be requeued by the
+versioning repair path.
 
 `StorageRequirement::MaintenanceBypass` is the explicit escape hatch for repair
 work. Core does not decide when a database should be repaired, how the marker is
@@ -436,10 +439,11 @@ commit step fails, SQLite rolls back the whole unit. This is what makes handler
 replay and process restart safe. Handler errors mean the queued input is
 terminal invalid: dispatch rolls back any handler-owned SQL written during that
 attempt, then commits deletion of the queue row and attached context rows
-without output. Validation errors and storage-version mismatches leave the
-intent row in place. Durable and local intent admission validates handler
-registry membership before queue insertion; a stale unregistered row that is
-already present is dropped as terminal invalid input.
+without output. Validation errors leave the intent row in place.
+Storage-version mismatches consume the selected row before the handler runs.
+Durable and local intent admission validates handler registry membership before
+queue insertion; a stale unregistered row that is already present is dropped as
+terminal invalid input.
 
 ### Rebuild Mode And Time Wakes
 

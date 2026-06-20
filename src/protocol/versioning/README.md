@@ -18,8 +18,8 @@ runtime contract.
 4. Commands, projectors, handlers, and queries declare the storage version they
    expect before they touch materialized state.
 5. If code advances past the stored database marker, normal paths run a bounded
-   turn and remain guarded until repair completes; effect commits roll back
-   instead of consuming queued work under stale storage.
+   turn and remain guarded until repair completes; stale selected queue rows are
+   consumed without ordinary effects instead of writing old-shape state.
 6. Version repair is the recurring update loop described below.
 
 ## Layout
@@ -79,8 +79,9 @@ The recurring update path is concrete:
    mode set.
 5. After that commit, the same runtime turn drains replay projection and replay
    intent work like normal queued work. The storage-requirement guards above
-   keep ordinary work from consuming stale materialized state while repair is
-   pending.
+   keep ordinary work from committing stale materialized state while repair is
+   pending. Retained facts are requeued by rebuild, while queued intents remain
+   droppable across upgrade.
 
 The update fact is retained as history, but its projector does rebuild work only
 during live projection. Replay projection of an old update fact is a no-op, so
@@ -93,8 +94,9 @@ is separate from the recurring update loop.
 
 Protocol projectors and handlers register `StorageRequirement::Current` for
 ordinary work. Core enforces that requirement inside the same SQL transaction
-that would otherwise remove the source queue row and commit the effects. On
-mismatch, SQLite rolls the whole transaction back. The versioning update
+that would otherwise commit the effects. On mismatch, core consumes the selected
+projection or intent row without ordinary effects. Handlers do not run under a
+stale marker, and projection effects are not published. The versioning update
 projector and handler use `StorageRequirement::MaintenanceBypass` so repair can
 run while storage is stale.
 

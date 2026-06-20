@@ -506,7 +506,6 @@ impl ContentMessageProjector {
                 author_need.clone(),
                 secret_need.clone(),
             ],
-            Vec::new(),
         );
         let Some(signature_payload) =
             context_payload(context, &signature_need, "message signature proof")?
@@ -521,7 +520,6 @@ impl ContentMessageProjector {
             message.signer_public_key,
             "content message",
         )?;
-        let signature_context_have = context_have_from_needs(context, [&signature_need]);
         let Some(signer_payload) = context.payload_for(&signer_need) else {
             return Ok(base_wait_output(
                 fact,
@@ -534,12 +532,9 @@ impl ContentMessageProjector {
                     author_need.clone(),
                     secret_need.clone(),
                 ],
-                signature_context_have,
             ));
         };
         validate_message_signer_context(signer_payload, &signer_need, &message)?;
-        let mut signer_context_have = signature_context_have;
-        signer_context_have.extend(context_have_from_needs(context, [&signer_need]));
         let Some(author) = context_payload(context, &author_need, "message author")? else {
             return Ok(base_wait_output(
                 fact,
@@ -552,7 +547,6 @@ impl ContentMessageProjector {
                     author_need.clone(),
                     secret_need.clone(),
                 ],
-                signer_context_have,
             ));
         };
         validate_author_user(author, message.workspace_id, message.author_user_id)?;
@@ -587,7 +581,6 @@ impl ContentMessageProjector {
                 author_need,
                 secret_need.clone(),
             ],
-            context_have,
         )
         .offer(crate::core::context::ContextOffer::range(
             fact.id,
@@ -616,24 +609,29 @@ impl ContentMessageProjector {
         let text = decrypt_text(&message, secret_payload)?;
 
         // 3. Materialize.
-        Ok(metadata_output
-            .offer(crate::core::context::ContextOffer::range(
-                fact.id,
-                "content_message",
-                scope,
-                fact.id,
-                fact.id,
-            ))
-            .row_mutation(RowMutation::InsertValues(opened_message_row(
-                OpenedMessageRow {
-                    workspace_id: message.workspace_id,
-                    message_id: fact.id,
-                    created_at_ms: message.created_at_ms,
-                    author_user_id: message.author_user_id,
-                    signer_id: message.signer_id,
-                    text,
-                },
-            ))))
+        Ok(share_fact_with_sync(
+            metadata_output
+                .offer(crate::core::context::ContextOffer::range(
+                    fact.id,
+                    "content_message",
+                    scope,
+                    fact.id,
+                    fact.id,
+                ))
+                .row_mutation(RowMutation::InsertValues(opened_message_row(
+                    OpenedMessageRow {
+                        workspace_id: message.workspace_id,
+                        message_id: fact.id,
+                        created_at_ms: message.created_at_ms,
+                        author_user_id: message.author_user_id,
+                        signer_id: message.signer_id,
+                        text,
+                    },
+                ))),
+            message.workspace_id,
+            fact,
+            context_have,
+        ))
     }
 }
 
@@ -641,19 +639,13 @@ fn base_wait_output(
     fact: &Fact,
     message: &super::fact::ContentMessageFact,
     needs: impl IntoIterator<Item = ContextNeed>,
-    context_have: Vec<FactId>,
 ) -> ProjectionOutput {
-    share_fact_with_sync(
-        with_retention_wakes(
-            needs
-                .into_iter()
-                .fold(ProjectionOutput::new(), |output, need| output.need(need)),
-            fact.id,
-            message,
-        ),
-        message.workspace_id,
-        fact,
-        context_have,
+    with_retention_wakes(
+        needs
+            .into_iter()
+            .fold(ProjectionOutput::new(), |output, need| output.need(need)),
+        fact.id,
+        message,
     )
 }
 
@@ -1262,11 +1254,7 @@ mod projector_tests {
 
         assert_eq!(output.offers.len(), 0);
         assert_eq!(output.needs.len(), 6);
-        assert_eq!(output.effects.intents.len(), 1);
-        assert_eq!(
-            output.effects.intents[0].kind.as_str(),
-            "share_fact_with_sync"
-        );
+        assert_eq!(output.effects.intents.len(), 0);
         assert!(put_row!(output, read_models::CONTENT_MESSAGE_ROWS).is_none());
         assert!(output.needs.iter().any(|need| need.role == "auth_user"));
         assert!(output
@@ -1350,11 +1338,7 @@ mod projector_tests {
         assert_eq!(output.needs.len(), 6);
         assert_eq!(output.offers.len(), 1);
         assert_eq!(output.offers[0].role, "content_message_meta");
-        assert_eq!(output.effects.intents.len(), 1);
-        assert_eq!(
-            output.effects.intents[0].kind.as_str(),
-            "share_fact_with_sync"
-        );
+        assert_eq!(output.effects.intents.len(), 0);
         let row =
             put_row!(output, read_models::CONTENT_MESSAGE_ROWS).expect("content metadata row");
         assert_eq!(

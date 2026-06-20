@@ -43,7 +43,6 @@ pub const CONTEXT_PROTOCOL: ProtocolDescription<ContextCliContext> = ProtocolDes
     daemon: DaemonDescription {
         inbound_network_intake: Some(receive_network_frame_facts),
         time_wakes: CONTEXT_DAEMON_TIME_WAKES,
-        storage_ready: Some(crate::protocol::versioning::check_version::storage_ready),
     },
     commands: CONTEXT_COMMANDS,
     context: ContextCliContext::new,

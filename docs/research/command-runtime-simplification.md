@@ -23,10 +23,12 @@ the authored facts, and returns. A command must not query after it has started
 authoring facts. If chained authoring needs an id from an earlier authored fact,
 it uses the in-memory fact or receipt it just constructed, not a projected row.
 
-The daemon is the live queue driver. One daemon tick gives the first recurring
-intent a chance to repair storage readiness, blocks live IO while a declared
-readiness guard is false, accepts inbound network input, admits due time wakes,
-drains projection and intent batches, and pumps outgoing network rows.
+The daemon is the live queue driver. One daemon tick gives recurring builders a
+chance to queue work, drains local and projection batches, accepts inbound
+network input, admits due time wakes, dispatches durable intents, and pumps
+outgoing network rows. Version repair is just recurring protocol work guarded by
+normal storage-version checks; the daemon loop does not own a separate storage
+readiness gate.
 
 Production derived-state rebuild is protocol policy: a protocol-owned update
 fact requests the generic rebuild effect, which wipes resettable state and marks

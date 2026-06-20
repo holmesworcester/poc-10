@@ -4,11 +4,10 @@
 //! per-database lock, bind the TCP listener, publish the readiness line, react to
 //! stop/reset, and run a bounded turn from the selected protocol's declarative
 //! daemon description. The turn is protocol-agnostic: give recurring builders a
-//! chance to repair storage readiness, block host IO until any declared
-//! readiness check passes, then optionally accept network bytes, stage and drain
-//! protocol-classified incoming facts, process declared time wakes with a high
-//! local budget, drain projection and intents, and optionally pump queued
-//! outgoing network bytes.
+//! chance to queue work, drain local and durable work, accept network bytes,
+//! stage and drain protocol-classified incoming facts, process declared time
+//! wakes with a high local budget, and optionally pump queued outgoing network
+//! bytes.
 //!
 //! The daemon is the host that supplies network adapters for the shared runtime
 //! turn. It does not decode connection frames or choose protocol actions itself.
@@ -16,13 +15,10 @@
 //! which time-wake timelines should be admitted, and supplies the runtime
 //! handlers that consume queued work.
 //!
-//! The order inside `runtime_turn` is part of the runtime contract. The first
-//! recurring intent that queues work runs before other recurring entries and
-//! before host IO. If the protocol readiness check is still false, only queued
-//! repair/rebuild work drains. Once ready, recurring work runs before inbound
-//! network input, due time ranges wake facts, projection and intents drain, and
-//! queued outgoing TCP bytes are pumped by target address when the host supplied
-//! a listener.
+//! The order inside `runtime_turn` is part of the runtime contract. Recurring
+//! work runs before inbound network input, due time ranges wake facts,
+//! projection and intents drain, and queued outgoing TCP bytes are pumped by
+//! target address when the host supplied a listener.
 //! Handler-emitted facts remain queued for later projection work. Change that
 //! order here only if the whole runtime turn scheduling policy changes; protocol
 //! handlers should adapt by emitting facts, time wakes, or intents rather than
@@ -77,15 +73,10 @@ pub struct DaemonDescription {
     pub inbound_network_intake: Option<InboundNetworkIntake>,
     /// Time-wake schedules daemon-host runtime turns should admit.
     pub time_wakes: &'static [DaemonTimeWake],
-    /// Optional protocol-owned guard for derived-state readiness.
-    pub storage_ready: Option<StorageReadyCheck>,
 }
 
 /// Function that turns an inbound frame into incoming projection inputs.
 pub type InboundNetworkIntake = fn(InboundNetworkFrame) -> Result<Vec<Fact>, String>;
-
-/// Protocol-owned check that decides whether normal daemon work may run.
-pub type StorageReadyCheck = fn(&Db) -> Result<bool, String>;
 
 /// Opaque inbound TCP frame plus local receipt metadata.
 #[derive(Debug, Clone)]
@@ -111,9 +102,9 @@ pub struct DaemonTimeWake {
 /// The scheduler and queue order are the same for daemon and command/query
 /// turns. A daemon turn supplies a listener, so network intake and outgoing TCP
 /// pumping can run and durable handlers may dispatch. A command/query turn
-/// supplies no listener; recurring local repair work, projection, local
-/// intents, and time wakes still get a chance, while durable handler dispatch
-/// and network host adapters are skipped.
+/// supplies no listener; recurring local work, projection, local intents, and
+/// time wakes still get a chance, while durable handler dispatch and network
+/// host adapters are skipped.
 #[derive(Clone, Copy)]
 pub struct RuntimeTurnHost<'a> {
     listener: Option<&'a network::Listener>,
@@ -156,30 +147,10 @@ pub fn runtime_turn(
     let local_derivation_limit = local_derivation_work_limit(work_limit);
     let local_addr = host.local_addr();
     let runs_durable_handlers = host.runs_durable_handlers();
-    let mut recurring_resume_at = 0;
     let mut profile = DaemonTurnProfile::start(local_addr);
 
-    let readiness_started = Instant::now();
-    let ready = run_readiness_gate(
-        description,
-        runtime,
-        local_addr,
-        runs_durable_handlers,
-        scheduler,
-        work_limit,
-        local_derivation_limit,
-        &mut active,
-        &mut recurring_resume_at,
-        &mut profile,
-    )?;
-    profile.record_bool("readiness_gate", readiness_started.elapsed(), ready);
-    if !ready {
-        profile.finish(active);
-        return Ok(active);
-    }
-
     active |= profile.measure_bool("fire_recurring_intents", || {
-        fire_recurring_intents(runtime, scheduler, local_addr, recurring_resume_at)
+        fire_recurring_intents(runtime, scheduler, local_addr)
     })?;
     active |= profile.measure_bool("drain_local_intents_pre", || {
         runtime.drain_local_intents(work_limit)
@@ -187,19 +158,6 @@ pub fn runtime_turn(
     active |= profile.measure_bool("drain_durable_projection_pre", || {
         runtime.drain_durable_projection(local_derivation_limit)
     })?;
-    if !profile.measure_bool("storage_ready_or_drain_repair", || {
-        storage_ready_or_drain_repair(
-            description,
-            runtime,
-            runs_durable_handlers,
-            work_limit,
-            local_derivation_limit,
-            &mut active,
-        )
-    })? {
-        profile.finish(active);
-        return Ok(active);
-    }
 
     active |= profile.measure_bool("drain_inbound_listener", || {
         drain_inbound_listener(description, runtime, host.listener, work_limit)
@@ -241,102 +199,9 @@ fn fire_recurring_intents(
     runtime: &mut Runtime,
     scheduler: &mut RecurringScheduler,
     local_addr: Option<SocketAddr>,
-    start_index: usize,
 ) -> Result<bool, String> {
-    let offered = scheduler.offer(runtime, now_ms(), local_addr, start_index, false)?;
+    let offered = scheduler.offer(runtime, now_ms(), local_addr)?;
     Ok(offered.queued > 0)
-}
-
-fn fire_first_recurring_intent(
-    runtime: &mut Runtime,
-    scheduler: &mut RecurringScheduler,
-    local_addr: Option<SocketAddr>,
-) -> Result<RecurringFire, String> {
-    scheduler.offer(runtime, now_ms(), local_addr, 0, true)
-}
-
-fn run_readiness_gate(
-    description: DaemonDescription,
-    runtime: &mut Runtime,
-    local_addr: Option<SocketAddr>,
-    runs_durable_handlers: bool,
-    scheduler: &mut RecurringScheduler,
-    work_limit: usize,
-    local_derivation_limit: usize,
-    active: &mut bool,
-    recurring_resume_at: &mut usize,
-    profile: &mut DaemonTurnProfile,
-) -> Result<bool, String> {
-    let fire_started = Instant::now();
-    let first_recurring = fire_first_recurring_intent(runtime, scheduler, local_addr)?;
-    profile.record_bool(
-        "readiness_fire_first_recurring",
-        fire_started.elapsed(),
-        first_recurring.queued > 0,
-    );
-    *recurring_resume_at = first_recurring.resume_at;
-    *active |= first_recurring.queued > 0;
-    if first_recurring.queued > 0 {
-        *active |= profile.measure_bool("readiness_drain_first_local_intent", || {
-            runtime.drain_local_intents(1)
-        })?;
-        *active |= profile.measure_bool("readiness_drain_first_durable_projection", || {
-            runtime.drain_durable_projection(local_derivation_limit)
-        })?;
-    }
-    profile.measure_bool("readiness_storage_ready_or_repair", || {
-        storage_ready_or_drain_repair(
-            description,
-            runtime,
-            runs_durable_handlers,
-            work_limit,
-            local_derivation_limit,
-            active,
-        )
-    })
-}
-
-fn storage_ready_or_drain_repair(
-    description: DaemonDescription,
-    runtime: &mut Runtime,
-    runs_durable_handlers: bool,
-    work_limit: usize,
-    local_derivation_limit: usize,
-    active: &mut bool,
-) -> Result<bool, String> {
-    if storage_ready(description, runtime)? {
-        return Ok(true);
-    }
-    *active |= drain_repair_work(
-        runtime,
-        local_derivation_limit,
-        work_limit,
-        runs_durable_handlers,
-    )?;
-    Ok(false)
-}
-
-fn storage_ready(description: DaemonDescription, runtime: &Runtime) -> Result<bool, String> {
-    let Some(check) = description.storage_ready else {
-        return Ok(true);
-    };
-    check(runtime.db())
-}
-
-fn drain_repair_work(
-    runtime: &mut Runtime,
-    local_derivation_limit: usize,
-    work_limit: usize,
-    runs_durable_handlers: bool,
-) -> Result<bool, String> {
-    let mut active = false;
-    active |= runtime.drain_durable_projection(local_derivation_limit)?;
-    active |= runtime.drain_incoming_projection(local_derivation_limit)?;
-    if runs_durable_handlers {
-        active |= runtime.drain_durable_intents(work_limit)?;
-    }
-    active |= runtime.drain_local_intents(work_limit)?;
-    Ok(active)
 }
 
 fn drain_inbound_listener(
@@ -484,17 +349,6 @@ impl DaemonTurnProfile {
         Ok(result)
     }
 
-    fn record_bool(&mut self, name: &'static str, elapsed: Duration, result: bool) {
-        if !self.enabled {
-            return;
-        }
-        self.stages.push(DaemonTurnStageProfile {
-            name,
-            elapsed,
-            result,
-        });
-    }
-
     fn finish(self, active: bool) {
         if let Some(line) = self.finish_line(active) {
             eprintln!("{line}");
@@ -549,12 +403,9 @@ fn duration_millis(duration: Duration) -> u128 {
 /// entries from the handler registry and gives them an opportunity during each
 /// bounded runtime turn. Builders decide from database state, clock, and host
 /// context whether to enqueue work. Nothing is persisted, so there is nothing
-/// to wipe on rebuild and nothing to replay. A protocol can put a
-/// storage-readiness check first in the registry; `runtime_turn` gives that
-/// first recurring entry a chance to queue and drain repair work before later
-/// recurring entries run. The scheduler also skips a recurring kind when local
-/// work for that kind is still queued, so operational loops do not build an
-/// unbounded backlog.
+/// to wipe on rebuild and nothing to replay. The scheduler also skips a
+/// recurring kind when local work for that kind is still queued, so operational
+/// loops do not build an unbounded backlog.
 pub struct RecurringScheduler {
     schedules: Vec<RecurringSchedule>,
 }
@@ -566,7 +417,6 @@ struct RecurringSchedule {
 
 struct RecurringFire {
     queued: usize,
-    resume_at: usize,
 }
 
 impl RecurringScheduler {
@@ -598,12 +448,9 @@ impl RecurringScheduler {
         runtime: &mut Runtime,
         now_ms: u64,
         local_addr: Option<SocketAddr>,
-        start_index: usize,
-        stop_after_queue: bool,
     ) -> Result<RecurringFire, String> {
         let mut fired = 0;
-        let mut resume_at = self.schedules.len();
-        for (index, schedule) in self.schedules.iter_mut().enumerate().skip(start_index) {
+        for schedule in &mut self.schedules {
             if runtime.has_pending_local_intent_kind(schedule.kind)? {
                 continue;
             }
@@ -619,15 +466,8 @@ impl RecurringScheduler {
                 runtime.submit_local_intent(intent)?;
                 fired += 1;
             }
-            if stop_after_queue && fired > 0 {
-                resume_at = index.saturating_add(1);
-                break;
-            }
         }
-        Ok(RecurringFire {
-            queued: fired,
-            resume_at,
-        })
+        Ok(RecurringFire { queued: fired })
     }
 }
 
@@ -1103,15 +943,12 @@ mod tests {
         let result = profile
             .measure_bool("stage", || Ok(true))
             .expect("stage result");
-        profile.record_bool("recorded_stage", Duration::from_millis(2), false);
 
         assert!(result);
         let line = profile.finish_line(true).expect("profile line");
         assert!(line.contains("daemon_turn_profile addr=127.0.0.1:4242 active=true"));
         assert!(line.contains("stage_ms="));
         assert!(line.contains("stage_result=1"));
-        assert!(line.contains("recorded_stage_ms=2"));
-        assert!(line.contains("recorded_stage_result=0"));
     }
 
     struct RecurringHandler;
@@ -1145,10 +982,9 @@ mod tests {
     }
 
     static RECURRING_HANDLER_CALLS: AtomicUsize = AtomicUsize::new(0);
-    static VERSION_REPAIR_HANDLER_CALLS: AtomicUsize = AtomicUsize::new(0);
-    static NORMAL_RECURRING_HANDLER_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static FIRST_RECURRING_HANDLER_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static SECOND_RECURRING_HANDLER_CALLS: AtomicUsize = AtomicUsize::new(0);
     static DURABLE_HANDLER_CALLS: AtomicUsize = AtomicUsize::new(0);
-    static VERSION_STORAGE_READY: AtomicBool = AtomicBool::new(false);
 
     const TEST_RUNTIME: RuntimeDescription = RuntimeDescription {
         schema_sources: &[network::SCHEMA_SOURCE],
@@ -1207,90 +1043,82 @@ mod tests {
         handlers: RECURRING_HANDLERS,
     };
 
-    struct VersionRepairHandler;
+    struct FirstRecurringHandler;
 
-    impl IntentHandler for VersionRepairHandler {
+    impl IntentHandler for FirstRecurringHandler {
         fn handle(&self, intent: &Intent, _context: &HandlerContext<'_>) -> HandlerResult {
-            assert_eq!(intent.kind.as_str(), "version_repair");
-            VERSION_REPAIR_HANDLER_CALLS.fetch_add(1, Ordering::SeqCst);
-            VERSION_STORAGE_READY.store(true, Ordering::SeqCst);
+            assert_eq!(intent.kind.as_str(), "first_recurring");
+            FIRST_RECURRING_HANDLER_CALLS.fetch_add(1, Ordering::SeqCst);
             Ok(RuntimeEffects::new())
         }
     }
 
-    fn version_repair_handler() -> Box<dyn IntentHandler> {
-        Box::new(VersionRepairHandler)
+    fn first_recurring_handler() -> Box<dyn IntentHandler> {
+        Box::new(FirstRecurringHandler)
     }
 
-    fn version_repair_builder(
+    fn first_recurring_builder(
         _store: &Db,
         _context: RecurringIntentContext,
     ) -> Result<Option<Intent>, String> {
-        if VERSION_STORAGE_READY.load(Ordering::SeqCst) {
-            return Ok(None);
-        }
         Ok(Some(Intent::new(
-            IntentKind::new("version_repair").expect("intent kind"),
-            b"repair".to_vec(),
+            IntentKind::new("first_recurring").expect("intent kind"),
+            b"first".to_vec(),
             Vec::new(),
         )))
     }
 
-    struct NormalRecurringHandler;
+    struct SecondRecurringHandler;
 
-    impl IntentHandler for NormalRecurringHandler {
+    impl IntentHandler for SecondRecurringHandler {
         fn handle(&self, intent: &Intent, _context: &HandlerContext<'_>) -> HandlerResult {
-            assert_eq!(intent.kind.as_str(), "normal_recurring");
-            NORMAL_RECURRING_HANDLER_CALLS.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(intent.kind.as_str(), "second_recurring");
+            SECOND_RECURRING_HANDLER_CALLS.fetch_add(1, Ordering::SeqCst);
             Ok(RuntimeEffects::new())
         }
     }
 
-    fn normal_recurring_handler() -> Box<dyn IntentHandler> {
-        Box::new(NormalRecurringHandler)
+    fn second_recurring_handler() -> Box<dyn IntentHandler> {
+        Box::new(SecondRecurringHandler)
     }
 
-    fn normal_recurring_builder(
+    fn second_recurring_builder(
         _store: &Db,
         _context: RecurringIntentContext,
     ) -> Result<Option<Intent>, String> {
         Ok(Some(Intent::new(
-            IntentKind::new("normal_recurring").expect("intent kind"),
-            b"normal".to_vec(),
+            IntentKind::new("second_recurring").expect("intent kind"),
+            b"second".to_vec(),
             Vec::new(),
         )))
     }
 
-    fn version_storage_ready(_store: &Db) -> Result<bool, String> {
-        Ok(VERSION_STORAGE_READY.load(Ordering::SeqCst))
-    }
-
-    const VERSION_GATED_HANDLERS: &[HandlerRoute] = &[
+    const MULTI_RECURRING_HANDLERS: &[HandlerRoute] = &[
         HandlerRoute {
-            intent_kind: "version_repair",
-            factory: version_repair_handler,
+            intent_kind: "first_recurring",
+            factory: first_recurring_handler,
             storage_requirement: StorageRequirement::MaintenanceBypass,
             recurrence: Some(RecurringIntentSpec {
-                build_intent: version_repair_builder,
+                build_intent: first_recurring_builder,
             }),
         },
         HandlerRoute {
-            intent_kind: "normal_recurring",
-            factory: normal_recurring_handler,
+            intent_kind: "second_recurring",
+            factory: second_recurring_handler,
             storage_requirement: StorageRequirement::MaintenanceBypass,
             recurrence: Some(RecurringIntentSpec {
-                build_intent: normal_recurring_builder,
+                build_intent: second_recurring_builder,
             }),
         },
     ];
 
-    const VERSION_GATED_RUNTIME: RuntimeDescription = RuntimeDescription {
+    const MULTI_RECURRING_RUNTIME: RuntimeDescription = RuntimeDescription {
         schema_sources: &[network::SCHEMA_SOURCE],
         row_mutation_tables: &[],
         projector: noop_projector,
         fact_routes: &[],
         fact_admission: None,
-        handlers: VERSION_GATED_HANDLERS,
+        handlers: MULTI_RECURRING_HANDLERS,
     };
 
     #[test]
@@ -1383,7 +1211,6 @@ mod tests {
             DaemonDescription {
                 inbound_network_intake: None,
                 time_wakes: &[],
-                storage_ready: None,
             },
             &mut runtime,
             RuntimeTurnHost::daemon(&listener),
@@ -1424,7 +1251,6 @@ mod tests {
             DaemonDescription {
                 inbound_network_intake: None,
                 time_wakes: &[],
-                storage_ready: None,
             },
             &mut runtime,
             RuntimeTurnHost::daemon(&listener),
@@ -1459,7 +1285,6 @@ mod tests {
             DaemonDescription {
                 inbound_network_intake: None,
                 time_wakes: &[],
-                storage_ready: None,
             },
             &mut runtime,
             RuntimeTurnHost::local(),
@@ -1480,7 +1305,6 @@ mod tests {
             DaemonDescription {
                 inbound_network_intake: None,
                 time_wakes: &[],
-                storage_ready: None,
             },
             &mut runtime,
             RuntimeTurnHost::daemon(&listener),
@@ -1506,7 +1330,6 @@ mod tests {
             DaemonDescription {
                 inbound_network_intake: None,
                 time_wakes: &[],
-                storage_ready: None,
             },
             &mut runtime,
             RuntimeTurnHost::daemon(&listener),
@@ -1544,7 +1367,6 @@ mod tests {
             DaemonDescription {
                 inbound_network_intake: None,
                 time_wakes: &[],
-                storage_ready: None,
             },
             &mut runtime,
             RuntimeTurnHost::daemon(&listener),
@@ -1563,20 +1385,18 @@ mod tests {
     }
 
     #[test]
-    fn runtime_turn_gives_first_recurring_repair_work_the_storage_ready_barrier() {
-        VERSION_REPAIR_HANDLER_CALLS.store(0, Ordering::SeqCst);
-        NORMAL_RECURRING_HANDLER_CALLS.store(0, Ordering::SeqCst);
-        VERSION_STORAGE_READY.store(false, Ordering::SeqCst);
+    fn runtime_turn_fires_all_recurring_intents_through_normal_path() {
+        FIRST_RECURRING_HANDLER_CALLS.store(0, Ordering::SeqCst);
+        SECOND_RECURRING_HANDLER_CALLS.store(0, Ordering::SeqCst);
         let listener =
             network::listen("127.0.0.1:0".parse().expect("listen addr")).expect("daemon listener");
-        let mut runtime = Runtime::open_memory(&VERSION_GATED_RUNTIME).expect("runtime");
-        let mut scheduler = RecurringScheduler::install(VERSION_GATED_RUNTIME.handlers);
+        let mut runtime = Runtime::open_memory(&MULTI_RECURRING_RUNTIME).expect("runtime");
+        let mut scheduler = RecurringScheduler::install(MULTI_RECURRING_RUNTIME.handlers);
 
         let status = runtime_turn(
             DaemonDescription {
                 inbound_network_intake: None,
                 time_wakes: &[],
-                storage_ready: Some(version_storage_ready),
             },
             &mut runtime,
             RuntimeTurnHost::daemon(&listener),
@@ -1586,11 +1406,11 @@ mod tests {
         .expect("daemon runtime turn");
 
         assert!(status);
-        assert_eq!(VERSION_REPAIR_HANDLER_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(FIRST_RECURRING_HANDLER_CALLS.load(Ordering::SeqCst), 1);
         assert_eq!(
-            NORMAL_RECURRING_HANDLER_CALLS.load(Ordering::SeqCst),
+            SECOND_RECURRING_HANDLER_CALLS.load(Ordering::SeqCst),
             1,
-            "normal recurring work may run only after the first repair handler makes storage ready"
+            "recurring handlers should share the same normal scheduling path"
         );
     }
 
