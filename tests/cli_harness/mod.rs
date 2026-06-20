@@ -26,6 +26,14 @@ pub fn con_cli(args: &[&str]) -> Output {
         .expect("run con")
 }
 
+pub fn con_cli_in_dir(cwd: &Path, args: &[&str]) -> Output {
+    Command::new(con_bin())
+        .current_dir(cwd)
+        .args(args)
+        .output()
+        .expect("run con")
+}
+
 pub fn con_cli_with_env(args: &[&str], envs: &[(&str, &str)]) -> Output {
     let mut command = Command::new(con_bin());
     command.args(args);

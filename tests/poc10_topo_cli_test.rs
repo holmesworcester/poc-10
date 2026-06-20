@@ -20,14 +20,57 @@ fn con_help_is_served_by_the_product_boundary() {
 
     assert!(
         stdout.contains("Context CLI")
-            && stdout.contains("con --db PATH [--at TIMESTAMP_MS] create-workspace")
+            && stdout.contains("con [--db PATH] [--at TIMESTAMP_MS] create-workspace")
             && stdout.contains("NAME --username USER --devicename DEVICE")
-            && stdout.contains("con --db PATH [--at TIMESTAMP_MS] workspaces")
-            && stdout.contains("con --db PATH [--at TIMESTAMP_MS] count")
-            && stdout.contains("con --db PATH start --listen IP PORT")
+            && stdout.contains("con [--db PATH] [--at TIMESTAMP_MS] workspaces")
+            && stdout.contains("con [--db PATH] [--at TIMESTAMP_MS] count")
+            && stdout.contains("con [--db PATH] start --listen IP PORT")
+            && stdout.contains("default database: con.db")
             && stdout.contains("target core runtime facade")
             && !stdout.contains("legacy"),
         "top-level help should describe the target app boundary; got:\n{stdout}"
+    );
+}
+
+#[test]
+fn con_uses_default_db_when_db_is_omitted() {
+    let temp = tempfile::tempdir().expect("temp dir");
+
+    let stdout = assert_success(con_cli_in_dir(
+        temp.path(),
+        &[
+            "create-workspace",
+            "Default DB",
+            "--username",
+            "alice",
+            "--devicename",
+            "laptop",
+        ],
+    ));
+
+    let workspace_id = line_value(&stdout, "workspace_id");
+    assert_eq!(workspace_id.len(), 64);
+    let default_db = temp.path().join("con.db");
+    assert!(
+        default_db.exists(),
+        "omitting --db should create the default database at {}",
+        default_db.display()
+    );
+
+    let workspaces = assert_success(con_cli_in_dir(temp.path(), &["workspaces"]));
+    assert!(
+        workspaces.contains("workspaces: 1")
+            && workspaces.contains(&workspace_id)
+            && workspaces.contains(" name=Default DB"),
+        "default database should be reused by later commands; got:\n{workspaces}"
+    );
+
+    let reset = assert_success(con_cli_in_dir(temp.path(), &["reset"]));
+    assert!(reset.contains("reset complete"), "{reset}");
+    assert!(
+        !default_db.exists(),
+        "default reset should remove {}",
+        default_db.display()
     );
 }
 
@@ -42,7 +85,7 @@ fn con_without_a_command_does_not_enter_legacy_cli() {
     let stderr = cli_harness::stderr(&output);
     assert!(
         stderr.contains("missing command")
-            && stderr.contains("con --db PATH [--at TIMESTAMP_MS] create-workspace")
+            && stderr.contains("con [--db PATH] [--at TIMESTAMP_MS] create-workspace")
             && stderr.contains("NAME --username USER --devicename DEVICE")
             && !stderr.contains("legacy"),
         "missing command should be rejected at the target app boundary; got:\n{stderr}"
@@ -60,7 +103,7 @@ fn con_demo_is_rejected_at_the_product_boundary() {
     let stderr = cli_harness::stderr(&output);
     assert!(
         stderr.contains("unknown command `demo`")
-            && stderr.contains("con --db PATH [--at TIMESTAMP_MS] create-workspace")
+            && stderr.contains("con [--db PATH] [--at TIMESTAMP_MS] create-workspace")
             && stderr.contains("NAME --username USER --devicename DEVICE")
             && !stderr.contains("walkthrough"),
         "`con demo` should be rejected by the central CLI registry; got:\n{stderr}"
@@ -78,7 +121,7 @@ fn con_negentropy_drain_is_not_registered() {
     let stderr = cli_harness::stderr(&output);
     assert!(
         stderr.contains("unknown command `negentropy-drain`")
-            && stderr.contains("con --db PATH [--at TIMESTAMP_MS] sync-status")
+            && stderr.contains("con [--db PATH] [--at TIMESTAMP_MS] sync-status")
             && !stderr.contains("negentropy-drain [LIMIT]"),
         "`negentropy-drain` should be rejected while `sync-status` remains available; got:\n{stderr}"
     );
@@ -96,9 +139,9 @@ fn con_chop_now_is_not_registered() {
     assert!(
         stderr.contains("unknown command `chop-now`")
             && stderr.contains(
-                "con --db PATH [--at TIMESTAMP_MS] disappearing-set WORKSPACE_ID_HEX TTL_MINUTES [--floor MINUTE]"
+                "con [--db PATH] [--at TIMESTAMP_MS] disappearing-set WORKSPACE_ID_HEX TTL_MINUTES [--floor MINUTE]"
             )
-            && !stderr.contains("con --db PATH chop-now"),
+            && !stderr.contains("con [--db PATH] chop-now"),
         "`chop-now` should be rejected while retention-floor commands remain available; got:\n{stderr}"
     );
 }
@@ -115,7 +158,7 @@ fn con_cascade_fixture_commands_are_not_registered() {
         let stderr = cli_harness::stderr(&output);
         assert!(
             stderr.contains(&format!("unknown command `{command}`"))
-                && stderr.contains("con --db PATH [--at TIMESTAMP_MS] state-summary")
+                && stderr.contains("con [--db PATH] [--at TIMESTAMP_MS] state-summary")
                 && !stderr.contains("cascade"),
             "`{command}` should be rejected while state-summary diagnostics remain available; got:\n{stderr}"
         );

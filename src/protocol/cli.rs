@@ -42,7 +42,7 @@ impl ContextCliContext {
     fn db_path(&self, command: &str) -> Result<&PathBuf, String> {
         self.db
             .as_ref()
-            .ok_or_else(|| format!("{command} requires --db PATH"))
+            .ok_or_else(|| format!("{command} requires a selected database"))
     }
 
     fn runtime(&self) -> &Runtime {

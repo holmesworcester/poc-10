@@ -34,7 +34,7 @@ If a reader understands these five files, they understand the core design:
 ## How Core Works
 
 Core is the reusable runtime loop around a protocol declaration. At startup the
-app hands core a `ProtocolDescription`; core opens the selected [SQLite](https://www.sqlite.org/index.html) database,
+app hands core a `ProtocolDescription`; core opens the selected SQLite database,
 applies core, network, and protocol schemas, builds the command registry, and
 constructs a `Runtime` from the declared projector, handler registry, row
 allowlist, schema sources, and runtime-turn hooks. From that point on, core does
@@ -167,6 +167,9 @@ rows, time wakes, and follow-up work. Runtime work can stage incoming facts in
 `incoming_facts`, submit local (ephemeral, not-replayed) intents to
 `local_intents`, and mark facts whose scheduled wake-up time has arrived as
 pending projection work.
+Any runtime effect that wants more fact projection goes through durable fact
+admission or incoming_facts staging; core does not let protocol code call a
+projector directly.
 
 Network bytes enter through the TCP listener and are first staged in the
 temporary `network_incoming` queue with origin and receive-time metadata.

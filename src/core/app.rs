@@ -8,8 +8,9 @@
 //! `main.rs` supplies argv. The protocol supplies a `ProtocolDescription`: names,
 //! runtime and runtime-turn declarations, the command table, and a context builder.
 //! This runner supplies the stable process shape around those declarations:
-//! command-first `--db`, optional command time, daemon lifecycle commands, help text, runtime
-//! opening, command dispatch, and display-line printing.
+//! command-first `--db`, a command-name-derived default database, optional
+//! command time, daemon lifecycle commands, help text, runtime opening, command
+//! dispatch, and display-line printing.
 //!
 //! The file does not own fact layouts, projector policy, handler policy, row
 //! meaning, or concrete command semantics. Change it when every protocol should
@@ -96,8 +97,8 @@ fn run_parsed<C: 'static>(
     };
     match command.as_str() {
         "start" => run_start(description, parsed),
-        "stop" => run_stop(parsed),
-        "reset" => run_reset(parsed),
+        "stop" => run_stop(description, parsed),
+        "reset" => run_reset(description, parsed),
         "assert" => run_assert(description, parsed),
         _ => run_protocol_command(description, parsed),
     }
@@ -112,9 +113,7 @@ fn run_start<C: 'static>(
     description: &'static ProtocolDescription<C>,
     parsed: ParsedArgs,
 ) -> Result<CliOutput, String> {
-    let db = parsed
-        .db
-        .ok_or_else(|| usage(description, "start requires --db PATH"))?;
+    let db = selected_db(description, parsed.db);
     let mut runtime = Runtime::open_disk(&description.runtime, &db)?;
     // Recurring operational loops are not durable state. Runtime turns offer
     // them from this in-memory scheduler after startup.
@@ -138,10 +137,11 @@ fn run_start<C: 'static>(
 ///
 /// The command is database-scoped but does not open the protocol runtime; daemon
 /// lifecycle storage is owned by `core::daemon`.
-fn run_stop(parsed: ParsedArgs) -> Result<CliOutput, String> {
-    let db = parsed
-        .db
-        .ok_or_else(|| "stop requires --db PATH".to_string())?;
+fn run_stop<C: 'static>(
+    description: &'static ProtocolDescription<C>,
+    parsed: ParsedArgs,
+) -> Result<CliOutput, String> {
+    let db = selected_db(description, parsed.db);
     daemon::stop(&db, CliArgs::new(&parsed.command[1..]))
 }
 
@@ -149,10 +149,11 @@ fn run_stop(parsed: ParsedArgs) -> Result<CliOutput, String> {
 ///
 /// This clears daemon-owned process coordination state without interpreting
 /// protocol commands or protocol rows.
-fn run_reset(parsed: ParsedArgs) -> Result<CliOutput, String> {
-    let db = parsed
-        .db
-        .ok_or_else(|| "reset requires --db PATH".to_string())?;
+fn run_reset<C: 'static>(
+    description: &'static ProtocolDescription<C>,
+    parsed: ParsedArgs,
+) -> Result<CliOutput, String> {
+    let db = selected_db(description, parsed.db);
     daemon::reset(&db, CliArgs::new(&parsed.command[1..]))
 }
 
@@ -166,10 +167,7 @@ fn run_assert<C: 'static>(
     description: &'static ProtocolDescription<C>,
     parsed: ParsedArgs,
 ) -> Result<CliOutput, String> {
-    let db = parsed
-        .db
-        .clone()
-        .ok_or_else(|| "assert requires --db PATH".to_string())?;
+    let db = selected_db(description, parsed.db.clone());
     let assertion = EventuallyAssertion::parse(description, &parsed.command[1..])?;
     let started = Instant::now();
     let timeout = Duration::from_millis(assertion.timeout_ms);
@@ -242,10 +240,7 @@ fn run_protocol_command<C: 'static>(
             &format!("unknown command `{command_name}`"),
         ));
     }
-    let db = parsed
-        .db
-        .clone()
-        .ok_or_else(|| format!("{command_name} requires --db PATH"))?;
+    let db = selected_db(description, parsed.db.clone());
     let _turn = RuntimeTurnLock::acquire(&db)?;
     let mut runtime = Runtime::open_disk(&description.runtime, &db)?;
     let mut scheduler = RecurringScheduler::install(description.runtime.handlers);
@@ -255,7 +250,7 @@ fn run_protocol_command<C: 'static>(
         &mut scheduler,
         runtime::DEFAULT_WORK_LIMIT,
     )?;
-    let mut context = (description.context)(runtime, parsed.db, parsed.at);
+    let mut context = (description.context)(runtime, Some(db), parsed.at);
     cli::run(
         description.command_name,
         description.commands,
@@ -278,22 +273,23 @@ pub fn usage<C: 'static>(description: &ProtocolDescription<C>, reason: &str) -> 
     let mut lines = vec![reason.to_string(), "usage:".to_string()];
     lines.extend([
         format!(
-            "  {} start --db PATH --listen IP PORT [--tick-ms N] [--quiet-ms N]",
+            "  {} [--db PATH] start --listen IP PORT [--tick-ms N] [--quiet-ms N]",
             description.command_name
         ),
-        format!("  {} stop --db PATH", description.command_name),
-        format!("  {} reset --db PATH", description.command_name),
+        format!("  {} [--db PATH] stop", description.command_name),
+        format!("  {} [--db PATH] reset", description.command_name),
         format!(
-            "  {} assert eventually COMMAND [ARGS...] FIELD OP VALUE --db PATH [--timeout-ms N] [--poll-ms N]",
+            "  {} [--db PATH] assert eventually COMMAND [ARGS...] FIELD OP VALUE [--timeout-ms N] [--poll-ms N]",
             description.command_name
         ),
     ]);
     for command in description.commands {
         lines.push(format!(
-            "  {} {} --db PATH [--at TIMESTAMP_MS]",
+            "  {} [--db PATH] [--at TIMESTAMP_MS] {}",
             description.command_name, command.usage
         ));
     }
+    lines.push(format!("default database: {}.db", description.command_name));
     lines.push(String::new());
     lines.push("available commands run through the target core runtime facade".to_string());
     lines.join("\n")
@@ -428,9 +424,17 @@ fn parse_positive_u64<C: 'static>(
 /// Build the focused usage text for malformed `assert eventually` invocations.
 fn assert_usage<C: 'static>(description: &ProtocolDescription<C>) -> String {
     format!(
-        "assert eventually COMMAND [ARGS...] FIELD OP VALUE [--timeout-ms N] [--poll-ms N]\nusage:\n  {} assert eventually COMMAND [ARGS...] FIELD OP VALUE --db PATH [--timeout-ms N] [--poll-ms N]",
+        "assert eventually COMMAND [ARGS...] FIELD OP VALUE [--timeout-ms N] [--poll-ms N]\nusage:\n  {} [--db PATH] assert eventually COMMAND [ARGS...] FIELD OP VALUE [--timeout-ms N] [--poll-ms N]",
         description.command_name
     )
+}
+
+fn selected_db<C: 'static>(description: &ProtocolDescription<C>, db: Option<PathBuf>) -> PathBuf {
+    db.unwrap_or_else(|| default_db_path(description))
+}
+
+fn default_db_path<C: 'static>(description: &ProtocolDescription<C>) -> PathBuf {
+    PathBuf::from(format!("./{}.db", description.command_name))
 }
 
 /// Extract unique scalar output fields from protocol command display lines.

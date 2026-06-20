@@ -2,24 +2,73 @@
 
 Context is a lightweight p2p engine for building [local-first](https://www.inkandswitch.com/essay/local-first/), end-to-end
 encrypted collaboration apps. Its storage and wire protocol are made of facts
-in the [Datalog](https://en.wikipedia.org/wiki/Datalog)/database sense: asserted ground records that can be stored,
+in the Datalog/database sense: asserted ground records that can be stored,
 matched, and projected. Context facts are immutable, fixed-layout records
 admitted locally and exchanged between peers. A fact can be a message, invite,
 membership change, sync request, receipt, key wrap, or connection handshake;
 deterministic projectors validate facts against context and turn them into
-[SQLite](https://www.sqlite.org/index.html) rows or bounded stateful work.
+SQLite rows or bounded stateful work.
 
 The result is a fact-based protocol runtime meant to be small enough to reason
 about and complete enough to be the backend for a p2p Slack: team chat, invites,
 membership, reactions, files, message history, sync, and frontend-friendly
 queries without a custom middle layer.
 
+In this repo, Context has been used to build a concrete collaboration protocol
+with encrypted messages and reactions, decentralized auth, multi-use invite
+links, file transfer, transit-layer encryption, message deletion with
+forward-secrecy protection, multi-device support, and protocol and data-layer
+versioning. The same fact/projector model should also be able to support
+document editing, where document operations are admitted as facts and projected
+into editable views.
+
 The runtime keeps the p2p stack behind a boring local API. A client should be
 able to ask for paginated message views with users, reactions, attachments, and
 download progress while Context handles networking, auth, sync, projection, and
 durable retry in one model.
 
-## Quickstart
+## Quick Start
+
+### Prerequisites
+
+- Rust toolchain (`cargo`, `rustc`)
+- SQLite (bundled via `rusqlite` in this repo)
+
+### Running The CLI
+
+Install the `con` binary, then use it directly:
+
+```bash
+cargo install --path .
+con --help
+```
+
+### CLI Preview
+
+`con` uses `con.db` in the current directory by default. Create a local
+workspace and inspect the projected state:
+
+```bash
+con reset
+con create-workspace Demo --username alice --devicename laptop
+con workspaces
+con state-summary
+```
+
+Use `--db PATH` when a flow needs separate peer databases:
+
+```bash
+con --db alice.db start --listen 127.0.0.1 41000
+con --db alice.db stop
+```
+
+### Running Tests
+
+```bash
+cargo test -- --test-threads=1
+```
+
+## Code Tour
 
 Understanding these source files should be enough to grasp the design:
 
@@ -43,44 +92,15 @@ Understanding these source files should be enough to grasp the design:
    on auth/local endpoint/ephemeral/receive context, and the handoff from
    deterministic projection into `create_connection` handler work.
 
-### Run It
-
-Build once, then run the `con` binary directly:
-
-```bash
-cargo build --target-dir target
-export PATH="$PWD/target/debug:$PATH"
-con --help
-```
-
-Use a scratch database to create a local workspace and inspect the projected
-state:
-
-```bash
-DB=/tmp/context-demo.db
-con reset --db "$DB"
-con create-workspace Demo --username alice --devicename laptop --db "$DB"
-con workspaces --db "$DB"
-con state-summary --db "$DB"
-```
-
-For live networking and daemon-host work, start a listener in one shell and
-stop it from another:
-
-```bash
-con start --db "$DB" --listen 127.0.0.1 41000
-con stop --db "$DB"
-```
-
 ## Approach
 
-In Context, a central idea is that [Datalog](https://en.wikipedia.org/wiki/Datalog)-like
-facts offer context to other facts. Context is a more general relationship than
-blocking: a context need can name an exact fact, but it can also name a range of
-facts, and context offers can be projected before the facts they refer to exist.
-That gives the runtime a standing relationship surface. Later facts can wake
-when relevant context appears, and earlier offers can satisfy later needs
-without hidden callbacks or broad scans.
+In Context, a central idea is that facts offer context to other facts.
+Context is a more general relationship than blocking: a context need can name an
+exact fact, but it can also name a range of facts, and context offers can be
+projected before the facts they refer to exist. That gives the runtime a
+standing relationship surface. Later facts can wake when relevant context
+appears, and earlier offers can satisfy later needs without hidden callbacks or
+broad scans.
 
 ```mermaid
 flowchart LR
@@ -351,6 +371,13 @@ rules and update loop live in
 short version is that protocol code owns the release marker, the update fact,
 and the rules for rebuilding materialized state, while core only enforces the
 storage-requirement guard it is handed.
+
+Release authoring follows a compatibility ceiling. A release must not author a
+durable fact version that any non-deprecated release cannot decode,
+authenticate, validate, and project; the release process tracks that ceiling as
+old releases are deprecated. Current code must still project retained old facts,
+but new releases only start authoring newer durable fact versions after all
+releases that cannot read them are known deprecated.
 
 There are two related concepts to keep separate. `CURRENT_PROTOCOL_VERSION` in
 `src/protocol/versioning.rs` is the version this checkout expects projected
