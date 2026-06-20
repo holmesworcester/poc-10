@@ -858,6 +858,7 @@ fn require_connection_endpoints(
     }
 }
 
+#[derive(Debug)]
 struct DecodedInnerBundle {
     sender_endpoint_id: FactId,
     receiver_endpoint_id: FactId,
@@ -942,7 +943,12 @@ impl<'a> Reader<'a> {
     }
 }
 
-// Tests. Ordered most-central-first: connection-material context resolution is the projector's core gate.
+// Tests. Invariants this projector must preserve:
+// 1. A frame received without its exact local connection material parks on precise needs.
+// 2. Connection frames may contain only a canonical inner bundle: TIB1, version 1,
+//    two endpoint ids, at least one length-delimited fact, and only zero padding.
+// 3. Endpoint ids recovered from the bundle are projector-owned evidence; they
+//    must survive decoding unchanged so the connection check can reject alien paths.
 #[cfg(test)]
 mod material_tests {
     use super::*;
@@ -1003,5 +1009,52 @@ mod material_tests {
             .expect("ephemeral public-key need");
         assert_eq!(secret_need.start_key.as_bytes(), public_key);
         assert_eq!(secret_need.end_key.as_bytes(), public_key);
+    }
+
+    fn packed_inner_bundle(
+        sender_endpoint_id: FactId,
+        receiver_endpoint_id: FactId,
+        facts: &[&[u8]],
+        zero_padding_bytes: usize,
+    ) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"TIB1");
+        bytes.push(1);
+        bytes.extend_from_slice(&sender_endpoint_id);
+        bytes.extend_from_slice(&receiver_endpoint_id);
+        bytes.extend_from_slice(&(facts.len() as u32).to_be_bytes());
+        for fact in facts {
+            bytes.extend_from_slice(&(fact.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(fact);
+        }
+        bytes.resize(bytes.len() + zero_padding_bytes, 0);
+        bytes
+    }
+
+    #[test]
+    fn inner_bundle_decodes_endpoints_fact_bytes_and_zero_padding() {
+        let fact_a = [11, 12, 13];
+        let fact_b = [21, 22];
+        let bytes = packed_inner_bundle([1; 32], [2; 32], &[&fact_a, &fact_b], 3);
+
+        let decoded = decode_packed_inner_bundle(&bytes).expect("decode bundle");
+
+        assert_eq!(decoded.sender_endpoint_id, [1; 32]);
+        assert_eq!(decoded.receiver_endpoint_id, [2; 32]);
+        assert_eq!(decoded.facts, vec![fact_a.to_vec(), fact_b.to_vec()]);
+    }
+
+    #[test]
+    fn inner_bundle_rejects_empty_payloads_and_nonzero_padding() {
+        let empty = packed_inner_bundle([1; 32], [2; 32], &[], 0);
+        let empty_err = decode_packed_inner_bundle(&empty).expect_err("empty bundle rejected");
+        assert!(empty_err.contains("must contain at least one fact"));
+
+        let fact = [31, 32, 33];
+        let mut padded = packed_inner_bundle([1; 32], [2; 32], &[&fact], 2);
+        *padded.last_mut().expect("padding byte") = 1;
+        let padding_err =
+            decode_packed_inner_bundle(&padded).expect_err("nonzero padding rejected");
+        assert!(padding_err.contains("nonzero padding"));
     }
 }

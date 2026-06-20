@@ -907,6 +907,111 @@ fn key_wrap(
 }
 
 // ---------------------------------------------------------------------------
+// Tests.
+// Invariants:
+// - key_wrap facts live in their workspace scope, never global or local scope;
+// - projection waits on the signer endpoint, recipient key, removal frontier,
+//   and local recipient key named by the wrap;
+// - before required context exists, projection emits no accepted row, sync
+//   offer, or local recovery fact.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod projector_tests {
+    use super::*;
+    use crate::core::project_fact::Projector;
+    use crate::protocol::auth::key_wrap::fact::{WrappedSecretKind, KEY_WRAP_CIPHERTEXT_BYTES};
+
+    #[test]
+    fn key_wrap_waits_for_exact_signer_recipient_frontier_and_local_recipient_context() {
+        let wrap = sample_wrap();
+        let fact = wrap_fact(
+            wrap.clone(),
+            crate::protocol::auth::workspace::scope(wrap.workspace_id),
+        );
+        let scope = crate::protocol::auth::workspace::scope(wrap.workspace_id);
+
+        let output = KeyWrapProjector::new()
+            .project(&fact, &ProjectionContext::default())
+            .expect("project without context");
+
+        assert_eq!(output.needs.len(), 4);
+        assert!(output.needs.contains(&ContextNeed::range(
+            fact.id,
+            "content_signer",
+            scope.clone(),
+            wrap.signer_endpoint_id,
+            wrap.signer_endpoint_id,
+        )));
+        assert!(output.needs.contains(&ContextNeed::range(
+            fact.id,
+            "recipient_key",
+            scope.clone(),
+            wrap.recipient_key_id,
+            wrap.recipient_key_id,
+        )));
+        assert!(output.needs.contains(&ContextNeed::range(
+            fact.id,
+            "auth_removal_frontier",
+            scope.clone(),
+            wrap.frontier_id,
+            wrap.frontier_id,
+        )));
+        assert!(output.needs.contains(&ContextNeed::range(
+            fact.id,
+            "local_recipient_key",
+            scope,
+            wrap.recipient_key_id,
+            wrap.recipient_key_id,
+        )));
+        assert!(output.offers.is_empty());
+        assert!(output.effects.row_mutations.is_empty());
+        assert!(output.effects.facts.is_empty());
+    }
+
+    #[test]
+    fn key_wrap_projection_rejects_scope_that_does_not_match_workspace() {
+        let wrap = sample_wrap();
+        let wrong_scope = crate::protocol::auth::workspace::scope([9; 32]);
+        let fact = wrap_fact(wrap, wrong_scope);
+
+        let err = KeyWrapProjector::new()
+            .project(&fact, &ProjectionContext::default())
+            .expect_err("wrong scope should reject");
+
+        assert!(err.contains("scope"), "{err}");
+    }
+
+    fn sample_wrap() -> KeyWrapFact {
+        KeyWrapFact {
+            workspace_id: [1; 32],
+            created_at_ms: 50,
+            signer_endpoint_id: [2; 32],
+            frontier_id: [3; 32],
+            wrapped_secret_kind: WrappedSecretKind::FrontierRoot,
+            wrapped_secret_id: [4; 32],
+            wrapped_source_secret_id: [0; 32],
+            wrapped_tombstone_node_id: [0; 32],
+            range_start: 0,
+            range_width: 0,
+            bit_depth: 0,
+            fact_id_prefix: [0; 32],
+            recipient_key_id: [6; 32],
+            sender_wrap_public_key: [7; 32],
+            nonce: [8; 24],
+            ciphertext: [9; KEY_WRAP_CIPHERTEXT_BYTES],
+        }
+    }
+
+    fn wrap_fact(wrap: KeyWrapFact, scope: FactScope) -> Fact {
+        Fact::new(
+            scope,
+            wrap.created_at_ms,
+            crate::protocol::auth::key_wrap::encode::encode_key_wrap(&wrap).expect("encode wrap"),
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests. Ordered most-central-first by how much wrap-source matching each proves.
 // ---------------------------------------------------------------------------
 #[cfg(test)]

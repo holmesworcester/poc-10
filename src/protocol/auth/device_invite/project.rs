@@ -567,3 +567,217 @@ fn device_invite_key(user_authority_fact_id: FactId, public_key: [u8; 32]) -> Ve
     key.extend_from_slice(&public_key);
     key
 }
+
+// Tests.
+//
+// Invariants:
+// - device_invite facts are global evidence for adding a device key;
+// - projection parks first on the invite's exact signature proof;
+// - user-authorized invites require matching workspace, user, and user_invite
+//   context before materializing;
+// - materialization writes one device-invite row, publishes id and composite-key
+//   offers, and syncs only the validated authority chain.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::context::ContextOffer;
+    use crate::core::facts::FactScope;
+    use crate::core::intents::RowMutation;
+    use crate::core::project_fact::{MatchedContext, Projector};
+    use crate::protocol::auth::workspace::author::create_workspace;
+    use crate::protocol::sync::share_fact_with_sync::decode_share_fact_with_sync;
+
+    const WORKSPACE_KEY: [u8; 32] = [9; 32];
+    const USER_INVITE_KEY: [u8; 32] = [7; 32];
+    const USER_KEY: [u8; 32] = [8; 32];
+    const DEVICE_INVITE_PUBLIC_KEY: [u8; 32] = [4; 32];
+
+    #[test]
+    fn user_authorized_device_invite_waits_for_signature_before_authority_context() {
+        let (_workspace, _user_invite, _user, invite, _signature) = user_authorized_fixture();
+
+        let output = DeviceInviteProjector::new()
+            .project(&invite, &ProjectionContext::default())
+            .expect("project without context");
+
+        let invite_body = decode::decode_fact(invite.body()).expect("decode invite");
+        assert_eq!(output.needs.len(), 1);
+        assert_eq!(
+            output.needs[0],
+            signature::project::signature_proof_need(
+                invite.id,
+                workspace::scope(invite_body.workspace_id),
+                invite.id,
+                invite_body.signer_public_key,
+            )
+            .expect("signature need")
+        );
+        assert!(output.offers.is_empty());
+        assert!(output.effects.row_mutations.is_empty());
+    }
+
+    #[test]
+    fn user_authorized_device_invite_materializes_row_offers_and_sync_context() {
+        let (workspace, user_invite, user, invite, signature) = user_authorized_fixture();
+
+        let output = DeviceInviteProjector::new()
+            .project(
+                &invite,
+                &user_authorized_context(&workspace, &user_invite, &user, &invite, &signature),
+            )
+            .expect("project with user-authorized context");
+
+        assert!(output.needs.is_empty());
+        assert_eq!(output.offers.len(), 2);
+        assert!(output.offers.iter().any(|offer| {
+            offer.role.as_str() == "auth_device_invite" && offer.scope == FactScope::Global
+        }));
+        assert!(output.offers.iter().any(|offer| {
+            offer.role.as_str() == "auth_device_invite_key"
+                && offer.scope == workspace::scope(workspace.id)
+        }));
+        assert_eq!(output.effects.row_mutations.len(), 1);
+        assert!(matches!(
+            &output.effects.row_mutations[0],
+            RowMutation::InsertValues(insert) if insert.table == super::super::DEVICE_INVITE_ROWS
+        ));
+        let share = decode_share_fact_with_sync(&output.effects.intents[0]).expect("share intent");
+        assert_eq!(share.workspace_id, workspace.id);
+        assert_eq!(share.owner_fact_id, invite.id);
+        assert_eq!(
+            share.context_have,
+            sorted_ids([signature.id, workspace.id, user.id, user_invite.id])
+        );
+    }
+
+    #[test]
+    fn device_invite_projection_rejects_non_global_scope() {
+        let (_workspace, _user_invite, _user, invite, _signature) = user_authorized_fixture();
+        let non_global = Fact {
+            scope: FactScope::Local,
+            ..invite
+        };
+
+        let err = DeviceInviteProjector::new()
+            .project(&non_global, &ProjectionContext::default())
+            .expect_err("local device invite should reject");
+
+        assert!(err.contains("must have global scope"), "{err}");
+    }
+
+    fn user_authorized_fixture() -> (Fact, Fact, Fact, Fact, Fact) {
+        let workspace = create_workspace(100, WORKSPACE_KEY, "Essay").expect("workspace");
+        let user_invite_public_key = crate::core::crypto::ed25519_public_key(&USER_INVITE_KEY);
+        let user_invite = crate::protocol::auth::user_invite::author::authored_user_invite_fact(
+            101,
+            user_invite_public_key,
+            workspace.id,
+            workspace.id,
+            workspace.id,
+            WORKSPACE_KEY,
+        )
+        .expect("user invite");
+        let user_public_key = crate::core::crypto::ed25519_public_key(&USER_KEY);
+        let user = crate::protocol::auth::user::author::authored_user_fact(
+            102,
+            workspace.id,
+            user_public_key,
+            "alice",
+            user_invite.id,
+            USER_INVITE_KEY,
+        )
+        .expect("user");
+        let invite = crate::protocol::auth::device_invite::author::authored_device_invite_fact(
+            103,
+            workspace.id,
+            user.id,
+            Some(user_invite.id),
+            DEVICE_INVITE_PUBLIC_KEY,
+            user.id,
+            USER_KEY,
+        )
+        .expect("device invite");
+        let signature =
+            signature::author::create_signature(workspace.id, invite.id, &USER_KEY, 104)
+                .expect("signature");
+        (workspace, user_invite, user, invite, signature)
+    }
+
+    fn user_authorized_context(
+        workspace_fact: &Fact,
+        user_invite_fact: &Fact,
+        user_fact: &Fact,
+        invite_fact: &Fact,
+        signature_fact: &Fact,
+    ) -> ProjectionContext {
+        let invite_body = decode::decode_fact(invite_fact.body()).expect("decode invite");
+        let user_invite_fact_id = invite_body
+            .user_invite_fact_id
+            .expect("user-authorized fixture uses user_invite");
+        let signature_need = signature::project::signature_proof_need(
+            invite_fact.id,
+            workspace::scope(invite_body.workspace_id),
+            invite_fact.id,
+            invite_body.signer_public_key,
+        )
+        .expect("signature need");
+        let needs = UserAuthorityNeeds::new(
+            invite_fact.id,
+            &invite_body,
+            user_invite_fact_id,
+            signature_need.clone(),
+        );
+        ProjectionContext::from_matches(vec![
+            MatchedContext {
+                need: signature_need,
+                offer: signature::project::signature_proof_offer(
+                    signature_fact.id,
+                    workspace::scope(invite_body.workspace_id),
+                    invite_fact.id,
+                    invite_body.signer_public_key,
+                )
+                .expect("signature offer"),
+                payload: signature_fact.clone(),
+            },
+            MatchedContext {
+                need: needs.workspace,
+                offer: ContextOffer::range(
+                    workspace_fact.id,
+                    "auth_workspace",
+                    FactScope::Global,
+                    workspace_fact.id,
+                    workspace_fact.id,
+                ),
+                payload: workspace_fact.clone(),
+            },
+            MatchedContext {
+                need: needs.user,
+                offer: ContextOffer::range(
+                    user_fact.id,
+                    "auth_user",
+                    FactScope::Global,
+                    user_fact.id,
+                    user_fact.id,
+                ),
+                payload: user_fact.clone(),
+            },
+            MatchedContext {
+                need: needs.user_invite,
+                offer: ContextOffer::range(
+                    user_invite_fact.id,
+                    "auth_user_invite",
+                    FactScope::Global,
+                    user_invite_fact.id,
+                    user_invite_fact.id,
+                ),
+                payload: user_invite_fact.clone(),
+            },
+        ])
+    }
+
+    fn sorted_ids(ids: impl IntoIterator<Item = FactId>) -> Vec<FactId> {
+        let mut ids = ids.into_iter().collect::<Vec<_>>();
+        ids.sort();
+        ids
+    }
+}

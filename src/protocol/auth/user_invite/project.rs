@@ -477,3 +477,158 @@ fn decode_admin_payload(
     let admin = admin::decode_fact_payload(fact.body())?;
     Ok(admin)
 }
+
+// Tests.
+//
+// Invariants:
+// - user_invite facts are global protocol evidence, not local-only state;
+// - projection parks first on the exact signature proof for this invite and
+//   signer key;
+// - bootstrap invites require a workspace-root signature plus the matching
+//   workspace payload;
+// - materialization writes one invite row, publishes both id and public-key
+//   offers, and advertises only validated context to sync.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::context::ContextOffer;
+    use crate::core::facts::FactScope;
+    use crate::core::intents::RowMutation;
+    use crate::core::project_fact::{MatchedContext, Projector};
+    use crate::protocol::auth::workspace::author::create_workspace;
+    use crate::protocol::sync::share_fact_with_sync::decode_share_fact_with_sync;
+
+    const WORKSPACE_KEY: [u8; 32] = [9; 32];
+    const INVITE_PUBLIC_KEY: [u8; 32] = [2; 32];
+
+    #[test]
+    fn bootstrap_user_invite_waits_for_signature_before_authority_context() {
+        let (_workspace, invite, _signature) = bootstrap_fixture();
+
+        let output = UserInviteProjector::new()
+            .project(&invite, &ProjectionContext::default())
+            .expect("project without context");
+
+        let invite_body = decode::decode_fact(invite.body()).expect("decode invite");
+        assert_eq!(output.needs.len(), 1);
+        assert_eq!(
+            output.needs[0],
+            signature::project::signature_proof_need(
+                invite.id,
+                workspace::scope(invite_body.workspace_id),
+                invite.id,
+                invite_body.signer_public_key,
+            )
+            .expect("signature need")
+        );
+        assert!(output.offers.is_empty());
+        assert!(output.effects.row_mutations.is_empty());
+    }
+
+    #[test]
+    fn bootstrap_user_invite_materializes_row_offers_and_sync_context() {
+        let (workspace, invite, signature) = bootstrap_fixture();
+
+        let output = UserInviteProjector::new()
+            .project(&invite, &bootstrap_context(&workspace, &invite, &signature))
+            .expect("project with bootstrap context");
+
+        assert!(output.needs.is_empty());
+        assert_eq!(output.offers.len(), 2);
+        assert!(output.offers.iter().any(|offer| {
+            offer.role.as_str() == "auth_user_invite" && offer.scope == FactScope::Global
+        }));
+        assert!(output.offers.iter().any(|offer| {
+            offer.role.as_str() == "auth_user_invite_key"
+                && offer.scope == workspace::scope(workspace.id)
+        }));
+        assert_eq!(output.effects.row_mutations.len(), 1);
+        assert!(matches!(
+            &output.effects.row_mutations[0],
+            RowMutation::InsertValues(insert) if insert.table == super::super::USER_INVITE_ROWS
+        ));
+        let share = decode_share_fact_with_sync(&output.effects.intents[0]).expect("share intent");
+        assert_eq!(share.workspace_id, workspace.id);
+        assert_eq!(share.owner_fact_id, invite.id);
+        assert_eq!(share.context_have, sorted_ids([workspace.id, signature.id]));
+    }
+
+    #[test]
+    fn user_invite_projection_rejects_non_global_scope() {
+        let (_workspace, invite, _signature) = bootstrap_fixture();
+        let non_global = Fact {
+            scope: FactScope::Local,
+            ..invite
+        };
+
+        let err = UserInviteProjector::new()
+            .project(&non_global, &ProjectionContext::default())
+            .expect_err("local invite should reject");
+
+        assert!(err.contains("must have global scope"), "{err}");
+    }
+
+    fn bootstrap_fixture() -> (Fact, Fact, Fact) {
+        let workspace = create_workspace(100, WORKSPACE_KEY, "Essay").expect("workspace");
+        let invite = crate::protocol::auth::user_invite::author::authored_user_invite_fact(
+            101,
+            INVITE_PUBLIC_KEY,
+            workspace.id,
+            workspace.id,
+            workspace.id,
+            WORKSPACE_KEY,
+        )
+        .expect("user invite");
+        let signature =
+            signature::author::create_signature(workspace.id, invite.id, &WORKSPACE_KEY, 102)
+                .expect("signature");
+        (workspace, invite, signature)
+    }
+
+    fn bootstrap_context(
+        workspace_fact: &Fact,
+        invite: &Fact,
+        signature_fact: &Fact,
+    ) -> ProjectionContext {
+        let invite_body = decode::decode_fact(invite.body()).expect("decode invite");
+        let signature_need = signature::project::signature_proof_need(
+            invite.id,
+            workspace::scope(invite_body.workspace_id),
+            invite.id,
+            invite_body.signer_public_key,
+        )
+        .expect("signature need");
+        let workspace_need =
+            WorkspaceAuthorityNeeds::new(invite.id, &invite_body, signature_need.clone()).workspace;
+        ProjectionContext::from_matches(vec![
+            MatchedContext {
+                need: signature_need,
+                offer: signature::project::signature_proof_offer(
+                    signature_fact.id,
+                    workspace::scope(invite_body.workspace_id),
+                    invite.id,
+                    invite_body.signer_public_key,
+                )
+                .expect("signature offer"),
+                payload: signature_fact.clone(),
+            },
+            MatchedContext {
+                need: workspace_need,
+                offer: ContextOffer::range(
+                    workspace_fact.id,
+                    "auth_workspace",
+                    FactScope::Global,
+                    workspace_fact.id,
+                    workspace_fact.id,
+                ),
+                payload: workspace_fact.clone(),
+            },
+        ])
+    }
+
+    fn sorted_ids(ids: impl IntoIterator<Item = FactId>) -> Vec<FactId> {
+        let mut ids = ids.into_iter().collect::<Vec<_>>();
+        ids.sort();
+        ids
+    }
+}

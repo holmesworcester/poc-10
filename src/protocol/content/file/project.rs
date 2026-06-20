@@ -698,10 +698,17 @@ fn require_fact_scope(fact: &Fact, expected: &crate::core::facts::FactScope) -> 
     }
 }
 
-// Tests. The single descriptor-field check that a non-standard slice budget is
-// rejected against the fixed file-slice slot.
+// Tests.
+//
+// Invariants:
+// - content_file facts must live in the workspace scope named by their body;
+// - projection waits for signature, signer, parent message, author, and file
+//   deletion context before it writes rows;
+// - non-empty files use the fixed slice budget consumed by file_slice facts.
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::core::project_fact::Projector;
     use crate::protocol::content::file::fact::{
         ContentFileFact, SealedMetadata, FILE_ROOT_HASH_BYTES,
     };
@@ -736,5 +743,65 @@ mod tests {
             err.contains("fixed file-slice slot"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn content_file_projector_waits_for_signature_signer_deletion_parent_and_author() {
+        let fact = authored_file();
+
+        let output = ContentFileProjector::new()
+            .project(&fact, &ProjectionContext::default())
+            .expect("project without context");
+
+        let roles = output
+            .needs
+            .iter()
+            .map(|need| need.role.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            roles,
+            std::collections::BTreeSet::from([
+                "auth_user",
+                "content_message",
+                "content_signer",
+                "fact_purged",
+                "signature_proof",
+            ])
+        );
+        assert!(output.offers.is_empty());
+        assert!(output.effects.row_mutations.is_empty());
+    }
+
+    #[test]
+    fn content_file_projector_rejects_scope_that_does_not_match_workspace() {
+        let fact = authored_file();
+        let wrong_scope = crate::core::facts::Fact {
+            scope: crate::protocol::auth::workspace::scope([9; 32]),
+            ..fact
+        };
+
+        let err = ContentFileProjector::new()
+            .project(&wrong_scope, &ProjectionContext::default())
+            .expect_err("wrong scope should reject");
+
+        assert!(err.contains("scope does not match"), "{err}");
+    }
+
+    fn authored_file() -> crate::core::facts::Fact {
+        crate::protocol::content::file::author::authored_file_fact(
+            [1; 32],
+            100,
+            [2; 32],
+            [3; 32],
+            [4; 32],
+            [6; 32],
+            1,
+            1,
+            FILE_SLICE_PLAINTEXT_BYTES as u32,
+            [7; FILE_ROOT_HASH_BYTES],
+            SealedMetadata::new(b"sealed").expect("metadata"),
+            [5; 32],
+        )
+        .expect("authored file")
     }
 }

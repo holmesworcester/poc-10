@@ -999,7 +999,17 @@ fn is_stream_closed(err: &std::io::Error) -> bool {
 // =============================================================================
 // Tests
 // =============================================================================
-// Ordered most-central-first: listener/framing roundtrips before edge guards.
+//
+// Invariants:
+// - TCP IO is only a length-prefixed opaque byte pump;
+// - empty frames are transport heartbeats, not protocol input;
+// - outgoing queue keys are idempotent for the same target and bytes, but never
+//   silently overwrite conflicting row contents;
+// - target index rows live and die with their queued outgoing frames;
+// - incoming rows claim in receive order and remain queued until explicit
+//   deletion;
+// - socket failures defer outgoing rows for a later pump instead of deleting
+//   protocol bytes.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1096,6 +1106,126 @@ mod tests {
     }
 
     #[test]
+    fn outgoing_queue_is_idempotent_and_prunes_empty_targets() {
+        let store = Db::open_memory_with_schema_sources(&[SCHEMA_SOURCE]).expect("open db");
+        let target = test_target(4101);
+        let row = OutgoingNetworkRow::new(target, b"frame".to_vec());
+
+        assert_eq!(
+            enqueue_outgoing(&store, std::slice::from_ref(&row)).expect("enqueue first row"),
+            1
+        );
+        assert_eq!(
+            enqueue_outgoing(&store, std::slice::from_ref(&row)).expect("repeat same row"),
+            0,
+            "same target and bytes should be an idempotent retry"
+        );
+        assert_eq!(
+            queued_outgoing_targets(&store, 8).expect("queued targets"),
+            vec![target]
+        );
+        assert_eq!(
+            claim_outgoing_for_target(&store, target, 8).expect("claim outgoing"),
+            vec![row.clone()]
+        );
+
+        delete_outgoing(&store, std::slice::from_ref(&row)).expect("delete outgoing row");
+
+        assert_eq!(store.table_row_count(OUTGOING_TABLE).expect("frames"), 0);
+        assert_eq!(
+            store
+                .table_row_count(OUTGOING_TARGETS_TABLE)
+                .expect("targets"),
+            0,
+            "deleting the final frame should prune the active-target index"
+        );
+    }
+
+    #[test]
+    fn outgoing_queue_rejects_key_content_conflicts() {
+        let store = Db::open_memory_with_schema_sources(&[SCHEMA_SOURCE]).expect("open db");
+        let target = test_target(4102);
+        let row = OutgoingNetworkRow::new(target, b"frame".to_vec());
+        let conflict = OutgoingNetworkRow {
+            bytes: b"different".to_vec(),
+            ..row.clone()
+        };
+
+        enqueue_outgoing(&store, std::slice::from_ref(&row)).expect("enqueue original");
+        let err = enqueue_outgoing(&store, &[conflict]).expect_err("conflict should reject");
+
+        assert!(err.contains("conflicting outgoing network row"), "{err}");
+        assert_eq!(
+            claim_outgoing_for_target(&store, target, 8).expect("claim outgoing"),
+            vec![row],
+            "conflict rejection must not replace the original queued bytes"
+        );
+    }
+
+    #[test]
+    fn incoming_queue_claims_in_receive_order_and_deletes_explicitly() {
+        let store = Db::open_memory_with_schema_sources(&[SCHEMA_SOURCE]).expect("open db");
+        let source = NetworkSource::new("127.0.0.1:4201".parse().expect("source addr"));
+        let later = IncomingNetworkRow::new(source, 20, b"later".to_vec());
+        let earlier = IncomingNetworkRow::new(source, 10, b"earlier".to_vec());
+
+        assert_eq!(
+            enqueue_incoming(&store, &[later.clone(), earlier.clone(), later.clone()])
+                .expect("enqueue incoming rows"),
+            2,
+            "same source, receive time, and bytes should deduplicate"
+        );
+        assert_eq!(
+            claim_incoming(&store, 1).expect("claim first incoming"),
+            vec![earlier.clone()]
+        );
+        assert_eq!(
+            store
+                .table_row_count(INCOMING_TABLE)
+                .expect("incoming count"),
+            2,
+            "claiming does not consume incoming rows"
+        );
+
+        delete_incoming(&store, std::slice::from_ref(&earlier)).expect("delete earlier row");
+
+        assert_eq!(
+            claim_incoming(&store, 8).expect("claim remaining incoming"),
+            vec![later]
+        );
+    }
+
+    #[test]
+    fn pump_outgoing_defers_unreachable_target_without_deleting_rows() {
+        let store = Db::open_memory_with_schema_sources(&[SCHEMA_SOURCE]).expect("open db");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("reserve local port");
+        let target = NetworkTarget::new(listener.local_addr().expect("reserved addr"));
+        drop(listener);
+        let row = OutgoingNetworkRow::new(target, b"retry-later".to_vec());
+        enqueue_outgoing(&store, std::slice::from_ref(&row)).expect("enqueue outgoing row");
+
+        let report = pump_outgoing(&store, 8, 8).expect("pump unreachable target");
+
+        assert_eq!(
+            report,
+            OutgoingPumpReport {
+                target_count: 1,
+                sent_frames: 0,
+                deferred_targets: 1,
+            }
+        );
+        assert_eq!(
+            claim_outgoing_for_target(&store, target, 8).expect("claim deferred row"),
+            vec![row],
+            "connect failure should leave bytes queued for retry"
+        );
+        assert_eq!(
+            queued_outgoing_targets(&store, 8).expect("queued target"),
+            vec![target]
+        );
+    }
+
+    #[test]
     fn write_frame_zero_budget_times_out_before_blocking() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
         let addr = listener.local_addr().expect("listener addr");
@@ -1110,5 +1240,9 @@ mod tests {
 
         assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
         reader.join().expect("reader thread");
+    }
+
+    fn test_target(port: u16) -> NetworkTarget {
+        NetworkTarget::new(format!("127.0.0.1:{port}").parse().expect("target addr"))
     }
 }

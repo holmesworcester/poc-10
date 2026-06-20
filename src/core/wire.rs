@@ -772,8 +772,20 @@ impl<'a> Reader<'a> {
 }
 
 // Tests.
-// Ordered most-central-first; an in-module test helper splits these into two
-// runs, each led by its broadest round-trip and length-invariant proof.
+//
+// Invariants:
+// - Fixed-width integers, booleans, bytes, tags, slots, and text have canonical
+//   mechanical byte representations.
+// - Sequential Writer and Reader preserve field order, advance monotonically, and
+//   reject incomplete, trailing, or overflowing reads.
+// - Length-prefixed byte/string codecs preserve valid UTF-8 and reject malformed
+//   text.
+// - Padded containers allow only zero padding; FixedText additionally rejects
+//   interior NUL and invalid UTF-8.
+// - Zeroing helpers touch only caller-selected byte ranges.
+//
+// The tests read from primitive layout proofs to sequential plumbing, then padded
+// containers and helper guards.
 
 #[cfg(test)]
 mod tests {
@@ -830,6 +842,86 @@ mod tests {
             }
         );
         assert!(FixedBytes::<32>::decode(&[0; 32]).is_ok());
+    }
+
+    #[test]
+    fn writer_and_reader_round_trip_sequential_fields() {
+        let mut writer = Writer::with_capacity(64);
+        writer.u8(9);
+        writer.bool8(true);
+        writer.u16be(0x1234);
+        writer.u32be(0x1234_5678);
+        writer.u64be(0x1234_5678_9abc_def0);
+        writer.fixed::<3>(b"abc");
+        writer.bytes_u16be(b"payload").expect("bytes_u16");
+
+        let bytes = writer.finish();
+        let mut reader = Reader::new(&bytes);
+
+        assert_eq!(reader.u8().expect("u8"), 9);
+        assert!(reader.bool8().expect("bool"));
+        assert_eq!(reader.u16be().expect("u16"), 0x1234);
+        assert_eq!(reader.u32be().expect("u32"), 0x1234_5678);
+        assert_eq!(reader.u64be().expect("u64"), 0x1234_5678_9abc_def0);
+        assert_eq!(reader.array::<3>().expect("array"), *b"abc");
+        assert_eq!(reader.bytes_u16be().expect("bytes"), b"payload");
+        reader.finish().expect("complete read");
+    }
+
+    #[test]
+    fn reader_rejects_trailing_overlong_and_overflow_reads() {
+        let mut trailing = Reader::new(&[1, 2]);
+        assert_eq!(trailing.u8().expect("u8"), 1);
+        assert_eq!(
+            trailing.finish().unwrap_err(),
+            WireError::WrongLength {
+                expected: 1,
+                actual: 2,
+            }
+        );
+
+        let mut short = Reader::new(&[1, 2]);
+        assert_eq!(
+            short.bytes(3).unwrap_err(),
+            WireError::WrongLength {
+                expected: 3,
+                actual: 2,
+            }
+        );
+
+        let mut overflow = Reader::new(&[1]);
+        overflow.u8().expect("advance offset");
+        assert_eq!(
+            overflow.bytes(usize::MAX).unwrap_err(),
+            WireError::ValueTooLarge {
+                max: usize::MAX,
+                actual: usize::MAX,
+            }
+        );
+    }
+
+    #[test]
+    fn length_prefixed_string_codecs_round_trip_and_reject_invalid_utf8() {
+        let mut writer = Writer::new();
+        writer.string_u16be("hello").expect("u16 string");
+        writer.string_u32be("world").expect("u32 string");
+        let bytes = writer.finish();
+        let mut reader = Reader::new(&bytes);
+
+        assert_eq!(reader.string_u16be().expect("first string"), "hello");
+        assert_eq!(reader.string_u32be().expect("second string"), "world");
+        reader.finish().expect("complete read");
+
+        let invalid_u16 = [0, 1, 0xff];
+        assert_eq!(
+            Reader::new(&invalid_u16).string_u16be().unwrap_err(),
+            WireError::InvalidUtf8
+        );
+        let invalid_u32 = [0, 0, 0, 1, 0xff];
+        assert_eq!(
+            Reader::new(&invalid_u32).string_u32be().unwrap_err(),
+            WireError::InvalidUtf8
+        );
     }
 
     #[test]
@@ -900,6 +992,41 @@ mod tests {
         assert_eq!(
             FixedSlot::<4>::decode(&out).unwrap_err(),
             WireError::ValueTooLarge { max: 4, actual: 5 }
+        );
+    }
+
+    #[test]
+    fn fixed_text_preserves_canonical_padding_and_string_traits() {
+        let text = FixedText::<8>::new("topo").expect("fixed text");
+
+        assert_eq!(text.as_str(), "topo");
+        assert_eq!(text.as_bytes(), b"topo");
+        assert_eq!(text.padded_bytes(), b"topo\0\0\0\0");
+        assert_eq!(text.to_string(), "topo");
+        assert_eq!(text, "topo");
+        assert_eq!("topo", text);
+
+        let decoded = FixedText::<8>::from_padded(*b"topo\0\0\0\0").expect("decode");
+        assert_eq!(decoded, "topo");
+    }
+
+    #[test]
+    fn fixed_text_rejects_overflow_interior_nul_and_invalid_utf8() {
+        assert_eq!(
+            FixedText::<3>::new("tool").unwrap_err(),
+            WireError::ValueTooLarge { max: 3, actual: 4 }
+        );
+        assert_eq!(
+            FixedText::<8>::new("to\0po").unwrap_err(),
+            WireError::InteriorNul { index: 2 }
+        );
+        assert_eq!(
+            FixedText::<4>::from_padded([0xff, 0, 0, 0]).unwrap_err(),
+            WireError::InvalidUtf8
+        );
+        assert_eq!(
+            FixedText::<4>::from_padded([b'a', 0, b'b', 0]).unwrap_err(),
+            WireError::NonZeroPadding { index: 2 }
         );
     }
 

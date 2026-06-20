@@ -31,7 +31,13 @@ pub mod decode {
     }
 
     // Tests.
-    // The fixed-width round-trip for the range request.
+    //
+    // Invariants:
+    // - Range-request bytes have one fixed-width representation.
+    // - Decode preserves workspace, connection, and inclusive timestamp bounds.
+    // - Inverted ranges are rejected before projection.
+    //
+    // The tests read from the full layout proof to the range-order guard.
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -53,6 +59,20 @@ pub mod decode {
                 decode_fact(&encoded).expect("decode sync range request"),
                 fact
             );
+        }
+
+        #[test]
+        fn sync_range_request_rejects_inverted_range() {
+            let mut encoded = vec![0; ENCODED_BYTES];
+            encoded[0] = super::super::super::encode::TYPE_SYNC_RANGE_REQUEST;
+            encoded[1..33].copy_from_slice(&[1; 32]);
+            encoded[33..65].copy_from_slice(&[2; 32]);
+            crate::core::wire::put_u64be(20, &mut encoded[65..73]).expect("start");
+            crate::core::wire::put_u64be(10, &mut encoded[73..81]).expect("end");
+
+            let err = decode_fact(&encoded).expect_err("inverted range should reject");
+
+            assert_eq!(err, "sync range request is inverted");
         }
     }
 }
@@ -91,7 +111,16 @@ pub mod authenticate {
     }
 
     // Tests.
-    // Most-central-first: the happy path then the id check, then decode-layer guards.
+    //
+    // Invariants:
+    // - Authentication admits canonical range requests.
+    // - The fact id is bound to the canonical bytes.
+    // - Decode-owned tag and length failures still reject at the authentication
+    //   boundary.
+    // - Admission scope is unsigned metadata and is checked by projection, not
+    //   authentication.
+    //
+    // The tests read from canonical admission to id and layout guards.
     #[cfg(test)]
     mod tests {
         use crate::core::facts::{Fact, FactScope};
@@ -246,5 +275,65 @@ fn require_fact_scope(fact: &Fact, expected: &FactScope) -> Result<(), String> {
         Ok(())
     } else {
         Err("sync context fact scope does not match body workspace".to_string())
+    }
+}
+
+// Tests.
+//
+// Invariants:
+// - Range-request projection accepts only the workspace scope named in the body.
+// - Projection intentionally emits no rows, needs, offers, intents, wakes, or
+//   purges; compare/send handlers own transfer planning.
+//
+// The tests prove the empty materialization contract first, then the scope guard.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::sync::range_request::encode;
+    use crate::protocol::sync::range_request::fact::SyncRangeRequestFact;
+
+    fn range_request_fact() -> Fact {
+        let request = SyncRangeRequestFact {
+            workspace_id: [1; 32],
+            connection_id: [2; 32],
+            start: 10,
+            end: 20,
+        };
+        Fact::new(
+            crate::protocol::auth::workspace::scope(request.workspace_id),
+            100,
+            encode::encode_fact(&request).expect("encode range request"),
+        )
+    }
+
+    #[test]
+    fn range_request_with_matching_workspace_scope_projects_empty_output() {
+        let fact = range_request_fact();
+
+        let output = SyncRangeRequestProjector::new()
+            .project(&fact, &ProjectionContext::default())
+            .expect("project range request");
+
+        assert!(output.needs.is_empty());
+        assert!(output.offers.is_empty());
+        assert!(output.effects.row_mutations.is_empty());
+        assert!(output.effects.intents.is_empty());
+        assert!(output.effects.purged_facts.is_empty());
+        assert!(output.time_wakes.is_empty());
+    }
+
+    #[test]
+    fn range_request_projection_rejects_scope_that_does_not_match_workspace() {
+        let canonical = range_request_fact();
+        let wrong_scope = Fact {
+            scope: FactScope::Global,
+            ..canonical
+        };
+
+        let err = SyncRangeRequestProjector::new()
+            .project(&wrong_scope, &ProjectionContext::default())
+            .expect_err("wrong scope should reject");
+
+        assert_eq!(err, "sync context fact scope does not match body workspace");
     }
 }

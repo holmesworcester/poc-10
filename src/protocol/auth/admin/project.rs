@@ -621,3 +621,214 @@ fn decode_user_invite_context(
     }
     Ok(invite)
 }
+
+// Tests.
+//
+// Invariants:
+// - admin grants are global evidence and cannot be admitted as local-only facts;
+// - projection parks first on the grant's exact signature proof;
+// - bootstrap admin grants must be signed by the workspace root and target a
+//   user whose signer is a workspace-root user_invite;
+// - materialization writes one admin row, publishes both id and user-scoped
+//   offers, and syncs only the validated authority chain.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::context::ContextOffer;
+    use crate::core::facts::FactScope;
+    use crate::core::intents::RowMutation;
+    use crate::core::project_fact::{MatchedContext, Projector};
+    use crate::protocol::auth::workspace::author::create_workspace;
+    use crate::protocol::sync::share_fact_with_sync::decode_share_fact_with_sync;
+
+    const WORKSPACE_KEY: [u8; 32] = [9; 32];
+    const USER_INVITE_KEY: [u8; 32] = [7; 32];
+    const ADMIN_USER_PUBLIC_KEY: [u8; 32] = [2; 32];
+
+    #[test]
+    fn bootstrap_admin_waits_for_signature_before_authority_context() {
+        let (_workspace, _user_invite, _user, admin, _signature) = bootstrap_fixture();
+
+        let output = AdminProjector::new()
+            .project(&admin, &ProjectionContext::default())
+            .expect("project without context");
+
+        let admin_body = decode::decode_fact(admin.body()).expect("decode admin");
+        assert_eq!(output.needs.len(), 1);
+        assert_eq!(
+            output.needs[0],
+            signature::project::signature_proof_need(
+                admin.id,
+                workspace::scope(admin_body.workspace_id),
+                admin.id,
+                admin_body.signer_public_key,
+            )
+            .expect("signature need")
+        );
+        assert!(output.offers.is_empty());
+        assert!(output.effects.row_mutations.is_empty());
+    }
+
+    #[test]
+    fn bootstrap_admin_materializes_row_offers_and_sync_context() {
+        let (workspace, user_invite, user, admin, signature) = bootstrap_fixture();
+
+        let output = AdminProjector::new()
+            .project(
+                &admin,
+                &bootstrap_context(&workspace, &user_invite, &user, &admin, &signature),
+            )
+            .expect("project with bootstrap context");
+
+        assert!(output.needs.is_empty());
+        assert_eq!(output.offers.len(), 2);
+        assert!(output
+            .offers
+            .iter()
+            .any(|offer| offer.role.as_str() == "auth_admin" && offer.scope == FactScope::Global));
+        assert!(output.offers.iter().any(|offer| {
+            offer.role.as_str() == "auth_admin" && offer.scope == workspace::scope(workspace.id)
+        }));
+        assert_eq!(output.effects.row_mutations.len(), 1);
+        assert!(matches!(
+            &output.effects.row_mutations[0],
+            RowMutation::InsertValues(insert) if insert.table == super::super::ADMIN_ROWS
+        ));
+        let share = decode_share_fact_with_sync(&output.effects.intents[0]).expect("share intent");
+        assert_eq!(share.workspace_id, workspace.id);
+        assert_eq!(share.owner_fact_id, admin.id);
+        assert_eq!(
+            share.context_have,
+            sorted_ids([signature.id, workspace.id, user.id, user_invite.id])
+        );
+    }
+
+    #[test]
+    fn admin_projection_rejects_non_global_scope() {
+        let (_workspace, _user_invite, _user, admin, _signature) = bootstrap_fixture();
+        let non_global = Fact {
+            scope: FactScope::Local,
+            ..admin
+        };
+
+        let err = AdminProjector::new()
+            .project(&non_global, &ProjectionContext::default())
+            .expect_err("local admin should reject");
+
+        assert!(err.contains("must have global scope"), "{err}");
+    }
+
+    fn bootstrap_fixture() -> (Fact, Fact, Fact, Fact, Fact) {
+        let workspace = create_workspace(100, WORKSPACE_KEY, "Essay").expect("workspace");
+        let user_invite_public_key = crate::core::crypto::ed25519_public_key(&USER_INVITE_KEY);
+        let user_invite = crate::protocol::auth::user_invite::author::authored_user_invite_fact(
+            101,
+            user_invite_public_key,
+            workspace.id,
+            workspace.id,
+            workspace.id,
+            WORKSPACE_KEY,
+        )
+        .expect("user invite");
+        let user = crate::protocol::auth::user::author::authored_user_fact(
+            102,
+            workspace.id,
+            ADMIN_USER_PUBLIC_KEY,
+            "alice",
+            user_invite.id,
+            USER_INVITE_KEY,
+        )
+        .expect("user");
+        let admin_body = AdminFact {
+            created_at_ms: 103,
+            workspace_id: workspace.id,
+            public_key: ADMIN_USER_PUBLIC_KEY,
+            authority_fact_id: workspace.id,
+            user_fact_id: user.id,
+            signer_id: workspace.id,
+            signer_public_key: [0; 32],
+        };
+        let admin = crate::protocol::auth::admin::author::authored_admin_fact(
+            103,
+            workspace.id,
+            WORKSPACE_KEY,
+            admin_body,
+        )
+        .expect("admin");
+        let signature =
+            signature::author::create_signature(workspace.id, admin.id, &WORKSPACE_KEY, 104)
+                .expect("signature");
+        (workspace, user_invite, user, admin, signature)
+    }
+
+    fn bootstrap_context(
+        workspace_fact: &Fact,
+        user_invite_fact: &Fact,
+        user_fact: &Fact,
+        admin_fact: &Fact,
+        signature_fact: &Fact,
+    ) -> ProjectionContext {
+        let admin_body = decode::decode_fact(admin_fact.body()).expect("decode admin");
+        let signature_need = signature::project::signature_proof_need(
+            admin_fact.id,
+            workspace::scope(admin_body.workspace_id),
+            admin_fact.id,
+            admin_body.signer_public_key,
+        )
+        .expect("signature need");
+        let needs = BootstrapAdminNeeds::new(admin_fact.id, &admin_body, signature_need.clone());
+        let user_invite_need = auth_user_invite_need(admin_fact.id, user_invite_fact.id);
+        ProjectionContext::from_matches(vec![
+            MatchedContext {
+                need: signature_need,
+                offer: signature::project::signature_proof_offer(
+                    signature_fact.id,
+                    workspace::scope(admin_body.workspace_id),
+                    admin_fact.id,
+                    admin_body.signer_public_key,
+                )
+                .expect("signature offer"),
+                payload: signature_fact.clone(),
+            },
+            MatchedContext {
+                need: needs.workspace,
+                offer: ContextOffer::range(
+                    workspace_fact.id,
+                    "auth_workspace",
+                    FactScope::Global,
+                    workspace_fact.id,
+                    workspace_fact.id,
+                ),
+                payload: workspace_fact.clone(),
+            },
+            MatchedContext {
+                need: needs.user,
+                offer: ContextOffer::range(
+                    user_fact.id,
+                    "auth_user",
+                    FactScope::Global,
+                    user_fact.id,
+                    user_fact.id,
+                ),
+                payload: user_fact.clone(),
+            },
+            MatchedContext {
+                need: user_invite_need,
+                offer: ContextOffer::range(
+                    user_invite_fact.id,
+                    "auth_user_invite",
+                    FactScope::Global,
+                    user_invite_fact.id,
+                    user_invite_fact.id,
+                ),
+                payload: user_invite_fact.clone(),
+            },
+        ])
+    }
+
+    fn sorted_ids(ids: impl IntoIterator<Item = FactId>) -> Vec<FactId> {
+        let mut ids = ids.into_iter().collect::<Vec<_>>();
+        ids.sort();
+        ids
+    }
+}

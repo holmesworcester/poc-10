@@ -29,7 +29,13 @@ pub mod decode {
     }
 
     // Tests.
-    // Single round-trip test: encode then decode recovers the fact.
+    //
+    // Invariants:
+    // - Recipient-key bytes have one fixed-width representation.
+    // - Decode preserves workspace, endpoint, key, previous-key, timestamp, and
+    //   signer fields exactly.
+    //
+    // The single test is the full layout proof for this small payload.
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -108,7 +114,16 @@ pub mod authenticate {
     }
 
     // Tests.
-    // Ordered most-central-first: happy-path authentication, then the id guard, then layout guards.
+    //
+    // Invariants:
+    // - Authentication admits a canonical signed recipient key.
+    // - The fact id is bound to the canonical bytes.
+    // - A recipient key cannot name its own fact id as the previous key.
+    // - Decode-owned tag and length failures still reject at the authentication
+    //   boundary.
+    //
+    // The tests read from canonical admission to id, intrinsic-field, and layout
+    // guards.
     #[cfg(test)]
     mod tests {
         use crate::core::crypto;
@@ -159,6 +174,22 @@ pub mod authenticate {
                 bytes: canonical.bytes.clone(),
             };
             assert!(is_invalid(&forged));
+        }
+
+        #[test]
+        fn rejects_self_supersession_after_id_binding_is_proven() {
+            let canonical = canonical_fact();
+            let mut decoded =
+                super::super::decode::decode_recipient_key(canonical.body()).expect("decode");
+            decoded.previous_recipient_key_id = canonical.id;
+
+            let err = super::prove_decoded_recipient_key(&canonical, decoded)
+                .expect_err("recipient key cannot supersede itself");
+
+            assert_eq!(
+                err,
+                "recipient key cannot supersede itself (previous_recipient_key_id == fact_id)"
+            );
         }
 
         #[test]

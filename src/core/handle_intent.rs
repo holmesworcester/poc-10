@@ -715,9 +715,19 @@ pub(crate) fn insert_intent_in_tx(
     intent: &Intent,
     mode: HandlerMode,
 ) -> rusqlite::Result<()> {
+    insert_intent_with_id_source_in_tx(db, queue, intent, mode, random_intent_id)
+}
+
+fn insert_intent_with_id_source_in_tx(
+    db: &Db,
+    queue: IntentQueue,
+    intent: &Intent,
+    mode: HandlerMode,
+    mut next_intent_id: impl FnMut() -> [u8; 16],
+) -> rusqlite::Result<()> {
     let table_name = quoted_table_name(queue.table())?;
     for _ in 0..8 {
-        let intent_id = random_intent_id();
+        let intent_id = next_intent_id();
         let changed = db.conn().execute(
             &format!(
                 "INSERT OR IGNORE INTO {table_name} (intent_id, kind, intent_key, payload, replay)
@@ -801,9 +811,18 @@ pub(crate) fn submit_intent_to_queue(
 // Tests
 // =============================================================================
 //
-// Ordered most-central-first: the success and rollback contracts of the
-// load/classify/commit lifecycle lead; terminal drops and queue-ordering guards
-// follow.
+// Invariants:
+// - durable and local queues are independent exact-row queues;
+// - successful handling consumes only the selected row after committing validated
+//   output in the same transaction;
+// - handler-owned SQL rolls back on handler failure or invalid output;
+// - context facts load by exact retained ids and context rows leave with their
+//   queue row;
+// - terminal invalid/stale work is consumed without running protocol code;
+// - repeated semantic work stays distinct unless the handler's own output
+//   collapses it;
+// - queue order is insertion order, and random row-id collisions retry before
+//   failing.
 
 #[cfg(test)]
 mod tests {
@@ -1281,6 +1300,91 @@ mod tests {
     }
 
     #[test]
+    fn intent_insert_retries_after_row_id_collision() {
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
+        let collision_id = test_intent_id(1);
+        let retried_id = test_intent_id(2);
+        let intent = test_intent("handled", b"retried");
+
+        store
+            .write_transaction(|tx| {
+                tx.conn().execute(
+                    "INSERT INTO intents (intent_id, kind, intent_key, payload, replay)
+                     VALUES (?1, 'handled', ?2, ?3, 0)",
+                    params![
+                        collision_id.as_slice(),
+                        b"existing".as_slice(),
+                        b"payload".as_slice()
+                    ],
+                )?;
+                let mut calls = 0;
+                insert_intent_with_id_source_in_tx(
+                    tx,
+                    IntentQueue::Durable,
+                    &intent,
+                    HandlerMode::Live,
+                    || {
+                        calls += 1;
+                        if calls == 1 {
+                            collision_id
+                        } else {
+                            retried_id
+                        }
+                    },
+                )?;
+                assert_eq!(calls, 2, "one collision should force one retry");
+                Ok(())
+            })
+            .expect("insert after retry");
+
+        assert_eq!(store.table_row_count(INTENTS).expect("durable count"), 2);
+        assert_eq!(
+            durable_intent_key_by_id(&store, &retried_id),
+            b"retried".to_vec(),
+            "retry should create a new row, not replace the collided row"
+        );
+    }
+
+    #[test]
+    fn intent_insert_errors_after_repeated_row_id_collisions() {
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
+        let collision_id = test_intent_id(3);
+        let intent = test_intent("handled", b"never-inserted");
+
+        let err = store
+            .write_transaction(|tx| {
+                tx.conn().execute(
+                    "INSERT INTO intents (intent_id, kind, intent_key, payload, replay)
+                     VALUES (?1, 'handled', ?2, ?3, 0)",
+                    params![
+                        collision_id.as_slice(),
+                        b"existing".as_slice(),
+                        b"payload".as_slice()
+                    ],
+                )?;
+                insert_intent_with_id_source_in_tx(
+                    tx,
+                    IntentQueue::Durable,
+                    &intent,
+                    HandlerMode::Live,
+                    || collision_id,
+                )
+            })
+            .expect_err("repeated collisions should fail");
+
+        assert!(
+            err.to_string()
+                .contains("intent id collision while queuing intent"),
+            "{err}"
+        );
+        assert_eq!(
+            store.table_row_count(INTENTS).expect("durable count"),
+            0,
+            "failed transaction should roll back the preloaded collision row"
+        );
+    }
+
+    #[test]
     fn intent_rows_select_durable_by_insertion_order() {
         let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
         for intent in [
@@ -1605,6 +1709,24 @@ mod tests {
                 |row| row.get::<_, i64>(0),
             )
             .expect("handler state count") as usize
+    }
+
+    fn test_intent_id(seed: u8) -> [u8; 16] {
+        let mut id = [seed; 16];
+        id[6] = (id[6] & 0x0f) | 0x40;
+        id[8] = (id[8] & 0x3f) | 0x80;
+        id
+    }
+
+    fn durable_intent_key_by_id(store: &Db, intent_id: &[u8]) -> Vec<u8> {
+        store
+            .conn()
+            .query_row(
+                "SELECT intent_key FROM intents WHERE intent_id = ?1",
+                params![intent_id],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .expect("query durable intent key")
     }
 
     #[test]

@@ -720,8 +720,13 @@ fn placeholders(count: usize) -> String {
 // Tests
 // =============================================================================
 //
-// Ordered most-central-first: the full insert/delete/replace plus rollback proof
-// of the typed row-mutation path leads; narrow guards and config checks follow.
+// Invariants:
+// - row mutations are atomic at the caller's transaction boundary;
+// - typed inserts are idempotent only when every inserted column still matches;
+// - replacement requires an explicit delete followed by an insert;
+// - storage-version reads use the declared newest-marker order and distinguish
+//   match, mismatch, missing, and absent-marker databases;
+// - connection pragmas keep core-local temp tables in memory.
 
 #[cfg(test)]
 mod tests {
@@ -730,6 +735,7 @@ mod tests {
     const TEST_ROWS: TableName = TableName::new("test_rows");
     const TEST_COLUMNS: &[&str] = &["id", "payload"];
     const TEST_KEY_COLUMNS: &[&str] = &["id"];
+    const VERSION_ROWS: TableName = TableName::new("version_rows");
     const TEST_SCHEMA: SchemaSource = SchemaSource {
         ddl: r#"
 CREATE TABLE IF NOT EXISTS test_rows (
@@ -738,6 +744,21 @@ CREATE TABLE IF NOT EXISTS test_rows (
 );
 "#,
         storage_version: None,
+        replay: ReplayTables::EMPTY,
+    };
+    const VERSION_SCHEMA: SchemaSource = SchemaSource {
+        ddl: r#"
+CREATE TABLE IF NOT EXISTS version_rows (
+    update_fact_id BLOB PRIMARY KEY NOT NULL,
+    protocol_version INTEGER NOT NULL,
+    applied_at_ms INTEGER NOT NULL
+);
+"#,
+        storage_version: Some(StorageVersionSource {
+            table: VERSION_ROWS,
+            version_column: "protocol_version",
+            order_by_columns: &["applied_at_ms", "update_fact_id"],
+        }),
         replay: ReplayTables::EMPTY,
     };
 
@@ -809,6 +830,83 @@ CREATE TABLE IF NOT EXISTS test_rows (
     }
 
     #[test]
+    fn insert_values_reject_conflicting_existing_row_without_replacing_it() {
+        let store = Db::open_memory_with_schema_sources(&[TEST_SCHEMA]).expect("open memory db");
+
+        assert_eq!(
+            store
+                .insert_table_values(vec![test_insert(b"one", b"first")])
+                .expect("insert first row"),
+            1
+        );
+        assert_eq!(
+            store
+                .insert_table_values(vec![test_insert(b"one", b"first")])
+                .expect("repeat same row"),
+            0,
+            "identical rows are idempotent"
+        );
+        let err = store
+            .insert_table_values(vec![test_insert(b"one", b"second")])
+            .expect_err("conflicting row should reject");
+
+        assert!(err.to_string().contains("conflicting row for test_rows"));
+        assert_eq!(
+            test_payload(&store, b"one"),
+            b"first".to_vec(),
+            "conflict detection must not replace the existing row"
+        );
+    }
+
+    #[test]
+    fn storage_version_marker_reads_latest_declared_row() {
+        let store = Db::open_memory_with_schema_sources(&[VERSION_SCHEMA]).expect("open db");
+        insert_version_marker(&store, [1; 32], 4, 20);
+        insert_version_marker(&store, [2; 32], 5, 10);
+        insert_version_marker(&store, [3; 32], 6, 20);
+
+        assert_eq!(
+            store.current_storage_version().expect("read version"),
+            Some(6),
+            "newest marker uses descending order columns, including the tie-breaker"
+        );
+        assert!(store.storage_version_is(6).expect("matching version"));
+        assert!(!store.storage_version_is(5).expect("mismatching version"));
+        assert!(store.require_storage_version(6).is_ok());
+        let err = store
+            .require_storage_version(5)
+            .expect_err("mismatch should reject");
+        assert!(err.contains("required_version=5 stored_version=6"), "{err}");
+    }
+
+    #[test]
+    fn storage_version_marker_reports_missing_and_absent_states() {
+        let versioned = Db::open_memory_with_schema_sources(&[VERSION_SCHEMA]).expect("open db");
+        assert_eq!(
+            versioned
+                .current_storage_version()
+                .expect("read empty marker"),
+            None
+        );
+        let err = versioned
+            .require_storage_version(1)
+            .expect_err("missing marker should reject");
+        assert!(
+            err.contains("required_version=1 stored_version=missing"),
+            "{err}"
+        );
+
+        let unversioned = Db::open_memory_with_schema_sources(&[TEST_SCHEMA]).expect("open db");
+        assert_eq!(
+            unversioned
+                .current_storage_version()
+                .expect("read absent marker"),
+            None,
+            "databases with no declared marker read as absent, not zero"
+        );
+    }
+
+    #[test]
     fn db_connections_keep_temp_storage_in_memory() {
         let store = Db::open_memory().expect("open memory db");
 
@@ -854,5 +952,20 @@ CREATE TABLE IF NOT EXISTS test_rows (
             .query_row("SELECT 1 FROM test_rows WHERE id = ?1", [id], |_| Ok(()))
             .optional()
             .map(|row| row.is_some())
+    }
+
+    fn insert_version_marker(store: &Db, update_fact_id: [u8; 32], protocol_version: u32, at: u64) {
+        store
+            .conn()
+            .execute(
+                "INSERT INTO version_rows (update_fact_id, protocol_version, applied_at_ms)
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    update_fact_id.as_slice(),
+                    i64::from(protocol_version),
+                    i64::try_from(at).expect("test timestamp fits sqlite")
+                ],
+            )
+            .expect("insert version marker");
     }
 }
