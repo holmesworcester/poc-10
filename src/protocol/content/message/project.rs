@@ -61,6 +61,8 @@ pub mod decode {
         format!("{err:?}")
     }
 
+    // Tests. Ordered most-central first: the fixed-width roundtrip proves the
+    // whole codec, then the tag and length rejections guard the layout.
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -145,6 +147,8 @@ pub mod authenticate {
         Ok(message)
     }
 
+    // Tests. Ordered most-central first: a canonical fact authenticates, then
+    // the id-binding invariant (id == hash(bytes)), then the layout rejections.
     #[cfg(test)]
     mod tests {
         use crate::core::facts::Fact;
@@ -193,6 +197,18 @@ pub mod authenticate {
         }
 
         #[test]
+        fn rejects_id_not_matching_bytes() {
+            let canonical = canonical_fact();
+            let forged = Fact {
+                id: [0; 32],
+                scope: canonical.scope.clone(),
+                timestamp: canonical.timestamp,
+                bytes: canonical.bytes.clone(),
+            };
+            assert!(is_invalid(&forged));
+        }
+
+        #[test]
         fn rejects_wrong_tag() {
             let canonical = canonical_fact();
             let mut bytes = canonical.bytes.clone();
@@ -214,18 +230,6 @@ pub mod authenticate {
                 canonical.timestamp,
                 bytes
             )));
-        }
-
-        #[test]
-        fn rejects_id_not_matching_bytes() {
-            let canonical = canonical_fact();
-            let forged = Fact {
-                id: [0; 32],
-                scope: canonical.scope.clone(),
-                timestamp: canonical.timestamp,
-                bytes: canonical.bytes.clone(),
-            };
-            assert!(is_invalid(&forged));
         }
     }
 }
@@ -1021,6 +1025,14 @@ pub fn context_payload<'a>(
     context.payload_for_checked(need, label)
 }
 
+// Tests.
+//
+// The semantic projector is the heart of this file; these are ordered
+// most-central first. The full materialize-after-context happy path leads,
+// followed by the wait/park gates, then the deletion and expiry/retraction
+// branches, and finally the row-builder, purge-coordinate, and malformed-bytes
+// checks. Reading top-down shows when a message becomes a visible row and when
+// it is withheld or removed.
 #[cfg(test)]
 mod projector_tests {
     use crate as topo;
@@ -1072,112 +1084,6 @@ mod projector_tests {
                     _ => None,
                 })
         };
-    }
-
-    #[test]
-    fn content_message_row_builders_use_registry_typed_schemas() {
-        let fact = ContentMessageFact {
-            workspace_id: [1; 32],
-            created_at_ms: 60_000,
-            author_user_id: [2; 32],
-            signer_id: [3; 32],
-            signer_public_key: [7; 32],
-            frontier_id: [4; 32],
-            local_history_node_secret_id: [5; 32],
-            expires_at_minute: u64::MAX,
-            retention_policy_id: [6; 32],
-            minute: 1,
-            nonce: [8; crate::protocol::content::message::fact::NONCE_BYTES],
-            ciphertext: MessageCiphertext::new(b"sealed").expect("ciphertext"),
-        };
-
-        let row = super::content_message_row([9; 32], &fact);
-        assert_eq!(row.table, read_models::CONTENT_MESSAGE_ROWS);
-        assert_eq!(row.columns, read_models::CONTENT_MESSAGES.columns);
-        assert_eq!(
-            row.values[0],
-            topo::core::intents::Value::Bytes(vec![1; 32])
-        );
-        assert_eq!(
-            row.values[1],
-            topo::core::intents::Value::Bytes(vec![9; 32])
-        );
-        assert_eq!(
-            row.values[2],
-            topo::core::intents::Value::Bytes(vec![2; 32])
-        );
-        assert_eq!(
-            row.values[4],
-            topo::core::intents::Value::Bytes(vec![3; 32])
-        );
-        assert_eq!(
-            row.values[5],
-            topo::core::intents::Value::Bytes(vec![4; 32])
-        );
-        assert_eq!(row.values[7], topo::core::intents::Value::Bool(false));
-
-        let opened = super::opened_message_row(super::OpenedMessageRow {
-            workspace_id: [1; 32],
-            message_id: [2; 32],
-            created_at_ms: 60_000,
-            author_user_id: [3; 32],
-            signer_id: [4; 32],
-            text: "hello".to_string(),
-        });
-        assert_eq!(opened.table, read_models::OPENED_MESSAGE_ROWS);
-        assert_eq!(opened.columns, read_models::OPENED_MESSAGES.columns);
-        assert_eq!(
-            opened.values[5],
-            topo::core::intents::Value::Bytes(b"hello".to_vec())
-        );
-
-        let tombstone = super::message_tombstone_row([1; 32], [2; 32], [3; 32], 120_000);
-        assert_eq!(tombstone.table, read_models::MESSAGE_TOMBSTONE_ROWS);
-        assert_eq!(tombstone.columns, read_models::MESSAGE_TOMBSTONES.columns);
-        assert_eq!(
-            tombstone.values[2],
-            topo::core::intents::Value::Bytes(vec![3; 32])
-        );
-        assert_eq!(tombstone.values[3], topo::core::intents::Value::U64(2));
-    }
-
-    #[test]
-    fn content_purge_coordinate_supports_exact_and_range_offers() {
-        let scope = FactScope::Local;
-        let owner = [1; 32];
-        let frontier_id = [7; 32];
-        let message_id = [9; 32];
-        let message_need = topo::core::project_fact::fact_purged_need(
-            owner,
-            scope.clone(),
-            project::fact_purged_key(frontier_id, 10, message_id),
-        );
-        let exact_offer = topo::core::project_fact::fact_purged_offer(
-            [2; 32],
-            scope.clone(),
-            project::fact_purged_key(frontier_id, 10, message_id),
-        );
-        let (range_start, range_end) = project::fact_purged_minute_range_keys(frontier_id, 9, 11);
-        let range_offer = topo::core::project_fact::fact_purged_range_offer(
-            [3; 32],
-            scope.clone(),
-            range_start,
-            range_end,
-        );
-        let other_frontier_need = topo::core::project_fact::fact_purged_need(
-            owner,
-            scope,
-            project::fact_purged_key([8; 32], 10, message_id),
-        );
-
-        assert_eq!(message_need.start_key, exact_offer.start_key);
-        assert_eq!(message_need.end_key, exact_offer.end_key);
-        assert!(range_offer.start_key <= message_need.start_key);
-        assert!(range_offer.end_key >= message_need.end_key);
-        assert!(
-            range_offer.end_key < other_frontier_need.start_key
-                || range_offer.start_key > other_frontier_need.end_key
-        );
     }
 
     #[test]
@@ -1310,47 +1216,6 @@ mod projector_tests {
     }
 
     #[test]
-    fn expired_content_message_retracts_before_context_wait() {
-        let author_fact = user_fact([9; 32]);
-        let (mut message, _fact, _key) = message_fact(author_fact.id, "already expired");
-        message.expires_at_minute = message.minute + 1;
-        let fact = Fact::new(
-            crate::protocol::auth::workspace::scope(message.workspace_id),
-            message.created_at_ms,
-            encode::encode_fact(&message).expect("encode content message"),
-        );
-        let signer_fact = signer_fact(&message);
-        let signature_fact = signature_fact(&message, &fact);
-        let context = ProjectionContext::from_matches(vec![
-            signature_match(&fact, &message, &signature_fact),
-            signer_match(&fact, &message, &signer_fact),
-            author_match(&fact, &message, &author_fact),
-        ])
-        .with_time_ranges(vec![TimeRange {
-            timeline: topo::protocol::content::message::expiration_timeline(),
-            start_exclusive: None,
-            end_inclusive: message.expires_at_minute,
-        }]);
-
-        let output = project::ContentMessageProjector::new()
-            .project(&fact, &context)
-            .expect("project expired content message");
-
-        assert!(output.needs.is_empty());
-        assert!(output.offers.is_empty());
-        assert_eq!(output.effects.intents.len(), 1);
-        let share = topo::protocol::sync::share_fact_with_sync::decode_share_fact_with_sync(
-            &output.effects.intents[0],
-        )
-        .expect("decode sync retraction");
-        assert_eq!(
-            share.state,
-            topo::protocol::sync::share_fact_with_sync::SyncShareState::Retract
-        );
-        assert_eq!(output.effects.purged_facts, vec![fact.id]);
-    }
-
-    #[test]
     fn content_message_projector_waits_without_materializing_before_secret_context() {
         let author_fact = user_fact([9; 32]);
         let (message, fact, _key) = message_fact(author_fact.id, "hidden until key context");
@@ -1450,6 +1315,153 @@ mod projector_tests {
             .expect_err("non-author delete offer must not purge target");
 
         assert!(err.contains("author does not match"), "{err}");
+    }
+
+    #[test]
+    fn expired_content_message_retracts_before_context_wait() {
+        let author_fact = user_fact([9; 32]);
+        let (mut message, _fact, _key) = message_fact(author_fact.id, "already expired");
+        message.expires_at_minute = message.minute + 1;
+        let fact = Fact::new(
+            crate::protocol::auth::workspace::scope(message.workspace_id),
+            message.created_at_ms,
+            encode::encode_fact(&message).expect("encode content message"),
+        );
+        let signer_fact = signer_fact(&message);
+        let signature_fact = signature_fact(&message, &fact);
+        let context = ProjectionContext::from_matches(vec![
+            signature_match(&fact, &message, &signature_fact),
+            signer_match(&fact, &message, &signer_fact),
+            author_match(&fact, &message, &author_fact),
+        ])
+        .with_time_ranges(vec![TimeRange {
+            timeline: topo::protocol::content::message::expiration_timeline(),
+            start_exclusive: None,
+            end_inclusive: message.expires_at_minute,
+        }]);
+
+        let output = project::ContentMessageProjector::new()
+            .project(&fact, &context)
+            .expect("project expired content message");
+
+        assert!(output.needs.is_empty());
+        assert!(output.offers.is_empty());
+        assert_eq!(output.effects.intents.len(), 1);
+        let share = topo::protocol::sync::share_fact_with_sync::decode_share_fact_with_sync(
+            &output.effects.intents[0],
+        )
+        .expect("decode sync retraction");
+        assert_eq!(
+            share.state,
+            topo::protocol::sync::share_fact_with_sync::SyncShareState::Retract
+        );
+        assert_eq!(output.effects.purged_facts, vec![fact.id]);
+    }
+
+    #[test]
+    fn content_message_row_builders_use_registry_typed_schemas() {
+        let fact = ContentMessageFact {
+            workspace_id: [1; 32],
+            created_at_ms: 60_000,
+            author_user_id: [2; 32],
+            signer_id: [3; 32],
+            signer_public_key: [7; 32],
+            frontier_id: [4; 32],
+            local_history_node_secret_id: [5; 32],
+            expires_at_minute: u64::MAX,
+            retention_policy_id: [6; 32],
+            minute: 1,
+            nonce: [8; crate::protocol::content::message::fact::NONCE_BYTES],
+            ciphertext: MessageCiphertext::new(b"sealed").expect("ciphertext"),
+        };
+
+        let row = super::content_message_row([9; 32], &fact);
+        assert_eq!(row.table, read_models::CONTENT_MESSAGE_ROWS);
+        assert_eq!(row.columns, read_models::CONTENT_MESSAGES.columns);
+        assert_eq!(
+            row.values[0],
+            topo::core::intents::Value::Bytes(vec![1; 32])
+        );
+        assert_eq!(
+            row.values[1],
+            topo::core::intents::Value::Bytes(vec![9; 32])
+        );
+        assert_eq!(
+            row.values[2],
+            topo::core::intents::Value::Bytes(vec![2; 32])
+        );
+        assert_eq!(
+            row.values[4],
+            topo::core::intents::Value::Bytes(vec![3; 32])
+        );
+        assert_eq!(
+            row.values[5],
+            topo::core::intents::Value::Bytes(vec![4; 32])
+        );
+        assert_eq!(row.values[7], topo::core::intents::Value::Bool(false));
+
+        let opened = super::opened_message_row(super::OpenedMessageRow {
+            workspace_id: [1; 32],
+            message_id: [2; 32],
+            created_at_ms: 60_000,
+            author_user_id: [3; 32],
+            signer_id: [4; 32],
+            text: "hello".to_string(),
+        });
+        assert_eq!(opened.table, read_models::OPENED_MESSAGE_ROWS);
+        assert_eq!(opened.columns, read_models::OPENED_MESSAGES.columns);
+        assert_eq!(
+            opened.values[5],
+            topo::core::intents::Value::Bytes(b"hello".to_vec())
+        );
+
+        let tombstone = super::message_tombstone_row([1; 32], [2; 32], [3; 32], 120_000);
+        assert_eq!(tombstone.table, read_models::MESSAGE_TOMBSTONE_ROWS);
+        assert_eq!(tombstone.columns, read_models::MESSAGE_TOMBSTONES.columns);
+        assert_eq!(
+            tombstone.values[2],
+            topo::core::intents::Value::Bytes(vec![3; 32])
+        );
+        assert_eq!(tombstone.values[3], topo::core::intents::Value::U64(2));
+    }
+
+    #[test]
+    fn content_purge_coordinate_supports_exact_and_range_offers() {
+        let scope = FactScope::Local;
+        let owner = [1; 32];
+        let frontier_id = [7; 32];
+        let message_id = [9; 32];
+        let message_need = topo::core::project_fact::fact_purged_need(
+            owner,
+            scope.clone(),
+            project::fact_purged_key(frontier_id, 10, message_id),
+        );
+        let exact_offer = topo::core::project_fact::fact_purged_offer(
+            [2; 32],
+            scope.clone(),
+            project::fact_purged_key(frontier_id, 10, message_id),
+        );
+        let (range_start, range_end) = project::fact_purged_minute_range_keys(frontier_id, 9, 11);
+        let range_offer = topo::core::project_fact::fact_purged_range_offer(
+            [3; 32],
+            scope.clone(),
+            range_start,
+            range_end,
+        );
+        let other_frontier_need = topo::core::project_fact::fact_purged_need(
+            owner,
+            scope,
+            project::fact_purged_key([8; 32], 10, message_id),
+        );
+
+        assert_eq!(message_need.start_key, exact_offer.start_key);
+        assert_eq!(message_need.end_key, exact_offer.end_key);
+        assert!(range_offer.start_key <= message_need.start_key);
+        assert!(range_offer.end_key >= message_need.end_key);
+        assert!(
+            range_offer.end_key < other_frontier_need.start_key
+                || range_offer.start_key > other_frontier_need.end_key
+        );
     }
 
     #[test]
