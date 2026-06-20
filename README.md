@@ -1,4 +1,4 @@
-# Context Architecture
+# Context
 
 Context is a lightweight p2p engine for building local-first, end-to-end
 encrypted collaboration apps. Its storage and wire protocol are made of facts
