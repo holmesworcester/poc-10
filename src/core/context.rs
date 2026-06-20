@@ -3,8 +3,8 @@
 //! This file intentionally contains only types and pure helpers. The SQLite
 //! tables, overlap queries, pending wake rows, and commit rules live in
 //! `project_fact.rs`. Projectors use these types to say "this fact still needs
-//! matching payload" (`ContextNeed`) or "this fact can satisfy matching needs"
-//! (`ContextOffer`) without importing SQL or queue machinery.
+//! matching payload from another fact" (`ContextNeed`) or "this fact can satisfy
+//! matching needs" (`ContextOffer`) without importing SQL or queue machinery.
 //!
 //! `context.rs` stays separate from `project_fact.rs` because the types are the
 //! public language shared by protocol projectors and the projection runner.
