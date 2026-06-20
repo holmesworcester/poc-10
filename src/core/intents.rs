@@ -26,10 +26,10 @@
 //! Handlers are reactive runtime code, not user-facing commands. They receive
 //! facts declared by the queued intent, use the transaction-local `Db` for
 //! handler-owned SQL, and return `RuntimeEffects` for runtime workers to commit
-//! atomically. Missing attached inputs or semantic violations are handler
-//! errors: dispatch does not commit output or consume the queue row. Runtime
-//! effect validation rejects any emitted intent whose kind is not registered by
-//! the active runtime.
+//! atomically. Handler errors roll back handler-owned SQL to dispatch's
+//! savepoint and commit only queue consumption. Runtime effect validation rejects
+//! any emitted intent whose kind is not registered by the active runtime; those
+//! validation errors abort the outer transaction, leaving the queue row in place.
 
 use crate::core::db::Db;
 use crate::core::effects::RuntimeEffects;

@@ -14,8 +14,8 @@
 //! the handler, while `intent_key` and `payload` remain handler-owned bytes.
 //! `intent_context` and `local_intent_context` attach exact fact inputs to that
 //! row. Runtime admission rejects intent kinds that are not in the handler
-//! registry; if a stale unregistered row is already present, dispatch consumes
-//! it as terminal invalid input. Durable and local rows are both selected by
+//! registry; if a stale invalid or unregistered row is already present, dispatch
+//! consumes it as terminal input. Durable and local rows are both selected by
 //! SQLite insertion order so projection, replay, and live IO all preserve the
 //! order in which work was queued.
 //!
@@ -24,16 +24,17 @@
 //! `HandlerContext`; handlers that require an input call
 //! `HandlerContext::require_fact`.
 //!
-//! This transaction boundary is why dispatch matters. Handler-owned SQL and
-//! returned runtime effects become visible exactly when the input queue row is
-//! consumed: no output without deleting the work item, and no deletion without
-//! committing the output. Terminal invalid input is the only delete-without-output
-//! case: dispatch drops the queue row and any attached context rows. For handler
-//! rejection, direct handler SQL is rolled back before the delete commits. If
-//! the transaction rolls back, the queued row is still there; if it commits, the
-//! row is gone and the output is durable. Queue rows do not collapse by `(kind,
-//! key)`; protocols that need backpressure express it in their own facts, row
-//! mutations, network queues, or handler-local state.
+//! This transaction boundary is why dispatch matters. The readable process is:
+//! load one row, classify whether it can run, consume that exact row, build the
+//! transaction-local handler context from attached facts, run the handler inside
+//! a savepoint, validate returned effects, and commit those effects before the
+//! transaction closes. Terminal rows and stale-version work are consumed without
+//! running protocol code. Handler rejection rolls back handler-owned SQL to the
+//! savepoint, then commits only the queue consumption. If the outer transaction
+//! rolls back, the queued row is still there; if it commits, the row is gone and
+//! any returned output is durable. Queue rows do not collapse by `(kind, key)`;
+//! protocols that need backpressure express it in their own facts, row mutations,
+//! network queues, or handler-local state.
 
 use crate::core::db::{quoted_table_name, Db, TableName};
 use crate::core::effects::{RuntimeEffects, StorageRequirement};
@@ -61,13 +62,15 @@ struct QueuedIntent {
     mode: HandlerMode,
 }
 
-struct IntentInput<'a> {
+/// A queued row whose kind resolved to a registered handler.
+struct RunnableIntent<'a> {
     queued: QueuedIntent,
     handler: &'a dyn IntentHandler,
     storage_requirement: StorageRequirement,
 }
 
-struct InvalidQueuedIntent {
+/// A queued row that is terminal before protocol code can run.
+struct TerminalIntentDrop {
     /// Random row id for the exact queued work item being dropped.
     intent_id: Vec<u8>,
     /// Queue from which this row was claimed.
@@ -77,8 +80,24 @@ struct InvalidQueuedIntent {
 }
 
 enum LoadedIntent<'a> {
-    Ready(IntentInput<'a>),
-    Invalid(InvalidQueuedIntent),
+    Runnable(RunnableIntent<'a>),
+    TerminalDrop(TerminalIntentDrop),
+}
+
+impl LoadedIntent<'_> {
+    fn profile_queue(&self) -> IntentQueue {
+        match self {
+            Self::Runnable(input) => input.queued.queue,
+            Self::TerminalDrop(drop) => drop.queue,
+        }
+    }
+
+    fn profile_kind(&self) -> &str {
+        match self {
+            Self::Runnable(input) => input.queued.intent.kind.as_str(),
+            Self::TerminalDrop(drop) => &drop.kind,
+        }
+    }
 }
 
 // =============================================================================
@@ -91,15 +110,17 @@ enum LoadedIntent<'a> {
 ///
 /// This is the whole intent worker in miniature:
 ///
-/// 1. Load one queued intent and its registered handler route.
-/// 2. Delete that exact row, run the handler, and validate returned effects
-///    inside one transaction.
-/// 3. Commit handler-owned SQL and validated effects together.
+/// 1. Load one queued row, its attached context ids, and its registered route.
+/// 2. Classify the row as runnable or terminal-before-handler.
+/// 3. For runnable rows, delete the exact row, load attached facts, run the
+///    handler in a savepoint, validate returned effects, and commit those
+///    effects in the same transaction.
+/// 4. For terminal rows, delete only the exact row and attached context rows.
 ///
 /// Handlers are allowed to observe runtime state, so this is not a
 /// pure-evaluation boundary like projection. The queue lifecycle is still
-/// centralized: the queue row is removed only by the same commit boundary that
-/// publishes the handler's SQL writes and returned effects.
+/// centralized: every successful path consumes only the selected row, and
+/// handler output becomes visible only through the same commit boundary.
 pub(crate) fn dispatch_one_intent(
     store: &Db,
     handlers: &HandlerSet,
@@ -111,26 +132,40 @@ pub(crate) fn dispatch_one_intent(
         None => return Ok(false),
         Some(loaded) => loaded,
     };
-    match loaded {
-        LoadedIntent::Ready(input) => run_and_commit_loaded_intent(
+    let profile_queue = loaded.profile_queue();
+    let profile_kind = loaded.profile_kind().to_string();
+    let started = Instant::now();
+
+    let result = match loaded {
+        LoadedIntent::Runnable(input) => run_and_commit_loaded_intent(
             store,
             input,
             allowed_tables,
             handlers.intent_kinds(),
             fact_admission,
         ),
-        LoadedIntent::Invalid(invalid) => drop_invalid_queued_intent(store, invalid),
-    }
+        LoadedIntent::TerminalDrop(drop) => drop_terminal_queued_intent(store, drop),
+    };
+    record_intent_dispatch_profile(
+        profile_queue,
+        &profile_kind,
+        started.elapsed(),
+        result.as_ref(),
+    );
+    result
 }
 
 // =============================================================================
 // Stages
 // =============================================================================
 
-/// Stage 1: load one queued intent and its registered handler.
+/// Stage 1: load and classify one queued intent.
 ///
-/// Durable and local rows use insertion order. Replay re-emits work in the
-/// order projectors recorded it instead of sorting by handler-owned keys.
+/// Durable and local rows use insertion order. This stage does not mutate SQL:
+/// it selects one row, loads its attached fact ids, rebuilds the typed `Intent`,
+/// and resolves the registered handler route. Invalid persisted kinds and stale
+/// unregistered kinds are terminal rows that a later commit stage will delete
+/// without running protocol code.
 fn load_one_intent_input<'a>(
     store: &'a Db,
     handlers: &'a HandlerSet,
@@ -153,7 +188,7 @@ fn load_one_intent_input<'a>(
     let kind = match IntentKind::new(kind) {
         Ok(kind) => kind,
         Err(_) => {
-            return Ok(Some(LoadedIntent::Invalid(InvalidQueuedIntent {
+            return Ok(Some(LoadedIntent::TerminalDrop(TerminalIntentDrop {
                 intent_id,
                 queue,
                 kind: "<invalid>".to_string(),
@@ -162,13 +197,13 @@ fn load_one_intent_input<'a>(
     };
     let intent = Intent::new(kind, intent_key, payload).with_context_fact_ids(context_fact_ids);
     let Some(entry) = handlers.handler_for_kind(intent.kind.as_str()) else {
-        return Ok(Some(LoadedIntent::Invalid(InvalidQueuedIntent {
+        return Ok(Some(LoadedIntent::TerminalDrop(TerminalIntentDrop {
             intent_id,
             queue,
             kind: intent.kind.as_str().to_string(),
         })));
     };
-    Ok(Some(LoadedIntent::Ready(IntentInput {
+    Ok(Some(LoadedIntent::Runnable(RunnableIntent {
         queued: QueuedIntent {
             intent_id,
             queue,
@@ -182,40 +217,53 @@ fn load_one_intent_input<'a>(
 
 /// Stage 2/3: run the handler and commit its terminal outcome.
 ///
-/// Handler reads and handler-owned SQL writes run inside the same transaction
-/// that consumes the queued row and commits returned runtime effects.
+/// This is intentionally written as the transaction story, not as a set of
+/// hidden callbacks. The order is the contract:
+///
+/// 1. Check whether this handler route can safely write to the current storage
+///    version. Stale-version work is consumed without running the handler.
+/// 2. Delete the exact queue row and attached context rows.
+/// 3. Load attached retained facts into `HandlerContext`; if any attached fact
+///    disappeared, treat the selected row as stale and commit only consumption.
+/// 4. Run the handler in a savepoint so handler-owned SQL can be rolled back
+///    independently from queue consumption.
+/// 5. Validate and commit returned `RuntimeEffects`.
 ///
 /// If the handled row is already gone, nothing commits and the returned value
 /// is `false`.
 fn run_and_commit_loaded_intent(
     store: &Db,
-    input: IntentInput<'_>,
+    input: RunnableIntent<'_>,
     allowed_tables: &[TableName],
     registered_intent_kinds: &[&str],
     fact_admission: Option<FactAdmissionFn>,
 ) -> Result<bool, String> {
-    let IntentInput {
+    let RunnableIntent {
         queued,
         handler,
         storage_requirement,
     } = input;
-    let queue = queued.queue;
-    let kind = queued.intent.kind.as_str().to_string();
-    let started = Instant::now();
-    let result = store
+    store
         .write_transaction(|tx| {
-            enforce_handler_storage_requirement(tx, storage_requirement)
-                .map_err(sqlite_string_error)?;
-            if delete_intent_row_in_tx(tx, queued.queue, &queued.intent_id)? == 0 {
+            if !handler_storage_requirement_satisfied(tx, storage_requirement)
+                .map_err(sqlite_string_error)?
+            {
+                // The route targets a storage version this database cannot
+                // currently satisfy. Consume the stale work without allowing the
+                // handler to write rows for an old shape.
+                return consume_queued_intent_in_tx(tx, queued.queue, &queued.intent_id);
+            }
+            if !consume_queued_intent_in_tx(tx, queued.queue, &queued.intent_id)? {
                 return Ok(false);
             }
-            delete_intent_context_rows_in_tx(tx, queued.queue, &queued.intent_id)?;
             let Some(context) = load_handler_context(tx, &queued.intent, queued.mode)
                 .map_err(sqlite_string_error)?
             else {
+                // Context rows point at exact retained facts. If one vanished,
+                // the selected intent is stale and there is no safe handler run.
                 return Ok(true);
             };
-            let Some(effects) = run_loaded_intent(
+            let Some(effects) = run_handler_and_validate_effects(
                 tx,
                 handler,
                 &queued.intent,
@@ -240,46 +288,23 @@ fn run_and_commit_loaded_intent(
             )?;
             Ok(true)
         })
-        .map_err(|err| format!("commit handler output: {err}"));
-    if intent_dispatch_profile_enabled() {
-        eprintln!(
-            "{}",
-            intent_dispatch_profile_line(queue, &kind, started.elapsed(), result.as_ref())
-        );
-    }
-    result
+        .map_err(|err| format!("commit handler output: {err}"))
 }
 
-/// Consume a terminal invalid queue row without running protocol code.
-fn drop_invalid_queued_intent(store: &Db, invalid: InvalidQueuedIntent) -> Result<bool, String> {
-    let queue = invalid.queue;
-    let kind = invalid.kind;
-    let started = Instant::now();
-    let result = store
-        .write_transaction(|tx| {
-            if delete_intent_row_in_tx(tx, invalid.queue, &invalid.intent_id)? == 0 {
-                return Ok(false);
-            }
-            delete_intent_context_rows_in_tx(tx, invalid.queue, &invalid.intent_id)?;
-            Ok(true)
-        })
-        .map_err(|err| format!("drop invalid intent: {err}"));
-    if intent_dispatch_profile_enabled() {
-        eprintln!(
-            "{}",
-            intent_dispatch_profile_line(queue, &kind, started.elapsed(), result.as_ref())
-        );
-    }
-    result
+/// Consume a terminal row without running protocol code.
+fn drop_terminal_queued_intent(store: &Db, drop: TerminalIntentDrop) -> Result<bool, String> {
+    store
+        .write_transaction(|tx| consume_queued_intent_in_tx(tx, drop.queue, &drop.intent_id))
+        .map_err(|err| format!("drop terminal intent: {err}"))
 }
 
-/// Run one claimed intent through its handler and normalize its uncommitted
-/// runtime effects.
+/// Run one claimed intent through its handler and validate uncommitted effects.
 ///
 /// The handler may use transaction-local SQL through the database handle in its
-/// context. Returned runtime effects are still validated before the transaction
-/// commits.
-fn run_loaded_intent(
+/// context. Handler errors roll back to the savepoint and return `None`, letting
+/// the caller commit only queue consumption. Successful effects are tagged with
+/// the route's storage requirement and validated before the transaction commits.
+fn run_handler_and_validate_effects(
     tx: &Db,
     handler: &dyn IntentHandler,
     intent: &Intent,
@@ -329,13 +354,16 @@ fn run_handler_in_savepoint(
     Ok(result)
 }
 
-fn enforce_handler_storage_requirement(
+fn handler_storage_requirement_satisfied(
     tx: &Db,
     requirement: StorageRequirement,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     match requirement {
-        StorageRequirement::MaintenanceBypass => Ok(()),
-        StorageRequirement::Current(version) => tx.require_storage_version(version),
+        StorageRequirement::MaintenanceBypass => Ok(true),
+        StorageRequirement::Current(version) => tx
+            .current_storage_version()
+            .map(|stored| stored == Some(version))
+            .map_err(|err| format!("read storage version marker: {err}")),
     }
 }
 
@@ -586,6 +614,20 @@ fn duration_millis(duration: Duration) -> u128 {
     duration.as_micros() / 1000
 }
 
+fn record_intent_dispatch_profile(
+    queue: IntentQueue,
+    kind: &str,
+    elapsed: Duration,
+    result: Result<&bool, &String>,
+) {
+    if intent_dispatch_profile_enabled() {
+        eprintln!(
+            "{}",
+            intent_dispatch_profile_line(queue, kind, elapsed, result)
+        );
+    }
+}
+
 // =============================================================================
 // Queue SQL Helpers
 // =============================================================================
@@ -661,6 +703,22 @@ fn replay_flag_for_handler_mode(mode: HandlerMode) -> i64 {
     } else {
         0
     }
+}
+
+/// Consume exactly one queue row and its attached context rows.
+///
+/// Returning `false` means the selected row disappeared before the transaction
+/// reached it, so the caller must not run handler code or commit effects.
+fn consume_queued_intent_in_tx(
+    db: &Db,
+    queue: IntentQueue,
+    intent_id: &[u8],
+) -> rusqlite::Result<bool> {
+    if delete_intent_row_in_tx(db, queue, intent_id)? == 0 {
+        return Ok(false);
+    }
+    delete_intent_context_rows_in_tx(db, queue, intent_id)?;
+    Ok(true)
 }
 
 /// Delete one queued intent row by its queue row id.
@@ -784,6 +842,7 @@ mod tests {
     const TEST_HANDLER_STATE_TABLE: &str = "\"test.handler_state\"";
 
     static AFTER_FACT_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static VERSION_GUARD_HANDLER_CALLS: AtomicUsize = AtomicUsize::new(0);
 
     #[test]
     fn intent_dispatch_profile_line_includes_queue_kind_status_and_timing() {
@@ -1401,12 +1460,21 @@ mod tests {
 
     const VERSION_GUARD_ROUTES: &[HandlerRoute] = &[HandlerRoute {
         intent_kind: "handled",
-        factory: noop_handler,
+        factory: version_guard_handler,
         storage_requirement: StorageRequirement::Current(7),
         recurrence: None,
     }];
     impl IntentHandler for NoopHandler {
         fn handle(&self, _intent: &Intent, _context: &HandlerContext<'_>) -> HandlerResult {
+            Ok(RuntimeEffects::new())
+        }
+    }
+
+    struct VersionGuardHandler;
+
+    impl IntentHandler for VersionGuardHandler {
+        fn handle(&self, _intent: &Intent, _context: &HandlerContext<'_>) -> HandlerResult {
+            VERSION_GUARD_HANDLER_CALLS.fetch_add(1, Ordering::SeqCst);
             Ok(RuntimeEffects::new())
         }
     }
@@ -1522,6 +1590,10 @@ mod tests {
         Box::new(NoopHandler)
     }
 
+    fn version_guard_handler() -> Box<dyn IntentHandler> {
+        Box::new(VersionGuardHandler)
+    }
+
     fn fatal_handler() -> Box<dyn IntentHandler> {
         Box::new(FatalHandler)
     }
@@ -1582,7 +1654,8 @@ mod tests {
     }
 
     #[test]
-    fn intent_storage_mismatch_rolls_back_queue_consumption() {
+    fn intent_storage_mismatch_consumes_without_running_handler() {
+        VERSION_GUARD_HANDLER_CALLS.store(0, Ordering::SeqCst);
         let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
         submit_intent_to_queue(
             &store,
@@ -1591,23 +1664,21 @@ mod tests {
         )
         .expect("submit guarded intent");
 
-        let err = dispatch_one_intent(
+        let consumed = dispatch_one_intent(
             &store,
             &HandlerSet::new(VERSION_GUARD_ROUTES),
             IntentQueue::Durable,
             &[],
             None,
         )
-        .expect_err("storage mismatch should abort intent commit");
+        .expect("storage mismatch should consume stale-version intent");
 
-        assert!(
-            err.contains("required_version=7 stored_version=missing"),
-            "{err}"
-        );
+        assert!(consumed);
+        assert_eq!(VERSION_GUARD_HANDLER_CALLS.load(Ordering::SeqCst), 0);
         assert_eq!(
             store.table_row_count(INTENTS).expect("durable count"),
-            1,
-            "failed storage guard must not consume the handled intent"
+            0,
+            "stale-version intent should be consumed without running handler effects"
         );
     }
 }
