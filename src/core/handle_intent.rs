@@ -286,6 +286,49 @@ fn drop_terminal_queued_intent(store: &Db, drop: TerminalIntentDrop) -> Result<b
         .map_err(|err| format!("drop terminal intent: {err}"))
 }
 
+// =============================================================================
+// Stage 2 Helpers
+// =============================================================================
+
+/// Build the transaction-local fact/database view attached to a queued intent.
+///
+/// This supports Stage 2 after the exact queue row has been consumed. Returning
+/// `None` means an attached context row pointed at a retained fact that no
+/// longer exists, so Stage 2 treats the selected intent as stale and commits
+/// only queue consumption.
+fn load_handler_context<'a>(
+    store: &'a Db,
+    intent: &Intent,
+    mode: HandlerMode,
+) -> Result<Option<HandlerContext<'a>>, String> {
+    let mut facts = Vec::new();
+    for id in &intent.context_fact_ids {
+        let Some(fact) = load_retained_fact(store, &id)? else {
+            return Ok(None);
+        };
+        facts.push(fact);
+    }
+    Ok(Some(
+        HandlerContext::with_facts(store, facts).with_mode(mode),
+    ))
+}
+
+fn load_retained_fact(store: &Db, id: &FactId) -> Result<Option<Fact>, String> {
+    store
+        .conn()
+        .query_row(
+            "SELECT f.id, m.scope, m.scope_kind, m.scope_id, m.received_at, f.bytes
+             FROM facts f
+             JOIN local_fact_admissions m ON m.fact_id = f.id
+             WHERE f.id = ?1
+             LIMIT 1",
+            params![id.as_slice()],
+            fact_from_storage_row,
+        )
+        .optional()
+        .map_err(|err| format!("load handler fact: {err}"))
+}
+
 /// Run one claimed intent through its handler and validate uncommitted effects.
 ///
 /// The handler may use transaction-local SQL through the database handle in its
@@ -356,7 +399,7 @@ fn handler_storage_requirement_satisfied(
 }
 
 // =============================================================================
-// Load Stage Helpers
+// Stage 1 Test Helpers
 // =============================================================================
 
 /// Return the first queued intent in queue order.
@@ -388,40 +431,6 @@ fn next_queued_intent_in_queue(
             })
         })
         .transpose()
-}
-
-/// Build the transaction-local fact/database view attached to a queued intent.
-fn load_handler_context<'a>(
-    store: &'a Db,
-    intent: &Intent,
-    mode: HandlerMode,
-) -> Result<Option<HandlerContext<'a>>, String> {
-    let mut facts = Vec::new();
-    for id in &intent.context_fact_ids {
-        let Some(fact) = load_retained_fact(store, &id)? else {
-            return Ok(None);
-        };
-        facts.push(fact);
-    }
-    Ok(Some(
-        HandlerContext::with_facts(store, facts).with_mode(mode),
-    ))
-}
-
-fn load_retained_fact(store: &Db, id: &FactId) -> Result<Option<Fact>, String> {
-    store
-        .conn()
-        .query_row(
-            "SELECT f.id, m.scope, m.scope_kind, m.scope_id, m.received_at, f.bytes
-             FROM facts f
-             JOIN local_fact_admissions m ON m.fact_id = f.id
-             WHERE f.id = ?1
-             LIMIT 1",
-            params![id.as_slice()],
-            fact_from_storage_row,
-        )
-        .optional()
-        .map_err(|err| format!("load handler fact: {err}"))
 }
 
 // =============================================================================
