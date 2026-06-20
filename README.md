@@ -19,6 +19,30 @@ able to ask for paginated message views with users, reactions, attachments, and
 download progress while Context handles networking, auth, sync, projection, and
 durable retry in one model.
 
+## Quickstart
+
+If a reader can understand five source files, start with these:
+
+1. `src/core/project_fact.rs`: the core fact-to-state transaction. It shows how
+   one queued fact is loaded with matched context, projected once, and committed
+   as replacement needs, append-only offers, row mutations, emitted facts,
+   purges, time wakes, and follow-up intents.
+2. `src/core/runtime.rs`: the bounded turn scheduler. It shows the order shared
+   by commands and daemons: recurring work, local and durable intents,
+   projection queues, incoming fact staging, due time wakes, network intake, and
+   outgoing network pumping.
+3. `src/core/handle_intent.rs`: the stateful-work transaction. It shows how one
+   durable or local intent is claimed, given exact fact inputs, routed to a
+   handler, and committed atomically with queue consumption.
+4. `src/protocol/registry.rs`: the concrete protocol integration table. It
+   wires fact tags, projectors, handler routes, recurring work, schema sources,
+   row allowlists, and commands into the core runtime without putting protocol
+   policy in core.
+5. `src/protocol/connection/request/project.rs`: a representative protocol
+   projector. It shows fixed fact decoding, sealed request validation, parking
+   on auth/local endpoint/ephemeral/receive context, and the handoff from
+   deterministic projection into `create_connection` handler work.
+
 ## Approach
 
 In Context, a central idea is that facts offer context to other facts. Context
@@ -272,6 +296,41 @@ to a `SocketAddr`. Core stores those bytes in memory-local `network_outgoing`
 rows, keeps active peer addresses in `network_outgoing_targets`, and lets the
 daemon TCP pump write and delete frames as socket capacity allows.
 
+## Protocol Versioning
+
+Protocol versioning is a protocol scope, not a core feature flag. The detailed
+rules and update loop live in
+[`src/protocol/versioning/README.md`](src/protocol/versioning/README.md); the
+short version is that protocol code owns the release marker, the update fact,
+and the rules for rebuilding materialized state, while core only enforces the
+storage-requirement guard it is handed.
+
+There are two related concepts to keep separate. `CURRENT_PROTOCOL_VERSION` in
+`src/protocol/versioning.rs` is the version this checkout expects projected
+storage to have. The database stores its latest projected marker in
+`protocol_version_rows`, a protocol-owned row table declared through the normal
+schema sources. Separately, each projector, handler, or query can declare the
+storage version it expects before it touches materialized state. Core can
+enforce those requirements at projection and handler commit boundaries; query
+modules must check their own read preconditions before reading tables directly.
+
+Repair is ordinary runtime work. Each bounded turn gives the recurring
+`check_version` builder a chance to compare the stored marker with
+`CURRENT_PROTOCOL_VERSION`. If the marker is missing or stale, the handler
+authors a priority local `local_update` fact. Live projection of that update
+fact records protocol-visible update history, advances the marker, requests a
+rebuild, clears schema-declared resettable runtime/materialized state, preserves
+retained facts, and requeues retained facts for replay projection. Replay of an
+old update fact is a no-op; previous update facts remain history, not commands
+that rerun.
+
+This keeps compatibility policy with the fact families that own it. Current
+projectors must still decode and project retained durable fact types that can
+remain in `facts`, but they must write only the current materialized table
+shape. If code is newer than the stored marker, guarded ordinary work consumes
+stale selected queue rows without publishing old-shape effects until the update
+loop repairs storage.
+
 ## Scope Layout
 
 Fact families are organized by protocol scope. The grouping is mostly arbitrary
@@ -296,6 +355,9 @@ src/protocol/connection/
 
 src/protocol/sync.rs
 src/protocol/sync/
+
+src/protocol/versioning.rs
+src/protocol/versioning/
 ```
 
 Each fact family owns its fact type, fixed wire layout, command constructors,
