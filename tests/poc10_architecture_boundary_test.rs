@@ -651,7 +651,7 @@ fn poc10_core_workers_expose_protocol_neutral_vocabulary() {
             "intent output",
             &[
                 "handler output",
-                "dispatch_one_intent",
+                "handle_one_intent",
                 "commit_handler_output",
             ][..],
         ),

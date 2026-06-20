@@ -3,34 +3,34 @@
 //! Intents are how the runtime represents work that should happen after a fact
 //! has projected or after IO produced protocol input. Projection stays
 //! deterministic and local to one fact: when it discovers follow-up work, it
-//! emits an `Intent` instead of running that work inline. The runtime later
-//! dispatches the intent to the protocol handler registered for its kind. This
-//! keeps commands, projection, network IO, and background maintenance on the
-//! same queue and commit model.
+//! emits an `Intent` instead of running that work inline. `handle_one_intent`
+//! later routes one queued intent to the protocol handler registered for its
+//! kind. This keeps commands, projection, network IO, and background maintenance
+//! on the same queue and commit model.
 //!
-//! Dispatch owns the lifecycle of one queued intent row. The SQL shape is two
-//! queues with the same columns: durable `intents` rows and process-local
-//! `local_intents` rows. Every insert gets a fresh row id; `kind` only selects
-//! the handler, while `intent_key` and `payload` remain handler-owned bytes.
-//! `intent_context` and `local_intent_context` attach exact fact inputs to that
-//! row. Runtime admission rejects intent kinds that are not in the handler
-//! registry; if a stale invalid or unregistered row is already present, dispatch
-//! consumes it as terminal input. Durable and local rows are both selected by
-//! SQLite insertion order so projection, replay, and live IO all preserve the
-//! order in which work was queued.
+//! `handle_one_intent` owns the lifecycle of one queued intent row. The SQL
+//! shape is two queues with the same columns: durable `intents` rows and
+//! process-local `local_intents` rows. Every insert gets a fresh row id; `kind`
+//! only selects the handler, while `intent_key` and `payload` remain
+//! handler-owned bytes. `intent_context` and `local_intent_context` attach exact
+//! fact inputs to that row. Runtime admission rejects intent kinds that are not
+//! in the handler registry; if a stale invalid or unregistered row is already
+//! present, intent handling consumes it as terminal input. Durable and local
+//! rows are both selected by SQLite insertion order so projection, replay, and
+//! live IO all preserve the order in which work was queued.
 //!
-//! Dispatch loads an intent's attached context fact ids by joining durable
+//! Intent handling loads attached context fact ids by joining durable
 //! `facts` bytes with `local_fact_admissions` metadata and places them in
 //! `HandlerContext`; handlers that require an input call
 //! `HandlerContext::require_fact`.
 //!
-//! This transaction boundary is why dispatch matters. The readable process is:
-//! load one row, classify whether it can run, then commit that classified
-//! outcome. Runnable outcomes consume the exact row, build the transaction-local
-//! handler context from attached facts, run the handler inside a savepoint,
-//! validate returned effects, and commit those effects before the transaction
-//! closes. Terminal rows and stale-version work are consumed without running
-//! protocol code. Handler rejection rolls back handler-owned SQL to the
+//! This transaction boundary is why `handle_one_intent` matters. The readable
+//! process is: load one row, classify whether it can run, then commit that
+//! classified outcome. Runnable outcomes consume the exact row, build the
+//! transaction-local handler context from attached facts, run the handler inside
+//! a savepoint, validate returned effects, and commit those effects before the
+//! transaction closes. Terminal rows and stale-version work are consumed without
+//! running protocol code. Handler rejection rolls back handler-owned SQL to the
 //! savepoint, then commits only the queue consumption. If the outer transaction
 //! rolls back, the queued row is still there; if it commits, the row is gone and
 //! any returned output is durable. Queue rows do not collapse by `(kind, key)`;
@@ -53,7 +53,7 @@ use rusqlite::{params, OptionalExtension};
 use std::net::SocketAddr;
 
 struct QueuedIntent {
-    /// Random row id for the exact queued work item being dispatched.
+    /// Random row id for the exact queued work item being handled.
     intent_id: Vec<u8>,
     /// Queue from which this row was claimed.
     queue: IntentQueue,
@@ -107,7 +107,7 @@ impl IntentQueue {
 // Runtime Entry Point
 // =============================================================================
 
-/// Dispatch one queued intent from the selected queue.
+/// Handle one queued intent from the selected queue.
 ///
 /// The caller owns queue order and batching. This function owns one intent row.
 ///
@@ -123,7 +123,7 @@ impl IntentQueue {
 /// pure-evaluation boundary like projection. The queue lifecycle is still
 /// centralized: every successful path consumes only the selected row, and
 /// handler output becomes visible only through the same commit boundary.
-pub(crate) fn dispatch_one_intent(
+pub(crate) fn handle_one_intent(
     store: &Db,
     handlers: &HandlerSet,
     queue: IntentQueue,
@@ -427,7 +427,7 @@ fn run_and_commit_loaded_intent(
 /// Consume one terminal row without running protocol code.
 ///
 /// Terminal rows are syntactically invalid or reference an intent kind this
-/// runtime no longer registers. They have no safe handler path, so dispatch
+/// runtime no longer registers. They have no safe handler path, so handling
 /// commits only exact row and context-row deletion during Stage 2.
 fn drop_terminal_queued_intent(store: &Db, drop: TerminalIntentDrop) -> Result<bool, String> {
     store
@@ -644,7 +644,7 @@ pub struct HandlerRoute {
 
 /// Instantiated handlers for one runtime pass.
 ///
-/// The set owns concrete handler values so dispatch can borrow trait objects
+/// The set owns concrete handler values so intent handling can borrow trait objects
 /// without rebuilding them for every queued row.
 pub(crate) struct HandlerSet {
     entries: Vec<HandlerEntry>,
@@ -682,7 +682,7 @@ impl HandlerSet {
     }
 }
 
-/// Verify that an intent can be dispatched by this runtime's handler registry.
+/// Verify that an intent can be handled by this runtime's handler registry.
 pub(crate) fn validate_intent_kind_registered(
     intent: &Intent,
     registered_kinds: &[&str],
@@ -824,7 +824,7 @@ mod tests {
         submit_intent_to_queue(&store, IntentQueue::Local, intent.clone()).expect("submit local");
         submit_intent_to_queue(&store, IntentQueue::Durable, intent).expect("submit durable");
 
-        let dispatched = dispatch_intents_for_test(
+        let handled = handle_intents_for_test(
             &store,
             &HandlerSet::new(NOOP_ROUTES),
             IntentQueue::Durable,
@@ -832,9 +832,9 @@ mod tests {
             None,
             1,
         )
-        .expect("dispatch durable intent");
+        .expect("handle durable intent");
 
-        assert_eq!(dispatched, 1);
+        assert_eq!(handled, 1);
         assert_eq!(store.table_row_count(INTENTS).expect("durable count"), 0);
         assert_eq!(
             store.table_row_count(LOCAL_INTENTS).expect("local count"),
@@ -852,7 +852,7 @@ mod tests {
             .expect("submit first local");
         submit_intent_to_queue(&store, IntentQueue::Local, second).expect("submit second local");
 
-        let dispatched = dispatch_intents_for_test(
+        let handled = handle_intents_for_test(
             &store,
             &HandlerSet::new(NOOP_ROUTES),
             IntentQueue::Local,
@@ -860,9 +860,9 @@ mod tests {
             None,
             8,
         )
-        .expect("dispatch local intents");
+        .expect("handle local intents");
 
-        assert_eq!(dispatched, 2);
+        assert_eq!(handled, 2);
         assert_eq!(
             store.table_row_count(LOCAL_INTENTS).expect("local count"),
             0,
@@ -876,7 +876,7 @@ mod tests {
         submit_intent_to_queue(&store, IntentQueue::Durable, test_intent("fatal", b"first"))
             .expect("submit fatal intent");
 
-        let consumed = dispatch_one_intent(
+        let consumed = handle_one_intent(
             &store,
             &HandlerSet::new(FATAL_ROUTES),
             IntentQueue::Durable,
@@ -899,7 +899,7 @@ mod tests {
         )
         .expect("submit unregistered intent row");
 
-        let consumed = dispatch_one_intent(
+        let consumed = handle_one_intent(
             &store,
             &HandlerSet::new(NOOP_ROUTES),
             IntentQueue::Durable,
@@ -930,7 +930,7 @@ mod tests {
             })
             .expect("insert invalid intent row");
 
-        let consumed = dispatch_one_intent(
+        let consumed = handle_one_intent(
             &store,
             &HandlerSet::new(NOOP_ROUTES),
             IntentQueue::Durable,
@@ -953,7 +953,7 @@ mod tests {
         )
         .expect("submit invalid-output intent");
 
-        let err = dispatch_one_intent(
+        let err = handle_one_intent(
             &store,
             &HandlerSet::new(INVALID_OUTPUT_ROUTES),
             IntentQueue::Durable,
@@ -999,7 +999,7 @@ mod tests {
         )
         .expect("submit invalid-output intent");
 
-        let err = dispatch_one_intent(
+        let err = handle_one_intent(
             &store,
             &HandlerSet::new(WRITE_THEN_INVALID_ROUTES),
             IntentQueue::Durable,
@@ -1015,7 +1015,7 @@ mod tests {
         assert_eq!(
             handler_state_row_count(&store),
             0,
-            "handler-owned sql should share the dispatch transaction"
+            "handler-owned sql should share the intent handling transaction"
         );
         assert_eq!(
             store.table_row_count(INTENTS).expect("durable count"),
@@ -1034,7 +1034,7 @@ mod tests {
         )
         .expect("submit emitting intent");
 
-        let err = dispatch_one_intent(
+        let err = handle_one_intent(
             &store,
             &HandlerSet::new(EMIT_UNKNOWN_ROUTES),
             IntentQueue::Durable,
@@ -1072,7 +1072,7 @@ mod tests {
         )
         .expect("submit following intent");
 
-        let dispatched = dispatch_intents_for_test(
+        let handled = handle_intents_for_test(
             &store,
             &HandlerSet::new(EMIT_FACT_ROUTES),
             IntentQueue::Durable,
@@ -1080,9 +1080,9 @@ mod tests {
             None,
             8,
         )
-        .expect("dispatch emitting intent");
+        .expect("handle emitting intent");
 
-        assert_eq!(dispatched, 2);
+        assert_eq!(handled, 2);
         assert_eq!(
             AFTER_FACT_CALLS.load(Ordering::SeqCst),
             1,
@@ -1127,7 +1127,7 @@ mod tests {
             1
         );
 
-        let dispatched = dispatch_intents_for_test(
+        let handled = handle_intents_for_test(
             &store,
             &HandlerSet::new(REQUIRE_CONTEXT_ROUTES),
             IntentQueue::Durable,
@@ -1135,9 +1135,9 @@ mod tests {
             None,
             1,
         )
-        .expect("dispatch context intent");
+        .expect("handle context intent");
 
-        assert_eq!(dispatched, 1);
+        assert_eq!(handled, 1);
         assert_eq!(store.table_row_count(INTENTS).expect("durable count"), 0);
         assert_eq!(
             store
@@ -1158,7 +1158,7 @@ mod tests {
         submit_intent_to_queue(&store, IntentQueue::Durable, intent)
             .expect("submit context intent");
 
-        dispatch_one_intent(
+        handle_one_intent(
             &store,
             &HandlerSet::new(FATAL_ROUTES),
             IntentQueue::Durable,
@@ -1184,7 +1184,7 @@ mod tests {
         submit_intent_to_queue(&store, IntentQueue::Durable, intent)
             .expect("submit context intent");
 
-        let consumed = dispatch_one_intent(
+        let consumed = handle_one_intent(
             &store,
             &HandlerSet::new(REQUIRE_CONTEXT_ROUTES),
             IntentQueue::Durable,
@@ -1224,7 +1224,7 @@ mod tests {
         )
         .expect("submit invalid intent");
 
-        let consumed = dispatch_one_intent(
+        let consumed = handle_one_intent(
             &store,
             &HandlerSet::new(WRITE_THEN_FATAL_ROUTES),
             IntentQueue::Durable,
@@ -1318,7 +1318,7 @@ mod tests {
         );
     }
 
-    fn dispatch_intents_for_test(
+    fn handle_intents_for_test(
         store: &Db,
         handlers: &HandlerSet,
         queue: IntentQueue,
@@ -1326,16 +1326,16 @@ mod tests {
         fact_admission: Option<FactAdmissionFn>,
         limit: usize,
     ) -> Result<usize, String> {
-        let mut dispatched = 0;
+        let mut handled = 0;
         for _ in 0..limit {
             let consumed =
-                dispatch_one_intent(store, handlers, queue, allowed_tables, fact_admission)?;
+                handle_one_intent(store, handlers, queue, allowed_tables, fact_admission)?;
             if !consumed {
                 break;
             }
-            dispatched += 1;
+            handled += 1;
         }
-        Ok(dispatched)
+        Ok(handled)
     }
 
     struct NoopHandler;
@@ -1610,7 +1610,7 @@ mod tests {
         )
         .expect("submit guarded intent");
 
-        let consumed = dispatch_one_intent(
+        let consumed = handle_one_intent(
             &store,
             &HandlerSet::new(VERSION_GUARD_ROUTES),
             IntentQueue::Durable,

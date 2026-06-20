@@ -2,8 +2,8 @@
 //!
 //! Runtime is the place where the generic core engine becomes an executable
 //! protocol instance. Core owns the mechanics: open the database, submit facts and
-//! intents, run pending fact projection, admit due time wakes, and dispatch
-//! handler work through SQLite-backed queues. Protocol code supplies the schema
+//! intents, run pending fact projection, admit due time wakes, and handle queued
+//! intent work through SQLite-backed queues. Protocol code supplies the schema
 //! sources, projector router, handler registry, and row mutation allowlist that
 //! make those mechanics meaningful.
 //!
@@ -15,8 +15,8 @@
 //! 4. Drain one bounded queue at a time.
 //!
 //! Command-authored facts commit before command receipts are returned, and
-//! handler output commits only through the dispatch boundary. Those rules make
-//! facts, context, rows, and queued work visible in a predictable order
+//! handler output commits only through the intent-handling boundary. Those rules
+//! make facts, context, rows, and queued work visible in a predictable order
 //! regardless of whether work came from a CLI command, a daemon tick, sync, or a
 //! protocol handler.
 //!
@@ -28,7 +28,7 @@ use crate::core::command::AuthoredFacts;
 use crate::core::db::{Db, SchemaSource, TableName};
 use crate::core::effects::RuntimeEffects;
 use crate::core::facts::Fact;
-use crate::core::handle_intent::{dispatch_one_intent, HandlerSet, IntentQueue};
+use crate::core::handle_intent::{handle_one_intent, HandlerSet, IntentQueue};
 use crate::core::intents::Intent;
 use crate::core::project_fact::{
     self, FactAdmissionFn, FactRoute, IncomingMetadata, ProjectionSource, Projector, Timeline,
@@ -47,7 +47,7 @@ pub type ProjectorFactory = fn() -> Box<dyn Projector>;
 /// The description is static so a runtime instance cannot drift after opening
 /// its database. `schema_sources` declare protocol tables, `row_mutation_tables`
 /// is the allowlist for effects, `projector` defines projection, and `handlers`
-/// define the queued work core may dispatch.
+/// define the queued work core may handle.
 #[derive(Clone, Copy)]
 pub struct RuntimeDescription {
     /// Protocol table declarations appended after the core schema.
@@ -62,16 +62,16 @@ pub struct RuntimeDescription {
     pub fact_routes: &'static [FactRoute],
     /// Optional protocol-owned fact admission check run before core stores facts.
     pub fact_admission: Option<FactAdmissionFn>,
-    /// Intent handlers this runtime may dispatch.
+    /// Intent handlers this runtime may handle.
     pub handlers: &'static [HandlerRoute],
 }
 
 /// Runtime for one concrete protocol description.
 ///
 /// `Runtime` owns a single SQLite connection. All durable and memory tables,
-/// projection, and dispatch operations happen through that handle so transaction
-/// boundaries stay visible and ephemeral tables are actually local to this
-/// runtime instance.
+/// projection, and intent handling happen through that handle so transaction
+/// boundaries stay visible and ephemeral tables are actually local to this runtime
+/// instance.
 pub struct Runtime {
     description: &'static RuntimeDescription,
     db: Db,
@@ -228,7 +228,7 @@ impl Runtime {
     ///
     /// This path is for live host work that is already volatile. It uses the
     /// same validation and atomic effect commit as projection and intent
-    /// dispatch, but has no queued input row of its own to consume.
+    /// handling, but has no queued input row of its own to consume.
     pub(crate) fn submit_runtime_effects(
         &mut self,
         effects: RuntimeEffects,
@@ -324,7 +324,7 @@ impl Runtime {
 
     fn drain_intent_queue(&mut self, queue: IntentQueue, limit: usize) -> Result<bool, String> {
         drain_bounded_work(limit, || {
-            dispatch_one_intent(
+            handle_one_intent(
                 &self.db,
                 &self.handlers,
                 queue,
@@ -600,7 +600,7 @@ mod tests {
         assert_eq!(
             HANDLER_CALLS.load(Ordering::SeqCst),
             1,
-            "one intent batch should dispatch at most its limit"
+            "one intent batch should handle at most its limit"
         );
         assert_eq!(intent_runtime.pending_intent_count(), 1);
     }
