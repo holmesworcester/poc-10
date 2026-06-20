@@ -217,8 +217,9 @@ pub mod adapt {
 
 // Key wrap projector plus shared auth key-material wrap-source policy.
 //
-// POLICY. A key wrap is admitted iff signer, recipient, and frontier context
-// validate; if local recipient material exists, a local recovery fact is emitted.
+// POLICY. A key wrap is admitted iff signer proof, recipient, and frontier
+// context validate; if local recipient material exists, a local recovery fact is
+// emitted.
 //
 // This module also owns the wrap-source coordinate scheme and the shared
 // projection helpers (scope checks, signer matching, wrap-source validation)
@@ -237,6 +238,7 @@ use crate::protocol::auth::local_history_node_secret;
 use crate::protocol::auth::local_key_secret;
 use crate::protocol::auth::recipient_key;
 use crate::protocol::auth::removal_frontier;
+use crate::protocol::auth::signature;
 use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
 use super::fact::KeyWrapFact;
@@ -776,7 +778,7 @@ fn key_wrap(
     let scope = crate::protocol::auth::workspace::scope(wrap.workspace_id);
     require_fact_scope(fact, &scope)?;
 
-    // 2. Context: signer, recipient, frontier, and local recipient.
+    // 2. Context: signer proof, recipient, frontier, and local recipient.
     let signer_need = ContextNeed::range(
         fact.id,
         "content_signer",
@@ -821,6 +823,23 @@ fn key_wrap(
         return Ok(output);
     }
     let signer_public_key = signer_public_key.expect("checked");
+    let signature_need = signature::project::signature_proof_need(
+        fact.id,
+        scope.clone(),
+        fact.id,
+        signer_public_key,
+    )?;
+    output = output.need(signature_need.clone());
+    if !signature::project::signature_proof_ready(
+        projection_context,
+        &signature_need,
+        wrap.workspace_id,
+        fact.id,
+        signer_public_key,
+        "key wrap",
+    )? {
+        return Ok(output);
+    }
 
     let recipient_fact = recipient_fact.expect("checked");
     if recipient_fact.id != wrap.recipient_key_id {
@@ -843,7 +862,12 @@ fn key_wrap(
     }
     let context_have = context_have_from_needs(
         projection_context,
-        [&signer_need, &recipient_need, &frontier_need],
+        [
+            &signer_need,
+            &recipient_need,
+            &frontier_need,
+            &signature_need,
+        ],
     );
 
     // 3. Materialize: write the accepted wrap row and emit local recovery facts.

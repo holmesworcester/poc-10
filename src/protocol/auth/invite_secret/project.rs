@@ -328,7 +328,10 @@ mod tests {
             output.effects.row_mutations,
             vec![RowMutation::InsertValues(invite_secret_row(&secret))]
         );
-        assert_eq!(output.effects.row_mutations[0].table(), INVITE_SECRET_ROWS);
+        let RowMutation::InsertValues(insert) = &output.effects.row_mutations[0] else {
+            panic!("invite secret projector should insert its row");
+        };
+        assert_eq!(insert.table, INVITE_SECRET_ROWS);
         assert!(output.effects.intents.is_empty());
         assert!(output.effects.purged_facts.is_empty());
         assert!(output.time_wakes.is_empty());
@@ -347,19 +350,6 @@ mod tests {
             .expect_err("non-local invite secret should reject");
 
         assert_eq!(err, "invite_secret fact must have local scope");
-    }
-
-    trait RowMutationTable {
-        fn table(&self) -> crate::core::db::TableName;
-    }
-
-    impl RowMutationTable for RowMutation {
-        fn table(&self) -> crate::core::db::TableName {
-            match self {
-                RowMutation::InsertValues(insert) => insert.table,
-                RowMutation::DeleteWhere(delete) => delete.table,
-            }
-        }
     }
 }
 

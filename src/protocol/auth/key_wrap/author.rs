@@ -161,12 +161,12 @@ pub fn unwrap_key_wrap_fact(
     Ok(unwrapped)
 }
 
-pub fn create_validated_key_wrap_fact(
+pub fn create_validated_key_wrap_facts(
     creation: &KeyWrapCreationFact,
     recipient_fact: &Fact,
     source_fact: &Fact,
     signer_secret_fact: &Fact,
-) -> Result<Fact, String> {
+) -> Result<[Fact; 2], String> {
     let wrap = create_key_wrap_fact(creation, recipient_fact, source_fact)?;
     let signer = local_signer_secret_layout::decode_fact(&signer_secret_fact.bytes)?;
     if signer_secret_fact.id != creation.signer_secret_fact_id {
@@ -179,7 +179,13 @@ pub fn create_validated_key_wrap_fact(
     if signer.signer_id != key_wrap.signer_endpoint_id {
         return Err("signer secret does not match key wrap signer".to_string());
     }
-    Ok(wrap)
+    let signature = crate::protocol::auth::signature::author::sign_fact(
+        creation.workspace_id,
+        &wrap,
+        &signer.private_key,
+        wrap.timestamp,
+    )?;
+    Ok([wrap, signature])
 }
 
 pub fn admit_key_wrap_fact(bytes: Vec<u8>) -> Result<Fact, String> {

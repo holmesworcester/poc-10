@@ -334,46 +334,48 @@ fn key_request(
         output = output.need(frontier_need.clone());
     }
 
-    // 3. Materialize: emit key-wrap creation facts for eligible sources.
-    if let (Some(recipient_fact), Some(frontier_fact)) = (recipient_fact, frontier_fact) {
-        if recipient_fact.id != request.recipient_key_id {
-            return Err("key request recipient context payload id mismatch".to_string());
+    // 3. Materialize: share only after recipient/frontier authority is proven,
+    // then emit key-wrap creation facts for eligible local sources when present.
+    let (Some(recipient_fact), Some(frontier_fact)) = (recipient_fact, frontier_fact) else {
+        return Ok(output);
+    };
+    if recipient_fact.id != request.recipient_key_id {
+        return Err("key request recipient context payload id mismatch".to_string());
+    }
+    let recipient = recipient_key::decode_fact_payload(&recipient_fact.bytes)?;
+    if recipient.workspace_id != request.workspace_id {
+        return Err("key request recipient workspace mismatch".to_string());
+    }
+    if recipient.endpoint_id != request.requester_endpoint_id {
+        return Err("key request recipient is not requester endpoint".to_string());
+    }
+    if frontier_fact.id != request.frontier_id {
+        return Err("key request frontier context payload id mismatch".to_string());
+    }
+    let frontier = removal_frontier::decode_fact_payload(&frontier_fact.bytes)?;
+    if frontier.workspace_id != request.workspace_id {
+        return Err("key request frontier workspace mismatch".to_string());
+    }
+    if frontier.owner_endpoint_id != request.responder_endpoint_id {
+        return Err("key request frontier is not owned by responder".to_string());
+    }
+    context_have.extend(context_have_from_needs(
+        projection_context,
+        [&recipient_need, &frontier_need],
+    ));
+    output = add_signer_needs_for_matching_sources(output, projection_context, &source_need)?;
+    for (source_fact_id, signer_secret_fact_id, source) in
+        matching_wrap_sources_with_signer(projection_context, &source_need)?
+    {
+        if source.owner_endpoint_id != request.responder_endpoint_id {
+            continue;
         }
-        let recipient = recipient_key::decode_fact_payload(&recipient_fact.bytes)?;
-        if recipient.workspace_id != request.workspace_id {
-            return Err("key request recipient workspace mismatch".to_string());
-        }
-        if recipient.endpoint_id != request.requester_endpoint_id {
-            return Err("key request recipient is not requester endpoint".to_string());
-        }
-        if frontier_fact.id != request.frontier_id {
-            return Err("key request frontier context payload id mismatch".to_string());
-        }
-        let frontier = removal_frontier::decode_fact_payload(&frontier_fact.bytes)?;
-        if frontier.workspace_id != request.workspace_id {
-            return Err("key request frontier workspace mismatch".to_string());
-        }
-        if frontier.owner_endpoint_id != request.responder_endpoint_id {
-            return Err("key request frontier is not owned by responder".to_string());
-        }
-        context_have.extend(context_have_from_needs(
-            projection_context,
-            [&recipient_need, &frontier_need],
-        ));
-        output = add_signer_needs_for_matching_sources(output, projection_context, &source_need)?;
-        for (source_fact_id, signer_secret_fact_id, source) in
-            matching_wrap_sources_with_signer(projection_context, &source_need)?
-        {
-            if source.owner_endpoint_id != request.responder_endpoint_id {
-                continue;
-            }
-            output = output.fact(key_wrap_creation_fact(
-                request.recipient_key_id,
-                source_fact_id,
-                signer_secret_fact_id,
-                source,
-            )?);
-        }
+        output = output.fact(key_wrap_creation_fact(
+            request.recipient_key_id,
+            source_fact_id,
+            signer_secret_fact_id,
+            source,
+        )?);
     }
     Ok(share_fact_with_sync(
         output,
@@ -399,4 +401,237 @@ fn validate_requester_signer(
         return Err("key request requester signing key mismatch".to_string());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod projector_tests {
+    use super::*;
+    use crate::core::context::{ContextNeed, ContextOffer};
+    use crate::core::crypto;
+    use crate::core::project_fact::{MatchedContext, Projector};
+    use crate::core::wire::FixedText;
+    use crate::protocol::auth::endpoint_shared::encode as endpoint_shared_layout;
+    use crate::protocol::auth::endpoint_shared::fact::{
+        EndpointRole, EndpointSharedFact, ENDPOINT_DEVICE_NAME_BYTES,
+    };
+    use crate::protocol::auth::recipient_key::encode as recipient_key_layout;
+    use crate::protocol::auth::recipient_key::fact::{RecipientKeyFact, NO_PREVIOUS_RECIPIENT_KEY};
+    use crate::protocol::auth::removal_frontier::encode as removal_frontier_layout;
+    use crate::protocol::auth::removal_frontier::fact::RemovalFrontierFact;
+
+    #[test]
+    fn key_request_waits_for_recipient_and_frontier_before_sharing() {
+        let private_key = [7; 32];
+        let public_key = crypto::ed25519_public_key(&private_key);
+        let recipient = recipient_fact([1; 32], [2; 32]);
+        let frontier = frontier_fact([1; 32], [3; 32]);
+        let request = request_fact(public_key, recipient.id, frontier.id);
+        let decoded = decode::decode_key_request(&request.bytes).expect("decode request");
+        let requester = endpoint_shared_fact(
+            decoded.workspace_id,
+            decoded.requester_endpoint_id,
+            public_key,
+        );
+        let signature = crate::protocol::auth::signature::author::create_signature(
+            decoded.workspace_id,
+            request.id,
+            &private_key,
+            request.timestamp,
+        )
+        .expect("signature fact");
+
+        let output = KeyRequestProjector::new()
+            .project(
+                &request,
+                &ProjectionContext::from_matches(vec![
+                    matched(signature_need(&request, public_key), signature),
+                    matched(requester_need(&request), requester),
+                ]),
+            )
+            .expect("project key request");
+
+        assert!(output.effects.intents.is_empty());
+        assert!(output.needs.iter().any(|need| need.role == "recipient_key"));
+        assert!(output
+            .needs
+            .iter()
+            .any(|need| need.role == "auth_removal_frontier"));
+    }
+
+    #[test]
+    fn key_request_shares_after_recipient_and_frontier_validate_without_local_source() {
+        let private_key = [7; 32];
+        let public_key = crypto::ed25519_public_key(&private_key);
+        let recipient = recipient_fact([1; 32], [2; 32]);
+        let frontier = frontier_fact([1; 32], [3; 32]);
+        let request = request_fact(public_key, recipient.id, frontier.id);
+        let decoded = decode::decode_key_request(&request.bytes).expect("decode request");
+        let requester = endpoint_shared_fact(
+            decoded.workspace_id,
+            decoded.requester_endpoint_id,
+            public_key,
+        );
+        let signature = crate::protocol::auth::signature::author::create_signature(
+            decoded.workspace_id,
+            request.id,
+            &private_key,
+            request.timestamp,
+        )
+        .expect("signature fact");
+
+        let output = KeyRequestProjector::new()
+            .project(
+                &request,
+                &ProjectionContext::from_matches(vec![
+                    matched(signature_need(&request, public_key), signature),
+                    matched(requester_need(&request), requester),
+                    matched(
+                        recipient_need(&request, decoded.recipient_key_id),
+                        recipient,
+                    ),
+                    matched(frontier_need(&request, decoded.frontier_id), frontier),
+                ]),
+            )
+            .expect("project key request");
+
+        assert!(output.effects.facts.is_empty());
+        assert!(output
+            .effects
+            .intents
+            .iter()
+            .any(|intent| intent.kind.as_str() == "share_fact_with_sync"));
+    }
+
+    fn request_fact(
+        signer_public_key: [u8; 32],
+        recipient_key_id: [u8; 32],
+        frontier_id: [u8; 32],
+    ) -> Fact {
+        let request = KeyRequestFact {
+            workspace_id: [1; 32],
+            requester_endpoint_id: [2; 32],
+            responder_endpoint_id: [3; 32],
+            frontier_id,
+            recipient_key_id,
+            created_at_ms: 10,
+            signer_public_key,
+        };
+        Fact::new(
+            crate::protocol::auth::workspace::scope(request.workspace_id),
+            request.created_at_ms,
+            crate::protocol::auth::key_request::encode::encode_key_request(&request)
+                .expect("encode key request"),
+        )
+    }
+
+    fn signature_need(request: &Fact, signer_public_key: [u8; 32]) -> ContextNeed {
+        crate::protocol::auth::signature::project::signature_proof_need(
+            request.id,
+            request.scope.clone(),
+            request.id,
+            signer_public_key,
+        )
+        .expect("signature need")
+    }
+
+    fn requester_need(request: &Fact) -> ContextNeed {
+        let decoded = decode::decode_key_request(&request.bytes).expect("decode request");
+        ContextNeed::range(
+            request.id,
+            "content_signer",
+            request.scope.clone(),
+            decoded.requester_endpoint_id,
+            decoded.requester_endpoint_id,
+        )
+    }
+
+    fn recipient_need(request: &Fact, recipient_key_id: [u8; 32]) -> ContextNeed {
+        ContextNeed::range(
+            request.id,
+            "recipient_key",
+            request.scope.clone(),
+            recipient_key_id,
+            recipient_key_id,
+        )
+    }
+
+    fn frontier_need(request: &Fact, frontier_id: [u8; 32]) -> ContextNeed {
+        ContextNeed::range(
+            request.id,
+            "auth_removal_frontier",
+            request.scope.clone(),
+            frontier_id,
+            frontier_id,
+        )
+    }
+
+    fn matched(need: ContextNeed, payload: Fact) -> MatchedContext {
+        MatchedContext {
+            offer: ContextOffer::range(
+                payload.id,
+                need.role.clone(),
+                need.scope.clone(),
+                need.start_key.as_bytes(),
+                need.end_key.as_bytes(),
+            ),
+            need,
+            payload,
+        }
+    }
+
+    fn endpoint_shared_fact(
+        workspace_id: [u8; 32],
+        endpoint_id: [u8; 32],
+        signing_public_key: [u8; 32],
+    ) -> Fact {
+        let shared = EndpointSharedFact {
+            created_at_ms: 10,
+            workspace_id,
+            user_authority_fact_id: [30; 32],
+            endpoint_id,
+            signing_public_key,
+            endpoint_role: EndpointRole::Device,
+            device_name: FixedText::<ENDPOINT_DEVICE_NAME_BYTES>::new("laptop")
+                .expect("device name"),
+            signer_id: endpoint_id,
+            signer_public_key: signing_public_key,
+        };
+        Fact::new(
+            crate::protocol::auth::workspace::scope(workspace_id),
+            10,
+            endpoint_shared_layout::encode_fact(&shared).expect("encode endpoint shared"),
+        )
+    }
+
+    fn recipient_fact(workspace_id: [u8; 32], endpoint_id: [u8; 32]) -> Fact {
+        let private_key = [8; 32];
+        let recipient = RecipientKeyFact {
+            workspace_id,
+            endpoint_id,
+            recipient_key: [9; 32],
+            previous_recipient_key_id: NO_PREVIOUS_RECIPIENT_KEY,
+            created_at_ms: 10,
+            signer_public_key: crypto::ed25519_public_key(&private_key),
+        };
+        Fact::new(
+            crate::protocol::auth::workspace::scope(workspace_id),
+            10,
+            recipient_key_layout::encode_recipient_key(&recipient).expect("encode recipient"),
+        )
+    }
+
+    fn frontier_fact(workspace_id: [u8; 32], owner_endpoint_id: [u8; 32]) -> Fact {
+        let private_key = [8; 32];
+        let frontier = RemovalFrontierFact {
+            workspace_id,
+            owner_endpoint_id,
+            created_at_ms: 10,
+            signer_public_key: crypto::ed25519_public_key(&private_key),
+        };
+        Fact::new(
+            crate::protocol::auth::workspace::scope(workspace_id),
+            10,
+            removal_frontier_layout::encode_removal_frontier(&frontier).expect("encode frontier"),
+        )
+    }
 }

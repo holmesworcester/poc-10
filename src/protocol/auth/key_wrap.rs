@@ -19,7 +19,7 @@ pub mod queries;
 
 use crate::core::db::{TableInsert, TableName, TypedTableSchema, Value};
 
-pub(crate) use author::{create_validated_key_wrap_fact, unwrap_key_wrap_fact};
+pub(crate) use author::{create_validated_key_wrap_facts, unwrap_key_wrap_fact};
 
 pub const TYPE_KEY_WRAP: u8 = encode::TYPE_KEY_WRAP;
 

@@ -118,14 +118,15 @@ pub mod adapt {
 //
 // POLICY. A key-wrap creation fact is admitted only locally. Projection waits
 // for the exact recipient key, source secret, and signer secret context it
-// names, then emits the deterministic shared key-wrap fact.
+// names, then emits the deterministic shared key-wrap fact and its detached
+// signer proof.
 
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactScope};
 use crate::core::project_fact::{
     FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
 };
-use crate::protocol::auth::key_wrap::create_validated_key_wrap_fact;
+use crate::protocol::auth::key_wrap::create_validated_key_wrap_facts;
 use crate::protocol::auth::key_wrap::project::{matched_payload_fact, require_local_scope};
 
 use super::fact::KeyWrapCreationFact;
@@ -216,13 +217,14 @@ fn project_key_wrap_creation(
     else {
         return Ok(output);
     };
-    // 3. Materialize: deterministic shared key-wrap fact.
-    Ok(output.fact(create_validated_key_wrap_fact(
+    // 3. Materialize: deterministic shared key-wrap fact plus signer proof.
+    let [key_wrap_fact, signature_fact] = create_validated_key_wrap_facts(
         &creation,
         recipient_fact,
         source_fact,
         signer_secret_fact,
-    )?))
+    )?;
+    Ok(output.fact(key_wrap_fact).fact(signature_fact))
 }
 
 fn matching_signer_secret_fact<'a>(
