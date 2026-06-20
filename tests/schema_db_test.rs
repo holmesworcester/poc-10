@@ -1,7 +1,9 @@
 use std::collections::BTreeSet;
 
 use rusqlite::{params, Connection};
-use topo::core::db::{Db, ReplayTables, SchemaSource, TableInsert, TableName, Value};
+use topo::core::db::{
+    Db, ReplayTables, SchemaSource, StorageVersionSource, TableInsert, TableName, Value,
+};
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::protocol::content::{file, reaction};
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
@@ -10,7 +12,9 @@ use topo::protocol::versioning::local_update::queries::state_summary_table_hashe
 const TYPED_MESSAGES: TableName = TableName::new("typed_messages");
 const REPLAY_PROTECTED_ROWS: TableName = TableName::new("replay_protected_rows");
 const REPLAY_RESET_ROWS: TableName = TableName::new("replay_reset_rows");
+const VERSION_ROWS: TableName = TableName::new("version_rows");
 const LIFECYCLE_COLUMNS: &[&str] = &["id", "payload"];
+const VERSION_COLUMNS: &[&str] = &["update_id", "storage_version", "applied_at_ms"];
 
 const TYPED_MESSAGES_SCHEMA: SchemaSource = SchemaSource {
     ddl: r#"
@@ -47,6 +51,22 @@ CREATE TABLE IF NOT EXISTS replay_reset_rows (
     },
 };
 
+const VERSION_SCHEMA: SchemaSource = SchemaSource {
+    ddl: r#"
+CREATE TABLE IF NOT EXISTS version_rows (
+    update_id BLOB PRIMARY KEY NOT NULL,
+    storage_version INTEGER NOT NULL,
+    applied_at_ms INTEGER NOT NULL
+);
+"#,
+    storage_version: Some(StorageVersionSource {
+        table: VERSION_ROWS,
+        version_column: "storage_version",
+        order_by_columns: &["applied_at_ms", "update_id"],
+    }),
+    replay: ReplayTables::EMPTY,
+};
+
 fn checked_schema_sources() -> [SchemaSource; 2] {
     [CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE]
 }
@@ -71,6 +91,10 @@ fn sqlite_index_names(path: &std::path::Path) -> BTreeSet<String> {
         .expect("query index names")
         .collect::<Result<BTreeSet<_>, _>>()
         .expect("collect index names")
+}
+
+fn table_names(tables: &[TableName]) -> Vec<&'static str> {
+    tables.iter().map(|table| table.as_str()).collect()
 }
 
 #[test]
@@ -505,6 +529,44 @@ fn rebuild_lifecycle_declares_protected_reset_and_summary_tables() {
 }
 
 #[test]
+fn replay_lifecycle_deduplicates_tables_in_declaration_order() {
+    const DUPLICATE_LIFECYCLE_SCHEMA: SchemaSource = SchemaSource {
+        ddl: r#"
+CREATE TABLE IF NOT EXISTS replay_protected_rows (
+    id BLOB PRIMARY KEY NOT NULL,
+    payload BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS replay_reset_rows (
+    id BLOB PRIMARY KEY NOT NULL,
+    payload BLOB NOT NULL
+);
+"#,
+        storage_version: None,
+        replay: ReplayTables {
+            protected: &[REPLAY_PROTECTED_ROWS, REPLAY_PROTECTED_ROWS],
+            reset: &[REPLAY_RESET_ROWS, REPLAY_RESET_ROWS],
+            summary: &[REPLAY_RESET_ROWS, REPLAY_PROTECTED_ROWS, REPLAY_RESET_ROWS],
+        },
+    };
+
+    let store = Db::open_memory_with_schema_sources(&[DUPLICATE_LIFECYCLE_SCHEMA])
+        .expect("open lifecycle db");
+
+    assert_eq!(
+        table_names(store.replay_protected_tables()),
+        vec![REPLAY_PROTECTED_ROWS.as_str()]
+    );
+    assert_eq!(
+        table_names(store.replay_reset_tables()),
+        vec![REPLAY_RESET_ROWS.as_str()]
+    );
+    assert_eq!(
+        table_names(store.replay_summary_tables()),
+        vec![REPLAY_RESET_ROWS.as_str(), REPLAY_PROTECTED_ROWS.as_str()]
+    );
+}
+
+#[test]
 fn core_replay_preserves_only_retained_facts_and_resets_runtime_tables() {
     let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open core db");
     let protected = store
@@ -522,6 +584,72 @@ fn core_replay_preserves_only_retained_facts_and_resets_runtime_tables() {
     assert!(
         !reset.contains(&"clock"),
         "removed local time table must stay absent: {reset:?}"
+    );
+}
+
+#[test]
+fn storage_version_reads_latest_declared_marker_row() {
+    let store = Db::open_memory_with_schema_sources(&[VERSION_SCHEMA]).expect("open version db");
+
+    assert_eq!(
+        store
+            .current_storage_version()
+            .expect("read empty storage version"),
+        None
+    );
+
+    store
+        .insert_table_values(vec![
+            version_row([1; 32], 1, 100),
+            version_row([2; 32], 2, 200),
+            version_row([3; 32], 3, 200),
+        ])
+        .expect("insert version markers");
+
+    assert_eq!(
+        store
+            .current_storage_version()
+            .expect("read latest storage version"),
+        Some(3)
+    );
+    assert!(store.storage_version_is(3).expect("check version"));
+    assert!(!store.storage_version_is(2).expect("check old version"));
+}
+
+fn version_row(update_id: [u8; 32], storage_version: u32, applied_at_ms: u64) -> TableInsert {
+    TableInsert {
+        table: VERSION_ROWS,
+        columns: VERSION_COLUMNS,
+        values: vec![
+            Value::Bytes(update_id.to_vec()),
+            Value::U64(u64::from(storage_version)),
+            Value::U64(applied_at_ms),
+        ],
+    }
+}
+
+#[test]
+fn storage_version_sources_must_not_conflict() {
+    const CONFLICTING_VERSION_SCHEMA: SchemaSource = SchemaSource {
+        ddl: "",
+        storage_version: Some(StorageVersionSource {
+            table: VERSION_ROWS,
+            version_column: "other_storage_version",
+            order_by_columns: &["applied_at_ms", "update_id"],
+        }),
+        replay: ReplayTables::EMPTY,
+    };
+
+    let err =
+        match Db::open_memory_with_schema_sources(&[VERSION_SCHEMA, CONFLICTING_VERSION_SCHEMA]) {
+            Ok(_) => panic!("conflicting storage version sources must reject"),
+            Err(err) => err,
+        };
+
+    assert!(
+        err.to_string()
+            .contains("conflicting storage version sources declared"),
+        "{err}"
     );
 }
 
