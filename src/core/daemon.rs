@@ -42,6 +42,10 @@ extern "C" fn handle_termination_signal(_signal: libc::c_int) {
     SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
 }
 
+// =============================================================================
+// Daemon Command Types
+// =============================================================================
+
 /// Parsed daemon start options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StartOptions {
@@ -72,6 +76,10 @@ impl DaemonReport {
         out
     }
 }
+
+// =============================================================================
+// Central Daemon Commands
+// =============================================================================
 
 /// Run the long-lived daemon loop until SIGINT/SIGTERM or `stop`.
 pub fn start(
@@ -148,6 +156,10 @@ pub fn current_listen_addr(db_path: &Path) -> Result<Option<SocketAddr>, String>
         .map_err(|err| format!("daemon lock listen addr is invalid: {err}"))
 }
 
+// =============================================================================
+// Start Option Parsing Helpers
+// =============================================================================
+
 fn parse_start_options(args: CliArgs<'_>) -> Result<StartOptions, String> {
     let mut listen = None;
     let mut tick_ms = DEFAULT_TICK_MS;
@@ -183,10 +195,6 @@ fn parse_start_options(args: CliArgs<'_>) -> Result<StartOptions, String> {
     })
 }
 
-fn sleep_after_tick(options: &StartOptions, active: bool) -> Option<Duration> {
-    (!active).then(|| Duration::from_millis(options.quiet_ms))
-}
-
 fn parse_positive_u64(value: Option<&str>) -> Result<u64, String> {
     let parsed = value
         .ok_or_else(|| START_USAGE.to_string())?
@@ -196,6 +204,14 @@ fn parse_positive_u64(value: Option<&str>) -> Result<u64, String> {
         return Err(START_USAGE.to_string());
     }
     Ok(parsed)
+}
+
+// =============================================================================
+// Daemon Loop And Signal Helpers
+// =============================================================================
+
+fn sleep_after_tick(options: &StartOptions, active: bool) -> Option<Duration> {
+    (!active).then(|| Duration::from_millis(options.quiet_ms))
 }
 
 fn install_termination_handlers() {
@@ -213,6 +229,10 @@ fn install_termination_handlers() {
         libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut());
     }
 }
+
+// =============================================================================
+// Stop And Reset Helpers
+// =============================================================================
 
 fn stop_daemon(db_path: &Path) -> Result<Vec<String>, String> {
     let lock = lock_path(db_path);
@@ -279,6 +299,10 @@ fn reset_db_files(db_path: &Path) -> Result<Vec<String>, String> {
     Ok(deleted)
 }
 
+// =============================================================================
+// Reset Path Helpers
+// =============================================================================
+
 fn validate_reset_path(db_path: &Path) -> Result<PathBuf, String> {
     if db_path.as_os_str().is_empty() {
         return Err("reset: empty db path".to_string());
@@ -320,6 +344,10 @@ fn sibling_path(db_path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(sibling)
 }
 
+// =============================================================================
+// Stop Process Helpers
+// =============================================================================
+
 enum LockState {
     Missing,
     Unreadable,
@@ -357,6 +385,10 @@ fn send_termination_signal(pid: u32) -> Result<(), String> {
         }
     }
 }
+
+// =============================================================================
+// Daemon Lock Helpers
+// =============================================================================
 
 struct DaemonLock {
     path: PathBuf,
@@ -438,6 +470,10 @@ fn stale_lock_can_be_removed(path: &Path) -> Result<bool, String> {
     };
     Ok(!process_exists(pid))
 }
+
+// =============================================================================
+// Output Helpers
+// =============================================================================
 
 fn print_line_now(line: &str) -> Result<(), String> {
     let stdout = std::io::stdout();

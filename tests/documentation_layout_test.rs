@@ -801,6 +801,66 @@ fn app_module_docs_stay_file_scoped_and_hierarchical() {
 }
 
 #[test]
+fn daemon_module_keeps_lifecycle_commands_above_purpose_grouped_helpers() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let daemon_path = root.join("src/core/daemon.rs");
+    let daemon = source_text(&daemon_path);
+    let module_doc = rust_module_doc_text(&daemon_path);
+    let normalized_doc = normalize_whitespace(&module_doc);
+
+    for required in [
+        "The daemon is the reusable process host around a runtime turn",
+        "This file does not define the work performed inside a turn",
+        "`core::runtime` owns the bounded turn order",
+        "`core::app` is the layer above both pieces",
+    ] {
+        assert!(
+            normalized_doc.contains(required),
+            "src/core/daemon.rs module docs should explain daemon lifecycle ownership: {required:?}"
+        );
+    }
+
+    let command_types = daemon
+        .find("// Daemon Command Types")
+        .expect("src/core/daemon.rs marks daemon command types");
+    let central_commands = daemon
+        .find("// Central Daemon Commands")
+        .expect("src/core/daemon.rs marks central daemon commands");
+    let start_options = daemon
+        .find("// Start Option Parsing Helpers")
+        .expect("src/core/daemon.rs groups start option helpers by use");
+    let loop_signal = daemon
+        .find("// Daemon Loop And Signal Helpers")
+        .expect("src/core/daemon.rs groups loop and signal helpers by use");
+    let stop_reset = daemon
+        .find("// Stop And Reset Helpers")
+        .expect("src/core/daemon.rs groups stop/reset helpers by use");
+    let reset_paths = daemon
+        .find("// Reset Path Helpers")
+        .expect("src/core/daemon.rs groups reset path helpers by use");
+    let stop_process = daemon
+        .find("// Stop Process Helpers")
+        .expect("src/core/daemon.rs groups process-stop helpers by use");
+    let daemon_lock = daemon
+        .find("// Daemon Lock Helpers")
+        .expect("src/core/daemon.rs groups daemon lock helpers by use");
+    let output_helpers = daemon
+        .find("// Output Helpers")
+        .expect("src/core/daemon.rs groups output helpers by use");
+    assert!(
+        command_types < central_commands
+            && central_commands < start_options
+            && start_options < loop_signal
+            && loop_signal < stop_reset
+            && stop_reset < reset_paths
+            && reset_paths < stop_process
+            && stop_process < daemon_lock
+            && daemon_lock < output_helpers,
+        "src/core/daemon.rs should keep central daemon commands before purpose-specific helper sections"
+    );
+}
+
+#[test]
 fn runtime_module_docs_define_turn_jargon_for_newcomers() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let runtime_path = root.join("src/core/runtime.rs");
