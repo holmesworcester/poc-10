@@ -29,6 +29,48 @@ runtime a standing relationship surface. Later facts can wake when relevant
 context appears, and earlier offers can satisfy later needs without hidden
 callbacks or broad scans.
 
+### Fact Projectors
+
+A fact projector is the deterministic pipeline for one fact family. Core stores
+immutable fact bytes, reads the first-byte type tag, and routes one fact at a
+time to the projector registered for that tag. The projector receives the
+primary `Fact`, the matched context that woke this projection item, due time
+ranges, and replay/live mode. It does not query for missing dependencies, call
+other projectors, run network IO, or update SQLite tables directly.
+
+The projector's job is to explain what this one fact means under the context
+currently available. A typical projector decodes the fixed layout, checks the
+fact id and scope, validates signatures or encryption/container shape, adapts
+any retained legacy payload form, inspects matched context payload facts, and
+then returns a complete projection output. That output can materialize rows,
+publish context offers, declare future needs, schedule time wakes, emit new
+facts, queue intents, or purge exact facts. Core commits that output
+atomically.
+
+```text
+fact bytes
+  -> tag route
+  -> projector(primary fact + matched context + due time ranges)
+  -> ProjectionOutput
+  -> core commit: replace needs/time wakes, append offers, mutate rows,
+     admit emitted facts, queue intents, wake matched owners
+```
+
+Missing context is ordinary control flow. If a message projector cannot yet
+prove its signer, author, key coverage, deletion state, or retention floor, it
+returns needs for exactly those proofs and no final message row. Core records
+those needs and the fact is parked. When an endpoint, user, key-wrap, deletion,
+or retention fact later projects a matching offer, core requeues the message and
+attaches the matched payload as projection context. The message projector then
+validates that payload for the current message before trusting it.
+
+This is why projectors are the narrative center of a fact family. They decide
+which evidence is enough, what missing evidence should wake them later, which
+rows become visible, what context this fact offers to others, and which bounded
+stateful work should run as an intent. The next section describes the standing
+need/offer rows that let core wake those projectors without understanding the
+protocol meaning of the evidence.
+
 ### Needs And Offers
 
 Every context row is either a need or an offer. A need says "wake and
