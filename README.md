@@ -23,22 +23,22 @@ durable retry in one model.
 
 Understanding these source files should be enough to grasp the design:
 
-1. `src/core/project_fact.rs`: the core fact-to-state transaction. It shows how
+1. [`src/core/project_fact.rs`](src/core/project_fact.rs): the core fact-to-state transaction. It shows how
    one queued fact is loaded with matched context, projected once, and committed
    as replacement needs, append-only offers, row mutations, emitted facts,
    purges, time wakes, and follow-up intents.
-2. `src/core/runtime.rs`: the bounded turn scheduler. It shows the order shared
+2. [`src/core/runtime.rs`](src/core/runtime.rs): the bounded turn scheduler. It shows the order shared
    by commands and daemons: recurring work, local and durable intents,
    projection queues, incoming fact staging, due time wakes, network intake, and
    outgoing network pumping.
-3. `src/core/handle_intent.rs`: the stateful-work transaction. It shows how one
+3. [`src/core/handle_intent.rs`](src/core/handle_intent.rs): the stateful-work transaction. It shows how one
    durable or local intent is claimed, given exact fact inputs, routed to a
    handler, and committed atomically with queue consumption.
-4. `src/protocol/registry.rs`: the concrete protocol integration table. It
+4. [`src/protocol/registry.rs`](src/protocol/registry.rs): the concrete protocol integration table. It
    wires fact tags, projectors, handler routes, recurring work, schema sources,
    row allowlists, and commands into the core runtime without putting protocol
    policy in core.
-5. `src/protocol/connection/request/project.rs`: a representative protocol
+5. [`src/protocol/connection/request/project.rs`](src/protocol/connection/request/project.rs): a representative protocol
    projector. It shows fixed fact decoding, sealed request validation, parking
    on auth/local endpoint/ephemeral/receive context, and the handoff from
    deterministic projection into `create_connection` handler work.
