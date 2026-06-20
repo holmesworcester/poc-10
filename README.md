@@ -43,6 +43,35 @@ Understanding these source files should be enough to grasp the design:
    on auth/local endpoint/ephemeral/receive context, and the handoff from
    deterministic projection into `create_connection` handler work.
 
+### Run It
+
+The binary is named `con`; when running through Cargo, pass CLI arguments after
+`--`:
+
+```bash
+cargo test --lib
+cargo run -- --help
+```
+
+Use a scratch database to create a local workspace and inspect the projected
+state:
+
+```bash
+DB=/tmp/context-demo.db
+cargo run -- --db "$DB" reset
+cargo run -- --db "$DB" create-workspace Demo --username alice --devicename laptop
+cargo run -- --db "$DB" workspaces
+cargo run -- --db "$DB" state-summary
+```
+
+For live networking and daemon-host work, start a listener in one shell and
+stop it from another:
+
+```bash
+cargo run -- --db "$DB" start --listen 127.0.0.1 41000
+cargo run -- --db "$DB" stop
+```
+
 ## Approach
 
 In Context, a central idea is that facts offer context to other facts. Context
