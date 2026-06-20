@@ -8,7 +8,7 @@
 //! `main.rs` supplies argv. The protocol supplies a `ProtocolDescription`: names,
 //! runtime and runtime-turn declarations, the command table, and a context builder.
 //! This runner supplies the stable process shape around those declarations:
-//! `--db`, optional command time, daemon lifecycle commands, help text, runtime
+//! command-first `--db`, optional command time, daemon lifecycle commands, help text, runtime
 //! opening, command dispatch, and display-line printing.
 //!
 //! The file does not own fact layouts, projector policy, handler policy, row
@@ -278,19 +278,19 @@ pub fn usage<C: 'static>(description: &ProtocolDescription<C>, reason: &str) -> 
     let mut lines = vec![reason.to_string(), "usage:".to_string()];
     lines.extend([
         format!(
-            "  {} --db PATH start --listen IP PORT [--tick-ms N] [--quiet-ms N]",
+            "  {} start --db PATH --listen IP PORT [--tick-ms N] [--quiet-ms N]",
             description.command_name
         ),
-        format!("  {} --db PATH stop", description.command_name),
-        format!("  {} --db PATH reset", description.command_name),
+        format!("  {} stop --db PATH", description.command_name),
+        format!("  {} reset --db PATH", description.command_name),
         format!(
-            "  {} --db PATH assert eventually COMMAND [ARGS...] FIELD OP VALUE [--timeout-ms N] [--poll-ms N]",
+            "  {} assert eventually COMMAND [ARGS...] FIELD OP VALUE --db PATH [--timeout-ms N] [--poll-ms N]",
             description.command_name
         ),
     ]);
     for command in description.commands {
         lines.push(format!(
-            "  {} --db PATH [--at TIMESTAMP_MS] {}",
+            "  {} {} --db PATH [--at TIMESTAMP_MS]",
             description.command_name, command.usage
         ));
     }
@@ -428,7 +428,7 @@ fn parse_positive_u64<C: 'static>(
 /// Build the focused usage text for malformed `assert eventually` invocations.
 fn assert_usage<C: 'static>(description: &ProtocolDescription<C>) -> String {
     format!(
-        "assert eventually COMMAND [ARGS...] FIELD OP VALUE [--timeout-ms N] [--poll-ms N]\nusage:\n  {} --db PATH assert eventually COMMAND [ARGS...] FIELD OP VALUE [--timeout-ms N] [--poll-ms N]",
+        "assert eventually COMMAND [ARGS...] FIELD OP VALUE [--timeout-ms N] [--poll-ms N]\nusage:\n  {} assert eventually COMMAND [ARGS...] FIELD OP VALUE --db PATH [--timeout-ms N] [--poll-ms N]",
         description.command_name
     )
 }
@@ -530,8 +530,9 @@ impl CompareOp {
 
 /// Parsed top-level argv before command-specific parsing.
 ///
-/// Only process-wide options live here. Once the first command word is seen, all
-/// remaining words are preserved for the selected command path.
+/// Only process-wide options live here. Recognized process options may appear
+/// before or after the command word; all other words are preserved for the
+/// selected command path in their original order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedArgs {
     db: Option<PathBuf>,
@@ -542,20 +543,16 @@ struct ParsedArgs {
 impl ParsedArgs {
     /// Parse process-wide `--db` and `--at` options from argv.
     ///
-    /// The parser stops option handling at the first command word so
-    /// protocol-owned command arguments can reuse ordinary flag syntax without
-    /// being interpreted by the app runner.
+    /// `con start --db ...` is the primary user-facing shape, but the older
+    /// `con --db ... start` form remains valid. Unknown flags stay with the
+    /// selected command so protocol-owned command arguments keep normal
+    /// flag syntax.
     fn parse(argv: Vec<String>) -> Result<Self, String> {
         let mut db = None;
         let mut at = None;
         let mut command = Vec::new();
         let mut iter = argv.into_iter();
         while let Some(arg) = iter.next() {
-            if !command.is_empty() {
-                command.push(arg);
-                command.extend(iter);
-                break;
-            }
             match arg.as_str() {
                 "--db" => {
                     let value = iter
@@ -583,5 +580,66 @@ impl ParsedArgs {
             }
         }
         Ok(Self { db, at, command })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(words: &[&str]) -> Vec<String> {
+        words.iter().map(|word| word.to_string()).collect()
+    }
+
+    #[test]
+    fn parsed_args_accept_command_first_process_options() {
+        let parsed = ParsedArgs::parse(args(&[
+            "create-workspace",
+            "Demo",
+            "--username",
+            "alice",
+            "--db",
+            "demo.db",
+            "--at",
+            "123",
+        ]))
+        .expect("parse command-first args");
+
+        assert_eq!(parsed.db, Some(PathBuf::from("demo.db")));
+        assert_eq!(parsed.at, Some(123));
+        assert_eq!(
+            parsed.command,
+            args(&["create-workspace", "Demo", "--username", "alice"])
+        );
+    }
+
+    #[test]
+    fn parsed_args_keep_legacy_global_options_before_command() {
+        let parsed = ParsedArgs::parse(args(&[
+            "--db",
+            "demo.db",
+            "--at",
+            "456",
+            "start",
+            "--listen",
+            "127.0.0.1",
+            "41000",
+        ]))
+        .expect("parse legacy args");
+
+        assert_eq!(parsed.db, Some(PathBuf::from("demo.db")));
+        assert_eq!(parsed.at, Some(456));
+        assert_eq!(
+            parsed.command,
+            args(&["start", "--listen", "127.0.0.1", "41000"])
+        );
+    }
+
+    #[test]
+    fn parsed_args_reject_duplicate_process_options_across_positions() {
+        let err = ParsedArgs::parse(args(&["count", "--db", "a.db", "--db", "b.db"]))
+            .expect_err("duplicate db rejected");
+
+        assert_eq!(err, "--db may be supplied only once");
     }
 }

@@ -45,12 +45,12 @@ Understanding these source files should be enough to grasp the design:
 
 ### Run It
 
-The binary is named `con`; when running through Cargo, pass CLI arguments after
-`--`:
+Build once, then run the `con` binary directly:
 
 ```bash
-cargo test --lib
-cargo run -- --help
+cargo build --target-dir target
+export PATH="$PWD/target/debug:$PATH"
+con --help
 ```
 
 Use a scratch database to create a local workspace and inspect the projected
@@ -58,29 +58,29 @@ state:
 
 ```bash
 DB=/tmp/context-demo.db
-cargo run -- --db "$DB" reset
-cargo run -- --db "$DB" create-workspace Demo --username alice --devicename laptop
-cargo run -- --db "$DB" workspaces
-cargo run -- --db "$DB" state-summary
+con reset --db "$DB"
+con create-workspace Demo --username alice --devicename laptop --db "$DB"
+con workspaces --db "$DB"
+con state-summary --db "$DB"
 ```
 
 For live networking and daemon-host work, start a listener in one shell and
 stop it from another:
 
 ```bash
-cargo run -- --db "$DB" start --listen 127.0.0.1 41000
-cargo run -- --db "$DB" stop
+con start --db "$DB" --listen 127.0.0.1 41000
+con stop --db "$DB"
 ```
 
 ## Approach
 
-In Context, a central idea is that facts offer context to other facts. Context
-is a more general relationship than blocking: a context need can name an exact
-fact, but it can also name a range of facts, and context
-offers can be projected before the facts they refer to exist. That gives the
-runtime a standing relationship surface. Later facts can wake when relevant
-context appears, and earlier offers can satisfy later needs without hidden
-callbacks or broad scans.
+In Context, a central idea is that [Datalog](https://en.wikipedia.org/wiki/Datalog)-like
+facts offer context to other facts. Context is a more general relationship than
+blocking: a context need can name an exact fact, but it can also name a range of
+facts, and context offers can be projected before the facts they refer to exist.
+That gives the runtime a standing relationship surface. Later facts can wake
+when relevant context appears, and earlier offers can satisfy later needs
+without hidden callbacks or broad scans.
 
 ```mermaid
 flowchart LR
