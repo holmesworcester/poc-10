@@ -191,6 +191,163 @@ pub(crate) fn project_one(
     Ok(true)
 }
 
+pub(crate) fn drain_projection_batched(
+    store: &Db,
+    projector: &(impl Projector + ?Sized),
+    source: ProjectionSource,
+    allowed_tables: &[TableName],
+    registered_intent_kinds: &[&str],
+    fact_admission: Option<FactAdmissionFn>,
+    limit: usize,
+    batch_size: usize,
+) -> Result<bool, String> {
+    let batch_size = batch_size.max(1);
+    let mut remaining = limit;
+    let mut progressed = false;
+    while remaining > 0 {
+        let batch_limit = remaining.min(batch_size);
+        let outcome = perf::measure_result("projection_batch_commit", || {
+            store
+                .write_transaction(|tx| {
+                    drain_projection_batch_in_tx(
+                        tx,
+                        projector,
+                        source,
+                        allowed_tables,
+                        registered_intent_kinds,
+                        fact_admission,
+                        batch_limit,
+                    )
+                })
+                .map_err(|err| format!("drain projection batch: {err}"))
+        })?;
+        if outcome.processed == 0 {
+            if let Some(error) = outcome.error {
+                return Err(error);
+            }
+            break;
+        }
+        progressed = true;
+        remaining = remaining.saturating_sub(outcome.processed);
+        if let Some(error) = outcome.error {
+            return Err(error);
+        }
+        if outcome.processed < batch_limit {
+            break;
+        }
+    }
+    Ok(progressed)
+}
+
+struct ProjectionBatchOutcome {
+    processed: usize,
+    error: Option<String>,
+}
+
+fn drain_projection_batch_in_tx(
+    tx: &Db,
+    projector: &(impl Projector + ?Sized),
+    source: ProjectionSource,
+    allowed_tables: &[TableName],
+    registered_intent_kinds: &[&str],
+    fact_admission: Option<FactAdmissionFn>,
+    limit: usize,
+) -> rusqlite::Result<ProjectionBatchOutcome> {
+    let mut processed = 0usize;
+    for _ in 0..limit {
+        match project_one_in_savepoint(
+            tx,
+            projector,
+            source,
+            allowed_tables,
+            registered_intent_kinds,
+            fact_admission,
+        )? {
+            Ok(false) => break,
+            Ok(true) => processed += 1,
+            Err(error) => {
+                return Ok(ProjectionBatchOutcome {
+                    processed,
+                    error: Some(error),
+                });
+            }
+        }
+    }
+    Ok(ProjectionBatchOutcome {
+        processed,
+        error: None,
+    })
+}
+
+fn project_one_in_savepoint(
+    tx: &Db,
+    projector: &(impl Projector + ?Sized),
+    source: ProjectionSource,
+    allowed_tables: &[TableName],
+    registered_intent_kinds: &[&str],
+    fact_admission: Option<FactAdmissionFn>,
+) -> rusqlite::Result<Result<bool, String>> {
+    tx.conn().execute_batch("SAVEPOINT projection_item")?;
+    let result = project_one_in_tx(
+        tx,
+        projector,
+        source,
+        allowed_tables,
+        registered_intent_kinds,
+        fact_admission,
+    );
+    match result {
+        Ok(processed) => {
+            tx.conn().execute_batch("RELEASE projection_item")?;
+            Ok(Ok(processed))
+        }
+        Err(error) => {
+            tx.conn().execute_batch("ROLLBACK TO projection_item")?;
+            tx.conn().execute_batch("RELEASE projection_item")?;
+            Ok(Err(error))
+        }
+    }
+}
+
+fn project_one_in_tx(
+    tx: &Db,
+    projector: &(impl Projector + ?Sized),
+    source: ProjectionSource,
+    allowed_tables: &[TableName],
+    registered_intent_kinds: &[&str],
+    fact_admission: Option<FactAdmissionFn>,
+) -> Result<bool, String> {
+    let load = match load_one_projection_input(tx, source)? {
+        None => return Ok(false),
+        Some(load) => load,
+    };
+
+    let outcome = match load {
+        ProjectionLoad::Loaded(input) => evaluate_loaded_projection_input(
+            projector,
+            input,
+            allowed_tables,
+            registered_intent_kinds,
+            fact_admission,
+        )?,
+        ProjectionLoad::Stale { source, fact_id } => {
+            ProjectionOutcome::RetireStaleInput { source, fact_id }
+        }
+    };
+
+    perf::measure_result("projection_commit_effects", || {
+        commit_projection_effects_in_tx(
+            tx,
+            &outcome,
+            allowed_tables,
+            registered_intent_kinds,
+            fact_admission,
+        )
+        .map_err(|err| format!("commit projection effects: {err}"))
+    })?;
+    Ok(true)
+}
+
 // =============================================================================
 // Stages
 // =============================================================================
@@ -313,46 +470,53 @@ fn commit_projection_effects(
     perf::measure_result("projection_commit_effects", || {
         store
             .write_transaction(|tx| {
-                perf::measure_result("projection_commit_tx_body", || match outcome {
-                    ProjectionOutcome::RetireStaleInput { source, fact_id } => {
-                        commit_stale_projection_input_in_tx(tx, *source, *fact_id)
-                    }
-                    ProjectionOutcome::RetireRejectedInput { source, fact_id } => {
-                        commit_rejected_projection_input_in_tx(tx, *source, *fact_id)
-                    }
-                    ProjectionOutcome::Accepted(projection) => {
-                        let fact_id = projection.fact.id;
-                        if !storage_requirement_satisfied(
-                            tx,
-                            projection.runtime_effects.storage_requirement,
-                        )
-                        .map_err(sqlite_string_error)?
-                        {
-                            return commit_rejected_projection_input_in_tx(
-                                tx,
-                                projection.source,
-                                fact_id,
-                            );
-                        }
-
-                        let retained =
-                            settle_projected_input_lifecycle_in_tx(tx, projection, fact_id)?;
-                        record_projection_timing_in_tx(tx, projection, retained)?;
-                        let new_context = publish_retained_projection_state_in_tx(
-                            tx, projection, fact_id, retained,
-                        )?;
-                        wake_projection_work_from_new_context_in_tx(tx, &new_context)?;
-                        commit_projector_emitted_runtime_effects_in_tx(
-                            tx,
-                            projection,
-                            allowed_tables,
-                            registered_intent_kinds,
-                            fact_admission,
-                        )
-                    }
-                })
+                commit_projection_effects_in_tx(
+                    tx,
+                    outcome,
+                    allowed_tables,
+                    registered_intent_kinds,
+                    fact_admission,
+                )
             })
             .map_err(|err| format!("commit projection effects: {err}"))
+    })
+}
+
+fn commit_projection_effects_in_tx(
+    tx: &Db,
+    outcome: &ProjectionOutcome,
+    allowed_tables: &[TableName],
+    registered_intent_kinds: &[&str],
+    fact_admission: Option<FactAdmissionFn>,
+) -> rusqlite::Result<()> {
+    perf::measure_result("projection_commit_tx_body", || match outcome {
+        ProjectionOutcome::RetireStaleInput { source, fact_id } => {
+            commit_stale_projection_input_in_tx(tx, *source, *fact_id)
+        }
+        ProjectionOutcome::RetireRejectedInput { source, fact_id } => {
+            commit_rejected_projection_input_in_tx(tx, *source, *fact_id)
+        }
+        ProjectionOutcome::Accepted(projection) => {
+            let fact_id = projection.fact.id;
+            if !storage_requirement_satisfied(tx, projection.runtime_effects.storage_requirement)
+                .map_err(sqlite_string_error)?
+            {
+                return commit_rejected_projection_input_in_tx(tx, projection.source, fact_id);
+            }
+
+            let retained = settle_projected_input_lifecycle_in_tx(tx, projection, fact_id)?;
+            record_projection_timing_in_tx(tx, projection, retained)?;
+            let new_context =
+                publish_retained_projection_state_in_tx(tx, projection, fact_id, retained)?;
+            wake_projection_work_from_new_context_in_tx(tx, &new_context)?;
+            commit_projector_emitted_runtime_effects_in_tx(
+                tx,
+                projection,
+                allowed_tables,
+                registered_intent_kinds,
+                fact_admission,
+            )
+        }
     })
 }
 
@@ -3670,6 +3834,7 @@ mod contract_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     const TEST_REGISTERED_INTENT_KINDS: &[&str] = &[
+        "batch_ready",
         "ephemeral_partial",
         "ephemeral_ready",
         "followup",
@@ -4169,6 +4334,65 @@ mod contract_tests {
             intent_payload_for(&store, "range_ready", &target.id),
             offered.id.to_vec()
         );
+    }
+
+    #[test]
+    fn batched_projection_drain_reads_context_written_earlier_in_batch() {
+        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+            .expect("open db");
+        let offered = Fact::new(FactScope::Global, 1, b"batched-offer".to_vec());
+        let target = Fact::new(FactScope::Global, 2, b"batched-target".to_vec());
+        submit_fact_to_db(&store, offered.clone()).expect("persist offered");
+        submit_fact_to_db(&store, target.clone()).expect("persist target");
+        store
+            .write_transaction(|tx| {
+                tx.conn().execute(
+                    "UPDATE pending_projection SET queued_at = 1 WHERE owner = ?1",
+                    rusqlite::params![offered.id.as_slice()],
+                )?;
+                tx.conn().execute(
+                    "UPDATE pending_projection SET queued_at = 2 WHERE owner = ?1",
+                    rusqlite::params![target.id.as_slice()],
+                )?;
+                Ok(())
+            })
+            .expect("order pending projection rows");
+
+        let role = Role::new("batched_exact").unwrap();
+        let key = ContextKey::from_bytes([42; 32]);
+        let offered_id = offered.id;
+        let projector = test_projector(move |fact, context| {
+            if fact.id == offered_id {
+                Ok(ProjectionOutput::new().offer(offer_for(fact, &role, &key)))
+            } else if let Some(offer) = context.offers().first() {
+                Ok(ProjectionOutput::new().intent(Intent::new(
+                    IntentKind::new("batch_ready").unwrap(),
+                    fact.id,
+                    offer.owner,
+                )))
+            } else {
+                Ok(ProjectionOutput::new().need(need_for(fact, &role, &key)))
+            }
+        });
+
+        let progress = crate::core::project_fact::drain_projection_batched(
+            &store,
+            &projector,
+            ProjectionSource::Durable,
+            &[],
+            TEST_REGISTERED_INTENT_KINDS,
+            None,
+            3,
+            3,
+        )
+        .expect("drain projection batch");
+
+        assert!(progress);
+        assert_eq!(
+            intent_payload_for(&store, "batch_ready", &target.id),
+            offered.id.to_vec()
+        );
+        assert_eq!(pending_projection_count(&store, target.id), 0);
     }
 
     #[test]

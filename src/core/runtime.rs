@@ -36,6 +36,8 @@ use crate::core::project_fact::{
 use crate::core::schema::{CORE_SCHEMA_SOURCE, INTENTS, LOCAL_INTENTS};
 use std::path::Path;
 
+const PROJECTION_BATCH_SIZE_ENV: &str = "TOPO_PROJECTION_BATCH_SIZE";
+
 pub use crate::core::handle_intent::{
     HandlerRoute, RecurringIntentBuilder, RecurringIntentContext, RecurringIntentSpec,
 };
@@ -295,6 +297,19 @@ impl Runtime {
         source: ProjectionSource,
         limit: usize,
     ) -> Result<bool, String> {
+        let batch_size = projection_batch_size();
+        if batch_size > 1 {
+            return project_fact::drain_projection_batched(
+                &self.db,
+                self.projector.as_ref(),
+                source,
+                self.description.row_mutation_tables,
+                self.handlers.intent_kinds(),
+                self.description.fact_admission,
+                limit,
+                batch_size,
+            );
+        }
         drain_bounded_work(limit, || {
             project_fact::project_one(
                 &self.db,
@@ -353,6 +368,14 @@ impl Runtime {
             limit,
         )
     }
+}
+
+fn projection_batch_size() -> usize {
+    std::env::var(PROJECTION_BATCH_SIZE_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|size| *size > 0)
+        .unwrap_or(1)
 }
 
 fn runtime_schema_sources(description: &RuntimeDescription) -> Vec<SchemaSource> {
