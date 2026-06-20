@@ -351,8 +351,10 @@ mod tests {
     use super::*;
     use crate::core::command::FnClock;
     use crate::core::daemon::{self, RuntimeTurnHost};
+    use crate::core::project_fact::IncomingMetadata;
     use crate::core::runtime::Runtime;
     use crate::protocol::app::{CONTEXT_PROTOCOL, CONTEXT_RUNTIME};
+    use std::time::Instant;
 
     fn drain_runtime_work_for_test(runtime: &mut Runtime, max_rounds: usize, limit: usize) {
         for _ in 0..max_rounds {
@@ -385,6 +387,202 @@ mod tests {
             512,
         )
         .expect("runtime turn");
+    }
+
+    fn message_count_for_workspace(runtime: &Runtime, workspace_id: WorkspaceId) -> usize {
+        runtime
+            .db()
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM content_messages WHERE workspace_id = ?1",
+                rusqlite::params![workspace_id.as_slice()],
+                |row| row.get::<_, i64>(0).map(|value| value as usize),
+            )
+            .expect("query content message count")
+    }
+
+    #[derive(Debug)]
+    struct LocalProjectionStats {
+        count: usize,
+        reprojected: usize,
+        max_projection_count: i64,
+        receive_to_first: Vec<i64>,
+        staged_to_first: Vec<i64>,
+        first_to_latest: Vec<i64>,
+    }
+
+    fn local_message_projection_stats(
+        runtime: &Runtime,
+        workspace_id: WorkspaceId,
+    ) -> LocalProjectionStats {
+        let mut stmt = runtime
+            .db()
+            .conn()
+            .prepare(
+                "SELECT
+                    t.origin_received_at,
+                    t.input_staged_at,
+                    t.first_projected_at,
+                    t.projected_at,
+                    t.projection_count
+                 FROM content_messages m
+                 JOIN projection_timings t ON t.fact_id = m.message_id
+                 WHERE m.workspace_id = ?1",
+            )
+            .expect("prepare message projection timing query");
+        let rows = stmt
+            .query_map(rusqlite::params![workspace_id.as_slice()], |row| {
+                Ok((
+                    row.get::<_, Option<i64>>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })
+            .expect("query message projection timings")
+            .map(|row| row.expect("message timing row"))
+            .collect::<Vec<_>>();
+        let count = rows.len();
+        let reprojected = rows.iter().filter(|(_, _, _, _, count)| *count > 1).count();
+        let max_projection_count = rows
+            .iter()
+            .map(|(_, _, _, _, count)| *count)
+            .max()
+            .unwrap_or(0);
+        let receive_to_first = rows
+            .iter()
+            .filter_map(|(origin, _, first, _, _)| {
+                origin.map(|origin| first.saturating_sub(origin).max(0))
+            })
+            .collect::<Vec<_>>();
+        let staged_to_first = rows
+            .iter()
+            .filter_map(|(_, staged, first, _, _)| {
+                staged.map(|staged| first.saturating_sub(staged).max(0))
+            })
+            .collect::<Vec<_>>();
+        let first_to_latest = rows
+            .iter()
+            .map(|(_, _, first, latest, _)| latest.saturating_sub(*first).max(0))
+            .collect::<Vec<_>>();
+        LocalProjectionStats {
+            count,
+            reprojected,
+            max_projection_count,
+            receive_to_first,
+            staged_to_first,
+            first_to_latest,
+        }
+    }
+
+    fn percentile(values: &mut [i64], percentile: usize) -> i64 {
+        assert!(!values.is_empty(), "percentile needs values");
+        values.sort();
+        let last = values.len() - 1;
+        let index = ((last * percentile) + 99) / 100;
+        values[index.min(last)]
+    }
+
+    fn print_latency(label: &str, values: &[i64]) {
+        let mut min = values.to_vec();
+        let mut p50 = values.to_vec();
+        let mut p95 = values.to_vec();
+        let mut max = values.to_vec();
+        let avg = values.iter().map(|value| *value as f64).sum::<f64>() / values.len() as f64;
+        eprint!(
+            " {label}_min_ms={} {label}_p50_ms={} {label}_p95_ms={} {label}_max_ms={} {label}_avg_ms={:.2}",
+            percentile(&mut min, 0),
+            percentile(&mut p50, 50),
+            percentile(&mut p95, 95),
+            percentile(&mut max, 100),
+            avg
+        );
+    }
+
+    #[test]
+    #[ignore = "manual local incoming projection fixture; run with --ignored when isolating projection without network"]
+    fn incoming_generated_message_projection_perf_single_runtime() {
+        let message_count = std::env::var("TOPO_LOCAL_INCOMING_PROJECTION_MESSAGES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(1);
+        let mut runtime = Runtime::open_memory(&CONTEXT_RUNTIME).expect("runtime");
+        initialize_runtime_for_test(&mut runtime);
+        let workspace_clock = FnClock(|| 1_000);
+        let workspace = crate::protocol::auth::workspace::api::create_workspace_with_identity(
+            runtime.db(),
+            &workspace_clock,
+            "test",
+            crate::protocol::auth::workspace::api::BootstrapIdentity {
+                username: "alice",
+                device_name: "laptop",
+                ttl_minutes: Some(0),
+            },
+        )
+        .expect("workspace command");
+        let workspace_id = workspace.receipt.workspace_fact_id;
+        runtime
+            .submit_authored_facts(workspace)
+            .expect("submit workspace");
+        drain_runtime_work_for_test(&mut runtime, 8, 512);
+        let frontier = crate::protocol::auth::key_wrap::api::create_key_frontier(
+            runtime.db(),
+            crate::protocol::auth::key_wrap::api::CreateKeyFrontier {
+                created_at_ms: 2_000,
+                workspace_id,
+            },
+        )
+        .expect("frontier command");
+        runtime
+            .submit_authored_facts(frontier)
+            .expect("submit frontier");
+        drain_runtime_work_for_test(&mut runtime, 8, 512);
+
+        let message_clock = FnClock(|| 10_000);
+        let generated = generate_messages(
+            runtime.db(),
+            &message_clock,
+            workspace_id,
+            message_count,
+            128,
+        )
+        .expect("generate messages");
+        let metadata = IncomingMetadata {
+            origin_addr: b"127.0.0.1:41001".to_vec(),
+            received_at_local_ms: daemon::now_ms(),
+        };
+        runtime
+            .submit_network_incoming_facts(
+                &generated.facts,
+                &metadata,
+                "stage local incoming generated messages",
+            )
+            .expect("stage incoming generated messages");
+        let pending_before = runtime.pending_projection_count();
+        let started = Instant::now();
+        drain_runtime_work_for_test(&mut runtime, 16, 65_536);
+        let elapsed = started.elapsed();
+        assert_eq!(
+            message_count_for_workspace(&runtime, workspace_id),
+            message_count
+        );
+        let stats = local_message_projection_stats(&runtime, workspace_id);
+        assert_eq!(stats.count, message_count);
+
+        eprint!(
+            "local_incoming_projection_perf messages={} pending_before={} wall_ms={} messages_per_s={:.2} reprojected={} max_projection_count={}",
+            message_count,
+            pending_before,
+            elapsed.as_millis(),
+            message_count as f64 / elapsed.as_secs_f64().max(0.001),
+            stats.reprojected,
+            stats.max_projection_count
+        );
+        print_latency("receive_to_first", &stats.receive_to_first);
+        print_latency("staged_to_first", &stats.staged_to_first);
+        print_latency("first_to_latest", &stats.first_to_latest);
+        eprintln!();
     }
 
     #[test]
