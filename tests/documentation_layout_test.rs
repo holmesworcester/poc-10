@@ -804,6 +804,7 @@ fn app_module_docs_stay_file_scoped_and_hierarchical() {
 fn runtime_module_docs_define_turn_jargon_for_newcomers() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let runtime_path = root.join("src/core/runtime.rs");
+    let runtime = source_text(&runtime_path);
     let module_doc = rust_module_doc_text(&runtime_path);
     let normalized_doc = normalize_whitespace(&module_doc);
 
@@ -841,6 +842,41 @@ fn runtime_module_docs_define_turn_jargon_for_newcomers() {
     assert!(
         runtime_intro < recurring_section && recurring_section < terms_section,
         "src/core/runtime.rs module docs should explain the main action before vocabulary details"
+    );
+
+    let central_facade = runtime
+        .find("// Central Runtime Facade")
+        .expect("src/core/runtime.rs marks its central runtime facade");
+    let central_turn = runtime
+        .find("// Central Turn Procedure")
+        .expect("src/core/runtime.rs marks the central turn procedure");
+    let turn_stage_helpers = runtime
+        .find("// Runtime Turn Budget And Stage Helpers")
+        .expect("src/core/runtime.rs groups turn-stage helpers by use");
+    let clock_helpers = runtime
+        .find("// Clock Helpers")
+        .expect("src/core/runtime.rs groups clock helpers by use");
+    let profiling_helpers = runtime
+        .find("// Runtime Turn Profiling Helpers")
+        .expect("src/core/runtime.rs groups profiling helpers by use");
+    let lock_path_helpers = runtime
+        .find("// Runtime Lock Path Helpers")
+        .expect("src/core/runtime.rs groups lock path helpers by use");
+    let schema_helpers = runtime
+        .find("// Schema Opening Helpers")
+        .expect("src/core/runtime.rs groups schema-opening helpers by use");
+    let bounded_drain_helpers = runtime
+        .find("// Generic Bounded Drain Helpers")
+        .expect("src/core/runtime.rs groups generic drain helpers by use");
+    assert!(
+        central_facade < central_turn
+            && central_turn < turn_stage_helpers
+            && turn_stage_helpers < clock_helpers
+            && clock_helpers < profiling_helpers
+            && profiling_helpers < lock_path_helpers
+            && lock_path_helpers < schema_helpers
+            && schema_helpers < bounded_drain_helpers,
+        "src/core/runtime.rs should keep central runtime logic before purpose-specific helper sections"
     );
 }
 

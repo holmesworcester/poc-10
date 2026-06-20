@@ -301,6 +301,10 @@ pub struct Runtime {
     handlers: HandlerSet,
 }
 
+// =============================================================================
+// Central Runtime Facade
+// =============================================================================
+
 impl Runtime {
     // -------------------------------------------------------------------------
     // Construction
@@ -577,7 +581,7 @@ impl Runtime {
     }
 
     // -------------------------------------------------------------------------
-    // Runtime Turns
+    // Central Turn Procedure
     // -------------------------------------------------------------------------
 
     /// Run one bounded runtime turn.
@@ -639,6 +643,14 @@ impl Runtime {
         Ok(active)
     }
 }
+
+// =============================================================================
+// Runtime Turn Budget And Stage Helpers
+// =============================================================================
+//
+// These helpers are called by `Runtime::run_turn`. They are ordered like the
+// turn itself: derive the local projection budget, offer recurring work, ingest
+// network bytes, admit due time wakes, and finally pump outgoing network rows.
 
 fn local_derivation_work_limit(work_limit: usize) -> usize {
     work_limit
@@ -738,12 +750,20 @@ fn drain_outgoing_network(
     Ok(report.sent_frames > 0)
 }
 
+// =============================================================================
+// Clock Helpers
+// =============================================================================
+
 pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
 }
+
+// =============================================================================
+// Runtime Turn Profiling Helpers
+// =============================================================================
 
 struct RuntimeTurnProfile {
     enabled: bool,
@@ -849,6 +869,10 @@ fn duration_millis(duration: Duration) -> u128 {
     duration.as_micros() / 1000
 }
 
+// =============================================================================
+// Runtime Lock Path Helpers
+// =============================================================================
+
 pub(crate) fn runtime_turn_lock_path(db_path: &Path) -> PathBuf {
     derived_lock_path(db_path, ".runtime.lock", "runtime.lock")
 }
@@ -864,12 +888,20 @@ fn derived_lock_path(db_path: &Path, suffix: &str, fallback: &str) -> PathBuf {
     path
 }
 
+// =============================================================================
+// Schema Opening Helpers
+// =============================================================================
+
 fn runtime_schema_sources(description: &RuntimeDescription) -> Vec<SchemaSource> {
     let mut sources = Vec::with_capacity(1 + description.schema_sources.len());
     sources.push(CORE_SCHEMA_SOURCE);
     sources.extend_from_slice(description.schema_sources);
     sources
 }
+
+// =============================================================================
+// Generic Bounded Drain Helpers
+// =============================================================================
 
 fn drain_bounded_work(
     limit: usize,
