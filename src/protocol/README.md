@@ -82,7 +82,9 @@ transaction and queue boundaries around those arrows.
 - [connection](connection/README.md) owns live peer sessions and transport facts.
   It turns invite-backed or membership-backed requests into connection rows,
   opens sealed frames, records receive evidence, and queues opaque bytes for
-  core networking.
+  core networking. This can be surprising at first: connection facts are also
+  the protocol's wire format, providing the handshake and transit-encryption
+  layer for all other facts and all network activity.
 - [sync](sync/README.md) owns replication planning. It records which admitted
   facts are shareable, computes connection-visible range summaries, exchanges
   compare/have/need facts, expands dependency closure, and asks connection to
