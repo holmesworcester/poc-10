@@ -511,6 +511,25 @@ from database state, clock, and optional host context.
 
 ## Example Runtime Graph
 
+```mermaid
+flowchart LR
+    Message["content message fact"]
+    Pending["pending_projection"]
+    Projector["content message projector"]
+    Context["auth/key context offer"]
+    Rows["message rows"]
+    Sync["share_fact_with_sync"]
+    Connection["connection frame fact"]
+
+    Message --> Pending
+    Pending --> Projector
+    Projector -. "needs authority + key coverage" .-> Context
+    Context --> Projector
+    Projector --> Rows
+    Projector --> Sync
+    Sync --> Connection
+```
+
 ```text
 content message fact
   -> pending_projection
