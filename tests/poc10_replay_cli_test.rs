@@ -7,7 +7,7 @@
 mod cli_harness;
 
 use std::collections::BTreeSet;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::process::Child;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -47,12 +47,24 @@ fn seed_workspace_with_content(db: &str) -> String {
 struct StartedDaemon {
     db: String,
     child: Child,
+    stdout: Option<thread::JoinHandle<String>>,
+    stderr: Option<thread::JoinHandle<String>>,
 }
 
 impl Drop for StartedDaemon {
     fn drop(&mut self) {
         let _ = topo(&["--db", &self.db, "stop"]);
         let _ = self.child.wait();
+        if let Some(stdout) = self.stdout.take() {
+            let _ = stdout.join();
+        }
+        if let Some(stderr) = self.stderr.take() {
+            if let Ok(text) = stderr.join() {
+                if !text.trim().is_empty() {
+                    eprintln!("[daemon-stderr db={}] {}", self.db, text.trim_end());
+                }
+            }
+        }
     }
 }
 
@@ -71,17 +83,28 @@ fn spawn_worker_daemon(db: &str) -> StartedDaemon {
         "25",
     ]);
     let stdout = child.stdout.take().expect("daemon stdout");
-    if let Some(stderr) = child.stderr.take() {
-        thread::spawn(move || for _ in BufReader::new(stderr).lines() {});
-    }
+    let stderr = child.stderr.take().expect("daemon stderr");
     let mut line = String::new();
-    BufReader::new(stdout)
+    let mut stdout_reader = BufReader::new(stdout);
+    stdout_reader
         .read_line(&mut line)
         .expect("read daemon ready line");
     assert!(line.contains("listening:"), "daemon did not start: {line}");
+    let stdout_handle = thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stdout_reader.read_to_string(&mut text);
+        text
+    });
+    let stderr_handle = thread::spawn(move || {
+        let mut text = String::new();
+        let _ = BufReader::new(stderr).read_to_string(&mut text);
+        text
+    });
     StartedDaemon {
         db: db.to_string(),
         child,
+        stdout: Some(stdout_handle),
+        stderr: Some(stderr_handle),
     }
 }
 

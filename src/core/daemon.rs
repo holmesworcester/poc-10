@@ -523,6 +523,7 @@ pub fn start(
         }
     }
 
+    crate::core::perf_profile::emit_runtime_profile(&format!("daemon@{local_addr}"));
     Ok(CliOutput::lines(report.lines()))
 }
 

@@ -1627,7 +1627,9 @@ pub(crate) mod context_db {
     use rusqlite::params;
     use std::collections::{BTreeMap, BTreeSet};
 
-    use super::{insert_pending_owner_in_tx, retained_fact, MatchedContext, ProjectionContext};
+    use super::{
+        insert_pending_owner_in_tx, perf, retained_fact, MatchedContext, ProjectionContext,
+    };
 
     const CONTEXT_NEED_DIRECTION: &str = "need";
     const CONTEXT_OFFER_DIRECTION: &str = "offer";
@@ -1686,11 +1688,13 @@ pub(crate) mod context_db {
         store: &Db,
         owner: &FactId,
     ) -> Result<ContextSet, String> {
-        Ok(ContextSet {
-            needs: stored_needs_for_owner(store, owner)?,
-            offers: stored_offers_for_owner(store, owner)?,
-        }
-        .normalized())
+        perf::measure_result("context_stored_context_owner", || {
+            Ok(ContextSet {
+                needs: stored_needs_for_owner(store, owner)?,
+                offers: stored_offers_for_owner(store, owner)?,
+            }
+            .normalized())
+        })
     }
 
     /// Replace this fact's standing needs, append its offers, and report additions.
@@ -1792,34 +1796,38 @@ pub(crate) mod context_db {
         store: &Db,
         owner: &FactId,
     ) -> Result<Vec<ContextNeed>, String> {
-        select_exact_context_needs(
-            store,
-            r#"
+        perf::measure_result("context_owner_exact_needs", || {
+            select_exact_context_needs(
+                store,
+                r#"
         SELECT owner, role, scope_key, key
         FROM context_exact_edges
         WHERE owner = :owner
           AND direction = 'need'
         ORDER BY owner, role, scope_key, key
         "#,
-            &[(":owner", bytes(owner))],
-        )
+                &[(":owner", bytes(owner))],
+            )
+        })
     }
 
     fn stored_range_needs_for_owner(
         store: &Db,
         owner: &FactId,
     ) -> Result<Vec<ContextNeed>, String> {
-        select_range_context_needs(
-            store,
-            r#"
+        perf::measure_result("context_owner_range_needs", || {
+            select_range_context_needs(
+                store,
+                r#"
         SELECT owner, role, scope_key, start_key, end_key
         FROM context_range_edges
         WHERE owner = :owner
           AND direction = 'need'
         ORDER BY owner, role, scope_key, start_key, end_key
         "#,
-            &[(":owner", bytes(owner))],
-        )
+                &[(":owner", bytes(owner))],
+            )
+        })
     }
 
     /// Load all offers owned by one fact.
@@ -1835,34 +1843,38 @@ pub(crate) mod context_db {
         store: &Db,
         owner: &FactId,
     ) -> Result<Vec<ContextOffer>, String> {
-        select_exact_context_offers(
-            store,
-            r#"
+        perf::measure_result("context_owner_exact_offers", || {
+            select_exact_context_offers(
+                store,
+                r#"
         SELECT owner, role, scope_key, key
         FROM context_exact_edges
         WHERE owner = :owner
           AND direction = 'offer'
         ORDER BY owner, role, scope_key, key
         "#,
-            &[(":owner", bytes(owner))],
-        )
+                &[(":owner", bytes(owner))],
+            )
+        })
     }
 
     fn stored_range_offers_for_owner(
         store: &Db,
         owner: &FactId,
     ) -> Result<Vec<ContextOffer>, String> {
-        select_range_context_offers(
-            store,
-            r#"
+        perf::measure_result("context_owner_range_offers", || {
+            select_range_context_offers(
+                store,
+                r#"
         SELECT owner, role, scope_key, start_key, end_key
         FROM context_range_edges
         WHERE owner = :owner
           AND direction = 'offer'
         ORDER BY owner, role, scope_key, start_key, end_key
         "#,
-            &[(":owner", bytes(owner))],
-        )
+                &[(":owner", bytes(owner))],
+            )
+        })
     }
 
     fn select_exact_context_needs(
@@ -2133,10 +2145,11 @@ pub(crate) mod context_db {
         store: &Db,
         owner: &FactId,
     ) -> Result<ProjectionContext, String> {
-        let mut stmt = store
-            .conn()
-            .prepare(
-                r#"
+        let pairs = perf::measure_result("context_pending_matches_select", || {
+            let mut stmt = store
+                .conn()
+                .prepare(
+                    r#"
                 SELECT need_role,
                        need_scope_key,
                        need_start_key,
@@ -2155,16 +2168,16 @@ pub(crate) mod context_db {
                     offer_start_key,
                     offer_end_key
                 "#,
-            )
-            .map_err(|err| format!("load pending projection matches: {err}"))?;
-        let rows = stmt
-            .query_map(params![owner.as_slice()], |row| {
-                selected_pending_projection_match(row, owner)
-            })
-            .map_err(|err| format!("load pending projection matches: {err}"))?;
-        let pairs = rows
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|err| format!("load pending projection matches: {err}"))?;
+                )
+                .map_err(|err| format!("load pending projection matches: {err}"))?;
+            let rows = stmt
+                .query_map(params![owner.as_slice()], |row| {
+                    selected_pending_projection_match(row, owner)
+                })
+                .map_err(|err| format!("load pending projection matches: {err}"))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|err| format!("load pending projection matches: {err}"))
+        })?;
 
         let mut matched = Vec::new();
         let mut seen = BTreeSet::new();
@@ -2231,8 +2244,10 @@ pub(crate) mod context_db {
         let payload = if let Some(payload) = payloads.get(&offer.owner) {
             payload.clone()
         } else {
-            let payload = retained_fact(store, &offer.owner)?
-                .ok_or_else(|| "context offer owner references unknown fact".to_string())?;
+            let payload = perf::measure_result("context_pending_match_payload", || {
+                retained_fact(store, &offer.owner)?
+                    .ok_or_else(|| "context offer owner references unknown fact".to_string())
+            })?;
             payloads.insert(offer.owner, payload.clone());
             payload
         };
@@ -2257,26 +2272,36 @@ pub(crate) mod context_db {
         store: &Db,
         additions: &ContextSetAdditions,
     ) -> Result<usize, String> {
-        let mut owners = BTreeSet::new();
-        for need in &additions.needs {
-            if !stored_overlapping_offers_for_need(store, need)?.is_empty() {
-                owners.insert(need.owner);
+        let owners = perf::measure_result("context_wake_find_owners", || {
+            let mut owners = BTreeSet::new();
+            for need in &additions.needs {
+                let has_offer = perf::measure_result("context_wake_need_offer_probe", || {
+                    stored_overlapping_offers_for_need(store, need).map(|offers| !offers.is_empty())
+                })?;
+                if has_offer {
+                    owners.insert(need.owner);
+                }
             }
-        }
-        for offer in &additions.offers {
-            for need in stored_overlapping_needs_for_offer(store, offer)? {
-                owners.insert(need.owner);
+            for offer in &additions.offers {
+                for need in perf::measure_result("context_wake_offer_need_probe", || {
+                    stored_overlapping_needs_for_offer(store, offer)
+                })? {
+                    owners.insert(need.owner);
+                }
             }
-        }
+            Ok::<_, String>(owners)
+        })?;
 
-        let mut changed = 0usize;
-        for owner in owners {
-            let queued = insert_pending_owner_in_tx(store, owner)
-                .map_err(|err| format!("queue pending projection input: {err}"))?;
-            let recorded = record_pending_context_inputs_for_stored_needs_in_tx(store, owner)?;
-            changed += usize::from(queued > 0 || recorded > 0);
-        }
-        Ok(changed)
+        perf::measure_result("context_wake_record_owners", || {
+            let mut changed = 0usize;
+            for owner in owners {
+                let queued = insert_pending_owner_in_tx(store, owner)
+                    .map_err(|err| format!("queue pending projection input: {err}"))?;
+                let recorded = record_pending_context_inputs_for_stored_needs_in_tx(store, owner)?;
+                changed += usize::from(queued > 0 || recorded > 0);
+            }
+            Ok(changed)
+        })
     }
 
     fn stored_overlapping_needs_for_offer(
@@ -2318,9 +2343,10 @@ pub(crate) mod context_db {
         scope_key: &[u8],
         key: &[u8],
     ) -> Result<Vec<ContextOffer>, String> {
-        select_exact_context_offers(
-            store,
-            r#"
+        perf::measure_result("context_exact_offers_key", || {
+            select_exact_context_offers(
+                store,
+                r#"
         SELECT owner, role, scope_key, key
         FROM context_exact_edges
         WHERE direction = 'offer'
@@ -2329,12 +2355,13 @@ pub(crate) mod context_db {
           AND key = :key
         ORDER BY owner, key
         "#,
-            &[
-                (":role", text(role)),
-                (":scope_key", bytes(scope_key)),
-                (":key", bytes(key)),
-            ],
-        )
+                &[
+                    (":role", text(role)),
+                    (":scope_key", bytes(scope_key)),
+                    (":key", bytes(key)),
+                ],
+            )
+        })
     }
 
     fn exact_needs_for_key(
@@ -2343,9 +2370,10 @@ pub(crate) mod context_db {
         scope_key: &[u8],
         key: &[u8],
     ) -> Result<Vec<ContextNeed>, String> {
-        select_exact_context_needs(
-            store,
-            r#"
+        perf::measure_result("context_exact_needs_key", || {
+            select_exact_context_needs(
+                store,
+                r#"
         SELECT owner, role, scope_key, key
         FROM context_exact_edges
         WHERE direction = 'need'
@@ -2354,12 +2382,13 @@ pub(crate) mod context_db {
           AND key = :key
         ORDER BY owner, key
         "#,
-            &[
-                (":role", text(role)),
-                (":scope_key", bytes(scope_key)),
-                (":key", bytes(key)),
-            ],
-        )
+                &[
+                    (":role", text(role)),
+                    (":scope_key", bytes(scope_key)),
+                    (":key", bytes(key)),
+                ],
+            )
+        })
     }
 
     fn exact_offers_in_range(
@@ -2369,9 +2398,10 @@ pub(crate) mod context_db {
         start_key: &[u8],
         end_key: &[u8],
     ) -> Result<Vec<ContextOffer>, String> {
-        select_exact_context_offers(
-            store,
-            r#"
+        perf::measure_result("context_exact_offers_in_range", || {
+            select_exact_context_offers(
+                store,
+                r#"
         SELECT owner, role, scope_key, key
         FROM context_exact_edges
         WHERE direction = 'offer'
@@ -2381,13 +2411,14 @@ pub(crate) mod context_db {
           AND key <= :end_key
         ORDER BY owner, key
         "#,
-            &[
-                (":role", text(role)),
-                (":scope_key", bytes(scope_key)),
-                (":start_key", bytes(start_key)),
-                (":end_key", bytes(end_key)),
-            ],
-        )
+                &[
+                    (":role", text(role)),
+                    (":scope_key", bytes(scope_key)),
+                    (":start_key", bytes(start_key)),
+                    (":end_key", bytes(end_key)),
+                ],
+            )
+        })
     }
 
     fn exact_needs_in_range(
@@ -2397,9 +2428,10 @@ pub(crate) mod context_db {
         start_key: &[u8],
         end_key: &[u8],
     ) -> Result<Vec<ContextNeed>, String> {
-        select_exact_context_needs(
-            store,
-            r#"
+        perf::measure_result("context_exact_needs_in_range", || {
+            select_exact_context_needs(
+                store,
+                r#"
         SELECT owner, role, scope_key, key
         FROM context_exact_edges
         WHERE direction = 'need'
@@ -2409,13 +2441,14 @@ pub(crate) mod context_db {
           AND key <= :end_key
         ORDER BY owner, key
         "#,
-            &[
-                (":role", text(role)),
-                (":scope_key", bytes(scope_key)),
-                (":start_key", bytes(start_key)),
-                (":end_key", bytes(end_key)),
-            ],
-        )
+                &[
+                    (":role", text(role)),
+                    (":scope_key", bytes(scope_key)),
+                    (":start_key", bytes(start_key)),
+                    (":end_key", bytes(end_key)),
+                ],
+            )
+        })
     }
 
     fn range_offers_overlapping_range(
@@ -2425,9 +2458,10 @@ pub(crate) mod context_db {
         start_key: &[u8],
         end_key: &[u8],
     ) -> Result<Vec<ContextOffer>, String> {
-        select_range_context_offers(
-            store,
-            r#"
+        perf::measure_result("context_range_offers_overlap", || {
+            select_range_context_offers(
+                store,
+                r#"
         SELECT owner, role, scope_key, start_key, end_key
         FROM context_range_edges
         WHERE direction = 'offer'
@@ -2437,13 +2471,14 @@ pub(crate) mod context_db {
           AND end_key >= :start_key
         ORDER BY owner, start_key, end_key
         "#,
-            &[
-                (":role", text(role)),
-                (":scope_key", bytes(scope_key)),
-                (":start_key", bytes(start_key)),
-                (":end_key", bytes(end_key)),
-            ],
-        )
+                &[
+                    (":role", text(role)),
+                    (":scope_key", bytes(scope_key)),
+                    (":start_key", bytes(start_key)),
+                    (":end_key", bytes(end_key)),
+                ],
+            )
+        })
     }
 
     fn range_needs_overlapping_range(
@@ -2453,9 +2488,10 @@ pub(crate) mod context_db {
         start_key: &[u8],
         end_key: &[u8],
     ) -> Result<Vec<ContextNeed>, String> {
-        select_range_context_needs(
-            store,
-            r#"
+        perf::measure_result("context_range_needs_overlap", || {
+            select_range_context_needs(
+                store,
+                r#"
         SELECT owner, role, scope_key, start_key, end_key
         FROM context_range_edges
         WHERE direction = 'need'
@@ -2465,13 +2501,14 @@ pub(crate) mod context_db {
           AND end_key >= :start_key
         ORDER BY owner, start_key, end_key
         "#,
-            &[
-                (":role", text(role)),
-                (":scope_key", bytes(scope_key)),
-                (":start_key", bytes(start_key)),
-                (":end_key", bytes(end_key)),
-            ],
-        )
+                &[
+                    (":role", text(role)),
+                    (":scope_key", bytes(scope_key)),
+                    (":start_key", bytes(start_key)),
+                    (":end_key", bytes(end_key)),
+                ],
+            )
+        })
     }
 
     /// Record pending context inputs for every standing need an owner currently holds.
@@ -2483,13 +2520,15 @@ pub(crate) mod context_db {
         store: &Db,
         owner: FactId,
     ) -> Result<usize, String> {
-        let mut changed = 0usize;
-        for need in stored_needs_for_owner(store, &owner)? {
-            for offer in stored_overlapping_offers_for_need(store, &need)? {
-                changed += record_pending_context_input_in_tx(store, &need, &offer)?;
+        perf::measure_result("context_record_pending_inputs_for_owner", || {
+            let mut changed = 0usize;
+            for need in stored_needs_for_owner(store, &owner)? {
+                for offer in stored_overlapping_offers_for_need(store, &need)? {
+                    changed += record_pending_context_input_in_tx(store, &need, &offer)?;
+                }
             }
-        }
-        Ok(changed)
+            Ok(changed)
+        })
     }
 
     fn record_pending_context_input_in_tx(
@@ -2501,10 +2540,11 @@ pub(crate) mod context_db {
             return Err("pending projection context input role/scope mismatch".to_string());
         }
         let scope_key = scope_key(&need.scope);
-        store
-            .conn()
-            .execute(
-                "INSERT OR IGNORE INTO pending_projection_matches
+        perf::measure_result("context_pending_match_insert", || {
+            store
+                .conn()
+                .execute(
+                    "INSERT OR IGNORE INTO pending_projection_matches
                     (owner,
                      need_role,
                      need_scope_key,
@@ -2514,18 +2554,19 @@ pub(crate) mod context_db {
                      offer_start_key,
                      offer_end_key)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    need.owner.as_slice(),
-                    need.role.as_str(),
-                    scope_key.as_slice(),
-                    need.start_key.as_bytes(),
-                    need.end_key.as_bytes(),
-                    offer.owner.as_slice(),
-                    offer.start_key.as_bytes(),
-                    offer.end_key.as_bytes(),
-                ],
-            )
-            .map_err(|err| format!("record pending projection match: {err}"))
+                    params![
+                        need.owner.as_slice(),
+                        need.role.as_str(),
+                        scope_key.as_slice(),
+                        need.start_key.as_bytes(),
+                        need.end_key.as_bytes(),
+                        offer.owner.as_slice(),
+                        offer.start_key.as_bytes(),
+                        offer.end_key.as_bytes(),
+                    ],
+                )
+                .map_err(|err| format!("record pending projection match: {err}"))
+        })
     }
 }
 pub mod effects {

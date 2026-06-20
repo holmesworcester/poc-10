@@ -19,9 +19,11 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const GENERATE_PROFILE_ENV: &str = "TOPO_PROFILE_GENERATE";
+const RUNTIME_PROFILE_ENV: &str = "TOPO_PROFILE_RUNTIME_PHASES";
 
 thread_local! {
     static ACTIVE_GENERATE_PROFILE: RefCell<Option<GenerateProfileState>> = const { RefCell::new(None) };
@@ -40,6 +42,12 @@ struct GenerateProfileState {
     requested_message_text_bytes: usize,
     generated_facts: Option<usize>,
     message_text_bytes: Option<usize>,
+    phases: BTreeMap<&'static str, PhaseStats>,
+}
+
+#[derive(Debug, Default)]
+struct RuntimeProfileState {
+    started: Option<Instant>,
     phases: BTreeMap<&'static str, PhaseStats>,
 }
 
@@ -109,12 +117,20 @@ pub fn add_duration(phase: &'static str, duration: Duration) {
 }
 
 pub fn measure<T>(phase: &'static str, work: impl FnOnce() -> T) -> T {
-    if !is_generate_profile_active() {
+    let generate_active = is_generate_profile_active();
+    let runtime_active = runtime_profile_state().is_some();
+    if !generate_active && !runtime_active {
         return work();
     }
     let started = Instant::now();
     let output = work();
-    add_duration(phase, started.elapsed());
+    let elapsed = started.elapsed();
+    if generate_active {
+        add_duration(phase, elapsed);
+    }
+    if runtime_active {
+        add_runtime_duration(phase, elapsed);
+    }
     output
 }
 
@@ -133,6 +149,77 @@ fn generate_profile_enabled() -> bool {
             !(normalized.is_empty() || normalized == "0" || normalized == "false")
         })
         .unwrap_or(false)
+}
+
+fn runtime_profile_state() -> Option<&'static Mutex<RuntimeProfileState>> {
+    static STATE: OnceLock<Option<Mutex<RuntimeProfileState>>> = OnceLock::new();
+    STATE
+        .get_or_init(|| {
+            runtime_profile_enabled().then(|| Mutex::new(RuntimeProfileState::default()))
+        })
+        .as_ref()
+}
+
+fn runtime_profile_enabled() -> bool {
+    std::env::var(RUNTIME_PROFILE_ENV)
+        .ok()
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            !(normalized.is_empty() || normalized == "0" || normalized == "false")
+        })
+        .unwrap_or(false)
+}
+
+fn add_runtime_duration(phase: &'static str, duration: Duration) {
+    let Some(state) = runtime_profile_state() else {
+        return;
+    };
+    let mut state = state.lock().expect("runtime profile lock");
+    if state.started.is_none() {
+        state.started = Some(Instant::now());
+    }
+    let stats = state.phases.entry(phase).or_default();
+    stats.calls = stats.calls.saturating_add(1);
+    stats.duration += duration;
+}
+
+pub fn emit_runtime_profile(label: &str) {
+    if let Some(line) = finish_runtime_profile_line(label) {
+        eprintln!("{line}");
+    }
+}
+
+fn finish_runtime_profile_line(label: &str) -> Option<String> {
+    let state = runtime_profile_state()?;
+    let mut state = state.lock().expect("runtime profile lock");
+    let line = runtime_profile_line(label, &state)?;
+    state.started = None;
+    state.phases.clear();
+    Some(line)
+}
+
+fn runtime_profile_line(label: &str, state: &RuntimeProfileState) -> Option<String> {
+    let started = state.started?;
+    if state.phases.is_empty() {
+        return None;
+    }
+    let mut line = format!(
+        "runtime_profile label={} total_ms={}",
+        sanitize_label(label),
+        millis(started.elapsed())
+    );
+    for (phase, stats) in &state.phases {
+        line.push_str(&format!(
+            " {phase}_ms={} {phase}_calls={}",
+            millis(stats.duration),
+            stats.calls
+        ));
+    }
+    Some(line)
+}
+
+fn sanitize_label(label: &str) -> String {
+    label.replace(char::is_whitespace, "_")
 }
 
 fn is_generate_profile_active() -> bool {
@@ -191,5 +278,34 @@ mod tests {
             Err("failed")
         );
         assert!(!is_generate_profile_active());
+    }
+
+    #[test]
+    fn runtime_profile_line_reports_phase_stats() {
+        let state = RuntimeProfileState {
+            started: Some(Instant::now() - Duration::from_millis(10)),
+            phases: BTreeMap::from([
+                (
+                    "phase_a",
+                    PhaseStats {
+                        calls: 2,
+                        duration: Duration::from_millis(7),
+                    },
+                ),
+                (
+                    "phase_b",
+                    PhaseStats {
+                        calls: 1,
+                        duration: Duration::from_millis(3),
+                    },
+                ),
+            ]),
+        };
+
+        let line = runtime_profile_line("daemon addr", &state).expect("profile line");
+
+        assert!(line.starts_with("runtime_profile label=daemon_addr total_ms="));
+        assert!(line.contains(" phase_a_ms=7 phase_a_calls=2"));
+        assert!(line.contains(" phase_b_ms=3 phase_b_calls=1"));
     }
 }
