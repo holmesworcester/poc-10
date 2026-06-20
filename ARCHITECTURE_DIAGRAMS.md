@@ -15,22 +15,22 @@ the loop:
 - an **intent handler** performs one bounded retryable action (IO, sealing,
   responding) and returns more facts.
 
-Protocol code also has thinner hooks at the edges — it authors facts for a
-command, converts inbound network bytes into incoming facts, and validates a
-fact on admission — but those only feed the queues; the projector and handler
+Protocol code also has thinner hooks at the edges: it authors facts for a
+command, converts inbound network bytes into runtime effects, and validates a
+fact on admission. Those hooks only feed the queues; the projector and handler
 are where queued work is transformed.
 
 Core never interprets a fact. It only admits facts, matches context ranges,
 schedules wakes, and pumps these queues through the protocol functions. Most
-queues are durable SQLite tables that survive restart; `incoming_facts` and
-`local_intents` are `CREATE TEMP TABLE`, so they last as long as the SQLite
-connection — the whole daemon session, or one CLI command — and a restart
-rebuilds them empty. The daemon drains them each tick on its own long-lived
-connection. A CLI command or query turn does not drain runtime queues. It reads
-currently projected rows or commits authored facts to durable pending
-projection. Because temp tables are connection-local and a CLI command runs on a
-separate connection from the daemon, any temp rows such a turn stages are
-dropped when its connection closes — they are not handed to the daemon (see
+queues are durable SQLite tables that survive restart; `incoming_facts`,
+`local_intents`, and `network_outgoing` are `CREATE TEMP TABLE`, so they last as
+long as the SQLite connection: the whole daemon session, or one CLI command. A
+restart rebuilds them empty. The daemon drains them each tick on its own
+long-lived connection. A CLI command or query turn does not drain runtime
+queues. It reads currently projected rows or commits authored facts to durable
+pending projection. Because temp tables are connection-local and a CLI command
+runs on a separate connection from the daemon, any temp rows such a turn stages
+are dropped when its connection closes; they are not handed to the daemon (see
 diagram 2):
 
 ```text
@@ -41,7 +41,7 @@ context_edges                     standing needs and offers
 pending_projection_matches        offers that matched a parked need
 time_wakes                        facts scheduled to reproject at a time
 intents (+ local_intents)         bounded work waiting for a handler (local is temp)
-network_outgoing                  sealed bytes waiting for the TCP pump
+network_outgoing                  sealed bytes waiting for the TCP pump (temp)
 <scope>_rows                      materialized state — read by queries and handlers, never by projectors
 ```
 
@@ -49,11 +49,12 @@ Each diagram below is one zoom level on that loop.
 
 ## 1) The Runtime Loop
 
-A fact lands in `pending_projection` and the projector runs. Its output fans
-into the other queues; core matches new offers against parked needs, re-queues
-the woken owners, and dispatches intents to handlers, whose facts re-enter the
-loop. Materialized rows are read-model and planning state, not part of the
-projection→match cycle: projectors and context matching never read them.
+A fact lands in `pending_projection`, or inbound intake stages an outside-origin
+fact in `incoming_facts`, and the projector runs. Its output fans into the other
+queues; core matches new offers against parked needs, re-queues the woken
+owners, and dispatches intents to handlers, whose facts re-enter the loop.
+Materialized rows are read-model and planning state, not part of the
+projection->match cycle: projectors and context matching never read them.
 Queries read rows, and handlers may read them when planning work (for example,
 sync computing range summaries).
 
@@ -63,6 +64,7 @@ flowchart TD
     FACTS[("facts: immutable store")]
     PENDING[("pending_projection")]
     NETIN["inbound bytes (from peers)"]
+    INTAKE{{"inbound network intake (protocol)"}}
     INCOMING[("incoming_facts (temp)")]
     PROJECTOR{{"fact projector (protocol)"}}
     CONTEXT[("context_edges: needs + offers")]
@@ -75,7 +77,9 @@ flowchart TD
     ROWS[("scope rows: materialized")]
     QUERY["query reads rows"]
 
-    NETIN -->|intake| INCOMING
+    NETIN --> INTAKE
+    INTAKE -->|sealed frame facts| INCOMING
+    INTAKE -->|local observation facts| FACTS
     FACTS -->|admit| PENDING
     INCOMING --> PROJECTOR
     PENDING --> PROJECTOR
@@ -94,28 +98,28 @@ flowchart TD
     INTENTS --> HANDLER
     HANDLER -->|facts| FACTS
     HANDLER -->|rows| ROWS
-    HANDLER -->|sealed bytes| OUT
+    HANDLER -->|sealed bytes / route work| OUT
 
     OUT -->|TCP pump| NETOUT
     ROWS --> QUERY
     ROWS -.read for planning.-> HANDLER
 ```
 
-Core owns every arrow and the atomic commit behind it; the two rounded boxes are
-the only protocol code on the diagram. The projector is pure derivation (it may
-park on missing context but never does IO); the handler is the only place
-*protocol* code does bounded, retryable work. Core still does mechanical IO of
-its own — the TCP listener reads frames and the pump writes `network_outgoing`,
-deferring targets whose sockets are not ready — but it moves opaque bytes and
-never interprets a fact.
+Core owns every arrow and the atomic commit behind it; the protocol-labeled
+boxes are the only protocol code on the diagram. The projector is pure
+derivation (it may park on missing context but never does IO); the handler is
+the only place *protocol* code does bounded, retryable work. Core still does
+mechanical IO of its own — the TCP listener reads frames and the pump writes
+`network_outgoing`, deferring targets whose sockets are not ready — but it moves
+opaque bytes and never interprets a fact.
 
 ## 2) One Serialized Turn
 
-Commands, queries, and the daemon turn all acquire `<db>.runtime.lock`, but they
-do not all drive the runtime loop. A command reads currently projected state,
-authors facts, commits them to durable pending projection, and returns a
+Commands, queries, and the daemon turn all acquire `<db>.runtime.lock`, but only
+the daemon turn drives runtime queues. A command reads currently projected
+state, authors facts, commits them to durable pending projection, and returns a
 receipt. A query reads currently projected rows. The daemon turn (the recurring
-scheduler plus `daemon::tick`) is the live loop that advances queues.
+scheduler plus `daemon::tick`) is the live loop that advances queued work.
 
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 300}} }%%
@@ -132,30 +136,34 @@ flowchart TD
     Q --> READ["read materialized rows"]
 
     LOCK --> TICK["daemon turn"]
-    TICK --> T0["daemon::tick step 1. fire recurring intents (maintain_connections, maintain_sync)"]
-    T0 --> T1["2. accept frames -> inbound intake -> incoming_facts"]
+    TICK --> T0["daemon::tick step 1. fire recurring intents -> local_intents"]
+    T0 --> T1["2. accept frames -> inbound intake -> RuntimeEffects"]
     T1 --> T2["3. admit due time_wakes -> pending_projection"]
-    T2 --> T3["4. drain one projection batch"]
-    T3 --> T4["5. dispatch one intent batch -> handlers"]
-    T4 --> T5["6. pump network_outgoing"]
+    T2 --> T3["4. drain durable_projection (high local-derivation limit)"]
+    T3 --> T4["5. drain incoming_projection (high local-derivation limit)"]
+    T4 --> T5["6. dispatch durable intents"]
+    T5 --> T6["7. dispatch local_intents"]
+    T6 --> T7["8. pump network_outgoing"]
 
-    T0 -.enqueued intents drained at.-> T4
-    CMD_SETTLE -.same projector loop.-> T3
-    Q_SETTLE -.same projector loop.-> T3
+    T0 -.same tick.-> T6
+    COMMIT_FACTS -.later daemon projection.-> T3
 ```
 
-The only difference between turns is which queues they drain. Queries and
-commands deliberately stop after projection: incoming facts, due time, recurring
-work, and handler-derived state are daemon progress, observed eventually, not
-produced inside a user command. Handler-emitted facts are committed atomically
-with intent dispatch and remain queued for a later projection batch.
+The turn owner decides which runtime work runs. Query turns drain no queues.
+Command turns commit authored facts and stop; incoming facts, due time,
+recurring work, and handler-derived state are daemon progress, observed
+eventually, not produced inside a user command. Handler-emitted facts are
+committed atomically with intent dispatch and remain queued for a later
+projection batch because projection drains have already run for that daemon
+tick.
 
 The recurring step is daemon-only and is the source of all periodic work.
 Recurring intents are not durable state: an in-memory `RecurringScheduler`,
 installed once from the handler registry at daemon start, fires due operational
-loops at the top of `daemon::tick` and enqueues ordinary intents that the same
-tick's intent batch dispatches like any other. The live daemon's cadence is only
-the scheduling mechanism; the work itself is plain facts and handlers.
+loops at the top of `daemon::tick` and enqueues ordinary local intents that the
+same tick's local-intent batch dispatches like any other. The live daemon's
+cadence is only the scheduling mechanism; the work itself is plain facts and
+handlers.
 
 ## 3) Needs And Offers
 
@@ -212,7 +220,7 @@ sequenceDiagram
     participant A as Node A
     participant B as Node B
 
-    Note over A,B: Each arrow is a sealed connection frame. The sender's handler queues<br/>send_facts_on_connection. The receiver's intake stages incoming_facts and a<br/>connection projector opens it into the named sync fact, which is then projected.
+    Note over A,B: Each arrow is a sealed connection frame. The sender's handler queues<br/>send_facts_on_connection. The receiver's daemon runs receive_network_frame_effects,<br/>committing a frame observation plus an incoming frame fact; the frame projector<br/>opens it into the named sync fact, which is then projected later.
 
     Note over A: owner (auth/content) projector admits a shared fact and emits<br/>share_fact_with_sync. Its handler upserts shareable + negentropy<br/>leaf/node rows — the durable range index (count + fingerprint).
     Note over A: seed_connection_sync / maintain_sync handler reads that index,<br/>builds a range summary, and emits the first compare.

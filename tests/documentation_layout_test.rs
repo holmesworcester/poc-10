@@ -90,6 +90,71 @@ fn documentation_layout_keeps_current_docs_live_and_old_notes_archived() {
 // has been removed deliberately; do not reintroduce one.
 
 #[test]
+fn architecture_diagrams_track_runtime_turn_and_daemon_ownership() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let main = source_text(&root.join("ARCHITECTURE_DIAGRAMS.md"));
+    let alt = source_text(&root.join("ARCHITECTURE_DIAGRAMS_ALT.md"));
+    let main_normalized = normalize_whitespace(&main);
+    let alt_normalized = normalize_whitespace(&alt);
+
+    for required in [
+        "only the daemon turn drives runtime queues",
+        "fire recurring intents -> local_intents",
+        "accept frames -> inbound intake -> RuntimeEffects",
+        "drain durable_projection",
+        "drain incoming_projection",
+        "dispatch durable intents",
+        "dispatch local_intents",
+        "pump network_outgoing",
+        "receive_network_frame_effects",
+    ] {
+        assert!(
+            main_normalized.contains(required),
+            "ARCHITECTURE_DIAGRAMS.md is missing current runtime/daemon ownership term {required:?}"
+        );
+    }
+
+    for required in [
+        "`RuntimeTurnLock`",
+        "Runtime::drain_durable_projection",
+        "Runtime::drain_incoming_projection",
+        "Runtime::submit_runtime_effects",
+        "Runtime::drain_durable_intents",
+        "Runtime::drain_local_intents",
+        "receive_network_frame_effects",
+        "queue_outgoing_frame handler",
+    ] {
+        assert!(
+            alt_normalized.contains(required),
+            "ARCHITECTURE_DIAGRAMS_ALT.md is missing current runtime/daemon ownership term {required:?}"
+        );
+    }
+
+    let combined = normalize_whitespace(&format!("{main}\n{alt}"));
+    for stale in [
+        "drain_projection_once",
+        "drain_intents_once",
+        "ephemeral_projection_inputs",
+        "network inbound rows",
+        "convert inbound rows",
+        "receive_network_frame handler",
+        "send_network_frame handler",
+        "PipelineEffects",
+        "CMD_SETTLE",
+        "Q_SETTLE",
+        "one projection batch",
+        "one intent batch",
+        "process_all_work_until_idle",
+        "Command-side settling",
+    ] {
+        assert!(
+            !combined.contains(stale),
+            "architecture diagrams still contain stale runtime/daemon wording {stale:?}"
+        );
+    }
+}
+
+#[test]
 fn root_readme_describes_context_project_aims() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let readme = source_text(&root.join("README.md"));
