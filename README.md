@@ -43,6 +43,16 @@ Understanding these source files should be enough to grasp the design:
    on auth/local endpoint/ephemeral/receive context, and the handoff from
    deterministic projection into `create_connection` handler work.
 
+## Approach
+
+In Context, a central idea is that facts offer context to other facts. Context
+is a more general relationship than blocking: a context need can name an exact
+fact, but it can also name a range of facts, and context
+offers can be projected before the facts they refer to exist. That gives the
+runtime a standing relationship surface. Later facts can wake when relevant
+context appears, and earlier offers can satisfy later needs without hidden
+callbacks or broad scans.
+
 ```mermaid
 flowchart LR
     Facts["facts"]
@@ -60,16 +70,6 @@ flowchart LR
     Intents --> Handlers
     Handlers --> Facts
 ```
-
-## Approach
-
-In Context, a central idea is that facts offer context to other facts. Context
-is a more general relationship than blocking: a context need can name an exact
-fact, but it can also name a range of facts, and context
-offers can be projected before the facts they refer to exist. That gives the
-runtime a standing relationship surface. Later facts can wake when relevant
-context appears, and earlier offers can satisfy later needs without hidden
-callbacks or broad scans.
 
 ### Fact Projectors
 
