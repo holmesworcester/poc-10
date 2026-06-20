@@ -113,9 +113,10 @@ fn runtime_routes_signature_evidenced_content_message_to_projector() {
             .is_empty(),
         "opened rows wait until author context is available"
     );
-    assert!(
-        runtime.pending_intent_count() > 0,
-        "semantic content message should still be made shareable while waiting"
+    assert_eq!(
+        runtime.pending_intent_count(),
+        0,
+        "waiting content message should not be made shareable before final valid projection"
     );
 }
 

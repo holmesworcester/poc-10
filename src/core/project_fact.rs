@@ -3975,7 +3975,7 @@ mod contract_tests {
     }
 
     #[test]
-    fn projection_drain_can_keep_watch_need_after_it_matches() {
+    fn projection_drain_can_keep_reemitted_need_after_it_matches() {
         let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
             .expect("open db");
         let target = Fact::new(FactScope::Global, 1, b"watcher".to_vec());
@@ -4002,7 +4002,7 @@ mod contract_tests {
         crate::core::project_fact::context_db::insert_context_offer_for_test(&store, &offer)
             .expect("insert stored offer");
 
-        let projector = watch_need(role, key, "observed");
+        let projector = reemitted_need(role, key, "observed");
         let progress =
             drain_projection(&projector, &store, &[], None, 2).expect("drain projection");
 
@@ -4685,7 +4685,7 @@ mod contract_tests {
         })
     }
 
-    fn watch_need(role: Role, key: ContextKey, intent_kind: &'static str) -> impl Projector {
+    fn reemitted_need(role: Role, key: ContextKey, intent_kind: &'static str) -> impl Projector {
         test_projector(move |fact, context| {
             let need = need_for(fact, &role, &key);
             let mut output = ProjectionOutput::new().need(need.clone());

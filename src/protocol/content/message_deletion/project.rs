@@ -82,9 +82,9 @@ pub mod authenticate {
     //!      the verifier key is embedded in the fact, so this needs no context.
     //!
     //! Admission scope is unsigned local metadata, not part of these bytes, so the
-    //! workspace-scope check is interpretation the projector owns. The authority of
-    //! the signer, target message, and author user is proven from other facts, also
-    //! in the projector.
+    //! workspace-scope check is interpretation the projector owns. Signer and
+    //! author-user authority are proven from other facts in the projector; the
+    //! target message later validates whether the signed claim applies to it.
 
     use crate::core::facts::Fact;
     use crate::core::project_fact::{verify_fact_id, ProjectionContext};
@@ -214,10 +214,9 @@ pub mod adapt {
 // POLICY. A content_message_deletion is admitted iff:
 //   1. STRUCTURAL. The fact is workspace-scoped, signed, and contains a
 //      deletion payload for one message and author user.
-//   2. AUTHORITY. The signer, target message, and author contexts prove the
-//      deletion author is the target message author in the same workspace.
-//      This uses authenticated message metadata, so deletes do not wait for
-//      encrypted message text to open.
+//   2. AUTHORITY. The deletion signer and author user contexts validate the
+//      signed deletion claim. The target message validates target coordinates
+//      and author equality when the delete offer wakes it.
 //   3. MATERIALIZE. Once authorized, write the deletion row, publish the
 //      fact_purged offer, and share the deletion fact.
 
@@ -229,7 +228,6 @@ use crate::core::project_fact::{
 
 use crate::protocol::auth::signature;
 use crate::protocol::auth::user;
-use crate::protocol::content::message;
 use crate::protocol::content::message::project::{self, FactSigner};
 use crate::protocol::registry::read_models;
 use crate::protocol::sync::shared_fact::project::{
@@ -298,13 +296,6 @@ impl ContentMessageDeletionProjector {
             deletion.signer_public_key,
         )?;
         let signer_need = project::signer_need(fact.id, deletion.workspace_id, deletion.signer_id);
-        let target_need = crate::core::context::ContextNeed::range(
-            fact.id,
-            "content_message_meta",
-            scope.clone(),
-            deletion.target_message_id,
-            deletion.target_message_id,
-        );
         let author_need = crate::core::context::ContextNeed::range(
             fact.id,
             "auth_user",
@@ -323,7 +314,6 @@ impl ContentMessageDeletionProjector {
             return Ok(output_with_needs([
                 Some(signature_need),
                 Some(signer_need),
-                Some(target_need),
                 Some(author_need),
             ]));
         }
@@ -341,36 +331,23 @@ impl ContentMessageDeletionProjector {
             return Ok(output_with_needs([
                 Some(signature_need),
                 Some(signer_need),
-                Some(target_need),
                 Some(author_need),
             ]));
         }
-        let Some(target_fact) = context_payload(context, &target_need, "message deletion target")?
-        else {
-            return Ok(output_with_needs([
-                Some(signature_need),
-                Some(signer_need),
-                Some(target_need),
-                Some(author_need),
-            ]));
-        };
         let Some(author_fact) = context_payload(context, &author_need, "message deletion author")?
         else {
             return Ok(output_with_needs([
                 Some(signature_need),
                 Some(signer_need),
-                Some(target_need),
                 Some(author_need),
             ]));
         };
-        validate_target_message(&deletion, target_fact)?;
         validate_author_user(&deletion, author_fact)?;
         let context_have = context_have_from_optional_needs(
             context,
             [
                 Some(&signature_need),
                 Some(&signer_need),
-                Some(&target_need),
                 Some(&author_need),
             ],
         );
@@ -384,22 +361,17 @@ impl ContentMessageDeletionProjector {
             author_user_id: deletion.author_user_id,
         });
         Ok(share_fact_with_sync(
-            output_with_needs([
-                Some(signature_need),
-                Some(signer_need),
-                Some(target_need),
-                Some(author_need),
-            ])
-            .offer(crate::core::project_fact::fact_purged_offer(
-                fact.id,
-                scope,
-                project::fact_purged_key(
-                    deletion.target_frontier_id,
-                    deletion.target_minute,
-                    deletion.target_message_id,
-                ),
-            ))
-            .row_mutation(RowMutation::InsertValues(row)),
+            output_with_needs([Some(signature_need), Some(signer_need), Some(author_need)])
+                .offer(crate::core::project_fact::fact_purged_offer(
+                    fact.id,
+                    scope,
+                    project::fact_purged_key(
+                        deletion.target_frontier_id,
+                        deletion.target_minute,
+                        deletion.target_message_id,
+                    ),
+                ))
+                .row_mutation(RowMutation::InsertValues(row)),
             deletion.workspace_id,
             fact,
             context_have,
@@ -422,35 +394,6 @@ fn output_with_needs(
         .into_iter()
         .flatten()
         .fold(ProjectionOutput::new(), |output, need| output.need(need))
-}
-
-fn validate_target_message(
-    deletion: &super::fact::ContentMessageDeletionFact,
-    target_fact: &Fact,
-) -> Result<(), String> {
-    if target_fact.id != deletion.target_message_id {
-        return Err("message deletion target context payload id mismatch".to_string());
-    }
-    let target = project::decode_typed_fact(
-        target_fact,
-        message::TYPE_CONTENT_MESSAGE,
-        "message deletion target",
-        message::decode_fact_payload,
-    )
-    .map_err(|_| "message deletion target context must be a content message".to_string())?;
-    if target.workspace_id != deletion.workspace_id {
-        return Err("message deletion target workspace does not match deletion".to_string());
-    }
-    if target.frontier_id != deletion.target_frontier_id {
-        return Err("message deletion target frontier does not match deletion".to_string());
-    }
-    if target.minute != deletion.target_minute {
-        return Err("message deletion target minute does not match deletion".to_string());
-    }
-    if target.author_user_id != deletion.author_user_id {
-        return Err("message deletion author is not the target message author".to_string());
-    }
-    Ok(())
 }
 
 fn validate_author_user(
@@ -546,7 +489,7 @@ mod projector_tests {
             )
             .expect("project deletion");
 
-        assert_eq!(output.needs.len(), 4);
+        assert_eq!(output.needs.len(), 3);
         assert_eq!(output.offers.len(), 1);
         assert_eq!(output.offers[0].role, "fact_purged");
         assert_eq!(output.effects.intents.len(), 1);
@@ -579,7 +522,7 @@ mod projector_tests {
     }
 
     #[test]
-    fn content_message_deletion_projector_waits_for_target_and_author_context() {
+    fn content_message_deletion_projector_waits_for_signature_signer_and_author_context() {
         let workspace_id = [9; 32];
         let author_user_id = [22; 32];
         let (deletion, fact) = deletion_fact(workspace_id, [11; 32], author_user_id, 12_345);
@@ -590,7 +533,7 @@ mod projector_tests {
 
         assert!(output.effects.intents.is_empty());
         assert!(output.offers.is_empty());
-        assert_eq!(output.needs.len(), 4);
+        assert_eq!(output.needs.len(), 3);
         assert!(output
             .needs
             .iter()
@@ -608,15 +551,6 @@ mod projector_tests {
             .needs
             .contains(&crate::core::context::ContextNeed::range(
                 fact.id,
-                "content_message_meta",
-                crate::protocol::auth::workspace::scope(deletion.workspace_id),
-                deletion.target_message_id,
-                deletion.target_message_id
-            )));
-        assert!(output
-            .needs
-            .contains(&crate::core::context::ContextNeed::range(
-                fact.id,
                 "auth_user",
                 crate::core::facts::FactScope::Global,
                 deletion.author_user_id,
@@ -625,7 +559,7 @@ mod projector_tests {
     }
 
     #[test]
-    fn content_message_deletion_projector_waits_for_author_after_target_is_known() {
+    fn content_message_deletion_projector_waits_for_author_after_signature_and_signer() {
         let workspace_id = [9; 32];
         let author_user_id = [22; 32];
         let message_fact = message_fact(workspace_id, author_user_id);
@@ -638,23 +572,13 @@ mod projector_tests {
                 &ProjectionContext::from_matches(vec![
                     signature_match(&fact),
                     signer_match(&fact, &signer_fact),
-                    target_match(&fact, &message_fact),
                 ]),
             )
             .expect("missing author is a need, not an unauthorized delete");
 
         assert!(output.effects.intents.is_empty());
         assert!(output.offers.is_empty());
-        assert_eq!(output.needs.len(), 4);
-        assert!(output
-            .needs
-            .contains(&crate::core::context::ContextNeed::range(
-                fact.id,
-                "content_message_meta",
-                crate::protocol::auth::workspace::scope(deletion.workspace_id),
-                deletion.target_message_id,
-                deletion.target_message_id
-            )));
+        assert_eq!(output.needs.len(), 3);
         assert!(output
             .needs
             .contains(&crate::core::context::ContextNeed::range(
@@ -667,18 +591,19 @@ mod projector_tests {
     }
 
     #[test]
-    fn content_message_deletion_projector_rejects_non_author_delete() {
+    fn content_message_deletion_projector_publishes_non_target_author_claim() {
         let workspace_id = [9; 32];
         let message_author = user_fact(workspace_id, [22; 32], "alice");
         let deleter = user_fact(workspace_id, [44; 32], "mallory");
         let message_fact = message_fact(workspace_id, message_author.id);
         let (_deletion, fact) = deletion_fact(workspace_id, message_fact.id, deleter.id, 12_345);
 
-        let err = project::ContentMessageDeletionProjector::new()
+        let output = project::ContentMessageDeletionProjector::new()
             .project(&fact, &authorized_context(&fact, &message_fact, &deleter))
-            .expect_err("non-author deletion must reject");
+            .expect("deletion projector publishes signed claim");
 
-        assert!(err.contains("not the target message author"), "{err}");
+        assert_eq!(output.offers.len(), 1);
+        assert_eq!(output.offers[0].role, "fact_purged");
     }
 
     #[test]
@@ -800,7 +725,7 @@ mod projector_tests {
 
     fn authorized_context(
         deletion_fact: &Fact,
-        target_fact: &Fact,
+        _target_fact: &Fact,
         author_fact: &Fact,
     ) -> ProjectionContext {
         let deletion = deletion_from_fact(deletion_fact);
@@ -808,7 +733,6 @@ mod projector_tests {
         ProjectionContext::from_matches(vec![
             signature_match(deletion_fact),
             signer_match(deletion_fact, &signer_fact),
-            target_match(deletion_fact, target_fact),
             author_match(deletion_fact, author_fact),
         ])
     }
@@ -861,28 +785,6 @@ mod projector_tests {
                 CONTENT_SIGNER_ID,
             ),
             payload: signer_fact.clone(),
-        }
-    }
-
-    fn target_match(deletion_fact: &Fact, target_fact: &Fact) -> MatchedContext {
-        let deletion = deletion_from_fact(deletion_fact);
-        let scope = crate::protocol::auth::workspace::scope(deletion.workspace_id);
-        MatchedContext {
-            need: crate::core::context::ContextNeed::range(
-                deletion_fact.id,
-                "content_message_meta",
-                scope.clone(),
-                target_fact.id,
-                target_fact.id,
-            ),
-            offer: crate::core::context::ContextOffer::range(
-                target_fact.id,
-                "content_message_meta",
-                scope,
-                target_fact.id,
-                target_fact.id,
-            ),
-            payload: target_fact.clone(),
         }
     }
 

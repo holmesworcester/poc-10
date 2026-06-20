@@ -24,6 +24,7 @@ pub struct OpenedMessage {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ContentCount {
     pub content_messages: usize,
+    pub message_facts: usize,
     pub message_payload_bytes: u64,
     pub max_created_at_ms: u64,
 }
@@ -68,23 +69,36 @@ pub fn opened_messages(store: &Db, workspace_id: FactId) -> Result<Vec<OpenedMes
 }
 
 pub fn count_for_workspace(store: &Db, workspace_id: FactId) -> Result<ContentCount, String> {
-    store
+    let (content_messages, max_created_at_ms) = store
         .conn()
         .query_row(
             "SELECT COUNT(*), COALESCE(MAX(created_at_ms), 0)
              FROM content_messages
              WHERE workspace_id = ?1 AND deleted = 0",
             params![workspace_id],
-            |row| {
-                let content_messages = row.get::<_, i64>(0)? as usize;
-                Ok(ContentCount {
-                    content_messages,
-                    message_payload_bytes: content_messages as u64 * CIPHERTEXT_BYTES as u64,
-                    max_created_at_ms: row.get::<_, i64>(1)? as u64,
-                })
-            },
+            |row| Ok((row.get::<_, i64>(0)? as usize, row.get::<_, i64>(1)? as u64)),
         )
-        .map_err(|err| format!("read content message rows: {err}"))
+        .map_err(|err| format!("read content message rows: {err}"))?;
+    let message_facts = store
+        .conn()
+        .query_row(
+            "SELECT COUNT(*)
+             FROM facts f
+             JOIN local_fact_admissions m ON m.fact_id = f.id
+             WHERE m.scope = 'scoped'
+               AND m.scope_kind = 'workspace'
+               AND m.scope_id = ?1
+               AND substr(f.bytes, 1, 1) = ?2",
+            params![workspace_id, vec![super::encode::TYPE_CONTENT_MESSAGE],],
+            |row| row.get::<_, i64>(0).map(|value| value as usize),
+        )
+        .map_err(|err| format!("read content message facts: {err}"))?;
+    Ok(ContentCount {
+        content_messages,
+        message_facts,
+        message_payload_bytes: message_facts as u64 * CIPHERTEXT_BYTES as u64,
+        max_created_at_ms,
+    })
 }
 
 pub(crate) fn max_created_at_ms(store: &Db) -> Result<u64, String> {

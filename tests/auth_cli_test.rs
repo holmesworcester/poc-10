@@ -701,7 +701,7 @@ fn wait_for_content_count(db: &str, workspace_id: &str, expected: &str, daemons:
         "eventually",
         "content-count",
         workspace_id,
-        "content_messages",
+        "message_facts",
         "eq",
         expected,
         "--timeout-ms",

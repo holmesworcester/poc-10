@@ -3,8 +3,7 @@
 //! A message deletion is a workspace-scoped declaration that the named
 //! `author_user_id` wants `target_message_id` removed. The target frontier and
 //! minute are the deletion match coordinate used by content and key projectors;
-//! projection validates that coordinate against the target message before it
-//! materializes deletion state.
+//! the target message validates that coordinate and author before it self-purges.
 
 use crate::core::crypto::Ed25519PublicKey;
 use crate::core::facts::FactId;

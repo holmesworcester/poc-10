@@ -393,6 +393,11 @@ impl ContentFileProjector {
             file.author_user_id,
             file.author_user_id,
         );
+        let file_deletion_need = crate::core::project_fact::fact_purged_need(
+            fact.id,
+            scope.clone(),
+            file_deletion::project::file_purged_key(fact.id),
+        );
         if !signature::project::signature_proof_ready(
             context,
             &signature_need,
@@ -404,6 +409,7 @@ impl ContentFileProjector {
             return Ok(output_with_needs([
                 Some(signature_need),
                 Some(signer_need),
+                Some(file_deletion_need),
                 Some(parent_need),
                 Some(author_need),
             ]));
@@ -422,15 +428,26 @@ impl ContentFileProjector {
             return Ok(output_with_needs([
                 Some(signature_need),
                 Some(signer_need),
+                Some(file_deletion_need),
                 Some(parent_need),
                 Some(author_need),
                 None,
             ]));
         }
+        if let Some(deletion) = context_payload(context, &file_deletion_need, "file deletion")? {
+            validate_file_deletion(deletion, file.workspace_id, fact.id, file.author_user_id)?;
+            return Ok(retract_fact_from_sync(
+                delete_file_projection(file.workspace_id, fact.id).purge_self(fact.id),
+                file.workspace_id,
+                fact.id,
+                file.created_at_ms,
+            ));
+        }
         let Some(parent_payload) = context_payload(context, &parent_need, "file parent")? else {
             return Ok(output_with_needs([
                 Some(signature_need),
                 Some(signer_need),
+                Some(file_deletion_need),
                 Some(parent_need),
                 Some(author_need),
             ]));
@@ -442,15 +459,6 @@ impl ContentFileProjector {
             file.message_id,
             "file parent",
         )?;
-        let file_deletion_need = crate::core::project_fact::fact_purged_need(
-            fact.id,
-            scope.clone(),
-            project::fact_purged_key(
-                parent.message.frontier_id,
-                message::fact::unix_minute_for(file.created_at_ms),
-                fact.id,
-            ),
-        );
         let parent_deletion_need = crate::core::project_fact::fact_purged_need(
             fact.id,
             scope.clone(),
@@ -460,20 +468,6 @@ impl ContentFileProjector {
                 file.message_id,
             ),
         );
-        if let Some(deletion) = context_payload(context, &file_deletion_need, "file deletion")? {
-            validate_file_deletion(deletion, file.workspace_id, fact.id, file.author_user_id)?;
-            return Ok(retract_fact_from_sync(
-                delete_file_projection(file.workspace_id, fact.id)
-                    .need(signature_need)
-                    .need(parent_need)
-                    .need(file_deletion_need)
-                    .need(parent_deletion_need)
-                    .purge_self(fact.id),
-                file.workspace_id,
-                fact.id,
-                file.created_at_ms,
-            ));
-        }
         if let Some(deletion) =
             context_payload(context, &parent_deletion_need, "file parent deletion")?
         {
@@ -486,12 +480,7 @@ impl ContentFileProjector {
                 parent.message.author_user_id,
             )?;
             return Ok(retract_fact_from_sync(
-                delete_file_projection(file.workspace_id, fact.id)
-                    .need(signature_need)
-                    .need(file_deletion_need)
-                    .need(parent_need)
-                    .need(parent_deletion_need)
-                    .purge_self(fact.id),
+                delete_file_projection(file.workspace_id, fact.id).purge_self(fact.id),
                 file.workspace_id,
                 fact.id,
                 file.created_at_ms,
@@ -522,29 +511,28 @@ impl ContentFileProjector {
 
         // 3. Materialize.
         Ok(share_fact_with_sync(
-            output_with_needs([
-                Some(signature_need),
-                Some(signer_need),
-                Some(file_deletion_need),
-                Some(parent_need),
-                Some(parent_deletion_need),
-                Some(author_need),
-            ])
-            .offer(crate::core::context::ContextOffer::range(
-                fact.id,
-                "content_file",
-                scope,
-                file.file_id,
-                file.file_id,
-            ))
-            .offer(crate::core::context::ContextOffer::range(
-                fact.id,
-                "sync_exact_fact",
-                crate::protocol::auth::workspace::scope(file.workspace_id),
-                fact.id,
-                fact.id,
-            ))
-            .row_mutation(RowMutation::InsertValues(content_file_row(fact.id, &file))),
+            ProjectionOutput::new()
+                .need(signature_need)
+                .need(signer_need)
+                .need(file_deletion_need)
+                .need(parent_need)
+                .need(parent_deletion_need)
+                .need(author_need)
+                .offer(crate::core::context::ContextOffer::range(
+                    fact.id,
+                    "content_file",
+                    scope,
+                    file.file_id,
+                    file.file_id,
+                ))
+                .offer(crate::core::context::ContextOffer::range(
+                    fact.id,
+                    "sync_exact_fact",
+                    crate::protocol::auth::workspace::scope(file.workspace_id),
+                    fact.id,
+                    fact.id,
+                ))
+                .row_mutation(RowMutation::InsertValues(content_file_row(fact.id, &file))),
             file.workspace_id,
             fact,
             context_have,

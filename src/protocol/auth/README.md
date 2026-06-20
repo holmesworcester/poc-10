@@ -278,12 +278,11 @@ evidence and signer context, find covering local key material, derive or
 validate the leaf, decrypt the encrypted fields, and emit opened rows via row
 mutations.
 
-Message metadata is intentionally separate from opened content. After signer
-and author context validate, a content-message projector may emit
-`content_message_meta` so an author deletion can be validated and purged before
-any key material arrives. It emits the normal `content_message` offer and
-opened rows only after decrypting the encrypted fields, so files and reactions
-still depend on opened message context.
+Message rows are materialized only after signer, author, and key context let the
+projector decrypt the encrypted fields. Message deletion facts materialize their
+signed deletion claim independently, and the target message validates that claim
+before self-deleting. Files and reactions still depend on opened message
+context.
 
 If opening requires broad scans, IO, clock reads, or external mutation, that
 step belongs in a bounded intent/handler, not in a generic opening worker.

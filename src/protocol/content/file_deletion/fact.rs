@@ -6,7 +6,8 @@
 //! envelope (workspace, timestamp, target, author, signer, signature).
 //!
 //! Current boundary: signature verification and signer-to-author authority live
-//! in the file-deletion projector with auth context witnesses.
+//! in the file-deletion projector with auth context witnesses. The target file
+//! validates whether the signed claim applies before it self-purges.
 
 use crate::core::crypto::Ed25519PublicKey;
 use crate::core::facts::FactId;

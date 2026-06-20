@@ -48,6 +48,7 @@ fn generate_cli_uses_real_store_and_reports_applied_facts() {
 
     let content = assert_success(topo(&["--db", &db, "content-count", &workspace_id]));
     assert_eq!(line_value(&content, "content_messages"), "7");
+    assert_eq!(line_value(&content, "message_facts"), "7");
     assert_eq!(line_value(&content, "message_payload_bytes"), "896");
 
     let status = assert_success(topo(&["--db", &db, "count"]));

@@ -134,11 +134,11 @@ fn three_player_sync_through_alice_keeps_workspace_scopes_separate() {
     set_sync_range_until_visible(&bob, &workspace_a, "0", "18446744073709551615", 30_000);
     set_sync_range_until_visible(&carol, &workspace_b, "0", "18446744073709551615", 30_000);
 
-    wait_for_content_count(&alice, &workspace_a, 3);
-    wait_for_content_count(&alice, &workspace_b, 4);
+    wait_for_message_fact_count(&alice, &workspace_a, 3);
+    wait_for_message_fact_count(&alice, &workspace_b, 4);
     wait_for_content_count(&bob, &workspace_a, 3);
-    assert_content_count(&bob, &workspace_b, 0);
-    assert_content_count(&carol, &workspace_a, 0);
+    assert_message_fact_count(&bob, &workspace_b, 0);
+    assert_message_fact_count(&carol, &workspace_a, 0);
     wait_for_content_count(&carol, &workspace_b, 4);
 }
 
@@ -1652,6 +1652,15 @@ fn assert_content_count(db: &str, workspace: &str, expected: usize) {
     );
 }
 
+fn assert_message_fact_count(db: &str, workspace: &str, expected: usize) {
+    let out = assert_success(topo(&["--db", db, "content-count", workspace]));
+    assert_eq!(
+        line_value(&out, "message_facts"),
+        expected.to_string(),
+        "content-count output:\n{out}"
+    );
+}
+
 fn poll_for_content_count_at_least(
     db: &str,
     workspace: &str,
@@ -1690,6 +1699,25 @@ fn wait_for_content_count(db: &str, workspace: &str, expected: usize) {
         "content-count",
         workspace,
         "content_messages",
+        "eq",
+        &expected,
+        "--timeout-ms",
+        "60000",
+        "--poll-ms",
+        "100",
+    ]));
+}
+
+fn wait_for_message_fact_count(db: &str, workspace: &str, expected: usize) {
+    let expected = expected.to_string();
+    assert_success(topo(&[
+        "--db",
+        db,
+        "assert",
+        "eventually",
+        "content-count",
+        workspace,
+        "message_facts",
         "eq",
         &expected,
         "--timeout-ms",

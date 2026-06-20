@@ -15,9 +15,8 @@ fact bytes and invokes the registered projector for each type tag.
 
 Data leaves content projection as:
 
-- context offers such as `content_message_meta`, `content_message`,
-  `content_file`, generic core `fact_purged`, `content_retention_floor`,
-  and `sync_exact_fact`;
+- context offers such as `content_message`, `content_file`, generic core
+  `fact_purged`, `content_retention_floor`, and `sync_exact_fact`;
 - context needs for auth signer/user/admin proof, key-material coverage,
   parent content facts, deletion facts, retention floors, and time wakes;
 - durable intent effects for follow-up work owned by registered protocol
@@ -49,8 +48,8 @@ below names the read.
 Auth provides `signature_proof`, `content_signer`, `auth_user`, `auth_admin`,
 and `secret_coverage` context. Content never opens encrypted text or admits
 signature-evidenced content until those witnesses match the payload. Content publishes
-`content_message`, `content_message_meta`, `content_file`, generic core
-`fact_purged`, and `content_retention_floor` context so child content,
+`content_message`, `content_file`, generic core `fact_purged`, and
+`content_retention_floor` context so child content,
 deletion, retention, and key-material projectors can make bounded progress
 without scanning content rows.
 
@@ -78,24 +77,29 @@ workspace. Retention policy facts are global facts whose payload names the
 workspace/scope and whose projector validates admin or bootstrap authority.
 
 Deletion is target-owned. A deletion projector publishes generic core
-`fact_purged` context only after it validates author and target. The target
-message/file/reaction/slice projector consumes that context, deletes its own
-rows, and purges its own fact bytes. Projectors do not purge someone else's
-fact.
+`fact_purged` context after it validates the signed deletion claim's signer and
+author user. The target message/file/reaction/slice projector consumes that
+context, validates that the claim names the target and the target author,
+deletes its own rows, and purges its own fact bytes. Projectors do not purge
+someone else's fact.
 
-Content encodes `fact_purged` coordinates as
-`frontier_id || minute || fact_id`. Target encrypted-content projectors publish
-exact needs at the coordinates that should wake them: messages watch their own
-coordinate, files watch their own coordinate and parent message coordinate, and
-reactions/slices watch parent coordinates. Exact deletions publish exact offers
-over one coordinate; retention or compaction can publish broader minute-range
-offers over the same frontier-scoped key shape. Non-encrypted facts do not
-publish these purge needs.
+Content encodes message `fact_purged` coordinates as
+`frontier_id || minute || fact_id`. File deletion uses a direct target-file-id
+purge coordinate because the file deletion fact carries only the target file id;
+the file projector validates the matched deletion payload before purging. Target
+encrypted-content projectors publish exact needs at the coordinates that should
+wake them: messages watch their own coordinate, files watch their own file
+coordinate and parent message coordinate, and reactions/slices watch parent
+coordinates. Exact deletions publish exact offers over one coordinate;
+retention or compaction can publish broader minute-range offers over the
+message frontier-scoped key shape. Non-encrypted facts do not publish these
+purge needs.
 
 Opened message rows are derived state. The message fact is admitted and shared
-after signer/author proof, but `opened_message_rows` are written only when the
-matching local secret coverage can decrypt the text. File slices verify BAO
-proofs against the descriptor root before writing ciphertext rows.
+only after signer/author proof and matching local secret coverage can decrypt
+the text. `content_messages` and `opened_message_rows` are written together on
+that final valid projection. File slices verify BAO proofs against the
+descriptor root before writing ciphertext rows.
 
 Signer-bearing content facts store signer identity fields, not embedded
 signature bytes. Commands emit the target content fact plus an `auth::signature`
@@ -131,11 +135,10 @@ those scopes own the follow-up work.
 ### `message` (tag 50)
 
 Encrypted text message. Projection requires workspace scope, signature proof,
-signer context, author context, secret coverage, deletion context,
-retention-floor context, and time-wake checks. It writes `content_messages`
-after metadata validation, writes `opened_message_rows` only after decryption, offers
-`content_message_meta` and `content_message`, shares the fact, and self-purges
-on deletion/expiry/retention.
+signer context, author context, secret coverage, deletion watch,
+retention-floor watch, and time-wake checks. Live projection writes
+`content_messages` and `opened_message_rows`, offers `content_message`, shares
+the fact, and self-purges on deletion/expiry/retention.
 
 ```text
 message {
@@ -156,11 +159,11 @@ message {
 
 ### `message_deletion` (tag 51)
 
-Authorizes removal of one message. Projection requires signer, target
-`content_message_meta`, and author user context, validates the target frontier,
-minute, and author, writes `message_deletion_rows`, offers exact
+Authorizes removal of one message. Projection requires signer and author user
+context for the signed delete claim, writes `message_deletion_rows`, offers exact
 `fact_purged(message, target_minute, target_message_id)`, and shares the
-deletion fact.
+deletion fact. The target message projector validates the target frontier,
+minute, id, and author before self-purging.
 
 ```text
 message_deletion {
@@ -197,11 +200,11 @@ reaction {
 
 ### `file_deletion` (tag 53)
 
-Authorizes removal of one file descriptor. Projection requires signer, exact
-target file, parent message, and author user context. It validates the target
-file author and parent message, writes `file_deletion_rows`, offers
-exact `fact_purged(file, target_file_minute, target_file_id)`, and shares the
-deletion fact.
+Authorizes removal of one file descriptor. Projection requires signer and
+author user context for the signed delete claim, writes `file_deletion_rows`,
+offers exact `fact_purged(file, target_file_id)`, and shares the deletion fact.
+The target file projector validates the target file id and author before
+self-purging.
 
 ```text
 file_deletion {
@@ -302,5 +305,5 @@ message_deletion_hello
 ```
 
 This graph shows why deletions are modeled as context rather than direct row
-mutation. The deletion fact proves authority once; each target fact owns its
-own cleanup when that context matches.
+mutation. The deletion fact proves a signed claim once; each target fact owns
+validating applicability and cleaning itself up when that context matches.

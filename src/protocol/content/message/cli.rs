@@ -380,7 +380,7 @@ pub fn content_count(store: &Db, args: CliArgs<'_>) -> Result<queries::ContentCo
 pub fn content_count_output(count: queries::ContentCount) -> CliOutput {
     CliOutput::lines(vec![
         format!("content_messages: {}", count.content_messages),
-        format!("message_facts: {}", count.content_messages),
+        format!("message_facts: {}", count.message_facts),
         format!("message_payload_bytes: {}", count.message_payload_bytes),
         format!("max_message_timestamp: {}", count.max_created_at_ms),
     ])

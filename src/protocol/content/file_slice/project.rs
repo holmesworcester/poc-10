@@ -236,11 +236,9 @@ use crate::core::project_fact::{
 
 use crate::protocol::auth::signature;
 use crate::protocol::content::file;
-use crate::protocol::content::file_deletion;
 use crate::protocol::content::message;
-use crate::protocol::content::message::fact::unix_minute_for;
 use crate::protocol::content::message::project as message_project;
-use crate::protocol::content::message_deletion;
+use crate::protocol::content::{file_deletion, message_deletion};
 use crate::protocol::registry::read_models;
 use crate::protocol::sync::shared_fact::project::{
     context_have_from_needs, retract_fact_from_sync, share_fact_with_sync,
@@ -384,11 +382,7 @@ impl ContentFileSliceProjector {
         let file_deletion_need = crate::core::project_fact::fact_purged_need(
             fact.id,
             scope.clone(),
-            message_project::fact_purged_key(
-                parent_message.frontier_id,
-                unix_minute_for(file.created_at_ms),
-                parent.id,
-            ),
+            file_deletion::project::file_purged_key(parent.id),
         );
         let parent_deletion_need = crate::core::project_fact::fact_purged_need(
             fact.id,

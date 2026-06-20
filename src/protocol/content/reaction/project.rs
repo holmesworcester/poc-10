@@ -427,14 +427,13 @@ impl ContentReactionProjector {
             ciphertext: reaction.ciphertext.bytes().to_vec(),
         })?;
         Ok(share_fact_with_sync(
-            output_with_needs([
-                Some(signature_need),
-                Some(signer_need),
-                Some(target_need),
-                Some(target_deletion_need),
-                Some(author_need),
-            ])
-            .row_mutation(RowMutation::InsertValues(row)),
+            ProjectionOutput::new()
+                .need(signature_need)
+                .need(signer_need)
+                .need(target_need)
+                .need(target_deletion_need)
+                .need(author_need)
+                .row_mutation(RowMutation::InsertValues(row)),
             reaction.workspace_id,
             fact,
             context_have,
