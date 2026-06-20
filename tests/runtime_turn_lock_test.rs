@@ -6,7 +6,7 @@ use std::thread;
 use std::time::Duration;
 
 use cli_harness::{assert_success, spawn_con, topo, wait_success};
-use topo::core::daemon::RuntimeTurnLock;
+use topo::core::runtime::RuntimeTurnLock;
 
 #[test]
 fn runtime_turn_lock_serializes_process_turns() {

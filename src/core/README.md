@@ -1,15 +1,13 @@
 # Core
 
 Core is the protocol-neutral runtime substrate. A different protocol should be
-able to reuse it unchanged: all commands, wire formats, transit layer security,
-connection bootstrapping, sync, fact relationships, data, storage, and
-materialization logic depend on protocol, not core.
-
-Core persists immutable facts, matches context ranges,
-runs projectors, dispatches queued intents, commits effect batches, hosts CLI
-and daemon loops, and moves opaque network bytes. In the case of a messaging
-app, for example, core must not know what a workspace, message, invite, key
-wrap, sync range, or connection fact means.
+able to reuse it unchanged: core persists immutable facts, matches context
+ranges, runs projectors, dispatches queued intents, commits effect batches,
+hosts CLI and daemon process loops, and moves opaque network bytes. Commands,
+wire formats, transit-layer security, connection bootstrapping, sync policy,
+fact relationships, data semantics, storage materialization, and read models
+belong to the protocol. In a messaging app, for example, core must not know what
+a workspace, message, invite, key wrap, sync range, or connection fact means.
 
 ## How Core Works
 
@@ -17,8 +15,8 @@ Core is the reusable runtime loop around a protocol declaration. At startup the
 app hands core a `ProtocolDescription`; core opens the selected SQLite database,
 applies core, network, and protocol schemas, builds the command registry, and
 constructs a `Runtime` from the declared projector, handler registry, row
-allowlist, schema sources, and daemon hooks. From that point on, core does not
-ask what a protocol fact means. It only moves facts, context, rows, intents,
+allowlist, schema sources, and runtime-turn hooks. From that point on, core does
+not ask what a protocol fact means. It only moves facts, context, rows, intents,
 time wakes, and opaque network bytes through the declared runtime workers.
 
 A normal command is a serialized database turn. Core opens the database, passes the
@@ -85,8 +83,11 @@ Protocol code enters core through declarations and effect values:
 
 - `runtime::RuntimeDescription` declares protocol schema sources, allowed row
   mutation tables, the projector factory, and registered intent handlers.
-- `app::ProtocolDescription` adds the product name, daemon declarations, and
-  CLI command table.
+- `runtime::RuntimeTurnDescription` declares host-turn intake: how inbound
+  network bytes become incoming facts and which time-wake timelines live turns
+  admit.
+- `app::ProtocolDescription` adds the product name, runtime-turn declaration,
+  CLI command table, and context builder.
 - `project_fact::Projector` receives one `Fact` plus a `ProjectionContext` and
   returns a `ProjectionOutput`; fact families keep decode, authenticate, adapt,
   and semantic projection helpers inside their owning `project.rs`.
@@ -106,8 +107,8 @@ Protocol code enters core through declarations and effect values:
   runtime state, and state-summary tables.
 
 Data leaves core through the same narrow surfaces: commands receive
-`CliOutput`, protocol queries read schema-owned rows through `Db`, daemon
-network drains receive length-prefixed frame bytes, and network sends consume
+`CliOutput`, protocol queries read schema-owned rows through `Db`, daemon-host
+runtime turns receive length-prefixed frame bytes, and network sends consume
 opaque outgoing rows from `network`.
 
 ## Data Flow
@@ -123,7 +124,7 @@ CLI command / daemon / handler
   -> RuntimeEffects
 ```
 
-Facts can enter through commands, handlers, sync, or incoming daemon input.
+Facts can enter through commands, handlers, sync, or incoming daemon-host input.
 Core records durable fact bytes with admission metadata and retained
 `pending_projection` work; outside-origin bytes are staged in the temporary
 `incoming_facts` first-pass queue until runtime loads them into the owning
@@ -147,9 +148,9 @@ addresses so the pump schedules peers without scanning frame payloads. The pump
 writes length-prefixed frames as socket capacity allows and deletes each frame
 row only after its frame is written.
 
-Time enters through daemon-owned `DaemonTimeWake` declarations. Core selects
-due `time_wakes`, attaches the due `TimeRange` to projection context, and lets
-the owning projector decide whether that time proves anything.
+Time enters through runtime-owned `RuntimeTimeWake` declarations. The current
+host turn selects due `time_wakes`, attaches the due `TimeRange` to projection
+context, and lets the owning projector decide whether that time proves anything.
 
 ## Invariants
 
@@ -203,7 +204,7 @@ the owning projector decide whether that time proves anything.
 Change core when the reusable runtime mechanics change: queue ordering,
 projection scheduling, context overlap matching, transaction boundaries,
 effect validation, wire primitives, database behavior, network byte pumping,
-daemon scheduling, or CLI hosting.
+daemon lifecycle, runtime-turn scheduling, or CLI hosting.
 
 Change protocol when the meaning of a fact, row, context role, command, sync
 range, invite, key, message, or connection frame changes. Protocol modules may
@@ -236,12 +237,11 @@ use core syntax and contracts, but core must not import their semantic rules.
   authenticated encryption, and checked byte slices. It centralizes low-level
   library calls. Protocol modules still own signing domains, associated data,
   key lifetimes, authority checks, and semantic validation.
-- `daemon.rs`: long-running process lifecycle and tick ordering. It owns the
-  database lock, listener setup, readiness/stop/reset handling, inbound frame
-  intake, due time-wake admission, host-aware durable handler dispatch, and the
-  bounded durable projection, incoming projection, and local intent queue order.
-  The protocol declaration decides how inbound bytes become runtime effects and
-  which time-wake timelines are active.
+- `daemon.rs`: long-running process lifecycle. It owns daemon start flag
+  parsing, the daemon process lock, listener setup, readiness output,
+  signal/stop/reset handling, idle sleep, and tick cadence. It receives a turn
+  closure from `app.rs` and repeats it with the live listener; it does not define
+  projection, intent, time-wake, or network queue order.
 - `effects.rs`: shared effect language for projectors and handlers.
   `RuntimeEffects` names facts to admit, incoming facts, exact purges, row
   mutations, durable intents, and local intents. The shared commit helper writes
@@ -279,8 +279,10 @@ use core syntax and contracts, but core must not import their semantic rules.
   emitted effects.
 - `runtime.rs`: executable engine for one selected protocol description. It
   opens databases, applies declared schemas, submits authored facts, exposes
-  bounded projection and intent queue drains, admits due time wakes, and
-  composes `project_fact.rs` and `handle_intent.rs` into bounded runtime turns.
+  bounded projection and intent queue drains, owns the runtime-turn lock, admits
+  due time wakes, stages inbound network bytes as incoming facts, pumps outgoing
+  network rows when a daemon host supplies a listener, and composes
+  `project_fact.rs` and `handle_intent.rs` into bounded runtime turns.
 - `schema.rs`: core-owned SQL table inventory. It declares facts, local
   admissions, context edges, time wakes, pending projection, incoming facts,
   pending projection matches, the `pending_time_ranges` work table, intent
@@ -301,7 +303,7 @@ The runtime contract is split by ownership: `project_fact.rs` keeps the
 protocol-neutral projection contract, route metadata, shared commit/context
 helpers, and fact queue worker; `handle_intent.rs` keeps handler route metadata,
 handler sets, and the intent queue worker. `runtime.rs`
-composes those pieces into command and daemon turns. Protocol
+composes those pieces into local command and daemon-host turns. Protocol
 projectors own raw decoding, validation, adaptation, and semantic projection;
 core owns queueing, matched context, needs/offers, effect commits, and replay
 mode.
@@ -333,8 +335,9 @@ mode.
   needs/time wakes, appends offers, and commits emitted effects.
 - `runtime.rs`: bounded work ordering. It admits facts and due time wakes,
   selects durable and incoming projection items through `project_fact.rs`,
-  dispatches queued intents through `handle_intent.rs`, and lets context wakes
-  or emitted follow-up facts re-enter the queue explicitly.
+  dispatches queued intents through `handle_intent.rs`, classifies daemon-host
+  inbound network rows into incoming facts, pumps queued outgoing rows, and lets
+  context wakes or emitted follow-up facts re-enter the queue explicitly.
 
 ### Storage Version Commit Guards
 

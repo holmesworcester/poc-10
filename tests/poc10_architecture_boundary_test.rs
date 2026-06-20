@@ -256,7 +256,7 @@ fn poc10_success_criteria_are_recorded_in_architecture_doc() {
         "src/core/network.rs",
         "src/protocol/registry.rs",
         "## Runtime Shape",
-        "Protocol manifests declare their commands, fact families, intent handlers, schemas, and daemon hooks",
+        "Protocol manifests declare their commands, fact families, intent handlers, schemas, and runtime-turn hooks",
         "app assembles those declarations into a `ProtocolDescription`",
         "Core uses that description to build the `con` CLI",
         "without hard-coding their names or behavior",

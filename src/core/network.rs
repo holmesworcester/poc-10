@@ -13,9 +13,10 @@
 //!
 //! The outgoing queue key is intentionally deterministic: the same route and
 //! same bytes map to the same row. That gives the boundary a cheap idempotence
-//! property while callers are still free to retry after crashes. If this module
-//! starts parsing payloads, naming protocol concepts, or deciding when a row
-//! should be produced, it has crossed out of core and into a fact module.
+//! property while callers are still free to retry after crashes. This file must
+//! not parse frame payloads, name protocol concepts, decide when protocol bytes
+//! should be produced, or decide whether received bytes are admissible protocol
+//! facts. Those responsibilities belong in the protocol fact and intent modules.
 //!
 //! Outgoing rows are produced by protocol handlers and consumed by the
 //! TCP pump. Inbound rows are produced by the TCP listener and consumed by the

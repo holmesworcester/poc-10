@@ -1,12 +1,13 @@
 //! Concrete protocol description exported to core.
 //!
 //! This is the one place that assembles the Context protocol as an executable
-//! application: runtime declarations, daemon declarations, and command table.
+//! application: runtime declarations, runtime-turn declarations, and command
+//! table.
 //! The binary selects this description; core consumes it generically.
 //!
 //! `protocol::registry` is the larger table of contents. This file chooses the
 //! pieces needed to run the protocol: schema sources, row mutation allowlist,
-//! projector, handler routes, daemon time wakes, and inbound-network intake
+//! projector, handler routes, runtime time wakes, and inbound-network intake
 //! conversion. If a new protocol capability needs to be
 //! visible to core, it is usually declared in the registry and wired into the
 //! `CONTEXT_RUNTIME` or `CONTEXT_PROTOCOL` constants here.
@@ -16,10 +17,11 @@
 //! and frame interpretation live in connection fact and intake modules.
 
 use crate::core::app::ProtocolDescription;
-use crate::core::daemon::{DaemonDescription, DaemonTimeWake, InboundNetworkFrame};
 use crate::core::db::Db;
 use crate::core::facts::Fact;
-use crate::core::runtime::RuntimeDescription;
+use crate::core::runtime::{
+    self, InboundNetworkFrame, RuntimeDescription, RuntimeTimeWake, RuntimeTurnDescription,
+};
 use crate::protocol::registry::{
     authenticate_fact_for_admission, protocol_projector, FACT_ROUTES, HANDLER_ROUTES,
     ROW_MUTATION_TABLES, SCHEMA_SOURCES,
@@ -40,20 +42,20 @@ pub const CONTEXT_PROTOCOL: ProtocolDescription<ContextCliContext> = ProtocolDes
     display_name: "Context",
     command_name: "con",
     runtime: CONTEXT_RUNTIME,
-    daemon: DaemonDescription {
+    runtime_turn: RuntimeTurnDescription {
         inbound_network_intake: Some(receive_network_frame_facts),
-        time_wakes: CONTEXT_DAEMON_TIME_WAKES,
+        time_wakes: CONTEXT_RUNTIME_TIME_WAKES,
     },
     commands: CONTEXT_COMMANDS,
     context: ContextCliContext::new,
 };
 
-/// Live daemon time wakes.
+/// Live runtime time wakes.
 ///
-/// These wakes are driven by the daemon's current wall time. Replay does not
-/// run daemon wall-clock work; it reprojects retained facts and leaves standing
-/// time wakes for the next live daemon tick.
-const CONTEXT_DAEMON_TIME_WAKES: &[DaemonTimeWake] = &[DaemonTimeWake {
+/// These wakes are driven by the host runtime turn's current wall time. Replay
+/// does not run live wall-clock work; it reprojects retained facts and leaves
+/// standing time wakes for the next live runtime turn.
+const CONTEXT_RUNTIME_TIME_WAKES: &[RuntimeTimeWake] = &[RuntimeTimeWake {
     timeline: content::message::expiration_timeline,
     end_inclusive: current_message_expiration_minute,
 }];
@@ -68,5 +70,5 @@ fn receive_network_frame_facts(input: InboundNetworkFrame) -> Result<Vec<Fact>, 
 }
 
 fn current_message_expiration_minute(_store: &Db) -> Result<Option<u64>, String> {
-    Ok(Some(crate::core::daemon::now_ms() / 60_000))
+    Ok(Some(runtime::now_ms() / 60_000))
 }

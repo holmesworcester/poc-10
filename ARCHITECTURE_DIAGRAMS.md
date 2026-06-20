@@ -266,11 +266,11 @@ separate runtime phases.
 ## 3) Serialized Turns And Locks
 
 Commands, queries, and the daemon all acquire `<db>.runtime.lock`. While holding
-the lock, each host first runs the same bounded `runtime_turn`; the host mode
-only decides which adapters are present. Local command/query turns use the local
-host mode, so they have no listener, outgoing pump, or durable handler dispatch.
-Daemon turns use daemon host mode, so the same runtime turn can accept inbound
-bytes, dispatch durable handlers, and pump outgoing frames.
+the lock, each host first enters `Runtime::run_turn`; the host mode only decides
+which adapters are present. Local command/query turns use the local host mode, so
+they have no listener, outgoing pump, or durable handler dispatch. Daemon turns
+use daemon host mode, so the same runtime-owned turn can accept inbound bytes,
+dispatch durable handlers, and pump outgoing frames.
 
 After the local preflight turn, core dispatches the registered protocol CLI
 command. Ordinary write commands verify storage readiness, read currently
@@ -288,8 +288,8 @@ flowchart TD
     LOCK["acquire <db>.runtime.lock"]
 
     LOCK --> HOST{"host entry"}
-    HOST -->|command/query/control| LOCAL_PREFLIGHT["runtime_turn(local host)<br/>no listener, no outgoing pump,<br/>no durable handler dispatch"]
-    HOST -->|daemon| DAEMON_PREFLIGHT["runtime_turn(daemon host)<br/>listener, durable handlers,<br/>outgoing pump"]
+    HOST -->|command/query/control| LOCAL_PREFLIGHT["Runtime::run_turn(local host)<br/>no listener, no outgoing pump,<br/>no durable handler dispatch"]
+    HOST -->|daemon| DAEMON_PREFLIGHT["Runtime::run_turn(daemon host)<br/>listener, durable handlers,<br/>outgoing pump"]
 
     LOCAL_PREFLIGHT --> CLI_DISPATCH["dispatch registered protocol CLI command"]
     CLI_DISPATCH --> CLI_KIND{"command policy"}
@@ -323,13 +323,13 @@ sequenceDiagram
 
     D->>L: acquire for daemon-host turn
     L-->>D: granted
-    D->>R: run runtime_turn with network adapters
+    D->>R: run Runtime::run_turn with network adapters
     C->>L: acquire for CLI command
     Note over C,L: OS blocks while daemon holds flock
     D->>L: release
     L-->>C: granted
     C->>R: open runtime
-    C->>R: run runtime_turn without network adapters
+    C->>R: run Runtime::run_turn without network adapters
     C->>R: run registered protocol CLI command
     alt ordinary query
         C->>R: require storage_ready
@@ -362,7 +362,7 @@ fact` path above is represented here as a single node.
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 300}} }%%
 flowchart TD
-    START["runtime_turn"] --> FIRST["offer recurring builders until one intent queues"]
+    START["Runtime::run_turn"] --> FIRST["offer recurring builders until one intent queues"]
     FIRST --> FIRST_DRAIN{"queued an early local intent?"}
     FIRST_DRAIN -- yes --> LOCAL_ONE["drain one local intent"]
     LOCAL_ONE --> DURABLE_REPAIR["drain durable projection after early intent"]
@@ -401,7 +401,7 @@ flowchart TD
 The recurring steps are turn-local and are the source of all periodic work.
 Recurring intents are not durable state: an in-memory `RecurringScheduler`,
 installed from the handler registry for a host runtime, offers operational loops
-during `runtime_turn` and enqueues ordinary local intents when builders decide
+during `Runtime::run_turn` and enqueues ordinary local intents when builders decide
 work is due. The pre-readiness recurring pass gives the first queued local
 intent a special repair chance before host IO; if storage is not ready, the turn
 drains only repair queues and skips normal network and wall-clock work. The

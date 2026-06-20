@@ -156,9 +156,9 @@ The current architecture is described by these boundaries:
 ## Runtime Shape
 
 `src/main.rs` delegates to the product app boundary. Protocol manifests declare
-their commands, fact families, intent handlers, schemas, and daemon hooks; the
-app assembles those declarations into a `ProtocolDescription` and passes it to
-core. Core uses that description to build the `con` CLI, open the declared
+their commands, fact families, intent handlers, schemas, and runtime-turn hooks;
+the app assembles those declarations into a `ProtocolDescription` and passes it
+to core. Core uses that description to build the `con` CLI, open the declared
 runtime, run bounded runtime turns, and dispatch registered protocol commands
 without hard-coding their names or behavior.
 

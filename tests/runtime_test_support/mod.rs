@@ -1,17 +1,16 @@
-use topo::core::daemon::{self, RuntimeTurnHost};
-use topo::core::runtime::Runtime;
+use topo::core::runtime::{RecurringScheduler, Runtime, RuntimeTurnHost};
 use topo::protocol::app::{CONTEXT_PROTOCOL, CONTEXT_RUNTIME};
 
 pub fn initialize_context_runtime(runtime: &mut Runtime) {
-    let mut scheduler = daemon::RecurringScheduler::install(CONTEXT_RUNTIME.handlers);
-    daemon::runtime_turn(
-        CONTEXT_PROTOCOL.daemon,
-        runtime,
-        RuntimeTurnHost::local(),
-        &mut scheduler,
-        4096,
-    )
-    .expect("initialize runtime through local turn");
+    let mut scheduler = RecurringScheduler::install(CONTEXT_RUNTIME.handlers);
+    runtime
+        .run_turn(
+            CONTEXT_PROTOCOL.runtime_turn,
+            RuntimeTurnHost::local(),
+            &mut scheduler,
+            4096,
+        )
+        .expect("initialize runtime through local turn");
 }
 
 #[allow(dead_code)]
