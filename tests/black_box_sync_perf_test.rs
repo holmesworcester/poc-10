@@ -1,6 +1,8 @@
 mod cli_harness;
 
+use std::fs;
 use std::io::{BufRead, BufReader, Read};
+use std::path::Path;
 use std::process::Child;
 use std::thread;
 use std::thread::JoinHandle;
@@ -14,9 +16,9 @@ use rusqlite::{params, Connection};
 fn black_box_generated_content_sync_perf_uses_daemon_restart_boundary() {
     // `generate` authors real message facts in one process so this can measure
     // sync throughput without paying one process start per `send`.
-    let tmp = tempfile::tempdir().unwrap();
-    let alice = temp_db(&tmp, "alice-sync-perf.db");
-    let bob = temp_db(&tmp, "bob-sync-perf.db");
+    let tmp = perf_tempdir();
+    let alice = temp_db(&tmp.dir, "alice-sync-perf.db");
+    let bob = temp_db(&tmp.dir, "bob-sync-perf.db");
     let alice_port = free_port();
     let bob_port = free_port();
     // Keep the ignored fixture quick by default. Use
@@ -88,7 +90,9 @@ fn black_box_generated_content_sync_perf_uses_daemon_restart_boundary() {
     let seconds = sync_elapsed.as_secs_f64().max(0.001);
     let messages_per_second = message_count as f64 / seconds;
     eprintln!(
-        "black_box_generated_content_sync_perf messages={} message_text_bytes={} timeout_ms={} daemon_tick_ms={} daemon_quiet_ms={} preindex_alice={} alice_indexed_before_generate={} alice_sync_index_ready_ms={} authoring_ms={} sync_enable_to_first_projected_ms={} daemons_ready_to_first_projected_ms={} first_projected_to_full_projected_ms={} sync_enable_to_projected_ms={} daemons_ready_to_projected_ms={} messages_per_s={:.2} bob_message_timing_count={} bob_message_timing_with_origin={} bob_message_timing_with_staged={} bob_message_reprojected={} bob_message_max_projection_count={} bob_message_staged_to_first_project_min_ms={} bob_message_staged_to_first_project_p50_ms={} bob_message_staged_to_first_project_p95_ms={} bob_message_staged_to_first_project_max_ms={} bob_message_staged_to_first_project_avg_ms={:.2} bob_message_first_receive_to_project_min_ms={} bob_message_first_receive_to_project_p50_ms={} bob_message_first_receive_to_project_p95_ms={} bob_message_first_receive_to_project_max_ms={} bob_message_first_receive_to_project_avg_ms={:.2} bob_message_latest_receive_to_project_min_ms={} bob_message_latest_receive_to_project_p50_ms={} bob_message_latest_receive_to_project_p95_ms={} bob_message_latest_receive_to_project_max_ms={} bob_message_latest_receive_to_project_avg_ms={:.2} bob_frame_timing_count={} bob_frame_timing_with_origin={} bob_frame_timing_with_staged={} bob_frame_reprojected={} bob_frame_max_projection_count={} bob_frame_staged_to_first_project_min_ms={} bob_frame_staged_to_first_project_p50_ms={} bob_frame_staged_to_first_project_p95_ms={} bob_frame_staged_to_first_project_max_ms={} bob_frame_staged_to_first_project_avg_ms={:.2} bob_frame_first_receive_to_project_min_ms={} bob_frame_first_receive_to_project_p50_ms={} bob_frame_first_receive_to_project_p95_ms={} bob_frame_first_receive_to_project_max_ms={} bob_frame_first_receive_to_project_avg_ms={:.2} bob_frame_latest_receive_to_project_min_ms={} bob_frame_latest_receive_to_project_p50_ms={} bob_frame_latest_receive_to_project_p95_ms={} bob_frame_latest_receive_to_project_max_ms={} bob_frame_latest_receive_to_project_avg_ms={:.2} generate_profile={}",
+        "black_box_generated_content_sync_perf db_temp_source={} db_temp_root={} messages={} message_text_bytes={} timeout_ms={} daemon_tick_ms={} daemon_quiet_ms={} preindex_alice={} alice_indexed_before_generate={} alice_sync_index_ready_ms={} authoring_ms={} sync_enable_to_first_projected_ms={} daemons_ready_to_first_projected_ms={} first_projected_to_full_projected_ms={} sync_enable_to_projected_ms={} daemons_ready_to_projected_ms={} messages_per_s={:.2} bob_message_timing_count={} bob_message_timing_with_origin={} bob_message_timing_with_staged={} bob_message_reprojected={} bob_message_max_projection_count={} bob_message_staged_to_first_project_min_ms={} bob_message_staged_to_first_project_p50_ms={} bob_message_staged_to_first_project_p95_ms={} bob_message_staged_to_first_project_max_ms={} bob_message_staged_to_first_project_avg_ms={:.2} bob_message_first_receive_to_project_min_ms={} bob_message_first_receive_to_project_p50_ms={} bob_message_first_receive_to_project_p95_ms={} bob_message_first_receive_to_project_max_ms={} bob_message_first_receive_to_project_avg_ms={:.2} bob_message_latest_receive_to_project_min_ms={} bob_message_latest_receive_to_project_p50_ms={} bob_message_latest_receive_to_project_p95_ms={} bob_message_latest_receive_to_project_max_ms={} bob_message_latest_receive_to_project_avg_ms={:.2} bob_frame_timing_count={} bob_frame_timing_with_origin={} bob_frame_timing_with_staged={} bob_frame_reprojected={} bob_frame_max_projection_count={} bob_frame_staged_to_first_project_min_ms={} bob_frame_staged_to_first_project_p50_ms={} bob_frame_staged_to_first_project_p95_ms={} bob_frame_staged_to_first_project_max_ms={} bob_frame_staged_to_first_project_avg_ms={:.2} bob_frame_first_receive_to_project_min_ms={} bob_frame_first_receive_to_project_p50_ms={} bob_frame_first_receive_to_project_p95_ms={} bob_frame_first_receive_to_project_max_ms={} bob_frame_first_receive_to_project_avg_ms={:.2} bob_frame_latest_receive_to_project_min_ms={} bob_frame_latest_receive_to_project_p50_ms={} bob_frame_latest_receive_to_project_p95_ms={} bob_frame_latest_receive_to_project_max_ms={} bob_frame_latest_receive_to_project_avg_ms={:.2} generate_profile={}",
+        tmp.source,
+        tmp.root,
         message_count,
         message_text_bytes,
         timeout_ms,
@@ -155,9 +159,9 @@ fn black_box_generated_content_live_tail_perf_skips_message_catchup() {
     // This fixture keeps both daemons connected before generating messages.
     // The measured message window therefore uses live-tail sends emitted by
     // `share_fact_with_sync`, not initial compare/catch-up for the message set.
-    let tmp = tempfile::tempdir().unwrap();
-    let alice = temp_db(&tmp, "alice-live-tail-perf.db");
-    let bob = temp_db(&tmp, "bob-live-tail-perf.db");
+    let tmp = perf_tempdir();
+    let alice = temp_db(&tmp.dir, "alice-live-tail-perf.db");
+    let bob = temp_db(&tmp.dir, "bob-live-tail-perf.db");
     let alice_port = free_port();
     let bob_port = free_port();
     let message_count = env_usize("TOPO_SYNC_PERF_MESSAGES").unwrap_or(100);
@@ -212,7 +216,9 @@ fn black_box_generated_content_live_tail_perf_skips_message_catchup() {
     let end_to_end_messages_per_second = message_count as f64 / end_to_end_seconds;
 
     eprintln!(
-        "black_box_generated_content_live_tail_perf messages={} message_text_bytes={} timeout_ms={} daemon_tick_ms={} daemon_quiet_ms={} setup_ms={} authoring_ms={} generate_start_to_first_projected_ms={} generate_return_to_first_projected_ms={} generate_return_to_projected_ms={} generate_start_to_projected_ms={} live_tail_messages_per_s={:.2} end_to_end_messages_per_s={:.2} bob_message_timing_count={} bob_message_timing_with_origin={} bob_message_timing_with_staged={} bob_message_reprojected={} bob_message_max_projection_count={} bob_message_staged_to_first_project_min_ms={} bob_message_staged_to_first_project_p50_ms={} bob_message_staged_to_first_project_p95_ms={} bob_message_staged_to_first_project_max_ms={} bob_message_staged_to_first_project_avg_ms={:.2} bob_message_first_receive_to_project_min_ms={} bob_message_first_receive_to_project_p50_ms={} bob_message_first_receive_to_project_p95_ms={} bob_message_first_receive_to_project_max_ms={} bob_message_first_receive_to_project_avg_ms={:.2} bob_message_latest_receive_to_project_min_ms={} bob_message_latest_receive_to_project_p50_ms={} bob_message_latest_receive_to_project_p95_ms={} bob_message_latest_receive_to_project_max_ms={} bob_message_latest_receive_to_project_avg_ms={:.2} bob_frame_timing_count={} bob_frame_timing_with_origin={} bob_frame_timing_with_staged={} bob_frame_reprojected={} bob_frame_max_projection_count={} bob_frame_staged_to_first_project_min_ms={} bob_frame_staged_to_first_project_p50_ms={} bob_frame_staged_to_first_project_p95_ms={} bob_frame_staged_to_first_project_max_ms={} bob_frame_staged_to_first_project_avg_ms={:.2} bob_frame_first_receive_to_project_min_ms={} bob_frame_first_receive_to_project_p50_ms={} bob_frame_first_receive_to_project_p95_ms={} bob_frame_first_receive_to_project_max_ms={} bob_frame_first_receive_to_project_avg_ms={:.2} bob_frame_latest_receive_to_project_min_ms={} bob_frame_latest_receive_to_project_p50_ms={} bob_frame_latest_receive_to_project_p95_ms={} bob_frame_latest_receive_to_project_max_ms={} bob_frame_latest_receive_to_project_avg_ms={:.2} generate_profile={}",
+        "black_box_generated_content_live_tail_perf db_temp_source={} db_temp_root={} messages={} message_text_bytes={} timeout_ms={} daemon_tick_ms={} daemon_quiet_ms={} setup_ms={} authoring_ms={} generate_start_to_first_projected_ms={} generate_return_to_first_projected_ms={} generate_return_to_projected_ms={} generate_start_to_projected_ms={} live_tail_messages_per_s={:.2} end_to_end_messages_per_s={:.2} bob_message_timing_count={} bob_message_timing_with_origin={} bob_message_timing_with_staged={} bob_message_reprojected={} bob_message_max_projection_count={} bob_message_staged_to_first_project_min_ms={} bob_message_staged_to_first_project_p50_ms={} bob_message_staged_to_first_project_p95_ms={} bob_message_staged_to_first_project_max_ms={} bob_message_staged_to_first_project_avg_ms={:.2} bob_message_first_receive_to_project_min_ms={} bob_message_first_receive_to_project_p50_ms={} bob_message_first_receive_to_project_p95_ms={} bob_message_first_receive_to_project_max_ms={} bob_message_first_receive_to_project_avg_ms={:.2} bob_message_latest_receive_to_project_min_ms={} bob_message_latest_receive_to_project_p50_ms={} bob_message_latest_receive_to_project_p95_ms={} bob_message_latest_receive_to_project_max_ms={} bob_message_latest_receive_to_project_avg_ms={:.2} bob_frame_timing_count={} bob_frame_timing_with_origin={} bob_frame_timing_with_staged={} bob_frame_reprojected={} bob_frame_max_projection_count={} bob_frame_staged_to_first_project_min_ms={} bob_frame_staged_to_first_project_p50_ms={} bob_frame_staged_to_first_project_p95_ms={} bob_frame_staged_to_first_project_max_ms={} bob_frame_staged_to_first_project_avg_ms={:.2} bob_frame_first_receive_to_project_min_ms={} bob_frame_first_receive_to_project_p50_ms={} bob_frame_first_receive_to_project_p95_ms={} bob_frame_first_receive_to_project_max_ms={} bob_frame_first_receive_to_project_avg_ms={:.2} bob_frame_latest_receive_to_project_min_ms={} bob_frame_latest_receive_to_project_p50_ms={} bob_frame_latest_receive_to_project_p95_ms={} bob_frame_latest_receive_to_project_max_ms={} bob_frame_latest_receive_to_project_avg_ms={:.2} generate_profile={}",
+        tmp.source,
+        tmp.root,
         message_count,
         message_text_bytes,
         timeout_ms,
@@ -272,6 +278,42 @@ fn black_box_generated_content_live_tail_perf_skips_message_catchup() {
 
     alice_daemon.stop_with_cli();
     bob_daemon.stop_with_cli();
+}
+
+struct PerfTempDir {
+    dir: tempfile::TempDir,
+    source: String,
+    root: String,
+}
+
+fn perf_tempdir() -> PerfTempDir {
+    let configured_root = std::env::var("TOPO_SYNC_PERF_TMPDIR").ok();
+    let dir = if let Some(root) = configured_root.as_deref() {
+        fs::create_dir_all(root).expect("create TOPO_SYNC_PERF_TMPDIR");
+        tempfile::Builder::new()
+            .prefix("topo-sync-perf-")
+            .tempdir_in(root)
+            .expect("create perf tempdir in TOPO_SYNC_PERF_TMPDIR")
+    } else {
+        tempfile::Builder::new()
+            .prefix("topo-sync-perf-")
+            .tempdir()
+            .expect("create perf tempdir")
+    };
+    let source = configured_root
+        .as_ref()
+        .map(|_| "TOPO_SYNC_PERF_TMPDIR")
+        .unwrap_or("tempfile_default")
+        .to_string();
+    let root = temp_root_for_log(dir.path());
+    PerfTempDir { dir, source, root }
+}
+
+fn temp_root_for_log(path: &Path) -> String {
+    path.parent()
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace(' ', "%20")
 }
 
 struct RunningDaemon {
