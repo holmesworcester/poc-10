@@ -20,19 +20,20 @@
 //! projector that created it and with the projector that later validates the
 //! matched payload.
 //!
-//! Every context edge is a range:
+//! Every context edge has a key interval:
 //!
 //! ```text
 //! owner, role, scope, start_key, end_key
 //! ```
 //!
 //! `role` and `scope` partition the search space. `start_key` and `end_key` are
-//! inclusive opaque byte endpoints inside that partition. Exact dependencies do
-//! not use a separate "point" concept; they are just ranges whose endpoints are
-//! identical. Core can build bounded canonical keys from simple parts for exact
-//! and composite-key dependencies. Broader dependencies still choose an
-//! order-preserving byte layout in the protocol domain so ordinary
-//! lexicographic range overlap is enough to find matching offers.
+//! inclusive opaque byte endpoints inside that partition. Exact dependencies
+//! should use `ContextNeed::for_key` and `ContextOffer::for_key`; those
+//! constructors store the same key as both endpoints so the exact relationship
+//! remains compatible with true range matches. Composite exact dependencies can
+//! use `for_key_parts` to build one bounded canonical key. Broader dependencies
+//! use `range` and choose an order-preserving byte layout in the protocol domain
+//! so ordinary lexicographic range overlap is enough to find matching offers.
 //!
 //! Core's only matching rule is:
 //!
@@ -70,6 +71,10 @@ const CONTEXT_KEY_MAX_PARTS: usize = 32;
 const CONTEXT_KEY_TUPLE_V1: u8 = 1;
 const CONTEXT_KEY_PART_BYTES: u8 = 1;
 const CONTEXT_KEY_PART_U64: u8 = 2;
+
+// =============================================================================
+// Public Vocabulary
+// =============================================================================
 
 /// Protocol-defined relationship role used for context matching.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -164,7 +169,7 @@ impl<'a> From<u64> for ContextKeyPart<'a> {
 }
 
 impl ContextKey {
-    /// Build an opaque range endpoint owned by one fact module.
+    /// Build an opaque key or range endpoint owned by one fact module.
     ///
     /// Core stores, sorts, and compares these bytes, but never parses them.
     /// Protocol code chooses a canonical byte layout and validates the matched
@@ -175,9 +180,9 @@ impl ContextKey {
 
     /// Build a bounded canonical key from typed parts.
     ///
-    /// Use this for exact or composite-key dependencies where the entire key is
-    /// matched as one degenerate range. Domain-specific range helpers should
-    /// still build their own low/high endpoints when byte ordering matters.
+    /// Use this for exact or composite-key dependencies where the complete tuple
+    /// is one key. Domain-specific range helpers should still build their own
+    /// low/high endpoints when byte ordering matters.
     pub fn from_parts<'a, I, P>(parts: I) -> Result<Self, String>
     where
         I: IntoIterator<Item = P>,
@@ -208,23 +213,6 @@ impl ContextKey {
     }
 }
 
-fn append_context_key_part(bytes: &mut Vec<u8>, part: ContextKeyPart<'_>) -> Result<(), String> {
-    match part {
-        ContextKeyPart::Bytes(part) => {
-            let len = u16::try_from(part.len())
-                .map_err(|_| "context key byte part is too large".to_string())?;
-            bytes.push(CONTEXT_KEY_PART_BYTES);
-            bytes.extend_from_slice(&len.to_be_bytes());
-            bytes.extend_from_slice(part);
-        }
-        ContextKeyPart::U64(value) => {
-            bytes.push(CONTEXT_KEY_PART_U64);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-    }
-    Ok(())
-}
-
 /// A standing request by one fact for matching context.
 ///
 /// The need's `owner` is the fact that should be woken when a compatible offer
@@ -246,6 +234,10 @@ pub struct ContextNeed {
 }
 
 impl ContextNeed {
+    /// Build an exact-key need.
+    ///
+    /// Exact needs are stored with identical start/end keys. They match exact
+    /// offers with the same key and true range offers that cover this key.
     pub fn for_key(
         owner: FactId,
         role: impl Into<Role>,
@@ -262,6 +254,11 @@ impl ContextNeed {
         }
     }
 
+    /// Build an exact-key need from bounded canonical key parts.
+    ///
+    /// Use this when multiple protocol fields together form one exact lookup
+    /// key. Use `range` only when the owner intentionally wants every matching
+    /// offer in a byte interval.
     pub fn for_key_parts<'a, I, P>(
         owner: FactId,
         role: impl Into<Role>,
@@ -282,6 +279,10 @@ impl ContextNeed {
         })
     }
 
+    /// Build a true range need with inclusive byte endpoints.
+    ///
+    /// Ranges can match many offers. Prefer `for_key` or `for_key_parts` for
+    /// ordinary fact-id or composite-key dependencies.
     pub fn range(
         owner: FactId,
         role: impl Into<Role>,
@@ -318,6 +319,10 @@ pub struct ContextOffer {
 }
 
 impl ContextOffer {
+    /// Build an exact-key offer.
+    ///
+    /// Exact offers are stored with identical start/end keys. They satisfy exact
+    /// needs for the same key and true range needs that cover this key.
     pub fn for_key(
         owner: FactId,
         role: impl Into<Role>,
@@ -334,6 +339,10 @@ impl ContextOffer {
         }
     }
 
+    /// Build an exact-key offer from bounded canonical key parts.
+    ///
+    /// Use this when multiple protocol fields together form one exact lookup
+    /// key. Use `range` only when the owner intentionally offers a byte interval.
     pub fn for_key_parts<'a, I, P>(
         owner: FactId,
         role: impl Into<Role>,
@@ -354,6 +363,10 @@ impl ContextOffer {
         })
     }
 
+    /// Build a true range offer with inclusive byte endpoints.
+    ///
+    /// Ranges can satisfy many needs. Prefer `for_key` or `for_key_parts` for
+    /// ordinary fact-id or composite-key context.
     pub fn range(
         owner: FactId,
         role: impl Into<Role>,
@@ -371,12 +384,9 @@ impl ContextOffer {
     }
 }
 
-/// Encode a fact scope into the stable bytes used by context match indexes.
-pub(crate) fn scope_key(scope: &FactScope) -> Vec<u8> {
-    let mut out = Writer::new();
-    encode_scope(&mut out, scope);
-    out.finish()
-}
+// =============================================================================
+// Context Set API
+// =============================================================================
 
 /// The complete standing context emitted by a single projection owner.
 ///
@@ -406,15 +416,12 @@ impl ContextSet {
         self
     }
 
-    pub fn normalized(mut self) -> Self {
-        // Normalization is deliberately mechanical. It gives the storage layer
-        // deterministic deltas without deciding whether any particular context
-        // row is semantically redundant.
-        self.needs.sort();
-        self.needs.dedup();
-        self.offers.sort();
-        self.offers.dedup();
-        self
+    /// Sort and deduplicate needs and offers without interpreting them.
+    pub fn normalized(self) -> Self {
+        Self {
+            needs: normalize_context_needs(self.needs),
+            offers: normalize_context_offers(self.offers),
+        }
     }
 }
 
@@ -437,20 +444,70 @@ impl ContextSetAdditions {
     }
 }
 
+// =============================================================================
+// Storage-Facing Operations
+// =============================================================================
+
+/// Encode a fact scope into the stable bytes used by context match indexes.
+pub(crate) fn scope_key(scope: &FactScope) -> Vec<u8> {
+    let mut out = Writer::new();
+    encode_scope(&mut out, scope);
+    out.finish()
+}
+
 /// Return relationships in `next` that are not present in `previous`.
 ///
 /// Projection commit uses this after every projection. Re-emitting the same need
 /// or offer is a no-op; adding one exposes a new possible match to wake fanout.
 pub fn context_set_additions(previous: &ContextSet, next: &ContextSet) -> ContextSetAdditions {
-    let previous_needs = previous.needs.iter().cloned().collect::<BTreeSet<_>>();
-    let next_needs = next.needs.iter().cloned().collect::<BTreeSet<_>>();
-    let previous_offers = previous.offers.iter().cloned().collect::<BTreeSet<_>>();
-    let next_offers = next.offers.iter().cloned().collect::<BTreeSet<_>>();
-
     ContextSetAdditions {
-        needs: next_needs.difference(&previous_needs).cloned().collect(),
-        offers: next_offers.difference(&previous_offers).cloned().collect(),
+        needs: added_context_items(&previous.needs, &next.needs),
+        offers: added_context_items(&previous.offers, &next.offers),
     }
+}
+
+// =============================================================================
+// General Helpers
+// =============================================================================
+
+fn normalize_context_needs(needs: Vec<ContextNeed>) -> Vec<ContextNeed> {
+    sort_and_deduplicate(needs)
+}
+
+fn normalize_context_offers(offers: Vec<ContextOffer>) -> Vec<ContextOffer> {
+    sort_and_deduplicate(offers)
+}
+
+fn sort_and_deduplicate<T: Ord>(mut items: Vec<T>) -> Vec<T> {
+    items.sort();
+    items.dedup();
+    items
+}
+
+fn added_context_items<T>(previous: &[T], next: &[T]) -> Vec<T>
+where
+    T: Ord + Clone,
+{
+    let previous = previous.iter().cloned().collect::<BTreeSet<_>>();
+    let next = next.iter().cloned().collect::<BTreeSet<_>>();
+    next.difference(&previous).cloned().collect()
+}
+
+fn append_context_key_part(bytes: &mut Vec<u8>, part: ContextKeyPart<'_>) -> Result<(), String> {
+    match part {
+        ContextKeyPart::Bytes(part) => {
+            let len = u16::try_from(part.len())
+                .map_err(|_| "context key byte part is too large".to_string())?;
+            bytes.push(CONTEXT_KEY_PART_BYTES);
+            bytes.extend_from_slice(&len.to_be_bytes());
+            bytes.extend_from_slice(part);
+        }
+        ContextKeyPart::U64(value) => {
+            bytes.push(CONTEXT_KEY_PART_U64);
+            bytes.extend_from_slice(&value.to_be_bytes());
+        }
+    }
+    Ok(())
 }
 
 fn encode_scope(out: &mut Writer, scope: &FactScope) {
@@ -509,7 +566,7 @@ mod tests {
     }
 
     #[test]
-    fn key_part_need_and_offer_are_degenerate_ranges() {
+    fn key_part_need_and_offer_use_identical_endpoints() {
         let owner = [1; 32];
         let scope = FactScope::Global;
         let first = [2; 32];
@@ -525,7 +582,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_key_need_and_offer_are_degenerate_ranges() {
+    fn exact_key_need_and_offer_use_identical_endpoints() {
         let owner = [1; 32];
         let scope = FactScope::Global;
         let key = [2; 32];
@@ -602,14 +659,11 @@ mod tests {
             end_key: ContextKey::from_bytes([3; 32]),
         };
 
-        let previous = ContextSet::new()
-            .need(stable.clone())
-            .need(stable.clone())
-            .normalized();
+        let previous = ContextSet::new().need(stable.clone()).need(stable.clone());
         let next = ContextSet::new()
             .need(stable)
             .need(added.clone())
-            .normalized();
+            .need(added.clone());
         let additions = context_set_additions(&previous, &next);
 
         assert_eq!(additions.needs, vec![added]);
