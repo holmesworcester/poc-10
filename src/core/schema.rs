@@ -207,6 +207,7 @@ CREATE TEMP TABLE IF NOT EXISTS incoming_facts (
     scope_kind TEXT NOT NULL,
     scope_id BLOB NOT NULL,
     received_at INTEGER NOT NULL,
+    staged_at INTEGER NOT NULL,
     bytes BLOB NOT NULL,
     origin_addr BLOB,
     origin_received_at INTEGER
@@ -216,16 +217,22 @@ CREATE INDEX IF NOT EXISTS incoming_facts_by_received_at
 
 CREATE TABLE IF NOT EXISTS projection_timings (
     fact_id BLOB PRIMARY KEY NOT NULL,
+    fact_type INTEGER NOT NULL,
     source TEXT NOT NULL,
     received_at INTEGER NOT NULL,
     origin_received_at INTEGER,
+    input_staged_at INTEGER,
+    first_projected_at INTEGER NOT NULL,
     projected_at INTEGER NOT NULL,
+    projection_count INTEGER NOT NULL,
     retained INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS projection_timings_by_projected_at
     ON projection_timings (projected_at, fact_id);
 CREATE INDEX IF NOT EXISTS projection_timings_by_origin_received_at
     ON projection_timings (origin_received_at, fact_id);
+CREATE INDEX IF NOT EXISTS projection_timings_by_fact_type_projected_at
+    ON projection_timings (fact_type, projected_at, fact_id);
 
 "#,
     storage_version: None,

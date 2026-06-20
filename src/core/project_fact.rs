@@ -83,6 +83,7 @@ pub(crate) enum ProjectionSource {
 pub(crate) struct ProjectionInput {
     source: ProjectionSource,
     fact: Fact,
+    input_staged_at_ms: Option<u64>,
     pending_inputs: ProjectionContext,
 }
 
@@ -107,6 +108,7 @@ struct PreparedProjection {
     fact: Fact,
     mode: ProjectionMode,
     input_received_at_ms: u64,
+    input_staged_at_ms: Option<u64>,
     incoming_metadata: Option<IncomingMetadata>,
     retain_self: bool,
     projected_context: ContextSet,
@@ -220,6 +222,39 @@ fn load_one_projection_input(
     Ok(Some(ProjectionLoad::Loaded(input)))
 }
 
+/// Load the selected fact and the non-fact inputs for one projection run.
+///
+/// The selected owner came from either durable `pending_projection` or volatile
+/// `incoming_facts`. Returning `None` means that selected work is stale: the
+/// queue/intake row still existed, but the backing fact bytes were gone by the
+/// time load reached them. Otherwise this assembles the exact in-memory shape
+/// passed to the projector: the `Fact`, optional source-local timing metadata,
+/// and `ProjectionContext`.
+///
+/// `pending_inputs` means "inputs pending for this projection item." For durable
+/// facts those are recorded context matches and due time ranges that woke or
+/// requeued the owner. For incoming first-pass facts there are no standing
+/// context matches yet; the context only carries incoming origin metadata.
+pub(crate) fn load_pending_fact(
+    store: &Db,
+    source: ProjectionSource,
+    fact_id: FactId,
+    mode: ProjectionMode,
+) -> Result<Option<ProjectionInput>, String> {
+    let fact = perf::measure_result("projection_load_fact", || source.load_fact(store, fact_id))?;
+    let Some(fact) = fact else {
+        return Ok(None);
+    };
+    let input_staged_at_ms = source.input_staged_at(store, fact_id)?;
+    let pending_inputs = source.load_pending_inputs(store, fact_id, mode)?;
+    Ok(Some(ProjectionInput {
+        source,
+        fact,
+        input_staged_at_ms,
+        pending_inputs,
+    }))
+}
+
 /// Stage 2: run the protocol projector and validate its uncommitted output.
 ///
 /// This stage is pure with respect to SQL. It never clears a queue row, deletes
@@ -312,6 +347,11 @@ fn commit_projection_effects(
 // =============================================================================
 
 impl ProjectionSource {
+    /// Select the next owner for this source without mutating source state.
+    ///
+    /// Durable projection is driven by `pending_projection`; incoming projection
+    /// is driven directly by first-pass `incoming_facts`. The later commit stage
+    /// is responsible for consuming or retiring the selected row.
     fn next_pending_owner(self, store: &Db) -> Result<Option<PendingProjectionItem>, String> {
         match self {
             ProjectionSource::Durable => next_durable_projection_item(store),
@@ -319,6 +359,12 @@ impl ProjectionSource {
         }
     }
 
+    /// Load the fact bytes plus the local admission columns needed to build `Fact`.
+    ///
+    /// Durable rows split content identity from admission metadata:
+    /// `facts` owns content-addressed bytes, while `local_fact_admissions`
+    /// owns local scope and receive time. Incoming rows are self-contained
+    /// because they have not yet been retained into durable fact storage.
     fn load_fact(self, store: &Db, fact_id: FactId) -> Result<Option<Fact>, String> {
         match self {
             ProjectionSource::Durable => store
@@ -349,6 +395,38 @@ impl ProjectionSource {
         }
     }
 
+    /// Return when this source first staged the input, when that fact is known.
+    ///
+    /// Durable facts may be requeued many times and do not have a single current
+    /// staging moment. Incoming rows do, so timing diagnostics can distinguish
+    /// intake latency from later projection latency.
+    fn input_staged_at(self, store: &Db, fact_id: FactId) -> Result<Option<u64>, String> {
+        match self {
+            ProjectionSource::Durable => Ok(None),
+            ProjectionSource::Incoming => store
+                .conn()
+                .query_row(
+                    "SELECT staged_at
+                     FROM incoming_facts
+                     WHERE id = ?1
+                     LIMIT 1",
+                    params![fact_id.as_slice()],
+                    |row| {
+                        let staged_at = row.get::<_, i64>(0)?;
+                        u64_column(staged_at, "incoming fact staged_at")
+                    },
+                )
+                .optional()
+                .map_err(|err| format!("load incoming projection staged_at: {err}")),
+        }
+    }
+
+    /// Build the `ProjectionContext` visible to this projection run.
+    ///
+    /// Durable pending inputs are the matched context payloads and due time
+    /// ranges recorded when the owner was queued. Incoming first-pass inputs do
+    /// not participate in standing context yet, so the context only carries the
+    /// execution mode and optional origin metadata supplied by intake.
     fn load_pending_inputs(
         self,
         store: &Db,
@@ -435,34 +513,13 @@ fn next_incoming_projection_item(store: &Db) -> Result<Option<PendingProjectionI
         .map_err(|err| format!("load incoming facts: {err}"))
 }
 
+/// Decode the replay bit stored on durable pending projection rows.
 fn projection_mode_from_replay_flag(replay: i64) -> ProjectionMode {
     if replay == 0 {
         ProjectionMode::Normal
     } else {
         ProjectionMode::Replay
     }
-}
-
-/// Load everything projection needs for one fact.
-///
-/// `pending_inputs` is the matched context and due time ranges exposed to the
-/// projector for this run.
-pub(crate) fn load_pending_fact(
-    store: &Db,
-    source: ProjectionSource,
-    fact_id: FactId,
-    mode: ProjectionMode,
-) -> Result<Option<ProjectionInput>, String> {
-    let fact = perf::measure_result("projection_load_fact", || source.load_fact(store, fact_id))?;
-    let Some(fact) = fact else {
-        return Ok(None);
-    };
-    let pending_inputs = source.load_pending_inputs(store, fact_id, mode)?;
-    Ok(Some(ProjectionInput {
-        source,
-        fact,
-        pending_inputs,
-    }))
 }
 
 // =============================================================================
@@ -485,6 +542,7 @@ fn prepare_projection(
     let ProjectionInput {
         source,
         fact,
+        input_staged_at_ms,
         pending_inputs,
     } = input;
     let mode = pending_inputs.mode();
@@ -510,6 +568,7 @@ fn prepare_projection(
         fact,
         mode,
         input_received_at_ms,
+        input_staged_at_ms,
         incoming_metadata,
         retain_self: output.retain_self,
         projected_context,
@@ -676,26 +735,56 @@ fn record_projection_timing_in_tx(
             )
         })
         .transpose()?;
+    let input_staged_at = projection
+        .input_staged_at_ms
+        .map(|staged_at| sqlite_u64(staged_at, "projection input staged_at"))
+        .transpose()?;
     let retained = if retained { 1i64 } else { 0i64 };
     let projected_at = queue_now_ms()?;
+    let fact_type = projection
+        .fact
+        .body()
+        .first()
+        .map(|value| *value as i64)
+        .unwrap_or(-1);
     tx.conn().execute(
         "INSERT INTO projection_timings
-            (fact_id, source, received_at, origin_received_at, projected_at, retained)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            (
+                fact_id,
+                fact_type,
+                source,
+                received_at,
+                origin_received_at,
+                input_staged_at,
+                first_projected_at,
+                projected_at,
+                projection_count,
+                retained
+            )
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, 1, ?8)
          ON CONFLICT(fact_id) DO UPDATE SET
+            fact_type = excluded.fact_type,
             source = excluded.source,
             received_at = excluded.received_at,
             origin_received_at = COALESCE(
                 excluded.origin_received_at,
                 projection_timings.origin_received_at
             ),
+            input_staged_at = COALESCE(
+                excluded.input_staged_at,
+                projection_timings.input_staged_at
+            ),
+            first_projected_at = projection_timings.first_projected_at,
             projected_at = excluded.projected_at,
+            projection_count = projection_timings.projection_count + 1,
             retained = excluded.retained",
         params![
             projection.fact.id.as_slice(),
+            fact_type,
             source,
             received_at,
             origin_received_at,
+            input_staged_at,
             projected_at,
             retained,
         ],
@@ -1866,6 +1955,12 @@ pub(crate) mod context_db {
         Ok(ProjectionContext::from_matches(matched))
     }
 
+    /// Decode one pending match row into the need owned by `owner` and its offer.
+    ///
+    /// Pending match rows deliberately store the already matched edge pair, not
+    /// the payload bytes. Loading the `ProjectionContext` later resolves the
+    /// offer owner to its retained fact so the projector sees the same payload
+    /// shape regardless of which context edge woke it.
     fn selected_pending_projection_match(
         row: &rusqlite::Row<'_>,
         owner: &FactId,
@@ -2673,16 +2768,28 @@ fn insert_incoming_fact_with_metadata_in_tx(
     let origin_received_at = metadata
         .map(|metadata| sqlite_u64(metadata.received_at_local_ms, "incoming origin received_at"))
         .transpose()?;
+    let staged_at = queue_now_ms()?;
     let changed = store.conn().execute(
         "INSERT OR IGNORE INTO incoming_facts
-            (id, scope, scope_kind, scope_id, received_at, bytes, origin_addr, origin_received_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            (
+                id,
+                scope,
+                scope_kind,
+                scope_id,
+                received_at,
+                staged_at,
+                bytes,
+                origin_addr,
+                origin_received_at
+            )
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             fact.id.as_slice(),
             scope,
             scope_kind,
             scope_id.as_slice(),
             sqlite_u64(fact.timestamp, "incoming fact received_at")?,
+            staged_at,
             fact.bytes.as_slice(),
             origin_addr,
             origin_received_at,
@@ -2818,6 +2925,12 @@ fn incoming_fact_by_id_in_tx(store: &Db, id: &FactId) -> rusqlite::Result<Option
         .optional()
 }
 
+/// Load transport-origin metadata for an incoming first-pass fact.
+///
+/// This metadata is intentionally limited to `incoming_facts`: it describes how
+/// outside-origin bytes reached this process before admission. If projection
+/// later retains the fact, the durable fact keeps normal local admission
+/// metadata, while timing diagnostics may preserve the original receive time.
 fn incoming_origin_metadata_by_id(
     store: &Db,
     id: &FactId,
@@ -3015,6 +3128,11 @@ fn enqueue_due_time_wakes_in_tx(
 }
 
 /// Load due time ranges attached to this pending projection owner.
+///
+/// Time wakes are recorded as pending inputs when the runtime admits a due
+/// semantic-time range. The projector receives these ranges through
+/// `ProjectionContext` in the same way it receives context matches: as a
+/// snapshot for this run, not as a live query against standing wake state.
 fn pending_time_ranges_for_owner(store: &Db, owner: FactId) -> Result<Vec<TimeRange>, String> {
     let mut stmt = store
         .conn()
@@ -3032,6 +3150,7 @@ fn pending_time_ranges_for_owner(store: &Db, owner: FactId) -> Result<Vec<TimeRa
         .map_err(|err| format!("load pending time ranges: {err}"))
 }
 
+/// Decode the SQL representation of a pending semantic-time range.
 fn decode_pending_time_range(row: &rusqlite::Row<'_>) -> rusqlite::Result<TimeRange> {
     let start_exclusive = match row.get::<_, i64>(1)? {
         0 => None,
@@ -3152,6 +3271,7 @@ mod contract_tests {
             ProjectionInput {
                 source: ProjectionSource::Durable,
                 fact: fact.clone(),
+                input_staged_at_ms: None,
                 pending_inputs,
             },
             &[],
@@ -4038,16 +4158,39 @@ mod contract_tests {
         )
         .expect("project parent"));
 
-        let (source, received_at, origin_received_at, projected_at, retained): (
+        let (
+            fact_type,
+            source,
+            received_at,
+            origin_received_at,
+            input_staged_at,
+            first_projected_at,
+            projected_at,
+            projection_count,
+            retained,
+        ): (
+            i64,
             String,
             i64,
             Option<i64>,
+            Option<i64>,
+            i64,
+            i64,
             i64,
             i64,
         ) = store
             .conn()
             .query_row(
-                "SELECT source, received_at, origin_received_at, projected_at, retained
+                "SELECT
+                    fact_type,
+                    source,
+                    received_at,
+                    origin_received_at,
+                    input_staged_at,
+                    first_projected_at,
+                    projected_at,
+                    projection_count,
+                    retained
                  FROM projection_timings
                  WHERE fact_id = ?1",
                 params![parent.id.as_slice()],
@@ -4058,11 +4201,16 @@ mod contract_tests {
                         row.get(2)?,
                         row.get(3)?,
                         row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
                     ))
                 },
             )
             .expect("load projection timing");
 
+        assert_eq!(fact_type, b't' as i64);
         assert_eq!(source, "incoming");
         assert_eq!(received_at, 42);
         assert_eq!(
@@ -4070,10 +4218,77 @@ mod contract_tests {
             Some(metadata.received_at_local_ms as i64)
         );
         assert!(
+            input_staged_at.is_some_and(|staged_at| staged_at <= projected_at),
+            "input_staged_at {input_staged_at:?} should exist before projected_at {projected_at}"
+        );
+        assert!(
+            first_projected_at >= before,
+            "first_projected_at {first_projected_at} should be at or after {before}"
+        );
+        assert!(
             projected_at >= before,
             "projected_at {projected_at} should be at or after {before}"
         );
+        assert_eq!(first_projected_at, projected_at);
+        assert_eq!(projection_count, 1);
         assert_eq!(retained, 0);
+    }
+
+    #[test]
+    fn projection_timing_preserves_first_projected_at_across_reprojection() {
+        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+            .expect("open db");
+        let fact = Fact::new(FactScope::Global, 42, b"timed-reprojection".to_vec());
+        submit_fact_to_db(&store, fact.clone()).expect("persist fact");
+
+        let projector = test_projector(|_fact, _context| Ok(ProjectionOutput::new()));
+        assert!(crate::core::project_fact::project_one(
+            &store,
+            &projector,
+            ProjectionSource::Durable,
+            &[],
+            TEST_REGISTERED_INTENT_KINDS,
+            None,
+        )
+        .expect("first projection"));
+
+        let first: (i64, i64, i64) = store
+            .conn()
+            .query_row(
+                "SELECT first_projected_at, projected_at, projection_count
+                 FROM projection_timings
+                 WHERE fact_id = ?1",
+                params![fact.id.as_slice()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("load first timing");
+
+        insert_pending_owner_with_mode_in_tx(&store, fact.id, ProjectionMode::Normal)
+            .expect("requeue fact");
+        assert!(crate::core::project_fact::project_one(
+            &store,
+            &projector,
+            ProjectionSource::Durable,
+            &[],
+            TEST_REGISTERED_INTENT_KINDS,
+            None,
+        )
+        .expect("second projection"));
+
+        let second: (i64, i64, i64) = store
+            .conn()
+            .query_row(
+                "SELECT first_projected_at, projected_at, projection_count
+                 FROM projection_timings
+                 WHERE fact_id = ?1",
+                params![fact.id.as_slice()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("load second timing");
+
+        assert_eq!(second.0, first.0);
+        assert!(second.1 >= first.1);
+        assert_eq!(second.2, 2);
     }
 
     #[test]

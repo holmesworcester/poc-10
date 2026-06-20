@@ -26,6 +26,8 @@ fn black_box_generated_content_sync_perf_uses_daemon_restart_boundary() {
     let preindex_alice = env_bool("TOPO_SYNC_PERF_PREINDEX_ALICE");
     let timeout_ms = env_u64("TOPO_SYNC_PERF_TIMEOUT_MS")
         .unwrap_or_else(|| 120_000_u64.max(message_count as u64 * 120));
+    let daemon_tick_ms = env_u64("TOPO_SYNC_PERF_DAEMON_TICK_MS").unwrap_or(100);
+    let daemon_quiet_ms = env_u64("TOPO_SYNC_PERF_DAEMON_QUIET_MS").unwrap_or(daemon_tick_ms);
 
     let workspace = create_workspace(&alice, "sync-perf", "alice", "alice-laptop");
     let invite = workspace_invite_for_addr(&alice, &workspace, alice_port);
@@ -79,16 +81,19 @@ fn black_box_generated_content_sync_perf_uses_daemon_restart_boundary() {
     let first_to_full_projected = sync_elapsed.saturating_sub(sync_to_first_projected);
     assert_eq!(projected.content_messages, message_count);
     assert!(first_projected.content_messages >= 1);
-    let timing = projection_timing_stats(&bob, &workspace);
-    assert_eq!(timing.count, message_count);
+    let message_timing = projection_timing_stats(&bob, &workspace);
+    assert_eq!(message_timing.count, message_count);
+    let frame_timing = frame_projection_timing_stats(&bob, &workspace);
 
     let seconds = sync_elapsed.as_secs_f64().max(0.001);
     let messages_per_second = message_count as f64 / seconds;
     eprintln!(
-        "black_box_generated_content_sync_perf messages={} message_text_bytes={} timeout_ms={} preindex_alice={} alice_indexed_before_generate={} alice_sync_index_ready_ms={} authoring_ms={} sync_enable_to_first_projected_ms={} daemons_ready_to_first_projected_ms={} first_projected_to_full_projected_ms={} sync_enable_to_projected_ms={} daemons_ready_to_projected_ms={} messages_per_s={:.2} bob_message_timing_count={} bob_message_timing_with_origin={} bob_message_receive_to_project_min_ms={} bob_message_receive_to_project_p50_ms={} bob_message_receive_to_project_p95_ms={} bob_message_receive_to_project_max_ms={} bob_message_receive_to_project_avg_ms={:.2} generate_profile={}",
+        "black_box_generated_content_sync_perf messages={} message_text_bytes={} timeout_ms={} daemon_tick_ms={} daemon_quiet_ms={} preindex_alice={} alice_indexed_before_generate={} alice_sync_index_ready_ms={} authoring_ms={} sync_enable_to_first_projected_ms={} daemons_ready_to_first_projected_ms={} first_projected_to_full_projected_ms={} sync_enable_to_projected_ms={} daemons_ready_to_projected_ms={} messages_per_s={:.2} bob_message_timing_count={} bob_message_timing_with_origin={} bob_message_timing_with_staged={} bob_message_reprojected={} bob_message_max_projection_count={} bob_message_staged_to_first_project_min_ms={} bob_message_staged_to_first_project_p50_ms={} bob_message_staged_to_first_project_p95_ms={} bob_message_staged_to_first_project_max_ms={} bob_message_staged_to_first_project_avg_ms={:.2} bob_message_first_receive_to_project_min_ms={} bob_message_first_receive_to_project_p50_ms={} bob_message_first_receive_to_project_p95_ms={} bob_message_first_receive_to_project_max_ms={} bob_message_first_receive_to_project_avg_ms={:.2} bob_message_latest_receive_to_project_min_ms={} bob_message_latest_receive_to_project_p50_ms={} bob_message_latest_receive_to_project_p95_ms={} bob_message_latest_receive_to_project_max_ms={} bob_message_latest_receive_to_project_avg_ms={:.2} bob_frame_timing_count={} bob_frame_timing_with_origin={} bob_frame_timing_with_staged={} bob_frame_reprojected={} bob_frame_max_projection_count={} bob_frame_staged_to_first_project_min_ms={} bob_frame_staged_to_first_project_p50_ms={} bob_frame_staged_to_first_project_p95_ms={} bob_frame_staged_to_first_project_max_ms={} bob_frame_staged_to_first_project_avg_ms={:.2} bob_frame_first_receive_to_project_min_ms={} bob_frame_first_receive_to_project_p50_ms={} bob_frame_first_receive_to_project_p95_ms={} bob_frame_first_receive_to_project_max_ms={} bob_frame_first_receive_to_project_avg_ms={:.2} bob_frame_latest_receive_to_project_min_ms={} bob_frame_latest_receive_to_project_p50_ms={} bob_frame_latest_receive_to_project_p95_ms={} bob_frame_latest_receive_to_project_max_ms={} bob_frame_latest_receive_to_project_avg_ms={:.2} generate_profile={}",
         message_count,
         message_text_bytes,
         timeout_ms,
+        daemon_tick_ms,
+        daemon_quiet_ms,
         preindex_alice,
         alice_indexed_before_generate,
         alice_sync_index_ready_ms,
@@ -99,13 +104,46 @@ fn black_box_generated_content_sync_perf_uses_daemon_restart_boundary() {
         sync_elapsed.as_millis(),
         ready_elapsed.as_millis(),
         messages_per_second,
-        timing.count,
-        timing.with_origin_received_at,
-        timing.min_ms,
-        timing.p50_ms,
-        timing.p95_ms,
-        timing.max_ms,
-        timing.avg_ms,
+        message_timing.count,
+        message_timing.with_origin_received_at,
+        message_timing.with_input_staged_at,
+        message_timing.reprojected,
+        message_timing.max_projection_count,
+        message_timing.staged_to_first.min_ms,
+        message_timing.staged_to_first.p50_ms,
+        message_timing.staged_to_first.p95_ms,
+        message_timing.staged_to_first.max_ms,
+        message_timing.staged_to_first.avg_ms,
+        message_timing.first.min_ms,
+        message_timing.first.p50_ms,
+        message_timing.first.p95_ms,
+        message_timing.first.max_ms,
+        message_timing.first.avg_ms,
+        message_timing.latest.min_ms,
+        message_timing.latest.p50_ms,
+        message_timing.latest.p95_ms,
+        message_timing.latest.max_ms,
+        message_timing.latest.avg_ms,
+        frame_timing.count,
+        frame_timing.with_origin_received_at,
+        frame_timing.with_input_staged_at,
+        frame_timing.reprojected,
+        frame_timing.max_projection_count,
+        frame_timing.staged_to_first.min_ms,
+        frame_timing.staged_to_first.p50_ms,
+        frame_timing.staged_to_first.p95_ms,
+        frame_timing.staged_to_first.max_ms,
+        frame_timing.staged_to_first.avg_ms,
+        frame_timing.first.min_ms,
+        frame_timing.first.p50_ms,
+        frame_timing.first.p95_ms,
+        frame_timing.first.max_ms,
+        frame_timing.first.avg_ms,
+        frame_timing.latest.min_ms,
+        frame_timing.latest.p50_ms,
+        frame_timing.latest.p95_ms,
+        frame_timing.latest.max_ms,
+        frame_timing.latest.avg_ms,
         one_line(&generated.stderr)
     );
     assert!(messages_per_second.is_finite() && messages_per_second > 0.0);
@@ -126,6 +164,8 @@ fn black_box_generated_content_live_tail_perf_skips_message_catchup() {
     let message_text_bytes = env_usize("TOPO_SYNC_PERF_MESSAGE_TEXT_BYTES").unwrap_or(128);
     let timeout_ms = env_u64("TOPO_SYNC_PERF_TIMEOUT_MS")
         .unwrap_or_else(|| 120_000_u64.max(message_count as u64 * 120));
+    let daemon_tick_ms = env_u64("TOPO_SYNC_PERF_DAEMON_TICK_MS").unwrap_or(100);
+    let daemon_quiet_ms = env_u64("TOPO_SYNC_PERF_DAEMON_QUIET_MS").unwrap_or(daemon_tick_ms);
 
     let workspace = create_workspace(&alice, "live-tail-perf", "alice", "alice-laptop");
     let invite = workspace_invite_for_addr(&alice, &workspace, alice_port);
@@ -158,8 +198,9 @@ fn black_box_generated_content_live_tail_perf_skips_message_catchup() {
     let full_projected_at = Instant::now();
     assert!(first_projected.content_messages >= 1);
     assert_eq!(projected.content_messages, message_count);
-    let timing = projection_timing_stats(&bob, &workspace);
-    assert_eq!(timing.count, message_count);
+    let message_timing = projection_timing_stats(&bob, &workspace);
+    assert_eq!(message_timing.count, message_count);
+    let frame_timing = frame_projection_timing_stats(&bob, &workspace);
 
     let generate_start_to_first = first_projected_at.duration_since(generate_started);
     let generate_return_to_first = first_projected_at.saturating_duration_since(generate_finished);
@@ -171,10 +212,12 @@ fn black_box_generated_content_live_tail_perf_skips_message_catchup() {
     let end_to_end_messages_per_second = message_count as f64 / end_to_end_seconds;
 
     eprintln!(
-        "black_box_generated_content_live_tail_perf messages={} message_text_bytes={} timeout_ms={} setup_ms={} authoring_ms={} generate_start_to_first_projected_ms={} generate_return_to_first_projected_ms={} generate_return_to_projected_ms={} generate_start_to_projected_ms={} live_tail_messages_per_s={:.2} end_to_end_messages_per_s={:.2} bob_message_timing_count={} bob_message_timing_with_origin={} bob_message_receive_to_project_min_ms={} bob_message_receive_to_project_p50_ms={} bob_message_receive_to_project_p95_ms={} bob_message_receive_to_project_max_ms={} bob_message_receive_to_project_avg_ms={:.2} generate_profile={}",
+        "black_box_generated_content_live_tail_perf messages={} message_text_bytes={} timeout_ms={} daemon_tick_ms={} daemon_quiet_ms={} setup_ms={} authoring_ms={} generate_start_to_first_projected_ms={} generate_return_to_first_projected_ms={} generate_return_to_projected_ms={} generate_start_to_projected_ms={} live_tail_messages_per_s={:.2} end_to_end_messages_per_s={:.2} bob_message_timing_count={} bob_message_timing_with_origin={} bob_message_timing_with_staged={} bob_message_reprojected={} bob_message_max_projection_count={} bob_message_staged_to_first_project_min_ms={} bob_message_staged_to_first_project_p50_ms={} bob_message_staged_to_first_project_p95_ms={} bob_message_staged_to_first_project_max_ms={} bob_message_staged_to_first_project_avg_ms={:.2} bob_message_first_receive_to_project_min_ms={} bob_message_first_receive_to_project_p50_ms={} bob_message_first_receive_to_project_p95_ms={} bob_message_first_receive_to_project_max_ms={} bob_message_first_receive_to_project_avg_ms={:.2} bob_message_latest_receive_to_project_min_ms={} bob_message_latest_receive_to_project_p50_ms={} bob_message_latest_receive_to_project_p95_ms={} bob_message_latest_receive_to_project_max_ms={} bob_message_latest_receive_to_project_avg_ms={:.2} bob_frame_timing_count={} bob_frame_timing_with_origin={} bob_frame_timing_with_staged={} bob_frame_reprojected={} bob_frame_max_projection_count={} bob_frame_staged_to_first_project_min_ms={} bob_frame_staged_to_first_project_p50_ms={} bob_frame_staged_to_first_project_p95_ms={} bob_frame_staged_to_first_project_max_ms={} bob_frame_staged_to_first_project_avg_ms={:.2} bob_frame_first_receive_to_project_min_ms={} bob_frame_first_receive_to_project_p50_ms={} bob_frame_first_receive_to_project_p95_ms={} bob_frame_first_receive_to_project_max_ms={} bob_frame_first_receive_to_project_avg_ms={:.2} bob_frame_latest_receive_to_project_min_ms={} bob_frame_latest_receive_to_project_p50_ms={} bob_frame_latest_receive_to_project_p95_ms={} bob_frame_latest_receive_to_project_max_ms={} bob_frame_latest_receive_to_project_avg_ms={:.2} generate_profile={}",
         message_count,
         message_text_bytes,
         timeout_ms,
+        daemon_tick_ms,
+        daemon_quiet_ms,
         setup_ms,
         generated.elapsed.as_millis(),
         generate_start_to_first.as_millis(),
@@ -183,13 +226,46 @@ fn black_box_generated_content_live_tail_perf_skips_message_catchup() {
         end_to_end.as_millis(),
         live_tail_messages_per_second,
         end_to_end_messages_per_second,
-        timing.count,
-        timing.with_origin_received_at,
-        timing.min_ms,
-        timing.p50_ms,
-        timing.p95_ms,
-        timing.max_ms,
-        timing.avg_ms,
+        message_timing.count,
+        message_timing.with_origin_received_at,
+        message_timing.with_input_staged_at,
+        message_timing.reprojected,
+        message_timing.max_projection_count,
+        message_timing.staged_to_first.min_ms,
+        message_timing.staged_to_first.p50_ms,
+        message_timing.staged_to_first.p95_ms,
+        message_timing.staged_to_first.max_ms,
+        message_timing.staged_to_first.avg_ms,
+        message_timing.first.min_ms,
+        message_timing.first.p50_ms,
+        message_timing.first.p95_ms,
+        message_timing.first.max_ms,
+        message_timing.first.avg_ms,
+        message_timing.latest.min_ms,
+        message_timing.latest.p50_ms,
+        message_timing.latest.p95_ms,
+        message_timing.latest.max_ms,
+        message_timing.latest.avg_ms,
+        frame_timing.count,
+        frame_timing.with_origin_received_at,
+        frame_timing.with_input_staged_at,
+        frame_timing.reprojected,
+        frame_timing.max_projection_count,
+        frame_timing.staged_to_first.min_ms,
+        frame_timing.staged_to_first.p50_ms,
+        frame_timing.staged_to_first.p95_ms,
+        frame_timing.staged_to_first.max_ms,
+        frame_timing.staged_to_first.avg_ms,
+        frame_timing.first.min_ms,
+        frame_timing.first.p50_ms,
+        frame_timing.first.p95_ms,
+        frame_timing.first.max_ms,
+        frame_timing.first.avg_ms,
+        frame_timing.latest.min_ms,
+        frame_timing.latest.p50_ms,
+        frame_timing.latest.p95_ms,
+        frame_timing.latest.max_ms,
+        frame_timing.latest.avg_ms,
         one_line(&generated.stderr)
     );
     assert!(live_tail_messages_per_second.is_finite() && live_tail_messages_per_second > 0.0);
@@ -260,6 +336,12 @@ impl RunningDaemon {
 
 fn spawn_daemon(db: &str, port: u16) -> RunningDaemon {
     let port_str = port.to_string();
+    let tick_ms = env_u64("TOPO_SYNC_PERF_DAEMON_TICK_MS")
+        .unwrap_or(100)
+        .to_string();
+    let quiet_ms = env_u64("TOPO_SYNC_PERF_DAEMON_QUIET_MS")
+        .unwrap_or_else(|| tick_ms.parse::<u64>().expect("tick ms parses"))
+        .to_string();
     let mut child = spawn_topo_with_env(
         &[
             "--db",
@@ -269,9 +351,9 @@ fn spawn_daemon(db: &str, port: u16) -> RunningDaemon {
             "127.0.0.1",
             &port_str,
             "--sync-ms",
-            "100",
+            &tick_ms,
             "--quiet-ms",
-            "100",
+            &quiet_ms,
         ],
         &[("TOPO_PROFILE_PROJECTION_TIMING", "1")],
     );
@@ -539,6 +621,16 @@ fn content_count(db: &str, workspace: &str) -> ContentCount {
 struct ProjectionTimingStats {
     count: usize,
     with_origin_received_at: usize,
+    with_input_staged_at: usize,
+    reprojected: usize,
+    max_projection_count: i64,
+    staged_to_first: LatencyStats,
+    first: LatencyStats,
+    latest: LatencyStats,
+}
+
+#[derive(Debug)]
+struct LatencyStats {
     min_ms: i64,
     p50_ms: i64,
     p95_ms: i64,
@@ -546,52 +638,158 @@ struct ProjectionTimingStats {
     avg_ms: f64,
 }
 
+#[derive(Debug)]
+struct ProjectionTimingRow {
+    received_at: i64,
+    origin_received_at: Option<i64>,
+    input_staged_at: Option<i64>,
+    first_projected_at: i64,
+    projected_at: i64,
+    projection_count: i64,
+}
+
 fn projection_timing_stats(db: &str, workspace: &str) -> ProjectionTimingStats {
+    message_projection_timing_stats(db, workspace)
+}
+
+fn message_projection_timing_stats(db: &str, workspace: &str) -> ProjectionTimingStats {
     let workspace_id = decode_hex_32(workspace);
     let conn = Connection::open(db).expect("open projection timing db");
     conn.busy_timeout(Duration::from_secs(5))
         .expect("set busy timeout");
     let mut stmt = conn
         .prepare(
-            "SELECT t.received_at, t.origin_received_at, t.projected_at
+            "SELECT
+                t.received_at,
+                t.origin_received_at,
+                t.input_staged_at,
+                t.first_projected_at,
+                t.projected_at,
+                t.projection_count
              FROM content_messages m
              JOIN projection_timings t ON t.fact_id = m.message_id
              WHERE m.workspace_id = ?1",
         )
         .expect("prepare projection timing query");
-    let mut latencies = stmt
+    let rows = stmt
         .query_map(params![workspace_id], |row| {
-            let received_at = row.get::<_, i64>(0)?;
-            let origin_received_at = row.get::<_, Option<i64>>(1)?;
-            let projected_at = row.get::<_, i64>(2)?;
-            Ok((received_at, origin_received_at, projected_at))
+            Ok(ProjectionTimingRow {
+                received_at: row.get(0)?,
+                origin_received_at: row.get(1)?,
+                input_staged_at: row.get(2)?,
+                first_projected_at: row.get(3)?,
+                projected_at: row.get(4)?,
+                projection_count: row.get(5)?,
+            })
         })
         .expect("query projection timings")
+        .map(|row| row.expect("projection timing row"))
+        .collect::<Vec<_>>();
+    stats_from_timing_rows(rows, "message projection timing")
+}
+
+fn frame_projection_timing_stats(db: &str, workspace: &str) -> ProjectionTimingStats {
+    let workspace_id = decode_hex_32(workspace);
+    let conn = Connection::open(db).expect("open frame projection timing db");
+    conn.busy_timeout(Duration::from_secs(5))
+        .expect("set busy timeout");
+    let mut stmt = conn
+        .prepare(
+            "WITH message_origins(origin_received_at) AS (
+                SELECT DISTINCT t.origin_received_at
+                FROM content_messages m
+                JOIN projection_timings t ON t.fact_id = m.message_id
+                WHERE m.workspace_id = ?1
+                  AND t.origin_received_at IS NOT NULL
+             )
+             SELECT
+                t.received_at,
+                t.origin_received_at,
+                t.input_staged_at,
+                t.first_projected_at,
+                t.projected_at,
+                t.projection_count
+             FROM projection_timings t
+             JOIN message_origins o ON o.origin_received_at = t.origin_received_at
+             WHERE t.fact_type IN (168, 169, 170)",
+        )
+        .expect("prepare frame projection timing query");
+    let rows = stmt
+        .query_map(params![workspace_id], |row| {
+            Ok(ProjectionTimingRow {
+                received_at: row.get(0)?,
+                origin_received_at: row.get(1)?,
+                input_staged_at: row.get(2)?,
+                first_projected_at: row.get(3)?,
+                projected_at: row.get(4)?,
+                projection_count: row.get(5)?,
+            })
+        })
+        .expect("query frame projection timings")
+        .map(|row| row.expect("frame projection timing row"))
+        .collect::<Vec<_>>();
+    stats_from_timing_rows(rows, "frame projection timing")
+}
+
+fn stats_from_timing_rows(rows: Vec<ProjectionTimingRow>, label: &str) -> ProjectionTimingStats {
+    let count = rows.len();
+    assert!(count > 0, "{label} stats require at least one row");
+    let with_origin_received_at = rows
+        .iter()
+        .filter(|row| row.origin_received_at.is_some())
+        .count();
+    let with_input_staged_at = rows
+        .iter()
+        .filter(|row| row.input_staged_at.is_some())
+        .count();
+    let reprojected = rows.iter().filter(|row| row.projection_count > 1).count();
+    let max_projection_count = rows
+        .iter()
+        .map(|row| row.projection_count)
+        .max()
+        .unwrap_or(0);
+    let first_latencies = rows
+        .iter()
         .map(|row| {
-            let (received_at, origin_received_at, projected_at) =
-                row.expect("projection timing row");
-            let baseline = origin_received_at.unwrap_or(received_at);
-            let latency = projected_at.saturating_sub(baseline).max(0);
-            (latency, origin_received_at.is_some())
+            let baseline = row.origin_received_at.unwrap_or(row.received_at);
+            row.first_projected_at.saturating_sub(baseline).max(0)
         })
         .collect::<Vec<_>>();
-    latencies.sort_by_key(|(latency, _)| *latency);
-    let count = latencies.len();
+    let staged_to_first_latencies = rows
+        .iter()
+        .filter_map(|row| {
+            row.input_staged_at
+                .map(|staged_at| row.first_projected_at.saturating_sub(staged_at).max(0))
+        })
+        .collect::<Vec<_>>();
     assert!(
-        count > 0,
-        "projection timing stats require at least one row"
+        !staged_to_first_latencies.is_empty(),
+        "{label} stats require at least one staged row"
     );
-    let with_origin_received_at = latencies
+    let latest_latencies = rows
         .iter()
-        .filter(|(_, has_origin)| *has_origin)
-        .count();
-    let sum = latencies
-        .iter()
-        .map(|(latency, _)| *latency as f64)
-        .sum::<f64>();
+        .map(|row| {
+            let baseline = row.origin_received_at.unwrap_or(row.received_at);
+            row.projected_at.saturating_sub(baseline).max(0)
+        })
+        .collect::<Vec<_>>();
     ProjectionTimingStats {
         count,
         with_origin_received_at,
+        with_input_staged_at,
+        reprojected,
+        max_projection_count,
+        staged_to_first: latency_stats(staged_to_first_latencies),
+        first: latency_stats(first_latencies),
+        latest: latency_stats(latest_latencies),
+    }
+}
+
+fn latency_stats(mut latencies: Vec<i64>) -> LatencyStats {
+    latencies.sort();
+    let count = latencies.len();
+    let sum = latencies.iter().map(|latency| *latency as f64).sum::<f64>();
+    LatencyStats {
         min_ms: percentile_latency(&latencies, 0),
         p50_ms: percentile_latency(&latencies, 50),
         p95_ms: percentile_latency(&latencies, 95),
@@ -600,11 +798,11 @@ fn projection_timing_stats(db: &str, workspace: &str) -> ProjectionTimingStats {
     }
 }
 
-fn percentile_latency(latencies: &[(i64, bool)], percentile: usize) -> i64 {
+fn percentile_latency(latencies: &[i64], percentile: usize) -> i64 {
     assert!(!latencies.is_empty(), "latencies must not be empty");
     let last = latencies.len() - 1;
     let index = ((last * percentile) + 99) / 100;
-    latencies[index.min(last)].0
+    latencies[index.min(last)]
 }
 
 fn decode_hex_32(value: &str) -> Vec<u8> {
