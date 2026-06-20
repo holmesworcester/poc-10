@@ -84,7 +84,8 @@ fn schema_sources_execute_declared_ddl() {
     for expected in [
         "facts",
         "local_fact_admissions",
-        "context_edges",
+        "context_exact_edges",
+        "context_range_edges",
         "projection_timings",
         "content_messages",
         "content_reactions",

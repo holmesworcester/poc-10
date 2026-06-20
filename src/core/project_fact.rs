@@ -16,8 +16,9 @@
 //! - `pending_projection_matches` and `pending_time_ranges` are pending input
 //!   tables: they carry context matches and time ranges that woke an owner.
 //!   They are consumed with the owner row.
-//! - `context_edges` stores standing needs/offers, and `time_wakes` stores
-//!   standing future wake requests emitted by durable projection.
+//! - `context_exact_edges` and `context_range_edges` store standing needs/offers,
+//!   and `time_wakes` stores standing future wake requests emitted by durable
+//!   projection.
 //!
 //! SQL atomicity is the safety mechanism. Submitting a fact inserts bytes,
 //! admission metadata, the pending row, and any already matched context in one
@@ -60,8 +61,8 @@ use crate::core::facts::{
 };
 use crate::core::perf_profile as perf;
 use crate::core::schema::{
-    CONTEXT_EDGES, FACTS, INCOMING_FACTS, LOCAL_FACT_ADMISSIONS, PENDING_PROJECTION,
-    PENDING_PROJECTION_MATCHES, PENDING_TIME_RANGES, TIME_WAKES,
+    CONTEXT_EXACT_EDGES, CONTEXT_RANGE_EDGES, FACTS, INCOMING_FACTS, LOCAL_FACT_ADMISSIONS,
+    PENDING_PROJECTION, PENDING_PROJECTION_MATCHES, PENDING_TIME_RANGES, TIME_WAKES,
 };
 use crate::core::wire::Writer;
 use rusqlite::{params, OptionalExtension};
@@ -843,7 +844,7 @@ fn publish_retained_projection_state_in_tx(
 /// Replace retained needs and append retained offers.
 ///
 /// The returned additions are computed inside the commit transaction against the
-/// current `context_edges` view. Only those new relationships can wake other
+/// current context edge view. Only those new relationships can wake other
 /// projection work.
 fn replace_needs_and_append_offers_if_retained_in_tx(
     tx: &Db,
@@ -1602,13 +1603,12 @@ pub(crate) mod context_db {
     //! needs, append stored offers, compare output with current standing context,
     //! and fan out wakeups to facts that may now make progress.
     //!
-    //! The stored shape is one `context_edges` row per standing need or offer. The
-    //! `owner` column is always the fact whose projection emitted the row. For
-    //! offers, that same owner is also the payload fact loaded into matched
-    //! projection context. Needs are current subscriptions: when a fact projects
-    //! again, its new output replaces the old need rows it owned. Offers are
-    //! append-only evidence: once inserted, an offer remains until the owner fact is
-    //! purged.
+    //! Exact rows and true-range rows are stored separately. The `owner` column is
+    //! always the fact whose projection emitted the row. For offers, that same owner
+    //! is also the payload fact loaded into matched projection context. Needs are
+    //! current subscriptions: when a fact projects again, its new output replaces the
+    //! old need rows it owned. Offers are append-only evidence: once inserted, an
+    //! offer remains until the owner fact is purged.
     //!
     //! The invariant is replacement needs plus append-only offers. Projection
     //! output is the complete need set and new offer set for one fact, and wake
@@ -1620,8 +1620,9 @@ pub(crate) mod context_db {
         context_set_additions, scope_key, ContextKey, ContextNeed, ContextOffer, ContextSet,
         ContextSetAdditions, Role,
     };
-    use crate::core::db::Db;
+    use crate::core::db::{quoted_table_name, Db, TableName};
     use crate::core::facts::{Fact, FactId, FactScope, ScopeKind};
+    use crate::core::schema::{CONTEXT_EXACT_EDGES, CONTEXT_RANGE_EDGES};
     use crate::core::wire::{Reader, WireError};
     use rusqlite::params;
     use std::collections::{BTreeMap, BTreeSet};
@@ -1630,6 +1631,55 @@ pub(crate) mod context_db {
 
     const CONTEXT_NEED_DIRECTION: &str = "need";
     const CONTEXT_OFFER_DIRECTION: &str = "offer";
+
+    struct StoredContextEdge<'a> {
+        owner: &'a FactId,
+        direction: &'static str,
+        role: &'a Role,
+        scope: &'a FactScope,
+        start_key: &'a [u8],
+        end_key: &'a [u8],
+    }
+
+    impl StoredContextEdge<'_> {
+        fn is_exact(&self) -> bool {
+            self.start_key == self.end_key
+        }
+    }
+
+    trait ContextEdgeView {
+        fn as_edge(&self, direction: &'static str) -> StoredContextEdge<'_>;
+    }
+
+    impl ContextEdgeView for ContextNeed {
+        fn as_edge(&self, direction: &'static str) -> StoredContextEdge<'_> {
+            StoredContextEdge {
+                owner: &self.owner,
+                direction,
+                role: &self.role,
+                scope: &self.scope,
+                start_key: self.start_key.as_bytes(),
+                end_key: self.end_key.as_bytes(),
+            }
+        }
+    }
+
+    impl ContextEdgeView for ContextOffer {
+        fn as_edge(&self, direction: &'static str) -> StoredContextEdge<'_> {
+            StoredContextEdge {
+                owner: &self.owner,
+                direction,
+                role: &self.role,
+                scope: &self.scope,
+                start_key: self.start_key.as_bytes(),
+                end_key: self.end_key.as_bytes(),
+            }
+        }
+    }
+
+    fn is_exact_range(start: &ContextKey, end: &ContextKey) -> bool {
+        start == end
+    }
 
     /// Load a fact's standing context: the needs and offers it currently owns.
     pub(crate) fn stored_context_for_owner(
@@ -1659,10 +1709,8 @@ pub(crate) mod context_db {
             .map_err(rusqlite::Error::InvalidParameterName)?;
         let additions = context_set_additions(&previous, context);
 
-        store.conn().execute(
-            "DELETE FROM context_edges WHERE owner = ?1 AND direction = 'need'",
-            params![owner.as_slice()],
-        )?;
+        delete_owner_direction_in_tx(store, CONTEXT_EXACT_EDGES, owner, CONTEXT_NEED_DIRECTION)?;
+        delete_owner_direction_in_tx(store, CONTEXT_RANGE_EDGES, owner, CONTEXT_NEED_DIRECTION)?;
         for need in &context.needs {
             insert_context_need_in_tx(store, need)?;
         }
@@ -1676,15 +1724,7 @@ pub(crate) mod context_db {
         store: &Db,
         need: &ContextNeed,
     ) -> rusqlite::Result<bool> {
-        insert_context_edge_in_tx(
-            store,
-            &need.owner,
-            CONTEXT_NEED_DIRECTION,
-            &need.role,
-            &need.scope,
-            need.start_key.as_bytes(),
-            need.end_key.as_bytes(),
-        )
+        insert_context_edge_in_tx(store, need.as_edge(CONTEXT_NEED_DIRECTION))
     }
 
     /// Insert one standing offer row inside the projection transaction.
@@ -1692,15 +1732,7 @@ pub(crate) mod context_db {
         store: &Db,
         offer: &ContextOffer,
     ) -> rusqlite::Result<bool> {
-        insert_context_edge_in_tx(
-            store,
-            &offer.owner,
-            CONTEXT_OFFER_DIRECTION,
-            &offer.role,
-            &offer.scope,
-            offer.start_key.as_bytes(),
-            offer.end_key.as_bytes(),
-        )
+        insert_context_edge_in_tx(store, offer.as_edge(CONTEXT_OFFER_DIRECTION))
     }
 
     #[cfg(test)]
@@ -1719,34 +1751,69 @@ pub(crate) mod context_db {
         need: &ContextNeed,
     ) -> Result<Vec<ContextOffer>, String> {
         let scope_key = scope_key(&need.scope);
-        select_context_offers(
+        let mut offers = if is_exact_range(&need.start_key, &need.end_key) {
+            exact_offers_for_key(
+                store,
+                need.role.as_str(),
+                &scope_key,
+                need.start_key.as_bytes(),
+            )?
+        } else {
+            exact_offers_in_range(
+                store,
+                need.role.as_str(),
+                &scope_key,
+                need.start_key.as_bytes(),
+                need.end_key.as_bytes(),
+            )?
+        };
+        offers.extend(range_offers_overlapping_range(
             store,
-            r#"
-        SELECT owner, role, scope_key, start_key, end_key
-        FROM context_edges
-        WHERE direction = 'offer'
-          AND role = :role
-          AND scope_key = :scope_key
-          AND start_key <= :need_end
-          AND end_key >= :need_start
-        ORDER BY owner, start_key, end_key
-        "#,
-            &[
-                (":role", text(need.role.as_str())),
-                (":scope_key", bytes(&scope_key)),
-                (":need_start", bytes(need.start_key.as_bytes())),
-                (":need_end", bytes(need.end_key.as_bytes())),
-            ],
-        )
+            need.role.as_str(),
+            &scope_key,
+            need.start_key.as_bytes(),
+            need.end_key.as_bytes(),
+        )?);
+        offers.sort();
+        offers.dedup();
+        Ok(offers)
     }
 
     /// Load all needs owned by one fact.
     fn stored_needs_for_owner(store: &Db, owner: &FactId) -> Result<Vec<ContextNeed>, String> {
-        select_context_needs(
+        let mut needs = stored_exact_needs_for_owner(store, owner)?;
+        needs.extend(stored_range_needs_for_owner(store, owner)?);
+        needs.sort();
+        needs.dedup();
+        Ok(needs)
+    }
+
+    fn stored_exact_needs_for_owner(
+        store: &Db,
+        owner: &FactId,
+    ) -> Result<Vec<ContextNeed>, String> {
+        select_exact_context_needs(
+            store,
+            r#"
+        SELECT owner, role, scope_key, key
+        FROM context_exact_edges
+        WHERE owner = :owner
+          AND direction = 'need'
+        ORDER BY owner, role, scope_key, key
+        "#,
+            &[(":owner", bytes(owner))],
+        )
+    }
+
+    fn stored_range_needs_for_owner(
+        store: &Db,
+        owner: &FactId,
+    ) -> Result<Vec<ContextNeed>, String> {
+        select_range_context_needs(
             store,
             r#"
         SELECT owner, role, scope_key, start_key, end_key
-        FROM context_edges
+        FROM context_range_edges
         WHERE owner = :owner
           AND direction = 'need'
         ORDER BY owner, role, scope_key, start_key, end_key
@@ -1757,11 +1824,39 @@ pub(crate) mod context_db {
 
     /// Load all offers owned by one fact.
     fn stored_offers_for_owner(store: &Db, owner: &FactId) -> Result<Vec<ContextOffer>, String> {
-        select_context_offers(
+        let mut offers = stored_exact_offers_for_owner(store, owner)?;
+        offers.extend(stored_range_offers_for_owner(store, owner)?);
+        offers.sort();
+        offers.dedup();
+        Ok(offers)
+    }
+
+    fn stored_exact_offers_for_owner(
+        store: &Db,
+        owner: &FactId,
+    ) -> Result<Vec<ContextOffer>, String> {
+        select_exact_context_offers(
+            store,
+            r#"
+        SELECT owner, role, scope_key, key
+        FROM context_exact_edges
+        WHERE owner = :owner
+          AND direction = 'offer'
+        ORDER BY owner, role, scope_key, key
+        "#,
+            &[(":owner", bytes(owner))],
+        )
+    }
+
+    fn stored_range_offers_for_owner(
+        store: &Db,
+        owner: &FactId,
+    ) -> Result<Vec<ContextOffer>, String> {
+        select_range_context_offers(
             store,
             r#"
         SELECT owner, role, scope_key, start_key, end_key
-        FROM context_edges
+        FROM context_range_edges
         WHERE owner = :owner
           AND direction = 'offer'
         ORDER BY owner, role, scope_key, start_key, end_key
@@ -1770,7 +1865,7 @@ pub(crate) mod context_db {
         )
     }
 
-    fn select_context_needs(
+    fn select_exact_context_needs(
         store: &Db,
         sql: &str,
         params: &[(&str, rusqlite::types::Value)],
@@ -1778,17 +1873,37 @@ pub(crate) mod context_db {
         let mut stmt = store
             .conn()
             .prepare(sql)
-            .map_err(|err| format!("load context needs: {err}"))?;
-        bind_named_params(&mut stmt, params).map_err(|err| format!("load context needs: {err}"))?;
+            .map_err(|err| format!("load exact context needs: {err}"))?;
+        bind_named_params(&mut stmt, params)
+            .map_err(|err| format!("load exact context needs: {err}"))?;
         let rows = stmt
             .raw_query()
-            .mapped(selected_context_need)
+            .mapped(selected_exact_context_need)
             .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|err| format!("load context needs: {err}"))?;
+            .map_err(|err| format!("load exact context needs: {err}"))?;
         Ok(rows)
     }
 
-    fn select_context_offers(
+    fn select_range_context_needs(
+        store: &Db,
+        sql: &str,
+        params: &[(&str, rusqlite::types::Value)],
+    ) -> Result<Vec<ContextNeed>, String> {
+        let mut stmt = store
+            .conn()
+            .prepare(sql)
+            .map_err(|err| format!("load range context needs: {err}"))?;
+        bind_named_params(&mut stmt, params)
+            .map_err(|err| format!("load range context needs: {err}"))?;
+        let rows = stmt
+            .raw_query()
+            .mapped(selected_range_context_need)
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|err| format!("load range context needs: {err}"))?;
+        Ok(rows)
+    }
+
+    fn select_exact_context_offers(
         store: &Db,
         sql: &str,
         params: &[(&str, rusqlite::types::Value)],
@@ -1796,47 +1911,120 @@ pub(crate) mod context_db {
         let mut stmt = store
             .conn()
             .prepare(sql)
-            .map_err(|err| format!("load context offers: {err}"))?;
+            .map_err(|err| format!("load exact context offers: {err}"))?;
         bind_named_params(&mut stmt, params)
-            .map_err(|err| format!("load context offers: {err}"))?;
+            .map_err(|err| format!("load exact context offers: {err}"))?;
         let rows = stmt
             .raw_query()
-            .mapped(selected_context_offer)
+            .mapped(selected_exact_context_offer)
             .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|err| format!("load context offers: {err}"))?;
+            .map_err(|err| format!("load exact context offers: {err}"))?;
+        Ok(rows)
+    }
+
+    fn select_range_context_offers(
+        store: &Db,
+        sql: &str,
+        params: &[(&str, rusqlite::types::Value)],
+    ) -> Result<Vec<ContextOffer>, String> {
+        let mut stmt = store
+            .conn()
+            .prepare(sql)
+            .map_err(|err| format!("load range context offers: {err}"))?;
+        bind_named_params(&mut stmt, params)
+            .map_err(|err| format!("load range context offers: {err}"))?;
+        let rows = stmt
+            .raw_query()
+            .mapped(selected_range_context_offer)
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|err| format!("load range context offers: {err}"))?;
         Ok(rows)
     }
 
     fn insert_context_edge_in_tx(
         store: &Db,
-        owner: &FactId,
-        direction: &str,
-        role: &Role,
-        scope: &FactScope,
-        start_key: &[u8],
-        end_key: &[u8],
+        edge: StoredContextEdge<'_>,
     ) -> rusqlite::Result<bool> {
-        let scope_key = scope_key(scope);
+        if edge.is_exact() {
+            insert_exact_context_edge_in_tx(store, edge)
+        } else {
+            insert_range_context_edge_in_tx(store, edge)
+        }
+    }
+
+    fn insert_exact_context_edge_in_tx(
+        store: &Db,
+        edge: StoredContextEdge<'_>,
+    ) -> rusqlite::Result<bool> {
+        let scope_key = scope_key(edge.scope);
         store
             .conn()
             .execute(
-                "INSERT OR IGNORE INTO context_edges
-                (owner, direction, role, scope_key, start_key, end_key)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT OR IGNORE INTO context_exact_edges
+                (owner, direction, role, scope_key, key)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![
-                    owner.as_slice(),
-                    direction,
-                    role.as_str(),
+                    edge.owner.as_slice(),
+                    edge.direction,
+                    edge.role.as_str(),
                     scope_key.as_slice(),
-                    start_key,
-                    end_key
+                    edge.start_key
                 ],
             )
             .map(|count| count > 0)
     }
 
+    fn insert_range_context_edge_in_tx(
+        store: &Db,
+        edge: StoredContextEdge<'_>,
+    ) -> rusqlite::Result<bool> {
+        let scope_key = scope_key(edge.scope);
+        store
+            .conn()
+            .execute(
+                "INSERT OR IGNORE INTO context_range_edges
+                (owner, direction, role, scope_key, start_key, end_key)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    edge.owner.as_slice(),
+                    edge.direction,
+                    edge.role.as_str(),
+                    scope_key.as_slice(),
+                    edge.start_key,
+                    edge.end_key
+                ],
+            )
+            .map(|count| count > 0)
+    }
+
+    fn delete_owner_direction_in_tx(
+        store: &Db,
+        table: TableName,
+        owner: FactId,
+        direction: &str,
+    ) -> rusqlite::Result<usize> {
+        let table = quoted_table_name(table)?;
+        store.conn().execute(
+            &format!("DELETE FROM {table} WHERE owner = ?1 AND direction = ?2"),
+            params![owner.as_slice(), direction],
+        )
+    }
+
     /// Decode one persisted need row back into the public context type.
-    fn selected_context_need(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextNeed> {
+    fn selected_exact_context_need(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextNeed> {
+        let key = ContextKey::from_bytes(row.get::<_, Vec<u8>>(3)?);
+        Ok(ContextNeed {
+            owner: fact_id_column(row.get::<_, Vec<u8>>(0)?, "owner")?,
+            role: Role::new(row.get::<_, String>(1)?)
+                .map_err(rusqlite::Error::InvalidParameterName)?,
+            scope: decode_scope_key(&row.get::<_, Vec<u8>>(2)?)
+                .map_err(rusqlite::Error::InvalidParameterName)?,
+            start_key: key.clone(),
+            end_key: key,
+        })
+    }
+
+    fn selected_range_context_need(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextNeed> {
         Ok(ContextNeed {
             owner: fact_id_column(row.get::<_, Vec<u8>>(0)?, "owner")?,
             role: Role::new(row.get::<_, String>(1)?)
@@ -1849,7 +2037,20 @@ pub(crate) mod context_db {
     }
 
     /// Decode one persisted offer row back into the public context type.
-    fn selected_context_offer(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextOffer> {
+    fn selected_exact_context_offer(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextOffer> {
+        let key = ContextKey::from_bytes(row.get::<_, Vec<u8>>(3)?);
+        Ok(ContextOffer {
+            owner: fact_id_column(row.get::<_, Vec<u8>>(0)?, "owner")?,
+            role: Role::new(row.get::<_, String>(1)?)
+                .map_err(rusqlite::Error::InvalidParameterName)?,
+            scope: decode_scope_key(&row.get::<_, Vec<u8>>(2)?)
+                .map_err(rusqlite::Error::InvalidParameterName)?,
+            start_key: key.clone(),
+            end_key: key,
+        })
+    }
+
+    fn selected_range_context_offer(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextOffer> {
         Ok(ContextOffer {
             owner: fact_id_column(row.get::<_, Vec<u8>>(0)?, "owner")?,
             role: Role::new(row.get::<_, String>(1)?)
@@ -2083,23 +2284,192 @@ pub(crate) mod context_db {
         offer: &ContextOffer,
     ) -> Result<Vec<ContextNeed>, String> {
         let scope_key = scope_key(&offer.scope);
-        select_context_needs(
+        let mut needs = if is_exact_range(&offer.start_key, &offer.end_key) {
+            exact_needs_for_key(
+                store,
+                offer.role.as_str(),
+                &scope_key,
+                offer.start_key.as_bytes(),
+            )?
+        } else {
+            exact_needs_in_range(
+                store,
+                offer.role.as_str(),
+                &scope_key,
+                offer.start_key.as_bytes(),
+                offer.end_key.as_bytes(),
+            )?
+        };
+        needs.extend(range_needs_overlapping_range(
+            store,
+            offer.role.as_str(),
+            &scope_key,
+            offer.start_key.as_bytes(),
+            offer.end_key.as_bytes(),
+        )?);
+        needs.sort();
+        needs.dedup();
+        Ok(needs)
+    }
+
+    fn exact_offers_for_key(
+        store: &Db,
+        role: &str,
+        scope_key: &[u8],
+        key: &[u8],
+    ) -> Result<Vec<ContextOffer>, String> {
+        select_exact_context_offers(
             store,
             r#"
-        SELECT owner, role, scope_key, start_key, end_key
-        FROM context_edges
+        SELECT owner, role, scope_key, key
+        FROM context_exact_edges
+        WHERE direction = 'offer'
+          AND role = :role
+          AND scope_key = :scope_key
+          AND key = :key
+        ORDER BY owner, key
+        "#,
+            &[
+                (":role", text(role)),
+                (":scope_key", bytes(scope_key)),
+                (":key", bytes(key)),
+            ],
+        )
+    }
+
+    fn exact_needs_for_key(
+        store: &Db,
+        role: &str,
+        scope_key: &[u8],
+        key: &[u8],
+    ) -> Result<Vec<ContextNeed>, String> {
+        select_exact_context_needs(
+            store,
+            r#"
+        SELECT owner, role, scope_key, key
+        FROM context_exact_edges
         WHERE direction = 'need'
           AND role = :role
           AND scope_key = :scope_key
-          AND start_key <= :offer_end
-          AND end_key >= :offer_start
+          AND key = :key
+        ORDER BY owner, key
+        "#,
+            &[
+                (":role", text(role)),
+                (":scope_key", bytes(scope_key)),
+                (":key", bytes(key)),
+            ],
+        )
+    }
+
+    fn exact_offers_in_range(
+        store: &Db,
+        role: &str,
+        scope_key: &[u8],
+        start_key: &[u8],
+        end_key: &[u8],
+    ) -> Result<Vec<ContextOffer>, String> {
+        select_exact_context_offers(
+            store,
+            r#"
+        SELECT owner, role, scope_key, key
+        FROM context_exact_edges
+        WHERE direction = 'offer'
+          AND role = :role
+          AND scope_key = :scope_key
+          AND key >= :start_key
+          AND key <= :end_key
+        ORDER BY owner, key
+        "#,
+            &[
+                (":role", text(role)),
+                (":scope_key", bytes(scope_key)),
+                (":start_key", bytes(start_key)),
+                (":end_key", bytes(end_key)),
+            ],
+        )
+    }
+
+    fn exact_needs_in_range(
+        store: &Db,
+        role: &str,
+        scope_key: &[u8],
+        start_key: &[u8],
+        end_key: &[u8],
+    ) -> Result<Vec<ContextNeed>, String> {
+        select_exact_context_needs(
+            store,
+            r#"
+        SELECT owner, role, scope_key, key
+        FROM context_exact_edges
+        WHERE direction = 'need'
+          AND role = :role
+          AND scope_key = :scope_key
+          AND key >= :start_key
+          AND key <= :end_key
+        ORDER BY owner, key
+        "#,
+            &[
+                (":role", text(role)),
+                (":scope_key", bytes(scope_key)),
+                (":start_key", bytes(start_key)),
+                (":end_key", bytes(end_key)),
+            ],
+        )
+    }
+
+    fn range_offers_overlapping_range(
+        store: &Db,
+        role: &str,
+        scope_key: &[u8],
+        start_key: &[u8],
+        end_key: &[u8],
+    ) -> Result<Vec<ContextOffer>, String> {
+        select_range_context_offers(
+            store,
+            r#"
+        SELECT owner, role, scope_key, start_key, end_key
+        FROM context_range_edges
+        WHERE direction = 'offer'
+          AND role = :role
+          AND scope_key = :scope_key
+          AND start_key <= :end_key
+          AND end_key >= :start_key
         ORDER BY owner, start_key, end_key
         "#,
             &[
-                (":role", text(offer.role.as_str())),
-                (":scope_key", bytes(&scope_key)),
-                (":offer_start", bytes(offer.start_key.as_bytes())),
-                (":offer_end", bytes(offer.end_key.as_bytes())),
+                (":role", text(role)),
+                (":scope_key", bytes(scope_key)),
+                (":start_key", bytes(start_key)),
+                (":end_key", bytes(end_key)),
+            ],
+        )
+    }
+
+    fn range_needs_overlapping_range(
+        store: &Db,
+        role: &str,
+        scope_key: &[u8],
+        start_key: &[u8],
+        end_key: &[u8],
+    ) -> Result<Vec<ContextNeed>, String> {
+        select_range_context_needs(
+            store,
+            r#"
+        SELECT owner, role, scope_key, start_key, end_key
+        FROM context_range_edges
+        WHERE direction = 'need'
+          AND role = :role
+          AND scope_key = :scope_key
+          AND start_key <= :end_key
+          AND end_key >= :start_key
+        ORDER BY owner, start_key, end_key
+        "#,
+            &[
+                (":role", text(role)),
+                (":scope_key", bytes(scope_key)),
+                (":start_key", bytes(start_key)),
+                (":end_key", bytes(end_key)),
             ],
         )
     }
@@ -2592,7 +2962,8 @@ pub use route::{
 };
 
 const OWNER_KEYED_FACT_CLEANUP_TABLES: &[TableName] = &[
-    CONTEXT_EDGES,
+    CONTEXT_EXACT_EDGES,
+    CONTEXT_RANGE_EDGES,
     TIME_WAKES,
     PENDING_TIME_RANGES,
     PENDING_PROJECTION_MATCHES,
@@ -3266,6 +3637,7 @@ mod contract_tests {
         "premature",
         "queue_ready",
         "queued_context_ready",
+        "range_ready",
         "ready",
         "readded_ready",
     ];
@@ -3655,7 +4027,7 @@ mod contract_tests {
     }
 
     #[test]
-    fn projection_drain_resolves_new_range_need_that_matches_existing_offer() {
+    fn projection_drain_resolves_exact_need_that_matches_existing_range_offer() {
         let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
             .expect("open db");
         let target = Fact::new(FactScope::Global, 1, b"target".to_vec());
@@ -3690,6 +4062,100 @@ mod contract_tests {
         assert_eq!(
             intent_payload_for(&store, "ready", &target.id),
             offered.id.to_vec()
+        );
+    }
+
+    #[test]
+    fn projection_drain_resolves_range_need_that_matches_existing_exact_offer() {
+        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+            .expect("open db");
+        let target = Fact::new(FactScope::Global, 1, b"target".to_vec());
+        let offered = Fact::new(FactScope::Global, 2, b"custom".to_vec());
+        submit_fact_to_db(&store, offered.clone()).expect("persist offer payload");
+        submit_fact_to_db(&store, target.clone()).expect("persist target");
+        store
+            .conn()
+            .execute(
+                "DELETE FROM pending_projection WHERE owner = ?1",
+                rusqlite::params![offered.id.as_slice()],
+            )
+            .expect("clear offered fact pending row");
+
+        let role = Role::new("range_need").unwrap();
+        let offer_key = ContextKey::from_bytes(b"m");
+        let offer = offer_for(&offered, &role, &offer_key);
+        crate::core::project_fact::context_db::insert_context_offer_for_test(&store, &offer)
+            .expect("insert stored offer");
+
+        let projector = test_projector(move |fact, context| {
+            let need = ContextNeed::range(
+                fact.id,
+                role.clone(),
+                fact.scope.clone(),
+                b"a".to_vec(),
+                b"z".to_vec(),
+            );
+            if let Some(payload) = context.payload_for(&need) {
+                Ok(ProjectionOutput::new().intent(Intent::new(
+                    IntentKind::new("range_ready").unwrap(),
+                    fact.id,
+                    payload.id,
+                )))
+            } else {
+                Ok(ProjectionOutput::new().need(need))
+            }
+        });
+
+        let first = drain_projection(&projector, &store, &[], None, 1)
+            .expect("first projection parks range need");
+        assert!(first);
+        assert_eq!(
+            pending_projection_count(&store, target.id),
+            1,
+            "range need should be requeued after matching the existing exact offer"
+        );
+        assert_eq!(
+            pending_projection_match_count(&store, target.id),
+            1,
+            "range need should record the exact offer as pending context"
+        );
+
+        let second = drain_projection(&projector, &store, &[], None, 1)
+            .expect("second projection sees exact offer payload");
+
+        assert!(second);
+        assert_eq!(
+            intent_payload_for(&store, "range_ready", &target.id),
+            offered.id.to_vec()
+        );
+    }
+
+    #[test]
+    fn exact_context_lookup_plan_uses_exact_key_index() {
+        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+            .expect("open db");
+
+        let plan = query_plan_text(
+            &store,
+            r#"
+            EXPLAIN QUERY PLAN
+            SELECT owner, role, scope_key, key
+            FROM context_exact_edges
+            WHERE direction = 'need'
+              AND role = 'exact_plan'
+              AND scope_key = x'01'
+              AND key = x'02'
+            ORDER BY owner, key
+            "#,
+        );
+
+        assert!(
+            plan.contains("context_exact_edges_by_key"),
+            "exact lookup should use the exact key index:\n{plan}"
+        );
+        assert!(
+            !plan.contains("context_range_edges"),
+            "exact lookup should not touch range context rows:\n{plan}"
         );
     }
 
@@ -3825,10 +4291,8 @@ mod contract_tests {
                     },
                 )
                 .map_err(sqlite_string_error)?;
-                tx.conn().execute(
-                    "DELETE FROM context_edges WHERE owner = ?1 AND direction = 'offer'",
-                    rusqlite::params![offered.id.as_slice()],
-                )?;
+                delete_rows_by_owner_in_tx(tx, CONTEXT_EXACT_EDGES, offered.id)?;
+                delete_rows_by_owner_in_tx(tx, CONTEXT_RANGE_EDGES, offered.id)?;
                 Ok(())
             })
             .expect("queue match then remove standing offer");
@@ -4585,14 +5049,29 @@ mod contract_tests {
     }
 
     fn context_edge_count(store: &Db, owner: FactId) -> i64 {
+        context_edge_table_count(store, CONTEXT_EXACT_EDGES, owner)
+            + context_edge_table_count(store, CONTEXT_RANGE_EDGES, owner)
+    }
+
+    fn context_edge_table_count(store: &Db, table: TableName, owner: FactId) -> i64 {
+        let table = quoted_table_name(table).expect("quote table");
         store
             .conn()
             .query_row(
-                "SELECT COUNT(*) FROM context_edges WHERE owner = ?1",
+                &format!("SELECT COUNT(*) FROM {table} WHERE owner = ?1"),
                 rusqlite::params![owner.as_slice()],
                 |row| row.get(0),
             )
-            .expect("count context edges")
+            .expect("count context edge rows")
+    }
+
+    fn query_plan_text(store: &Db, sql: &str) -> String {
+        let mut stmt = store.conn().prepare(sql).expect("prepare query plan");
+        stmt.query_map([], |row| row.get::<_, String>(3))
+            .expect("run query plan")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect query plan")
+            .join("\n")
     }
 
     fn need_for(fact: &Fact, role: &Role, key: &ContextKey) -> ContextNeed {
@@ -5115,16 +5594,15 @@ mod tests {
         db.write_transaction(|tx| {
             insert_incoming_fact_in_tx(tx, &oldest)?;
             insert_incoming_fact_in_tx(tx, &newer)?;
-            tx.conn().execute(
-                "INSERT INTO context_edges
-                    (owner, direction, role, scope_key, start_key, end_key)
-                 VALUES (?1, 'need', 'incoming_context', ?2, ?3, ?4)",
-                params![
-                    oldest.id.as_slice(),
-                    b"scope".as_slice(),
-                    b"a".as_slice(),
-                    b"z".as_slice()
-                ],
+            insert_context_need_in_tx(
+                tx,
+                &ContextNeed::range(
+                    oldest.id,
+                    "incoming_context",
+                    FactScope::Local,
+                    b"a".to_vec(),
+                    b"z".to_vec(),
+                ),
             )?;
             Ok(())
         })
@@ -5226,16 +5704,15 @@ mod tests {
         owner: FactId,
         offer_owner: FactId,
     ) -> rusqlite::Result<()> {
-        store.conn().execute(
-            "INSERT INTO context_edges
-                (owner, direction, role, scope_key, start_key, end_key)
-             VALUES (?1, 'need', 'cleanup_role', ?2, ?3, ?4)",
-            params![
-                owner.as_slice(),
-                b"scope".as_slice(),
-                b"a".as_slice(),
-                b"z".as_slice()
-            ],
+        insert_context_need_in_tx(
+            store,
+            &ContextNeed::range(
+                owner,
+                "cleanup_role",
+                FactScope::Local,
+                b"a".to_vec(),
+                b"z".to_vec(),
+            ),
         )?;
         store.conn().execute(
             "INSERT INTO time_wakes (timeline, at, owner)
@@ -5274,9 +5751,20 @@ mod tests {
     }
 
     fn assert_owner_keyed_fact_rows(store: &Db, owner: FactId, expected: i64) {
-        for table in OWNER_KEYED_FACT_CLEANUP_TABLES {
+        assert_eq!(
+            owner_row_count(store, CONTEXT_EXACT_EDGES, owner)
+                + owner_row_count(store, CONTEXT_RANGE_EDGES, owner),
+            expected,
+            "logical context rows"
+        );
+        for table in [
+            TIME_WAKES,
+            PENDING_TIME_RANGES,
+            PENDING_PROJECTION_MATCHES,
+            PENDING_PROJECTION,
+        ] {
             assert_eq!(
-                owner_row_count(store, *table, owner),
+                owner_row_count(store, table, owner),
                 expected,
                 "owner rows in {}",
                 table.as_str()

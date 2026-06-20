@@ -37,7 +37,8 @@ network_incoming                  raw inbound frame bytes awaiting classificatio
 incoming_facts                    incoming facts staged for projection (temp)
 pending_projection                scheduled projection attempts for retained facts
 pending_time_ranges               due time context attached to pending owners
-context_edges                     standing needs and offers
+context_exact_edges               standing exact-key needs and offers
+context_range_edges               standing true-range needs and offers
 pending_projection_matches        offers that matched a parked need
 time_wakes                        facts scheduled to reproject at a time
 intents (+ local_intents)         bounded work waiting for a handler (local is temp)
@@ -91,7 +92,7 @@ flowchart TD
     NETWORK[("network: TCP + network_incoming")]
     INCOMING[("incoming: incoming_facts")]
     PROJECTOR{{"projection: fact projector (protocol)"}}
-    CONTEXT[("context_edges: needs + offers")]
+    CONTEXT[("context exact/range edges: needs + offers")]
     MATCHES[("pending_projection_matches")]
     WAKES[("time_wakes")]
     INTENTS[("intents + local_intents")]
@@ -218,7 +219,7 @@ flowchart TD
     COMMIT["phase: commit projection transaction"]
     CLEANUP["phase: cleanup stale or rejected input"]
 
-    CONTEXT[("context_edges")]
+    CONTEXT[("context exact/range edges")]
     WAKES[("time_wakes")]
     ROWS[("scope rows")]
     INTENTS[("intents")]
@@ -425,10 +426,10 @@ whether that payload actually proves what it needed.
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 300}} }%%
 flowchart TD
-    A["fact A projector: missing proof"] -->|emit need role/scope/range| NEED[("context_edges: need (A)")]
+    A["fact A projector: missing proof"] -->|emit need role/scope/range| NEED[("context exact/range edges: need (A)")]
     NEED --> PARK["A parked as standing need<br/>(no pending row)"]
 
-    B["fact B projector: accepted"] -->|emit offer role/scope/range| OFFER[("context_edges: offer (B)")]
+    B["fact B projector: accepted"] -->|emit offer role/scope/range| OFFER[("context exact/range edges: offer (B)")]
 
     NEED --> MATCH{{"core: range overlap match<br/>(runs at projection commit)"}}
     OFFER --> MATCH
