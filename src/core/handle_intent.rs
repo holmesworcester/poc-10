@@ -40,6 +40,7 @@ use crate::core::db::{quoted_table_name, Db, TableName};
 use crate::core::effects::{RuntimeEffects, StorageRequirement};
 use crate::core::facts::{fact_from_storage_row, Fact, FactId};
 use crate::core::intents::{HandlerContext, HandlerMode, Intent, IntentHandler, IntentKind};
+use crate::core::perf_profile as perf;
 use crate::core::schema::{INTENTS, INTENT_CONTEXT, LOCAL_INTENTS, LOCAL_INTENT_CONTEXT};
 
 use crate::core::crypto;
@@ -49,9 +50,6 @@ use crate::core::project_fact::commit_effects::{
 use crate::core::project_fact::route::FactAdmissionFn;
 use rusqlite::{params, OptionalExtension};
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
-
-const INTENT_DISPATCH_PROFILE_ENV: &str = "TOPO_PROFILE_INTENT_DISPATCH";
 
 struct QueuedIntent {
     /// Random row id for the exact queued work item being dispatched.
@@ -75,29 +73,11 @@ struct TerminalIntentDrop {
     intent_id: Vec<u8>,
     /// Queue from which this row was claimed.
     queue: IntentQueue,
-    /// Raw kind string for profiling and diagnostics.
-    kind: String,
 }
 
 enum LoadedIntent<'a> {
     Runnable(RunnableIntent<'a>),
     TerminalDrop(TerminalIntentDrop),
-}
-
-impl LoadedIntent<'_> {
-    fn profile_queue(&self) -> IntentQueue {
-        match self {
-            Self::Runnable(input) => input.queued.queue,
-            Self::TerminalDrop(drop) => drop.queue,
-        }
-    }
-
-    fn profile_kind(&self) -> &str {
-        match self {
-            Self::Runnable(input) => input.queued.intent.kind.as_str(),
-            Self::TerminalDrop(drop) => &drop.kind,
-        }
-    }
 }
 
 // =============================================================================
@@ -111,11 +91,10 @@ impl LoadedIntent<'_> {
 /// This is the whole intent worker in miniature:
 ///
 /// 1. Load one queued row, its attached context ids, and its registered route.
-/// 2. Classify the row as runnable or terminal-before-handler.
-/// 3. For runnable rows, delete the exact row, load attached facts, run the
+/// 2. For runnable rows, delete the exact row, load attached facts, run the
 ///    handler in a savepoint, validate returned effects, and commit those
 ///    effects in the same transaction.
-/// 4. For terminal rows, delete only the exact row and attached context rows.
+/// 3. For terminal rows, delete only the exact row and attached context rows.
 ///
 /// Handlers are allowed to observe runtime state, so this is not a
 /// pure-evaluation boundary like projection. The queue lifecycle is still
@@ -128,31 +107,30 @@ pub(crate) fn dispatch_one_intent(
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
 ) -> Result<bool, String> {
-    let loaded = match load_one_intent_input(store, handlers, queue)? {
+    let loaded = match perf::measure_result("intent_load", || {
+        load_one_intent_input(store, handlers, queue)
+    })? {
         None => return Ok(false),
         Some(loaded) => loaded,
     };
-    let profile_queue = loaded.profile_queue();
-    let profile_kind = loaded.profile_kind().to_string();
-    let started = Instant::now();
 
-    let result = match loaded {
-        LoadedIntent::Runnable(input) => run_and_commit_loaded_intent(
-            store,
-            input,
-            allowed_tables,
-            handlers.intent_kinds(),
-            fact_admission,
-        ),
-        LoadedIntent::TerminalDrop(drop) => drop_terminal_queued_intent(store, drop),
+    let commit_result = match loaded {
+        LoadedIntent::Runnable(input) => perf::measure_result("intent_commit_runnable", || {
+            run_and_commit_loaded_intent(
+                store,
+                input,
+                allowed_tables,
+                handlers.intent_kinds(),
+                fact_admission,
+            )
+        }),
+        LoadedIntent::TerminalDrop(drop) => {
+            perf::measure_result("intent_commit_terminal_drop", || {
+                drop_terminal_queued_intent(store, drop)
+            })
+        }
     };
-    record_intent_dispatch_profile(
-        profile_queue,
-        &profile_kind,
-        started.elapsed(),
-        result.as_ref(),
-    );
-    result
+    commit_result
 }
 
 // =============================================================================
@@ -191,7 +169,6 @@ fn load_one_intent_input<'a>(
             return Ok(Some(LoadedIntent::TerminalDrop(TerminalIntentDrop {
                 intent_id,
                 queue,
-                kind: "<invalid>".to_string(),
             })));
         }
     };
@@ -200,7 +177,6 @@ fn load_one_intent_input<'a>(
         return Ok(Some(LoadedIntent::TerminalDrop(TerminalIntentDrop {
             intent_id,
             queue,
-            kind: intent.kind.as_str().to_string(),
         })));
     };
     Ok(Some(LoadedIntent::Runnable(RunnableIntent {
@@ -215,7 +191,7 @@ fn load_one_intent_input<'a>(
     })))
 }
 
-/// Stage 2/3: run the handler and commit its terminal outcome.
+/// Stage 2: commit one runnable intent.
 ///
 /// This is intentionally written as the transaction story, not as a set of
 /// hidden callbacks. The order is the contract:
@@ -245,53 +221,65 @@ fn run_and_commit_loaded_intent(
     } = input;
     store
         .write_transaction(|tx| {
-            if !handler_storage_requirement_satisfied(tx, storage_requirement)
+            perf::measure_result("intent_commit_tx_body", || {
+                if !handler_storage_requirement_satisfied(tx, storage_requirement)
+                    .map_err(sqlite_string_error)?
+                {
+                    // The route targets a storage version this database cannot
+                    // currently satisfy. Consume the stale work without allowing the
+                    // handler to write rows for an old shape.
+                    return consume_queued_intent_in_tx(tx, queued.queue, &queued.intent_id);
+                }
+                if !consume_queued_intent_in_tx(tx, queued.queue, &queued.intent_id)? {
+                    return Ok(false);
+                }
+                let Some(context) = perf::measure_result("intent_load_handler_context", || {
+                    load_handler_context(tx, &queued.intent, queued.mode)
+                })
                 .map_err(sqlite_string_error)?
-            {
-                // The route targets a storage version this database cannot
-                // currently satisfy. Consume the stale work without allowing the
-                // handler to write rows for an old shape.
-                return consume_queued_intent_in_tx(tx, queued.queue, &queued.intent_id);
-            }
-            if !consume_queued_intent_in_tx(tx, queued.queue, &queued.intent_id)? {
-                return Ok(false);
-            }
-            let Some(context) = load_handler_context(tx, &queued.intent, queued.mode)
+                else {
+                    // Context rows point at exact retained facts. If one vanished,
+                    // the selected intent is stale and there is no safe handler run.
+                    return Ok(true);
+                };
+                let Some(effects) = perf::measure_result("intent_handler_and_validate", || {
+                    run_handler_and_validate_effects(
+                        tx,
+                        handler,
+                        &queued.intent,
+                        context,
+                        storage_requirement,
+                        allowed_tables,
+                        registered_intent_kinds,
+                        fact_admission,
+                    )
+                })
                 .map_err(sqlite_string_error)?
-            else {
-                // Context rows point at exact retained facts. If one vanished,
-                // the selected intent is stale and there is no safe handler run.
-                return Ok(true);
-            };
-            let Some(effects) = run_handler_and_validate_effects(
-                tx,
-                handler,
-                &queued.intent,
-                context,
-                storage_requirement,
-                allowed_tables,
-                registered_intent_kinds,
-                fact_admission,
-            )
-            .map_err(sqlite_string_error)?
-            else {
-                return Ok(true);
-            };
-            commit_runtime_effects_in_tx(
-                tx,
-                &effects,
-                allowed_tables,
-                registered_intent_kinds,
-                fact_admission,
-                queued.mode.is_replay(),
-                false,
-            )?;
-            Ok(true)
+                else {
+                    return Ok(true);
+                };
+                perf::measure_result("intent_commit_runtime_effects", || {
+                    commit_runtime_effects_in_tx(
+                        tx,
+                        &effects,
+                        allowed_tables,
+                        registered_intent_kinds,
+                        fact_admission,
+                        queued.mode.is_replay(),
+                        false,
+                    )
+                })?;
+                Ok(true)
+            })
         })
         .map_err(|err| format!("commit handler output: {err}"))
 }
 
-/// Consume a terminal row without running protocol code.
+/// Stage 3: consume one terminal row without running protocol code.
+///
+/// Terminal rows are syntactically invalid or reference an intent kind this
+/// runtime no longer registers. They have no safe handler path, so dispatch
+/// commits only exact row and context-row deletion.
 fn drop_terminal_queued_intent(store: &Db, drop: TerminalIntentDrop) -> Result<bool, String> {
     store
         .write_transaction(|tx| consume_queued_intent_in_tx(tx, drop.queue, &drop.intent_id))
@@ -568,64 +556,6 @@ impl IntentQueue {
             Self::Local => LOCAL_INTENT_CONTEXT,
         }
     }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Durable => "durable",
-            Self::Local => "local",
-        }
-    }
-}
-
-fn intent_dispatch_profile_enabled() -> bool {
-    std::env::var(INTENT_DISPATCH_PROFILE_ENV)
-        .ok()
-        .map(|value| {
-            let normalized = value.trim().to_ascii_lowercase();
-            !(normalized.is_empty() || normalized == "0" || normalized == "false")
-        })
-        .unwrap_or(false)
-}
-
-fn intent_dispatch_profile_line(
-    queue: IntentQueue,
-    kind: &str,
-    elapsed: Duration,
-    result: Result<&bool, &String>,
-) -> String {
-    match result {
-        Ok(progressed) => format!(
-            "intent_dispatch_profile queue={} kind={} status=ok progressed={} total_ms={}",
-            queue.label(),
-            kind,
-            progressed,
-            duration_millis(elapsed)
-        ),
-        Err(_) => format!(
-            "intent_dispatch_profile queue={} kind={} status=error progressed=false total_ms={}",
-            queue.label(),
-            kind,
-            duration_millis(elapsed)
-        ),
-    }
-}
-
-fn duration_millis(duration: Duration) -> u128 {
-    duration.as_micros() / 1000
-}
-
-fn record_intent_dispatch_profile(
-    queue: IntentQueue,
-    kind: &str,
-    elapsed: Duration,
-    result: Result<&bool, &String>,
-) {
-    if intent_dispatch_profile_enabled() {
-        eprintln!(
-            "{}",
-            intent_dispatch_profile_line(queue, kind, elapsed, result)
-        );
-    }
 }
 
 // =============================================================================
@@ -843,32 +773,6 @@ mod tests {
 
     static AFTER_FACT_CALLS: AtomicUsize = AtomicUsize::new(0);
     static VERSION_GUARD_HANDLER_CALLS: AtomicUsize = AtomicUsize::new(0);
-
-    #[test]
-    fn intent_dispatch_profile_line_includes_queue_kind_status_and_timing() {
-        let ok = intent_dispatch_profile_line(
-            IntentQueue::Durable,
-            "send_facts_on_connection",
-            Duration::from_millis(7),
-            Ok(&true),
-        );
-        assert_eq!(
-            ok,
-            "intent_dispatch_profile queue=durable kind=send_facts_on_connection status=ok progressed=true total_ms=7"
-        );
-
-        let err = "boom".to_string();
-        let failed = intent_dispatch_profile_line(
-            IntentQueue::Local,
-            "maintain_sync",
-            Duration::from_millis(3),
-            Err(&err),
-        );
-        assert_eq!(
-            failed,
-            "intent_dispatch_profile queue=local kind=maintain_sync status=error progressed=false total_ms=3"
-        );
-    }
 
     #[test]
     fn durable_success_deletes_only_claimed_row() {
