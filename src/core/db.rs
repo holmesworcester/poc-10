@@ -381,7 +381,8 @@ impl Db {
         conn.busy_timeout(Duration::from_secs(5))?;
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
-             PRAGMA synchronous = NORMAL;",
+             PRAGMA synchronous = NORMAL;
+             PRAGMA temp_store = MEMORY;",
         )?;
         Ok(Self {
             conn,
@@ -615,4 +616,24 @@ fn placeholders(count: usize) -> String {
         .map(|index| format!("?{index}"))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn db_connections_keep_temp_storage_in_memory() {
+        let store = Db::open_memory().expect("open memory db");
+
+        let temp_store = store
+            .conn()
+            .query_row("PRAGMA temp_store", [], |row| row.get::<_, i64>(0))
+            .expect("query temp_store pragma");
+
+        assert_eq!(
+            temp_store, 2,
+            "SQLite temp_store MEMORY has numeric value 2"
+        );
+    }
 }
