@@ -79,11 +79,13 @@ fn black_box_generated_content_sync_perf_uses_daemon_restart_boundary() {
     let first_to_full_projected = sync_elapsed.saturating_sub(sync_to_first_projected);
     assert_eq!(projected.content_messages, message_count);
     assert!(first_projected.content_messages >= 1);
+    let timing = projection_timing_stats(&bob, &workspace);
+    assert_eq!(timing.count, message_count);
 
     let seconds = sync_elapsed.as_secs_f64().max(0.001);
     let messages_per_second = message_count as f64 / seconds;
     eprintln!(
-        "black_box_generated_content_sync_perf messages={} message_text_bytes={} timeout_ms={} preindex_alice={} alice_indexed_before_generate={} alice_sync_index_ready_ms={} authoring_ms={} sync_enable_to_first_projected_ms={} daemons_ready_to_first_projected_ms={} first_projected_to_full_projected_ms={} sync_enable_to_projected_ms={} daemons_ready_to_projected_ms={} messages_per_s={:.2} generate_profile={}",
+        "black_box_generated_content_sync_perf messages={} message_text_bytes={} timeout_ms={} preindex_alice={} alice_indexed_before_generate={} alice_sync_index_ready_ms={} authoring_ms={} sync_enable_to_first_projected_ms={} daemons_ready_to_first_projected_ms={} first_projected_to_full_projected_ms={} sync_enable_to_projected_ms={} daemons_ready_to_projected_ms={} messages_per_s={:.2} bob_message_timing_count={} bob_message_timing_with_origin={} bob_message_receive_to_project_min_ms={} bob_message_receive_to_project_p50_ms={} bob_message_receive_to_project_p95_ms={} bob_message_receive_to_project_max_ms={} bob_message_receive_to_project_avg_ms={:.2} generate_profile={}",
         message_count,
         message_text_bytes,
         timeout_ms,
@@ -97,6 +99,13 @@ fn black_box_generated_content_sync_perf_uses_daemon_restart_boundary() {
         sync_elapsed.as_millis(),
         ready_elapsed.as_millis(),
         messages_per_second,
+        timing.count,
+        timing.with_origin_received_at,
+        timing.min_ms,
+        timing.p50_ms,
+        timing.p95_ms,
+        timing.max_ms,
+        timing.avg_ms,
         one_line(&generated.stderr)
     );
     assert!(messages_per_second.is_finite() && messages_per_second > 0.0);
@@ -149,6 +158,8 @@ fn black_box_generated_content_live_tail_perf_skips_message_catchup() {
     let full_projected_at = Instant::now();
     assert!(first_projected.content_messages >= 1);
     assert_eq!(projected.content_messages, message_count);
+    let timing = projection_timing_stats(&bob, &workspace);
+    assert_eq!(timing.count, message_count);
 
     let generate_start_to_first = first_projected_at.duration_since(generate_started);
     let generate_return_to_first = first_projected_at.saturating_duration_since(generate_finished);
@@ -160,7 +171,7 @@ fn black_box_generated_content_live_tail_perf_skips_message_catchup() {
     let end_to_end_messages_per_second = message_count as f64 / end_to_end_seconds;
 
     eprintln!(
-        "black_box_generated_content_live_tail_perf messages={} message_text_bytes={} timeout_ms={} setup_ms={} authoring_ms={} generate_start_to_first_projected_ms={} generate_return_to_first_projected_ms={} generate_return_to_projected_ms={} generate_start_to_projected_ms={} live_tail_messages_per_s={:.2} end_to_end_messages_per_s={:.2} generate_profile={}",
+        "black_box_generated_content_live_tail_perf messages={} message_text_bytes={} timeout_ms={} setup_ms={} authoring_ms={} generate_start_to_first_projected_ms={} generate_return_to_first_projected_ms={} generate_return_to_projected_ms={} generate_start_to_projected_ms={} live_tail_messages_per_s={:.2} end_to_end_messages_per_s={:.2} bob_message_timing_count={} bob_message_timing_with_origin={} bob_message_receive_to_project_min_ms={} bob_message_receive_to_project_p50_ms={} bob_message_receive_to_project_p95_ms={} bob_message_receive_to_project_max_ms={} bob_message_receive_to_project_avg_ms={:.2} generate_profile={}",
         message_count,
         message_text_bytes,
         timeout_ms,
@@ -172,6 +183,13 @@ fn black_box_generated_content_live_tail_perf_skips_message_catchup() {
         end_to_end.as_millis(),
         live_tail_messages_per_second,
         end_to_end_messages_per_second,
+        timing.count,
+        timing.with_origin_received_at,
+        timing.min_ms,
+        timing.p50_ms,
+        timing.p95_ms,
+        timing.max_ms,
+        timing.avg_ms,
         one_line(&generated.stderr)
     );
     assert!(live_tail_messages_per_second.is_finite() && live_tail_messages_per_second > 0.0);
@@ -242,18 +260,21 @@ impl RunningDaemon {
 
 fn spawn_daemon(db: &str, port: u16) -> RunningDaemon {
     let port_str = port.to_string();
-    let mut child = spawn_topo(&[
-        "--db",
-        db,
-        "start",
-        "--listen",
-        "127.0.0.1",
-        &port_str,
-        "--sync-ms",
-        "100",
-        "--quiet-ms",
-        "100",
-    ]);
+    let mut child = spawn_topo_with_env(
+        &[
+            "--db",
+            db,
+            "start",
+            "--listen",
+            "127.0.0.1",
+            &port_str,
+            "--sync-ms",
+            "100",
+            "--quiet-ms",
+            "100",
+        ],
+        &[("TOPO_PROFILE_PROJECTION_TIMING", "1")],
+    );
     let stdout = child.stdout.take().expect("daemon stdout");
     let stderr = child.stderr.take().expect("daemon stderr");
     let mut reader = BufReader::new(stdout);
@@ -512,6 +533,78 @@ fn content_count(db: &str, workspace: &str) -> ContentCount {
             )
             .expect("query content message count"),
     }
+}
+
+#[derive(Debug)]
+struct ProjectionTimingStats {
+    count: usize,
+    with_origin_received_at: usize,
+    min_ms: i64,
+    p50_ms: i64,
+    p95_ms: i64,
+    max_ms: i64,
+    avg_ms: f64,
+}
+
+fn projection_timing_stats(db: &str, workspace: &str) -> ProjectionTimingStats {
+    let workspace_id = decode_hex_32(workspace);
+    let conn = Connection::open(db).expect("open projection timing db");
+    conn.busy_timeout(Duration::from_secs(5))
+        .expect("set busy timeout");
+    let mut stmt = conn
+        .prepare(
+            "SELECT t.received_at, t.origin_received_at, t.projected_at
+             FROM content_messages m
+             JOIN projection_timings t ON t.fact_id = m.message_id
+             WHERE m.workspace_id = ?1",
+        )
+        .expect("prepare projection timing query");
+    let mut latencies = stmt
+        .query_map(params![workspace_id], |row| {
+            let received_at = row.get::<_, i64>(0)?;
+            let origin_received_at = row.get::<_, Option<i64>>(1)?;
+            let projected_at = row.get::<_, i64>(2)?;
+            Ok((received_at, origin_received_at, projected_at))
+        })
+        .expect("query projection timings")
+        .map(|row| {
+            let (received_at, origin_received_at, projected_at) =
+                row.expect("projection timing row");
+            let baseline = origin_received_at.unwrap_or(received_at);
+            let latency = projected_at.saturating_sub(baseline).max(0);
+            (latency, origin_received_at.is_some())
+        })
+        .collect::<Vec<_>>();
+    latencies.sort_by_key(|(latency, _)| *latency);
+    let count = latencies.len();
+    assert!(
+        count > 0,
+        "projection timing stats require at least one row"
+    );
+    let with_origin_received_at = latencies
+        .iter()
+        .filter(|(_, has_origin)| *has_origin)
+        .count();
+    let sum = latencies
+        .iter()
+        .map(|(latency, _)| *latency as f64)
+        .sum::<f64>();
+    ProjectionTimingStats {
+        count,
+        with_origin_received_at,
+        min_ms: percentile_latency(&latencies, 0),
+        p50_ms: percentile_latency(&latencies, 50),
+        p95_ms: percentile_latency(&latencies, 95),
+        max_ms: percentile_latency(&latencies, 100),
+        avg_ms: sum / count as f64,
+    }
+}
+
+fn percentile_latency(latencies: &[(i64, bool)], percentile: usize) -> i64 {
+    assert!(!latencies.is_empty(), "latencies must not be empty");
+    let last = latencies.len() - 1;
+    let index = ((last * percentile) + 99) / 100;
+    latencies[index.min(last)].0
 }
 
 fn decode_hex_32(value: &str) -> Vec<u8> {

@@ -14,6 +14,7 @@
 
 use crate::core::facts::{Fact, FactId};
 use crate::core::intents::{Intent, RowMutation};
+use std::collections::BTreeMap;
 
 /// Storage version contract carried by one effect batch.
 ///
@@ -36,6 +37,12 @@ impl Default for StorageRequirement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncomingMetadata {
+    pub origin_addr: Vec<u8>,
+    pub received_at_local_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeEffects {
     /// Storage precondition checked before this batch commits.
     pub storage_requirement: StorageRequirement,
@@ -45,6 +52,8 @@ pub struct RuntimeEffects {
     pub priority_facts: Vec<Fact>,
     /// Outside-origin projectable inputs that are not durable until projection retains them.
     pub incoming_facts: Vec<Fact>,
+    /// Optional transport metadata for incoming facts emitted by projectors.
+    pub incoming_fact_metadata: BTreeMap<FactId, IncomingMetadata>,
     /// Existing facts to remove with their derived core-owned rows.
     pub purged_facts: Vec<FactId>,
     /// Protocol or core table mutations validated against the runtime allowlist.
@@ -64,6 +73,7 @@ impl Default for RuntimeEffects {
             facts: Vec::new(),
             priority_facts: Vec::new(),
             incoming_facts: Vec::new(),
+            incoming_fact_metadata: BTreeMap::new(),
             purged_facts: Vec::new(),
             row_mutations: Vec::new(),
             intents: Vec::new(),
@@ -82,6 +92,7 @@ impl RuntimeEffects {
         self.facts.is_empty()
             && self.priority_facts.is_empty()
             && self.incoming_facts.is_empty()
+            && self.incoming_fact_metadata.is_empty()
             && self.purged_facts.is_empty()
             && self.row_mutations.is_empty()
             && self.intents.is_empty()
@@ -105,6 +116,12 @@ impl RuntimeEffects {
     }
 
     pub fn incoming_fact(mut self, fact: Fact) -> Self {
+        self.incoming_facts.push(fact);
+        self
+    }
+
+    pub fn incoming_fact_with_metadata(mut self, fact: Fact, metadata: IncomingMetadata) -> Self {
+        self.incoming_fact_metadata.insert(fact.id, metadata);
         self.incoming_facts.push(fact);
         self
     }

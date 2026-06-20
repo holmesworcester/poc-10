@@ -39,9 +39,26 @@ pub fn spawn_topo(args: &[&str]) -> Child {
     spawn_con(args)
 }
 
+pub fn spawn_topo_with_env(args: &[&str], envs: &[(&str, &str)]) -> Child {
+    spawn_con_with_env(args, envs)
+}
+
 pub fn spawn_con(args: &[&str]) -> Child {
     Command::new(con_bin())
         .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn con")
+}
+
+pub fn spawn_con_with_env(args: &[&str], envs: &[(&str, &str)]) -> Child {
+    let mut command = Command::new(con_bin());
+    command.args(args);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()

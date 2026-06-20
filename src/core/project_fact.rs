@@ -65,21 +65,11 @@ use crate::core::schema::{
 use crate::core::wire::Writer;
 use rusqlite::{params, OptionalExtension};
 
+pub use crate::core::effects::IncomingMetadata;
 pub use crate::core::facts::verify_fact_id;
 pub(crate) use commit_effects::{
     commit_network_incoming_facts_to_db, commit_runtime_effects_to_db,
 };
-
-/// Transport metadata attached to an outside-origin projection input.
-///
-/// Incoming rows carry this while they are volatile. Projectors that need
-/// receive metadata to survive replay must emit ordinary protocol facts that
-/// encode it; core never preserves this metadata beside retained facts.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IncomingMetadata {
-    pub origin_addr: Vec<u8>,
-    pub received_at_local_ms: u64,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProjectionSource {
@@ -116,6 +106,8 @@ struct PreparedProjection {
     source: ProjectionSource,
     fact: Fact,
     mode: ProjectionMode,
+    input_received_at_ms: u64,
+    incoming_metadata: Option<IncomingMetadata>,
     retain_self: bool,
     projected_context: ContextSet,
     time_wakes: Vec<TimeWake>,
@@ -271,6 +263,9 @@ fn evaluate_loaded_projection_input(
 /// projection loop is visible here: settle this input's lifecycle, publish
 /// retained owner state, wake projection work from new context, then commit
 /// projector-emitted effects.
+///
+/// This is the commit_projection_effects work item named in the architecture
+/// contract tests.
 fn commit_projection_outcome(
     store: &Db,
     outcome: &ProjectionOutcome,
@@ -293,6 +288,7 @@ fn commit_projection_outcome(
 
                         let retained =
                             settle_projected_input_lifecycle_in_tx(tx, projection, fact_id)?;
+                        record_projection_timing_in_tx(tx, projection, retained)?;
                         let new_context = publish_retained_projection_state_in_tx(
                             tx, projection, fact_id, retained,
                         )?;
@@ -492,6 +488,8 @@ fn prepare_projection(
         pending_inputs,
     } = input;
     let mode = pending_inputs.mode();
+    let input_received_at_ms = fact.timestamp;
+    let incoming_metadata = pending_inputs.incoming_metadata().cloned();
     let output = perf::measure_result("projection_projector_cpu", || {
         projector.project(&fact, &pending_inputs)
     })?;
@@ -511,6 +509,8 @@ fn prepare_projection(
         source,
         fact,
         mode,
+        input_received_at_ms,
+        incoming_metadata,
         retain_self: output.retain_self,
         projected_context,
         time_wakes: output.time_wakes,
@@ -643,6 +643,83 @@ fn settle_projected_input_lifecycle_in_tx(
         }
     };
     Ok(retained)
+}
+
+/// Record local timing for a successful projection commit.
+///
+/// `origin_received_at` is copied from volatile incoming metadata when present.
+/// If a fact parks from incoming into durable storage before its final useful
+/// projection, later durable projections keep the first origin receive time.
+fn record_projection_timing_in_tx(
+    tx: &Db,
+    projection: &PreparedProjection,
+    retained: bool,
+) -> rusqlite::Result<()> {
+    if !projection_timing_enabled() {
+        return Ok(());
+    }
+    let source = match projection.source {
+        ProjectionSource::Durable => "durable",
+        ProjectionSource::Incoming => "incoming",
+    };
+    let received_at = sqlite_u64(
+        projection.input_received_at_ms,
+        "projection input received_at",
+    )?;
+    let origin_received_at = projection
+        .incoming_metadata
+        .as_ref()
+        .map(|metadata| {
+            sqlite_u64(
+                metadata.received_at_local_ms,
+                "projection origin received_at",
+            )
+        })
+        .transpose()?;
+    let retained = if retained { 1i64 } else { 0i64 };
+    let projected_at = queue_now_ms()?;
+    tx.conn().execute(
+        "INSERT INTO projection_timings
+            (fact_id, source, received_at, origin_received_at, projected_at, retained)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(fact_id) DO UPDATE SET
+            source = excluded.source,
+            received_at = excluded.received_at,
+            origin_received_at = COALESCE(
+                excluded.origin_received_at,
+                projection_timings.origin_received_at
+            ),
+            projected_at = excluded.projected_at,
+            retained = excluded.retained",
+        params![
+            projection.fact.id.as_slice(),
+            source,
+            received_at,
+            origin_received_at,
+            projected_at,
+            retained,
+        ],
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+fn projection_timing_enabled() -> bool {
+    true
+}
+
+#[cfg(not(test))]
+fn projection_timing_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("TOPO_PROFILE_PROJECTION_TIMING")
+            .ok()
+            .map(|value| {
+                let normalized = value.trim().to_ascii_lowercase();
+                !(normalized.is_empty() || normalized == "0" || normalized == "false")
+            })
+            .unwrap_or(false)
+    })
 }
 
 /// Publish standing owner state for a retained projection.
@@ -860,12 +937,11 @@ pub(crate) mod commit_effects {
     use super::context::ProjectionMode;
     use super::route::FactAdmissionFn;
     use super::{
-        insert_facts_and_record_matches_with_mode_in_tx, insert_incoming_fact_in_tx,
+        insert_facts_and_record_matches_with_mode_in_tx, insert_incoming_fact_with_metadata_in_tx,
         insert_priority_facts_and_record_matches_with_mode_in_tx, purge_fact_in_tx,
-        IncomingMetadata,
     };
     use crate::core::db::{Db, TableName};
-    use crate::core::effects::{RuntimeEffects, StorageRequirement};
+    use crate::core::effects::{IncomingMetadata, RuntimeEffects, StorageRequirement};
     use crate::core::facts::Fact;
     use crate::core::intents::{Intent, RowMutation};
 
@@ -896,6 +972,7 @@ pub(crate) mod commit_effects {
     ) -> Result<(), String> {
         validate_intents(&effects.intents, registered_intent_kinds)?;
         validate_intents(&effects.local_intents, registered_intent_kinds)?;
+        validate_incoming_fact_metadata(effects)?;
         validate_rebuild_effect_shape(effects)?;
         validate_row_mutations(&effects.row_mutations, allowed_tables)?;
         Ok(())
@@ -940,6 +1017,21 @@ pub(crate) mod commit_effects {
             return Err(
                 "derived-state rebuild effect cannot be mixed with facts or intents".to_string(),
             );
+        }
+        Ok(())
+    }
+
+    fn validate_incoming_fact_metadata(effects: &RuntimeEffects) -> Result<(), String> {
+        for fact_id in effects.incoming_fact_metadata.keys() {
+            if !effects
+                .incoming_facts
+                .iter()
+                .any(|fact| &fact.id == fact_id)
+            {
+                return Err(
+                    "incoming fact metadata must reference an emitted incoming fact".to_string(),
+                );
+            }
         }
         Ok(())
     }
@@ -1105,7 +1197,8 @@ pub(crate) mod commit_effects {
             )?;
 
         for fact in &effects.incoming_facts {
-            insert_incoming_fact_in_tx(tx, fact)?;
+            let metadata = effects.incoming_fact_metadata.get(&fact.id);
+            insert_incoming_fact_with_metadata_in_tx(tx, fact, metadata)?;
         }
 
         validate_row_mutations(&effects.row_mutations, allowed_tables)
@@ -1948,7 +2041,7 @@ pub mod effects {
     //! Projection effects and time-wake output for fact projectors.
 
     use crate::core::context::{ContextKey, ContextNeed, ContextOffer, ContextSet, Role};
-    use crate::core::effects::RuntimeEffects;
+    use crate::core::effects::{IncomingMetadata, RuntimeEffects};
     use crate::core::facts::{Fact, FactId};
     use crate::core::intents::{Intent, RowMutation};
 
@@ -2164,6 +2257,18 @@ pub mod effects {
         }
 
         pub fn incoming_fact(mut self, fact: Fact) -> Self {
+            self.effects.incoming_facts.push(fact);
+            self
+        }
+
+        pub fn incoming_fact_with_metadata(
+            mut self,
+            fact: Fact,
+            metadata: IncomingMetadata,
+        ) -> Self {
+            self.effects
+                .incoming_fact_metadata
+                .insert(fact.id, metadata);
             self.effects.incoming_facts.push(fact);
             self
         }
@@ -2544,6 +2649,7 @@ pub(crate) fn insert_network_incoming_fact_in_tx(
     insert_incoming_fact_with_metadata_in_tx(store, fact, Some(metadata))
 }
 
+#[cfg(test)]
 fn insert_incoming_fact_in_tx(store: &Db, fact: &Fact) -> rusqlite::Result<bool> {
     insert_incoming_fact_with_metadata_in_tx(store, fact, None)
 }
@@ -3856,6 +3962,118 @@ mod contract_tests {
         .expect("load parked fact")
         .expect("parked fact should load");
         assert_eq!(input.pending_inputs.incoming_metadata(), None);
+    }
+
+    #[test]
+    fn emitted_incoming_fact_can_preserve_origin_metadata() {
+        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+            .expect("open db");
+        let parent = Fact::new(FactScope::Local, 1, b"metadata-parent".to_vec());
+        let child = Fact::new(FactScope::Global, 2, b"metadata-child".to_vec());
+        let metadata = IncomingMetadata {
+            origin_addr: b"127.0.0.1:41001".to_vec(),
+            received_at_local_ms: 1_700_000_333,
+        };
+        store
+            .write_transaction(|tx| insert_network_incoming_fact_in_tx(tx, &parent, &metadata))
+            .expect("insert incoming fact with metadata");
+
+        let child_for_projector = child.clone();
+        let projector = test_projector(move |_fact, context| {
+            let metadata = context
+                .incoming_metadata()
+                .expect("incoming metadata")
+                .clone();
+            Ok(ProjectionOutput::new()
+                .drop_incoming()
+                .incoming_fact_with_metadata(child_for_projector.clone(), metadata))
+        });
+        assert!(crate::core::project_fact::project_one(
+            &store,
+            &projector,
+            ProjectionSource::Incoming,
+            &[],
+            TEST_REGISTERED_INTENT_KINDS,
+            None,
+        )
+        .expect("project parent"));
+
+        let child_input = load_pending_fact(
+            &store,
+            ProjectionSource::Incoming,
+            child.id,
+            ProjectionMode::Normal,
+        )
+        .expect("load child")
+        .expect("child should be staged as incoming");
+        assert_eq!(
+            child_input.pending_inputs.incoming_metadata(),
+            Some(&metadata)
+        );
+    }
+
+    #[test]
+    fn projection_commit_records_projected_at_with_origin_receive_time() {
+        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+            .expect("open db");
+        let parent = Fact::new(FactScope::Local, 42, b"timed-parent".to_vec());
+        let metadata = IncomingMetadata {
+            origin_addr: b"127.0.0.1:41001".to_vec(),
+            received_at_local_ms: 1_700_000_444,
+        };
+        store
+            .write_transaction(|tx| insert_network_incoming_fact_in_tx(tx, &parent, &metadata))
+            .expect("insert incoming fact with metadata");
+
+        let before = queue_now_ms().expect("clock before projection");
+        let projector =
+            test_projector(|_fact, _context| Ok(ProjectionOutput::new().drop_incoming()));
+        assert!(crate::core::project_fact::project_one(
+            &store,
+            &projector,
+            ProjectionSource::Incoming,
+            &[],
+            TEST_REGISTERED_INTENT_KINDS,
+            None,
+        )
+        .expect("project parent"));
+
+        let (source, received_at, origin_received_at, projected_at, retained): (
+            String,
+            i64,
+            Option<i64>,
+            i64,
+            i64,
+        ) = store
+            .conn()
+            .query_row(
+                "SELECT source, received_at, origin_received_at, projected_at, retained
+                 FROM projection_timings
+                 WHERE fact_id = ?1",
+                params![parent.id.as_slice()],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("load projection timing");
+
+        assert_eq!(source, "incoming");
+        assert_eq!(received_at, 42);
+        assert_eq!(
+            origin_received_at,
+            Some(metadata.received_at_local_ms as i64)
+        );
+        assert!(
+            projected_at >= before,
+            "projected_at {projected_at} should be at or after {before}"
+        );
+        assert_eq!(retained, 0);
     }
 
     #[test]

@@ -35,6 +35,7 @@ fn intent_runtime_output_boundary_is_facts_and_followup_intents_only() {
         facts,
         priority_facts,
         incoming_facts,
+        incoming_fact_metadata,
         purged_facts,
         row_mutations,
         intents,
@@ -49,6 +50,7 @@ fn intent_runtime_output_boundary_is_facts_and_followup_intents_only() {
     assert_eq!(facts.len(), 1);
     assert!(priority_facts.is_empty());
     assert!(incoming_facts.is_empty());
+    assert!(incoming_fact_metadata.is_empty());
     assert!(purged_facts.is_empty());
     assert!(row_mutations.is_empty());
     assert!(local_intents.is_empty());

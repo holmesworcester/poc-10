@@ -292,7 +292,7 @@ use crate::core::context::ContextNeed;
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, IncomingMetadata, ProjectionContext, ProjectionOutput, Projector,
 };
 use crate::protocol::connection::fact_receipt::fact::ReceiptPathInput;
 use crate::protocol::connection::fact_receipt::project::connection_fact_receipt_for_path;
@@ -385,7 +385,7 @@ pub fn project_observed_frame(
         &origin.origin_addr,
         origin.received_at_local_ms,
     ) {
-        Ok(facts) => Ok(facts_output(fact.id, facts)),
+        Ok(facts) => Ok(facts_output(fact.id, &origin, facts)),
         Err(_) => Ok(ProjectionOutput::new().drop_incoming()),
     }
 }
@@ -444,12 +444,22 @@ fn frame_observation_output(
     Ok(output.fact(observation))
 }
 
-fn facts_output(frame_fact_id: FactId, facts: Vec<(Fact, Fact)>) -> ProjectionOutput {
+fn facts_output(
+    frame_fact_id: FactId,
+    origin: &ObservedOrigin,
+    facts: Vec<(Fact, Fact)>,
+) -> ProjectionOutput {
     let mut output = ProjectionOutput::new()
         .drop_incoming()
         .purge_self(frame_fact_id);
     for (received, receipt) in facts {
-        output = output.incoming_fact(received).fact(receipt);
+        let metadata = IncomingMetadata {
+            origin_addr: origin.origin_addr.clone(),
+            received_at_local_ms: origin.received_at_local_ms,
+        };
+        output = output
+            .incoming_fact_with_metadata(received, metadata)
+            .fact(receipt);
     }
     output
 }

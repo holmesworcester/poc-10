@@ -509,6 +509,11 @@ fn well_formed_frame_opens_key_wrap_and_records_fact_receipt() {
         output.effects.incoming_facts.contains(&admitted_wrap),
         "opened frame should emit the admitted key-wrap fact"
     );
+    assert_eq!(
+        output.effects.incoming_fact_metadata.get(&admitted_wrap.id),
+        Some(&incoming_metadata()),
+        "opened child fact should retain the frame receive metadata"
+    );
     let receipt_fact = output
         .effects
         .facts
@@ -540,6 +545,11 @@ fn retained_frame_opens_from_durable_observation_and_records_fact_receipt() {
     assert_eq!(output.effects.facts.len(), 1);
     let admitted_wrap = auth_create::admit_key_wrap_fact(signed_wrap).expect("admit expected wrap");
     assert!(output.effects.incoming_facts.contains(&admitted_wrap));
+    assert_eq!(
+        output.effects.incoming_fact_metadata.get(&admitted_wrap.id),
+        Some(&incoming_metadata()),
+        "opened child fact should inherit metadata from durable frame observation"
+    );
     let receipt =
         connection::fact_receipt::project::decode::decode_fact(&output.effects.facts[0].bytes)
             .expect("decode receipt");

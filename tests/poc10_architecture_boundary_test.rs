@@ -463,6 +463,7 @@ fn poc10_runtime_effects_names_the_common_commit_shape() {
         facts,
         priority_facts,
         incoming_facts,
+        incoming_fact_metadata,
         purged_facts,
         row_mutations,
         intents,
@@ -477,6 +478,7 @@ fn poc10_runtime_effects_names_the_common_commit_shape() {
     assert!(facts.is_empty());
     assert!(priority_facts.is_empty());
     assert!(incoming_facts.is_empty());
+    assert!(incoming_fact_metadata.is_empty());
     assert!(purged_facts.is_empty());
     assert!(row_mutations.is_empty());
     assert!(intents.is_empty());

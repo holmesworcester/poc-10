@@ -52,6 +52,8 @@ pub(crate) const LOCAL_INTENTS: TableName = TableName::new("local_intents");
 pub(crate) const LOCAL_INTENT_CONTEXT: TableName = TableName::new("local_intent_context");
 /// Volatile fact table for outside-origin incoming inputs.
 pub(crate) const INCOMING_FACTS: TableName = TableName::new("incoming_facts");
+/// Durable diagnostic timing rows for projected inputs.
+pub(crate) const PROJECTION_TIMINGS: TableName = TableName::new("projection_timings");
 const CORE_REPLAY_PROTECTED_TABLES: &[TableName] = &[FACTS, LOCAL_FACT_ADMISSIONS];
 
 const CORE_REPLAY_RESET_TABLES: &[TableName] = &[
@@ -65,6 +67,7 @@ const CORE_REPLAY_RESET_TABLES: &[TableName] = &[
     LOCAL_INTENTS,
     LOCAL_INTENT_CONTEXT,
     INCOMING_FACTS,
+    PROJECTION_TIMINGS,
 ];
 
 const CORE_REPLAY_SUMMARY_TABLES: &[TableName] = &[FACTS, CONTEXT_EDGES, TIME_WAKES];
@@ -210,6 +213,19 @@ CREATE TEMP TABLE IF NOT EXISTS incoming_facts (
 );
 CREATE INDEX IF NOT EXISTS incoming_facts_by_received_at
     ON incoming_facts (received_at, id);
+
+CREATE TABLE IF NOT EXISTS projection_timings (
+    fact_id BLOB PRIMARY KEY NOT NULL,
+    source TEXT NOT NULL,
+    received_at INTEGER NOT NULL,
+    origin_received_at INTEGER,
+    projected_at INTEGER NOT NULL,
+    retained INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS projection_timings_by_projected_at
+    ON projection_timings (projected_at, fact_id);
+CREATE INDEX IF NOT EXISTS projection_timings_by_origin_received_at
+    ON projection_timings (origin_received_at, fact_id);
 
 "#,
     storage_version: None,

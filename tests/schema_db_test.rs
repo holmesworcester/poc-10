@@ -85,6 +85,7 @@ fn schema_sources_execute_declared_ddl() {
         "facts",
         "local_fact_admissions",
         "context_edges",
+        "projection_timings",
         "content_messages",
         "content_reactions",
         "content_files",

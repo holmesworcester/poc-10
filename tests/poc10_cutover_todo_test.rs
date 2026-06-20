@@ -656,10 +656,11 @@ fn cutover_imported_black_box_tests_have_no_extra_ignores() {
     let root = root();
     let allowed_ignored = [
         "black_box_sync_test.rs::cli_three_long_running_daemons_converge_messages_among_late_joiner",
-        "black_box_sync_test.rs::cli_daemon_download_perf_times_send_to_peer_receipt",
+        "black_box_sync_test.rs::cli_cable_bound_download_perf_isolates_authoring_sync_and_save",
         "content_cli_test.rs::cli_files_listing_shows_partial_progress_during_sync",
         "content_cli_test.rs::cli_files_listing_shows_zero_progress_when_only_descriptor_received",
         "content_cli_test.rs::cli_save_file_rejects_incomplete_download",
+        "generate_cli_test.rs::generate_cli_bulk_perf_isolates_authoring_and_admission_from_projection",
     ];
 
     let mut offenders = Vec::new();
