@@ -159,19 +159,21 @@ pub fn runtime_turn(
     let mut recurring_resume_at = 0;
     let mut profile = DaemonTurnProfile::start(local_addr);
 
-    if !profile.measure_bool("readiness_gate", || {
-        run_readiness_gate(
-            description,
-            runtime,
-            local_addr,
-            runs_durable_handlers,
-            scheduler,
-            work_limit,
-            local_derivation_limit,
-            &mut active,
-            &mut recurring_resume_at,
-        )
-    })? {
+    let readiness_started = Instant::now();
+    let ready = run_readiness_gate(
+        description,
+        runtime,
+        local_addr,
+        runs_durable_handlers,
+        scheduler,
+        work_limit,
+        local_derivation_limit,
+        &mut active,
+        &mut recurring_resume_at,
+        &mut profile,
+    )?;
+    profile.record_bool("readiness_gate", readiness_started.elapsed(), ready);
+    if !ready {
         profile.finish(active);
         return Ok(active);
     }
@@ -263,22 +265,35 @@ fn run_readiness_gate(
     local_derivation_limit: usize,
     active: &mut bool,
     recurring_resume_at: &mut usize,
+    profile: &mut DaemonTurnProfile,
 ) -> Result<bool, String> {
+    let fire_started = Instant::now();
     let first_recurring = fire_first_recurring_intent(runtime, scheduler, local_addr)?;
+    profile.record_bool(
+        "readiness_fire_first_recurring",
+        fire_started.elapsed(),
+        first_recurring.queued > 0,
+    );
     *recurring_resume_at = first_recurring.resume_at;
     *active |= first_recurring.queued > 0;
     if first_recurring.queued > 0 {
-        *active |= runtime.drain_local_intents(1)?;
-        *active |= runtime.drain_durable_projection(local_derivation_limit)?;
+        *active |= profile.measure_bool("readiness_drain_first_local_intent", || {
+            runtime.drain_local_intents(1)
+        })?;
+        *active |= profile.measure_bool("readiness_drain_first_durable_projection", || {
+            runtime.drain_durable_projection(local_derivation_limit)
+        })?;
     }
-    storage_ready_or_drain_repair(
-        description,
-        runtime,
-        runs_durable_handlers,
-        work_limit,
-        local_derivation_limit,
-        active,
-    )
+    profile.measure_bool("readiness_storage_ready_or_repair", || {
+        storage_ready_or_drain_repair(
+            description,
+            runtime,
+            runs_durable_handlers,
+            work_limit,
+            local_derivation_limit,
+            active,
+        )
+    })
 }
 
 fn storage_ready_or_drain_repair(
@@ -467,6 +482,17 @@ impl DaemonTurnProfile {
             result,
         });
         Ok(result)
+    }
+
+    fn record_bool(&mut self, name: &'static str, elapsed: Duration, result: bool) {
+        if !self.enabled {
+            return;
+        }
+        self.stages.push(DaemonTurnStageProfile {
+            name,
+            elapsed,
+            result,
+        });
     }
 
     fn finish(self, active: bool) {
@@ -1077,12 +1103,15 @@ mod tests {
         let result = profile
             .measure_bool("stage", || Ok(true))
             .expect("stage result");
+        profile.record_bool("recorded_stage", Duration::from_millis(2), false);
 
         assert!(result);
         let line = profile.finish_line(true).expect("profile line");
         assert!(line.contains("daemon_turn_profile addr=127.0.0.1:4242 active=true"));
         assert!(line.contains("stage_ms="));
         assert!(line.contains("stage_result=1"));
+        assert!(line.contains("recorded_stage_ms=2"));
+        assert!(line.contains("recorded_stage_result=0"));
     }
 
     struct RecurringHandler;
