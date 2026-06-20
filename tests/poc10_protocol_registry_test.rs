@@ -1,9 +1,8 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use topo::core::daemon::{self, RuntimeTurnHost};
 use topo::core::effects::StorageRequirement;
-use topo::core::runtime::Runtime;
+use topo::core::runtime::{RecurringScheduler, Runtime, RuntimeTurnHost};
 use topo::protocol::app::{CONTEXT_PROTOCOL, CONTEXT_RUNTIME};
 use topo::protocol::versioning::check_version::CHECK_VERSION;
 use topo::protocol::versioning::CURRENT_PROTOCOL_VERSION;
@@ -42,7 +41,10 @@ fn executable_protocol_tables_name_the_target_surfaces() {
         .commands
         .iter()
         .any(|command| command.name == "assert"));
-    assert!(CONTEXT_PROTOCOL.daemon.inbound_network_intake.is_some());
+    assert!(CONTEXT_PROTOCOL
+        .runtime_turn
+        .inbound_network_intake
+        .is_some());
 }
 
 #[test]
@@ -57,15 +59,15 @@ fn fresh_runtime_initializes_protocol_marker_through_runtime_turn() {
         None
     );
 
-    let mut scheduler = daemon::RecurringScheduler::install(CONTEXT_RUNTIME.handlers);
-    daemon::runtime_turn(
-        CONTEXT_PROTOCOL.daemon,
-        &mut runtime,
-        RuntimeTurnHost::local(),
-        &mut scheduler,
-        32,
-    )
-    .expect("runtime turn");
+    let mut scheduler = RecurringScheduler::install(CONTEXT_RUNTIME.handlers);
+    runtime
+        .run_turn(
+            CONTEXT_PROTOCOL.runtime_turn,
+            RuntimeTurnHost::local(),
+            &mut scheduler,
+            32,
+        )
+        .expect("runtime turn");
 
     assert_eq!(
         runtime

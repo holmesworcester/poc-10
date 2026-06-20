@@ -6,7 +6,7 @@
 //! commands, and implements the generic `assert eventually` polling wrapper.
 //!
 //! `main.rs` supplies argv. The protocol supplies a `ProtocolDescription`: names,
-//! runtime and daemon declarations, the command table, and a context builder.
+//! runtime and runtime-turn declarations, the command table, and a context builder.
 //! This runner supplies the stable process shape around those declarations:
 //! `--db`, optional command time, daemon lifecycle commands, help text, runtime
 //! opening, command dispatch, and display-line printing.
@@ -17,8 +17,11 @@
 //! command modules when only one protocol's behavior changes.
 
 use crate::core::cli::{self, CliArgs, CliCommand, CliOutput};
-use crate::core::daemon::{self, DaemonDescription};
-use crate::core::runtime::{Runtime, RuntimeDescription};
+use crate::core::daemon;
+use crate::core::runtime::{
+    self, RecurringScheduler, Runtime, RuntimeDescription, RuntimeTurnDescription, RuntimeTurnHost,
+    RuntimeTurnLock,
+};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::thread;
@@ -32,8 +35,8 @@ pub struct ProtocolDescription<C: 'static> {
     pub command_name: &'static str,
     /// Runtime schema, projection, matching, and handler declarations.
     pub runtime: RuntimeDescription,
-    /// Long-running daemon declarations.
-    pub daemon: DaemonDescription,
+    /// Host-turn declarations shared by daemon and local command turns.
+    pub runtime_turn: RuntimeTurnDescription,
     /// Non-daemon command registry.
     pub commands: &'static [CliCommand<C>],
     /// Convert an opened runtime into the protocol-owned CLI context.
@@ -103,8 +106,8 @@ fn run_parsed<C: 'static>(
 /// Start the long-running daemon for the selected database.
 ///
 /// Startup opens the runtime once, installs process-local recurring work, and
-/// then delegates listener parsing, stop-file handling, and daemon turn driving
-/// to `core::daemon`.
+/// then delegates listener parsing, stop-file handling, and daemon loop cadence
+/// to `core::daemon`. The runtime turn itself remains owned by `core::runtime`.
 fn run_start<C: 'static>(
     description: &'static ProtocolDescription<C>,
     parsed: ParsedArgs,
@@ -115,15 +118,15 @@ fn run_start<C: 'static>(
     let mut runtime = Runtime::open_disk(&description.runtime, &db)?;
     // Recurring operational loops are not durable state. Runtime turns offer
     // them from this in-memory scheduler after startup.
-    let mut scheduler = daemon::RecurringScheduler::install(description.runtime.handlers);
+    let mut scheduler = RecurringScheduler::install(description.runtime.handlers);
     daemon::start(
         &db,
         CliArgs::new(&parsed.command[1..]),
         |listener, limit| {
-            daemon::runtime_turn(
-                description.daemon,
-                &mut runtime,
-                daemon::RuntimeTurnHost::daemon(listener),
+            let _turn = RuntimeTurnLock::acquire(&db)?;
+            runtime.run_turn(
+                description.runtime_turn,
+                RuntimeTurnHost::daemon(listener),
                 &mut scheduler,
                 limit,
             )
@@ -243,15 +246,14 @@ fn run_protocol_command<C: 'static>(
         .db
         .clone()
         .ok_or_else(|| format!("{command_name} requires --db PATH"))?;
-    let _turn = daemon::RuntimeTurnLock::acquire(&db)?;
+    let _turn = RuntimeTurnLock::acquire(&db)?;
     let mut runtime = Runtime::open_disk(&description.runtime, &db)?;
-    let mut scheduler = daemon::RecurringScheduler::install(description.runtime.handlers);
-    daemon::runtime_turn(
-        description.daemon,
-        &mut runtime,
-        daemon::RuntimeTurnHost::local(),
+    let mut scheduler = RecurringScheduler::install(description.runtime.handlers);
+    runtime.run_turn(
+        description.runtime_turn,
+        RuntimeTurnHost::local(),
         &mut scheduler,
-        daemon::DEFAULT_WORK_LIMIT,
+        runtime::DEFAULT_WORK_LIMIT,
     )?;
     let mut context = (description.context)(runtime, parsed.db, parsed.at);
     cli::run(

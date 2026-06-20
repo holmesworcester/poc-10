@@ -142,9 +142,9 @@ addresses so the pump schedules peers without scanning frame payloads. The pump
 writes length-prefixed frames as socket capacity allows and deletes each frame
 row only after its frame is written.
 
-Time enters through daemon-owned `DaemonTimeWake` declarations. Core selects
-due `time_wakes`, attaches the due `TimeRange` to projection context, and lets
-the owning projector decide whether that time proves anything.
+Time enters through runtime-owned `RuntimeTimeWake` declarations. The current
+host turn selects due `time_wakes`, attaches the due `TimeRange` to projection
+context, and lets the owning projector decide whether that time proves anything.
 
 ## Invariants
 

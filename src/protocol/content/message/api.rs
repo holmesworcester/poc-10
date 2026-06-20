@@ -350,8 +350,7 @@ fn content_message_retention(
 mod tests {
     use super::*;
     use crate::core::command::FnClock;
-    use crate::core::daemon::{self, RuntimeTurnHost};
-    use crate::core::runtime::Runtime;
+    use crate::core::runtime::{RecurringScheduler, Runtime, RuntimeTurnHost};
     use crate::protocol::app::{CONTEXT_PROTOCOL, CONTEXT_RUNTIME};
 
     fn drain_runtime_work_for_test(runtime: &mut Runtime, max_rounds: usize, limit: usize) {
@@ -376,15 +375,15 @@ mod tests {
     }
 
     fn initialize_runtime_for_test(runtime: &mut Runtime) {
-        let mut scheduler = daemon::RecurringScheduler::install(CONTEXT_RUNTIME.handlers);
-        daemon::runtime_turn(
-            CONTEXT_PROTOCOL.daemon,
-            runtime,
-            RuntimeTurnHost::local(),
-            &mut scheduler,
-            512,
-        )
-        .expect("runtime turn");
+        let mut scheduler = RecurringScheduler::install(CONTEXT_RUNTIME.handlers);
+        runtime
+            .run_turn(
+                CONTEXT_PROTOCOL.runtime_turn,
+                RuntimeTurnHost::local(),
+                &mut scheduler,
+                512,
+            )
+            .expect("runtime turn");
     }
 
     #[test]

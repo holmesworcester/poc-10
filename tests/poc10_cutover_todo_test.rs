@@ -1019,7 +1019,7 @@ fn cutover_content_read_models_have_normal_sqlite_tables() {
 fn cutover_runtime_step_commits_projection_context_rows_and_intents_atomically() {
     let root = root();
     let project_fact = source_text(&root.join("src/core/project_fact.rs"));
-    let core_daemon = source_text(&root.join("src/core/daemon.rs"));
+    let core_runtime = source_text(&root.join("src/core/runtime.rs"));
     let queue_outgoing_frame =
         source_text(&root.join("src/protocol/connection/queue_outgoing_frame.rs"));
 
@@ -1036,15 +1036,15 @@ fn cutover_runtime_step_commits_projection_context_rows_and_intents_atomically()
                 .to_string(),
         );
     }
-    if core_daemon.contains("network::delete_inbound(runtime.db(), inbound)?;") {
+    if core_runtime.contains("network::delete_inbound(runtime.db(), inbound)?;") {
         offenders.push(
-            "src/core/daemon.rs deletes inbound network bytes before the protocol receive effect is proven durable"
+            "src/core/runtime.rs deletes inbound network bytes before the protocol receive effect is proven durable"
                 .to_string(),
         );
     }
-    if core_daemon.contains("network::delete_inbound") {
+    if core_runtime.contains("network::delete_inbound") {
         offenders.push(
-            "src/core/daemon.rs should not delete inbound rows outside the proven classifier commit"
+            "src/core/runtime.rs should not delete inbound rows outside the proven classifier commit"
                 .to_string(),
         );
     }
@@ -1123,7 +1123,7 @@ fn cutover_network_io_boundaries_are_live_only_work() {
     let maintenance = source_text(&root.join("src/protocol/connection/maintain_connections.rs"));
     let send_facts_handler =
         source_text(&root.join("src/protocol/connection/send_facts_on_connection.rs"));
-    let daemon = source_text(&root.join("src/core/daemon.rs"));
+    let runtime = source_text(&root.join("src/core/runtime.rs"));
     let protocol_app = source_text(&root.join("src/protocol/app.rs"));
     let network_io_files = ["src/protocol/connection/queue_outgoing_frame.rs"];
 
@@ -1147,16 +1147,17 @@ fn cutover_network_io_boundaries_are_live_only_work() {
         offenders
             .push("send_facts_on_connection does not enqueue network frames directly".to_string());
     }
-    if !daemon.contains("drain_inbound_network_queue")
-        || !daemon.contains("runtime.submit_network_incoming_facts")
+    if !runtime.contains("drain_inbound_network_queue")
+        || !runtime.contains("runtime.submit_network_incoming_facts")
         || !protocol_app.contains("inbound_network_intake: Some(receive_network_frame_facts)")
     {
         offenders.push(
-            "daemon inbound network frames are not staged through core incoming facts".to_string(),
+            "runtime-host inbound network frames are not staged through core incoming facts"
+                .to_string(),
         );
     }
-    if daemon.contains("runtime.submit_local_intent(to_intent") {
-        offenders.push("daemon still stages inbound network frames as local intents".to_string());
+    if runtime.contains("runtime.submit_local_intent(to_intent") {
+        offenders.push("runtime still stages inbound network frames as local intents".to_string());
     }
     if !handle_intent.contains("LOCAL_INTENTS")
         || !core_schema.contains("CREATE TEMP TABLE IF NOT EXISTS local_intents")

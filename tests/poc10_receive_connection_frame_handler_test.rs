@@ -8,12 +8,11 @@ use std::time::Duration;
 use rusqlite::{params, Connection, OptionalExtension};
 use topo::core::context::{ContextNeed, ContextOffer};
 use topo::core::crypto;
-use topo::core::daemon::{self, RuntimeTurnHost};
 use topo::core::db::TableName;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::network;
 use topo::core::project_fact::{IncomingMetadata, MatchedContext, ProjectionContext, Projector};
-use topo::core::runtime::Runtime;
+use topo::core::runtime::{RecurringScheduler, Runtime, RuntimeTurnHost};
 use topo::core::wire::{FixedBytes, FixedSlot};
 use topo::protocol::app::{CONTEXT_PROTOCOL, CONTEXT_RUNTIME};
 use topo::protocol::auth::endpoint::encode as endpoint_layout;
@@ -317,15 +316,15 @@ fn daemon_runtime_turn_admits_wire_frame_without_inbound_rows_or_receive_intents
     });
     std::thread::sleep(Duration::from_millis(50));
 
-    let mut scheduler = daemon::RecurringScheduler::install(CONTEXT_RUNTIME.handlers);
-    let status = daemon::runtime_turn(
-        CONTEXT_PROTOCOL.daemon,
-        &mut runtime,
-        RuntimeTurnHost::daemon(&listener),
-        &mut scheduler,
-        16,
-    )
-    .expect("daemon runtime turn");
+    let mut scheduler = RecurringScheduler::install(CONTEXT_RUNTIME.handlers);
+    let status = runtime
+        .run_turn(
+            CONTEXT_PROTOCOL.runtime_turn,
+            RuntimeTurnHost::daemon(&listener),
+            &mut scheduler,
+            16,
+        )
+        .expect("daemon runtime turn");
     writer.join().expect("writer thread");
 
     assert!(status);
