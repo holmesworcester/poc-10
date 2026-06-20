@@ -3,14 +3,39 @@
 //! `Db` is the lowest runtime layer above SQLite. It opens the connection,
 //! applies schema batches, records how to read the storage-version marker
 //! declared by those schema batches, runs explicit transactions, quotes trusted
-//! table and column identifiers, and applies typed row mutations. It does not
-//! own fact persistence, projection queues, intent queues, state-summary
-//! diagnostics, network queues, or protocol query SQL; those modules use `Db::conn()` and
-//! `write_transaction()` to own their table behavior directly.
+//! table and column identifiers for syntax safety, and applies typed row
+//! mutations. It does not own fact persistence, projection queues, intent
+//! queues, state-summary diagnostics, network queues, or protocol query SQL;
+//! those modules use `Db::conn()` and `write_transaction()` to own their table
+//! behavior directly.
+//!
+//! The storage-version marker is also protocol-owned state. A `SchemaSource`
+//! may declare a `StorageVersionSource`: the marker table, the version column,
+//! and the columns that sort newest marker rows first. `Db` records only that
+//! read recipe when it opens schema sources. `current_storage_version()` then
+//! asks "what storage version does this database currently project?" by reading
+//! the latest declared marker row, for example
+//! `protocol_version_rows.protocol_version ORDER BY applied_at_ms DESC,
+//! update_fact_id DESC LIMIT 1`. Fresh or stale databases are repaired by the
+//! protocol's versioning update path; core only reads the marker to enforce
+//! declared commit preconditions: projection and intent writes compiled for a
+//! different storage version are consumed without row effects, and query
+//! helpers that opt into current-storage checks use the same marker to return a
+//! mismatch error before reading incompatible materialized rows.
 //!
 //! All atomicity comes from callers choosing the transaction closure. `Db`
 //! supplies `BEGIN IMMEDIATE`, rollback, and `COMMIT`; owning modules decide
 //! which facts, rows, queue entries, or diagnostics belong in that boundary.
+//!
+//! The exported surface is split by responsibility:
+//!
+//! - `Db` is the reusable SQLite handle and transaction boundary.
+//! - `SchemaSource`, `StorageVersionSource`, and `ReplayTables` let runtime
+//!   owners declare schema, upgrade-marker, and rebuild lifecycle metadata.
+//! - `TableName`, `TypedTableSchema`, `TableInsert`, `TableDeleteWhere`,
+//!   `RowMutation`, and `Value` are the typed-row mutation vocabulary.
+//! - The crate-visible quoting helpers are for modules that own direct SQL but
+//!   still need the same trusted-identifier validation as the row helpers.
 
 use rusqlite::{
     params_from_iter, types::Value as SqliteValue, Connection as SqliteConnection,
@@ -18,6 +43,16 @@ use rusqlite::{
 };
 use std::path::Path;
 use std::time::Duration;
+
+// =============================================================================
+// Exported Vocabulary
+// =============================================================================
+
+/// Temporary upper bound for read helpers that still return Vec-backed pages.
+///
+/// Query modules should shrink this surface into caller-supplied paging or
+/// narrower SQL predicates as their fact families migrate fully to SQL.
+pub const DEFAULT_QUERY_LIMIT: usize = 10_000;
 
 /// A static, trusted row-table name.
 ///
@@ -88,50 +123,6 @@ pub struct SchemaSource {
     /// Rebuild reset and summary lifecycle declarations for this source's
     /// tables.
     pub replay: ReplayTables,
-}
-
-/// Quote a declared table name after rejecting unsafe identifier bytes.
-pub(crate) fn quoted_table_name(table: TableName) -> rusqlite::Result<String> {
-    quoted_table_name_str(table.as_str())
-}
-
-/// Quote a table name string after rejecting unsafe identifier bytes.
-pub(crate) fn quoted_table_name_str(name: &str) -> rusqlite::Result<String> {
-    if !name
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.'))
-    {
-        return Err(rusqlite::Error::InvalidParameterName(format!(
-            "invalid table name {name}"
-        )));
-    }
-    Ok(format!("\"{name}\""))
-}
-
-/// Quote one SQL identifier after rejecting unsafe identifier bytes.
-pub(crate) fn quoted_identifier(name: &str) -> rusqlite::Result<String> {
-    if !name
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-    {
-        return Err(rusqlite::Error::InvalidParameterName(format!(
-            "invalid identifier {name}"
-        )));
-    }
-    Ok(format!("\"{name}\""))
-}
-
-/// Quote and comma-join SQL identifiers.
-pub(crate) fn quoted_identifier_list<I, S>(columns: I) -> rusqlite::Result<String>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    columns
-        .into_iter()
-        .map(|column| quoted_identifier(column.as_ref()))
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map(|columns| columns.join(", "))
 }
 
 /// SQLite value carried by typed-table row mutations and internal SQL helpers.
@@ -236,60 +227,9 @@ pub enum RowMutation {
     DeleteWhere(TableDeleteWhere),
 }
 
-fn db_error(message: impl Into<String>) -> rusqlite::Error {
-    rusqlite::Error::InvalidParameterName(message.into())
-}
-
-fn unique_table_names(tables: impl IntoIterator<Item = TableName>) -> Vec<TableName> {
-    let mut unique = Vec::new();
-    for table in tables {
-        if !unique.contains(&table) {
-            unique.push(table);
-        }
-    }
-    unique
-}
-
-fn validate_replay_lifecycle(protected: &[TableName], reset: &[TableName]) -> rusqlite::Result<()> {
-    for table in reset {
-        if protected.contains(table) {
-            return Err(db_error(format!(
-                "table {} cannot be both replay-protected and replay-resettable",
-                table.as_str()
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn declared_storage_version_source(
-    sources: &[SchemaSource],
-) -> rusqlite::Result<Option<StorageVersionSource>> {
-    let mut declared = None;
-    for source in sources {
-        let Some(version_source) = source.storage_version else {
-            continue;
-        };
-        match declared {
-            Some(existing) if !same_storage_version_source(existing, version_source) => {
-                return Err(db_error(format!(
-                    "conflicting storage version sources declared: {} and {}",
-                    existing.table.as_str(),
-                    version_source.table.as_str()
-                )));
-            }
-            Some(_) => {}
-            None => declared = Some(version_source),
-        }
-    }
-    Ok(declared)
-}
-
-fn same_storage_version_source(left: StorageVersionSource, right: StorageVersionSource) -> bool {
-    left.table == right.table
-        && left.version_column == right.version_column
-        && left.order_by_columns == right.order_by_columns
-}
+// =============================================================================
+// Exported Database Handle
+// =============================================================================
 
 /// The only durable substrate core offers protocol code.
 ///
@@ -304,13 +244,11 @@ pub struct Db {
     replay_summary_tables: Vec<TableName>,
 }
 
-/// Temporary upper bound for read helpers that still return Vec-backed pages.
-///
-/// Query modules should shrink this surface into caller-supplied paging or
-/// narrower SQL predicates as their fact families migrate fully to SQL.
-pub const DEFAULT_QUERY_LIMIT: usize = 10_000;
-
 impl Db {
+    // =========================================================================
+    // Central Entry Points
+    // =========================================================================
+
     /// Expose the underlying SQLite connection to core modules that own their
     /// table SQL directly.
     pub(crate) fn conn(&self) -> &SqliteConnection {
@@ -336,6 +274,38 @@ impl Db {
         let conn = SqliteConnection::open_in_memory()?;
         Self::from_connection_with_schema_sources(conn, sources)
     }
+
+    // Critical path: callers put every atomic row mutation
+    // through this closure, then use the transaction-local row helpers below.
+    /// Run a write transaction.
+    ///
+    /// The closure sees its own writes through the same SQLite handle. Keep
+    /// closures narrow: they are where callers express the atomic unit, while
+    /// this database only supplies `BEGIN IMMEDIATE` / `COMMIT` / `ROLLBACK`.
+    pub fn write_transaction<T>(
+        &self,
+        apply: impl FnOnce(&Db) -> rusqlite::Result<T>,
+    ) -> rusqlite::Result<T> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = apply(self);
+        match result {
+            Ok(value) => match self.conn.execute_batch("COMMIT") {
+                Ok(()) => Ok(value),
+                Err(err) => {
+                    let _ = self.conn.execute_batch("ROLLBACK");
+                    Err(err)
+                }
+            },
+            Err(err) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(err)
+            }
+        }
+    }
+
+    // =========================================================================
+    // Schema Opening Stages
+    // =========================================================================
 
     fn from_connection_with_schema_sources(
         conn: SqliteConnection,
@@ -393,6 +363,10 @@ impl Db {
         })
     }
 
+    // =========================================================================
+    // Replay Lifecycle Views
+    // =========================================================================
+
     /// Tables protected from rebuild reset.
     pub fn replay_protected_tables(&self) -> &[TableName] {
         &self.replay_protected_tables
@@ -407,6 +381,10 @@ impl Db {
     pub fn replay_summary_tables(&self) -> &[TableName] {
         &self.replay_summary_tables
     }
+
+    // =========================================================================
+    // Storage-Version Marker Reads
+    // =========================================================================
 
     /// Return the current core storage-version marker, if the database has one.
     pub fn current_storage_version(&self) -> rusqlite::Result<Option<u32>> {
@@ -449,33 +427,9 @@ impl Db {
         }
     }
 
-    // Critical path: callers put every atomic row mutation
-    // through this closure, then use the transaction-local row helpers below.
-    /// Run a write transaction.
-    ///
-    /// The closure sees its own writes through the same SQLite handle. Keep
-    /// closures narrow: they are where callers express the atomic unit, while
-    /// this database only supplies `BEGIN IMMEDIATE` / `COMMIT` / `ROLLBACK`.
-    pub fn write_transaction<T>(
-        &self,
-        apply: impl FnOnce(&Db) -> rusqlite::Result<T>,
-    ) -> rusqlite::Result<T> {
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
-        let result = apply(self);
-        match result {
-            Ok(value) => match self.conn.execute_batch("COMMIT") {
-                Ok(()) => Ok(value),
-                Err(err) => {
-                    let _ = self.conn.execute_batch("ROLLBACK");
-                    Err(err)
-                }
-            },
-            Err(err) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
-                Err(err)
-            }
-        }
-    }
+    // =========================================================================
+    // Typed Row Mutation Stages
+    // =========================================================================
 
     /// Insert typed table rows idempotently in their declared tables.
     pub fn insert_table_values(&self, rows: Vec<TableInsert>) -> rusqlite::Result<usize> {
@@ -568,6 +522,121 @@ impl Db {
             .map(|row| row.is_some())
     }
 }
+
+// =============================================================================
+// Shared Error Helper
+// =============================================================================
+
+fn db_error(message: impl Into<String>) -> rusqlite::Error {
+    rusqlite::Error::InvalidParameterName(message.into())
+}
+
+// =============================================================================
+// Schema Opening Helpers
+// =============================================================================
+
+fn unique_table_names(tables: impl IntoIterator<Item = TableName>) -> Vec<TableName> {
+    let mut unique = Vec::new();
+    for table in tables {
+        if !unique.contains(&table) {
+            unique.push(table);
+        }
+    }
+    unique
+}
+
+fn validate_replay_lifecycle(protected: &[TableName], reset: &[TableName]) -> rusqlite::Result<()> {
+    for table in reset {
+        if protected.contains(table) {
+            return Err(db_error(format!(
+                "table {} cannot be both replay-protected and replay-resettable",
+                table.as_str()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn declared_storage_version_source(
+    sources: &[SchemaSource],
+) -> rusqlite::Result<Option<StorageVersionSource>> {
+    let mut declared = None;
+    for source in sources {
+        let Some(version_source) = source.storage_version else {
+            continue;
+        };
+        match declared {
+            Some(existing) if !same_storage_version_source(existing, version_source) => {
+                return Err(db_error(format!(
+                    "conflicting storage version sources declared: {} and {}",
+                    existing.table.as_str(),
+                    version_source.table.as_str()
+                )));
+            }
+            Some(_) => {}
+            None => declared = Some(version_source),
+        }
+    }
+    Ok(declared)
+}
+
+fn same_storage_version_source(left: StorageVersionSource, right: StorageVersionSource) -> bool {
+    left.table == right.table
+        && left.version_column == right.version_column
+        && left.order_by_columns == right.order_by_columns
+}
+
+// =============================================================================
+// SQL Identifier Helpers
+// =============================================================================
+
+/// Quote a declared table name after rejecting unsafe identifier bytes.
+pub(crate) fn quoted_table_name(table: TableName) -> rusqlite::Result<String> {
+    quoted_table_name_str(table.as_str())
+}
+
+/// Quote a table name string after rejecting unsafe identifier bytes.
+pub(crate) fn quoted_table_name_str(name: &str) -> rusqlite::Result<String> {
+    if !name
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.'))
+    {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "invalid table name {name}"
+        )));
+    }
+    Ok(format!("\"{name}\""))
+}
+
+/// Quote one SQL identifier after rejecting unsafe identifier bytes.
+pub(crate) fn quoted_identifier(name: &str) -> rusqlite::Result<String> {
+    if !name
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "invalid identifier {name}"
+        )));
+    }
+    Ok(format!("\"{name}\""))
+}
+
+/// Quote and comma-join SQL identifiers.
+pub(crate) fn quoted_identifier_list<I, S>(columns: I) -> rusqlite::Result<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    columns
+        .into_iter()
+        .map(|column| quoted_identifier(column.as_ref()))
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map(|columns| columns.join(", "))
+}
+
+// =============================================================================
+// Row Mutation SQL Helpers
+// =============================================================================
 
 fn validate_columns_and_values(
     columns: &[&str],

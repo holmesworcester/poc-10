@@ -862,6 +862,85 @@ fn command_module_docs_explain_command_system_role() {
 }
 
 #[test]
+fn db_module_docs_explain_identifier_quoting_and_storage_marker_reads() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let db_path = root.join("src/core/db.rs");
+    let db_doc = rust_module_doc_text(&db_path);
+    let normalized_doc = normalize_whitespace(&db_doc);
+
+    for required in [
+        "The exported surface is split by responsibility",
+        "`Db` is the reusable SQLite handle and transaction boundary",
+        "`SchemaSource`, `StorageVersionSource`, and `ReplayTables` let runtime owners declare schema, upgrade-marker, and rebuild lifecycle metadata",
+        "`TableName`, `TypedTableSchema`, `TableInsert`, `TableDeleteWhere`, `RowMutation`, and `Value` are the typed-row mutation vocabulary",
+        "The crate-visible quoting helpers are for modules that own direct SQL",
+        "quotes trusted table and column identifiers for syntax safety",
+        "The storage-version marker is also protocol-owned state",
+        "A `SchemaSource` may declare a `StorageVersionSource`: the marker table, the version column, and the columns that sort newest marker rows first",
+        "`Db` records only that read recipe when it opens schema sources",
+        "`current_storage_version()` then asks \"what storage version does this database currently project?\"",
+        "`protocol_version_rows.protocol_version ORDER BY applied_at_ms DESC, update_fact_id DESC LIMIT 1`",
+        "Fresh or stale databases are repaired by the protocol's versioning update path",
+        "core only reads the marker to enforce declared commit preconditions: projection and intent writes compiled for a different storage version are consumed without row effects",
+        "query helpers that opt into current-storage checks use the same marker to return a mismatch error before reading incompatible materialized rows",
+    ] {
+        assert!(
+            normalized_doc.contains(required),
+            "src/core/db.rs module docs should explain quoting and storage marker reads: {required:?}"
+        );
+    }
+}
+
+#[test]
+fn db_module_layout_presents_exports_before_stages_and_helpers() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let db = source_text(&root.join("src/core/db.rs"));
+
+    let mut previous = 0usize;
+    for section in [
+        "Exported Vocabulary",
+        "Exported Database Handle",
+        "Central Entry Points",
+        "Schema Opening Stages",
+        "Replay Lifecycle Views",
+        "Storage-Version Marker Reads",
+        "Typed Row Mutation Stages",
+        "Shared Error Helper",
+        "Schema Opening Helpers",
+        "SQL Identifier Helpers",
+        "Row Mutation SQL Helpers",
+    ] {
+        let offset = db
+            .find(section)
+            .unwrap_or_else(|| panic!("src/core/db.rs is missing section {section:?}"));
+        assert!(
+            previous < offset,
+            "src/core/db.rs section {section:?} should appear after the previous section"
+        );
+        previous = offset;
+    }
+
+    for exported in [
+        "pub const DEFAULT_QUERY_LIMIT",
+        "pub struct TableName",
+        "pub struct ReplayTables",
+        "pub struct StorageVersionSource",
+        "pub struct SchemaSource",
+        "pub enum Value",
+        "pub struct TableInsert",
+        "pub struct TableDeleteWhere",
+        "pub struct TypedTableSchema",
+        "pub enum RowMutation",
+        "pub struct Db",
+    ] {
+        assert!(
+            db.contains(exported),
+            "src/core/db.rs should make exported database surface visible: {exported:?}"
+        );
+    }
+}
+
+#[test]
 fn architecture_docs_match_current_module_and_context_names() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
 
