@@ -599,36 +599,27 @@ impl ContentMessageProjector {
 
         // 3. Materialize.
         Ok(share_fact_with_sync(
-            ready_message_output(
-                fact,
-                &message,
-                signature_need,
-                signer_need,
-                deletion_need,
-                retention_floor_need,
-                author_need,
-                secret_need,
-            )
-            .offer(crate::core::context::ContextOffer::range(
-                fact.id,
-                "content_message",
-                scope,
-                fact.id,
-                fact.id,
-            ))
-            .row_mutation(RowMutation::InsertValues(content_message_row(
-                fact.id, &message,
-            )))
-            .row_mutation(RowMutation::InsertValues(opened_message_row(
-                OpenedMessageRow {
-                    workspace_id: message.workspace_id,
-                    message_id: fact.id,
-                    created_at_ms: message.created_at_ms,
-                    author_user_id: message.author_user_id,
-                    signer_id: message.signer_id,
-                    text,
-                },
-            ))),
+            ready_message_output(fact, &message, deletion_need, retention_floor_need)
+                .offer(crate::core::context::ContextOffer::range(
+                    fact.id,
+                    "content_message",
+                    scope,
+                    fact.id,
+                    fact.id,
+                ))
+                .row_mutation(RowMutation::InsertValues(content_message_row(
+                    fact.id, &message,
+                )))
+                .row_mutation(RowMutation::InsertValues(opened_message_row(
+                    OpenedMessageRow {
+                        workspace_id: message.workspace_id,
+                        message_id: fact.id,
+                        created_at_ms: message.created_at_ms,
+                        author_user_id: message.author_user_id,
+                        signer_id: message.signer_id,
+                        text,
+                    },
+                ))),
             message.workspace_id,
             fact,
             context_have,
@@ -653,21 +644,13 @@ fn base_wait_output(
 fn ready_message_output(
     fact: &Fact,
     message: &super::fact::ContentMessageFact,
-    signature_need: ContextNeed,
-    signer_need: ContextNeed,
     deletion_need: ContextNeed,
     retention_floor_need: ContextNeed,
-    author_need: ContextNeed,
-    secret_need: ContextNeed,
 ) -> ProjectionOutput {
     with_retention_wakes(
         ProjectionOutput::new()
-            .need(signature_need)
-            .need(signer_need)
             .need(deletion_need)
-            .need(retention_floor_need)
-            .need(author_need)
-            .need(secret_need),
+            .need(retention_floor_need),
         fact.id,
         message,
     )
@@ -1217,7 +1200,25 @@ mod projector_tests {
             )
             .expect("project content message");
 
-        assert_eq!(output.needs.len(), 6);
+        assert_eq!(output.needs.len(), 2);
+        assert!(output.needs.iter().any(|need| need.role == "fact_purged"));
+        assert!(output
+            .needs
+            .iter()
+            .any(|need| need.role == "content_retention_floor"));
+        assert!(!output.needs.iter().any(|need| need.role == "auth_user"));
+        assert!(!output
+            .needs
+            .iter()
+            .any(|need| need.role == "signature_proof"));
+        assert!(!output
+            .needs
+            .iter()
+            .any(|need| need.role == "content_signer"));
+        assert!(!output
+            .needs
+            .iter()
+            .any(|need| need.role == "secret_coverage"));
         assert_eq!(output.offers.len(), 1);
         assert!(output
             .offers
@@ -1227,6 +1228,18 @@ mod projector_tests {
         assert_eq!(
             output.effects.intents[0].kind.as_str(),
             "share_fact_with_sync"
+        );
+        let share = topo::protocol::sync::share_fact_with_sync::decode_share_fact_with_sync(
+            &output.effects.intents[0],
+        )
+        .expect("decode share intent");
+        assert_eq!(share.owner_fact_id, fact.id);
+        assert_eq!(share.workspace_id, message.workspace_id);
+        let mut expected_context_have = vec![signature_fact.id, signer_fact.id, author_fact.id];
+        expected_context_have.sort();
+        assert_eq!(
+            share.context_have, expected_context_have,
+            "sync keeps validated dependency facts without keeping live validation needs"
         );
         assert_eq!(output.effects.row_mutations.len(), 2);
 

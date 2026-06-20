@@ -361,7 +361,7 @@ impl ContentMessageDeletionProjector {
             author_user_id: deletion.author_user_id,
         });
         Ok(share_fact_with_sync(
-            output_with_needs([Some(signature_need), Some(signer_need), Some(author_need)])
+            ProjectionOutput::new()
                 .offer(crate::core::project_fact::fact_purged_offer(
                     fact.id,
                     scope,
@@ -481,15 +481,28 @@ mod projector_tests {
         let message_fact = message_fact(workspace_id, author_user_id.id);
         let (deletion, fact) =
             deletion_fact(workspace_id, message_fact.id, author_user_id.id, 12_345);
+        let signer_fact = signer_fact(workspace_id, author_user_id.id);
+        let signature_ctx = signature_match(&fact);
+        let signer_ctx = signer_match(&fact, &signer_fact);
+        let author_ctx = author_match(&fact, &author_user_id);
+        let mut expected_context_have = vec![
+            signature_ctx.payload.id,
+            signer_ctx.payload.id,
+            author_ctx.payload.id,
+        ];
+        expected_context_have.sort();
 
         let output = project::ContentMessageDeletionProjector::new()
             .project(
                 &fact,
-                &authorized_context(&fact, &message_fact, &author_user_id),
+                &ProjectionContext::from_matches(vec![signature_ctx, signer_ctx, author_ctx]),
             )
             .expect("project deletion");
 
-        assert_eq!(output.needs.len(), 3);
+        assert!(
+            output.needs.is_empty(),
+            "valid deletion claims should not retain proof needs after sharing"
+        );
         assert_eq!(output.offers.len(), 1);
         assert_eq!(output.offers[0].role, "fact_purged");
         assert_eq!(output.effects.intents.len(), 1);
@@ -497,6 +510,13 @@ mod projector_tests {
             output.effects.intents[0].kind.as_str(),
             "share_fact_with_sync"
         );
+        let share = topo::protocol::sync::share_fact_with_sync::decode_share_fact_with_sync(
+            &output.effects.intents[0],
+        )
+        .expect("decode share intent");
+        assert_eq!(share.owner_fact_id, fact.id);
+        assert_eq!(share.workspace_id, workspace_id);
+        assert_eq!(share.context_have, expected_context_have);
         assert_eq!(output.effects.row_mutations.len(), 1);
         let RowMutation::InsertValues(stored) = &output.effects.row_mutations[0] else {
             panic!("expected insert values mutation");

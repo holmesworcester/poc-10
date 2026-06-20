@@ -408,9 +408,6 @@ impl ContentFileSliceProjector {
             )?;
             return Ok(retract_fact_from_sync(
                 ProjectionOutput::new()
-                    .need(signature_need)
-                    .need(file_need)
-                    .need(message_need)
                     .need(file_deletion_need)
                     .need(parent_deletion_need)
                     .row_mutation(RowMutation::DeleteWhere(content_file_slice_delete(
@@ -430,9 +427,6 @@ impl ContentFileSliceProjector {
             validate_file_deletion(deletion, file.workspace_id, parent.id, file.author_user_id)?;
             return Ok(retract_fact_from_sync(
                 ProjectionOutput::new()
-                    .need(signature_need)
-                    .need(file_need)
-                    .need(message_need)
                     .need(file_deletion_need)
                     .need(parent_deletion_need)
                     .row_mutation(RowMutation::DeleteWhere(content_file_slice_delete(
@@ -460,9 +454,6 @@ impl ContentFileSliceProjector {
         // 3. Materialize.
         Ok(share_fact_with_sync(
             ProjectionOutput::new()
-                .need(signature_need)
-                .need(file_need)
-                .need(message_need)
                 .need(file_deletion_need)
                 .need(parent_deletion_need)
                 .row_mutation(RowMutation::InsertValues(content_file_slice_row(

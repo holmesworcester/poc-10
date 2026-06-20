@@ -285,7 +285,7 @@ impl RemovalFrontierProjector {
 
         // 3. Materialize.
         Ok(share_fact_with_sync(
-            waiting.offer(ContextOffer::range(
+            ProjectionOutput::new().offer(ContextOffer::range(
                 fact.id,
                 "auth_removal_frontier",
                 scope,

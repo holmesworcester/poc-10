@@ -417,7 +417,7 @@ impl RetentionPolicyProjector {
         // 3. Materialize.
         let row = policy_row(fact.id, &policy);
         Ok(share_fact_with_sync(
-            waiting
+            ProjectionOutput::new()
                 .offer(crate::core::context::ContextOffer::range(
                     fact.id,
                     "sync_exact_fact",

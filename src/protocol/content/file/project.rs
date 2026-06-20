@@ -512,12 +512,8 @@ impl ContentFileProjector {
         // 3. Materialize.
         Ok(share_fact_with_sync(
             ProjectionOutput::new()
-                .need(signature_need)
-                .need(signer_need)
                 .need(file_deletion_need)
-                .need(parent_need)
                 .need(parent_deletion_need)
-                .need(author_need)
                 .offer(crate::core::context::ContextOffer::range(
                     fact.id,
                     "content_file",

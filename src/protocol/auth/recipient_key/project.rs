@@ -294,12 +294,27 @@ fn recipient_key(
         fact.id,
         fact.id,
     );
+    let min_frontier_created_at_ms =
+        if recipient.previous_recipient_key_id == NO_PREVIOUS_RECIPIENT_KEY {
+            0
+        } else {
+            recipient.created_at_ms
+        };
+    let wrap_need = proactive_wrap_source_need(
+        fact.id,
+        scope.clone(),
+        recipient.workspace_id,
+        min_frontier_created_at_ms,
+    );
     let mut context_have = context_have_from_needs(projection_context, [&superseded_need]);
     let is_superseded = !context_have.is_empty();
     let mut output = ProjectionOutput::new()
         .need(signature_need.clone())
         .need(signer_need.clone())
-        .need(superseded_need);
+        .need(superseded_need.clone())
+        .need(wrap_need.clone());
+    output = add_signer_needs_for_matching_sources(output, projection_context, &wrap_need)?;
+    let mut previous_superseded_offer = None;
     if !signature::project::signature_proof_ready(
         projection_context,
         &signature_need,
@@ -325,7 +340,7 @@ fn recipient_key(
         };
         validate_previous_recipient_key(previous_fact, &recipient)?;
         context_have.push(previous_fact.id);
-        output = output.offer(ContextOffer::range(
+        previous_superseded_offer = Some(ContextOffer::range(
             fact.id,
             "recipient_superseded",
             scope.clone(),
@@ -344,8 +359,15 @@ fn recipient_key(
     context_have.extend(context_have_from_needs(projection_context, [&signer_need]));
 
     // 3. Materialize: publish recipient context and proactive key-wrap creation facts.
+    let mut materialized_output = ProjectionOutput::new();
+    if !is_superseded {
+        materialized_output = materialized_output.need(superseded_need.clone());
+    }
+    if let Some(offer) = previous_superseded_offer {
+        materialized_output = materialized_output.offer(offer);
+    }
     output = share_fact_with_sync(
-        output.offer(ContextOffer::range(
+        materialized_output.offer(ContextOffer::range(
             fact.id,
             "recipient_key",
             scope.clone(),
@@ -382,21 +404,9 @@ fn recipient_key(
         return Ok(output);
     }
 
-    let min_frontier_created_at_ms =
-        if recipient.previous_recipient_key_id == NO_PREVIOUS_RECIPIENT_KEY {
-            0
-        } else {
-            recipient.created_at_ms
-        };
-    let wrap_need = proactive_wrap_source_need(
-        fact.id,
-        scope.clone(),
-        recipient.workspace_id,
-        min_frontier_created_at_ms,
-    );
     output = output.need(wrap_need.clone());
-
     output = add_signer_needs_for_matching_sources(output, projection_context, &wrap_need)?;
+
     for (source_fact_id, signer_secret_fact_id, source) in
         matching_wrap_sources_with_signer(projection_context, &wrap_need)?
     {

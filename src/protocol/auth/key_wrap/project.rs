@@ -811,7 +811,7 @@ fn key_wrap(
         .need(signer_need.clone())
         .need(recipient_need.clone())
         .need(frontier_need.clone())
-        .need(local_recipient_need);
+        .need(local_recipient_need.clone());
 
     if signer_public_key.is_none() || recipient_fact.is_none() || frontier_fact.is_none() {
         return Ok(output);
@@ -843,8 +843,12 @@ fn key_wrap(
     );
 
     // 3. Materialize: write the accepted wrap row and emit local recovery facts.
+    let mut materialized_output = ProjectionOutput::new();
+    if local_recipient_fact.is_none() {
+        materialized_output = materialized_output.need(local_recipient_need.clone());
+    }
     output = share_fact_with_sync(
-        output
+        materialized_output
             .row_mutation(RowMutation::InsertValues(key_wrap_insert(KeyWrapRow {
                 key_wrap_id: fact.id,
                 signer_public_key,

@@ -375,12 +375,7 @@ fn project_bootstrap_admin(
     );
 
     // 3. Materialize.
-    materialized_output(
-        fact,
-        admin,
-        needs.output().need(user_invite_need),
-        context_have,
-    )
+    materialized_output(fact, admin, ProjectionOutput::new(), context_have)
 }
 
 fn project_delegated_admin(
@@ -439,7 +434,7 @@ fn project_delegated_admin(
     );
 
     // 3. Materialize.
-    materialized_output(fact, admin, needs.output(), context_have)
+    materialized_output(fact, admin, ProjectionOutput::new(), context_have)
 }
 
 struct BootstrapAdminNeeds {

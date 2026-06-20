@@ -386,8 +386,6 @@ impl ContentReactionProjector {
             )?;
             return Ok(retract_fact_from_sync(
                 delete_reaction_projection(reaction.workspace_id, fact.id)
-                    .need(signature_need)
-                    .need(target_need)
                     .need(target_deletion_need)
                     .purge_self(fact.id),
                 reaction.workspace_id,
@@ -428,11 +426,7 @@ impl ContentReactionProjector {
         })?;
         Ok(share_fact_with_sync(
             ProjectionOutput::new()
-                .need(signature_need)
-                .need(signer_need)
-                .need(target_need)
                 .need(target_deletion_need)
-                .need(author_need)
                 .row_mutation(RowMutation::InsertValues(row)),
             reaction.workspace_id,
             fact,

@@ -299,12 +299,13 @@ fn key_request(
 
     let recipient_fact = matched_payload_fact(projection_context, &recipient_need);
     let frontier_fact = matched_payload_fact(projection_context, &frontier_need);
-    let mut output = ProjectionOutput::new()
+    let mut waiting = ProjectionOutput::new()
         .need(signature_need.clone())
         .need(requester_need.clone())
         .need(recipient_need.clone())
         .need(frontier_need.clone())
         .need(source_need.clone());
+    waiting = add_signer_needs_for_matching_sources(waiting, projection_context, &source_need)?;
     if !signature::project::signature_proof_ready(
         projection_context,
         &signature_need,
@@ -313,14 +314,21 @@ fn key_request(
         request.signer_public_key,
         "key request",
     )? {
-        return Ok(output);
+        return Ok(waiting);
     }
     let Some(requester_fact) = projection_context.payload_for(&requester_need) else {
-        return Ok(output);
+        return Ok(waiting);
     };
     validate_requester_signer(requester_fact, &request)?;
     let mut context_have =
         context_have_from_needs(projection_context, [&signature_need, &requester_need]);
+    let mut output = ProjectionOutput::new().need(source_need.clone());
+    if recipient_fact.is_none() {
+        output = output.need(recipient_need.clone());
+    }
+    if frontier_fact.is_none() {
+        output = output.need(frontier_need.clone());
+    }
 
     // 3. Materialize: emit key-wrap creation facts for eligible sources.
     if let (Some(recipient_fact), Some(frontier_fact)) = (recipient_fact, frontier_fact) {

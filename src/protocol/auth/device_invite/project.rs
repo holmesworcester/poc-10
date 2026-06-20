@@ -378,7 +378,7 @@ fn project_user_authorized(
     );
 
     // 3. Materialize.
-    materialized_output(fact, invite, needs.output(), context_have)
+    materialized_output(fact, invite, ProjectionOutput::new(), context_have)
 }
 
 fn project_endpoint_authorized(
@@ -424,7 +424,7 @@ fn project_endpoint_authorized(
     );
 
     // 3. Materialize.
-    materialized_output(fact, invite, needs.output(), context_have)
+    materialized_output(fact, invite, ProjectionOutput::new(), context_have)
 }
 
 struct UserAuthorityNeeds {

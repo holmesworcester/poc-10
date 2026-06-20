@@ -298,8 +298,6 @@ impl WorkspaceProjector {
         // 3. Materialize.
         Ok(share_fact_with_sync(
             ProjectionOutput::new()
-                .need(signature_need.clone())
-                .need(accepted_need.clone())
                 .offer(crate::core::context::ContextOffer::range(
                     fact.id,
                     "auth_workspace",

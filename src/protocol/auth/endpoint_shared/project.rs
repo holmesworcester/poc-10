@@ -369,8 +369,6 @@ impl EndpointSharedProjector {
         // 3. Materialize.
         Ok(share_fact_with_sync(
             ProjectionOutput::new()
-                .need(signature_need)
-                .need(authority_need)
                 .offer(crate::core::context::ContextOffer::range(
                     fact.id,
                     "content_signer",
