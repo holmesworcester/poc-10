@@ -83,6 +83,37 @@ in `src/core` or `src/protocol`.
   standard fact-family role files. Avoid files or directories named `state`,
   `jobs`, `cli_commands`, or `codec.rs` in target code.
 
+## Source File Organization
+
+Source files should be readable top-down by a newcomer. A first pass should show
+what the file exports, what the main procedure or runtime surface is, which
+component stages implement it, and which helpers are just mechanics.
+
+For files that export public or crate-visible types, constants, traits, or
+functions, make the exported surface explicit in the module docs. Group the
+exported vocabulary near the top of the file, before private helper code, and
+explain each exported group by responsibility instead of merely listing names.
+This is especially important for core substrate files such as `db.rs`,
+`network.rs`, `runtime.rs`, and `project_fact.rs`, where the exported surface is
+the boundary other modules are expected to use.
+
+Prefer the hierarchical layout used by `project_fact.rs`: central procedures
+first, then component stages, then purpose-specific helpers. The top of the
+file should answer "what are the one or two things this module does?" before it
+dives into low-level SQL, byte parsing, validation, or row-key details. Helper
+sections should be named by purpose, not by vague buckets such as "misc" or
+"utils".
+
+Module docs should include direct negative boundaries. Use "this file must not
+..." wording when a mistake would cross an ownership line, and name the correct
+destination for that work. For example, core network IO must not parse frame
+payloads or decide fact admission; those responsibilities belong in protocol
+fact and intent modules.
+
+Keep small mechanisms small in prose. It is enough to say that trusted table and
+column identifiers are quoted for syntax safety; expand only when the behavior
+would otherwise be ambiguous to a maintainer.
+
 ## Documentation Style
 
 Project documentation describes the current system in terms of purpose,

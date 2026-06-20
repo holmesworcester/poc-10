@@ -466,11 +466,25 @@ fn repo_instructions_point_at_live_documentation_style_rules() {
         "AGENTS.md should point at the live documentation style section"
     );
     assert!(
+        agents.contains("docs/RULES.md#source-file-organization"),
+        "AGENTS.md should point at the live source file organization section"
+    );
+    assert!(
         !agents.contains("documentation_guide.md"),
         "AGENTS.md should not point at the removed documentation guide"
     );
 
     for required in [
+        "## Source File Organization",
+        "Source files should be readable top-down by a newcomer",
+        "what the file exports, what the main procedure or runtime surface is, which component stages implement it",
+        "make the exported surface explicit in the module docs",
+        "Group the exported vocabulary near the top of the file, before private helper code",
+        "Prefer the hierarchical layout used by `project_fact.rs`: central procedures first, then component stages, then purpose-specific helpers",
+        "Module docs should include direct negative boundaries",
+        "this file must not",
+        "core network IO must not parse frame payloads or decide fact admission",
+        "trusted table and column identifiers are quoted for syntax safety",
         "## Documentation Style",
         "What does this component own?",
         "What invariants, ordering rules, idempotence rules, replacement rules, or security conditions",
