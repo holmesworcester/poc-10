@@ -11,7 +11,7 @@ production/recovery, and local-only secrets.
 
 Data enters core as immutable facts returned by auth commands, emitted by
 projection, or received through connection/sync paths. Core stores the bytes,
-assigns the BLAKE3 fact id, and routes projection by the first-byte type tag
+assigns the [BLAKE3](https://www.blake3.io/) fact id, and routes projection by the first-byte type tag
 registered in `protocol::registry`.
 
 Data leaves auth projection as:
@@ -491,7 +491,8 @@ invite_accepted {
 
 ### `endpoint` (tag 128)
 
-Stores this device's local X25519 and Ed25519 private material. Projection
+Stores this device's local [X25519](https://www.rfc-editor.org/rfc/rfc7748) and
+[Ed25519](https://www.rfc-editor.org/rfc/rfc8032) private material. Projection
 requires local scope, re-derives public keys from private keys, writes the
 local endpoint rows, and offers `auth_local_endpoint` plus the singleton
 `auth_daemon_endpoint`.

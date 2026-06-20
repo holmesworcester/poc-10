@@ -226,7 +226,7 @@ connection {
 
 ### `ephemeral_secret` (tag 43)
 
-Local X25519 handshake secret. Projection requires local scope and public/private
+Local [X25519](https://www.rfc-editor.org/rfc/rfc7748) handshake secret. Projection requires local scope and public/private
 key consistency, writes `connection_ephemeral_secret_rows`, offers
 `connection_ephemeral_secret` by fact id and
 `connection_ephemeral_secret_public_key` by public key, and deletes/purges

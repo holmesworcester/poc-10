@@ -1,13 +1,13 @@
 # Context
 
-Context is a lightweight p2p engine for building local-first, end-to-end
+Context is a lightweight p2p engine for building [local-first](https://www.inkandswitch.com/essay/local-first/), end-to-end
 encrypted collaboration apps. Its storage and wire protocol are made of facts
-in the Datalog/database sense: asserted ground records that can be stored,
+in the [Datalog](https://en.wikipedia.org/wiki/Datalog)/database sense: asserted ground records that can be stored,
 matched, and projected. Context facts are immutable, fixed-layout records
 admitted locally and exchanged between peers. A fact can be a message, invite,
 membership change, sync request, receipt, key wrap, or connection handshake;
 deterministic projectors validate facts against context and turn them into
-SQLite rows or bounded stateful work.
+[SQLite](https://www.sqlite.org/index.html) rows or bounded stateful work.
 
 The result is a fact-based protocol runtime meant to be small enough to reason
 about and complete enough to be the backend for a p2p Slack: team chat, invites,
@@ -343,13 +343,21 @@ facts, context, time wakes, intents, or schema-owned rows.
 
 Active design and maintenance docs are:
 
-- `README.md`: architecture overview and protocol function boundaries.
-- `ARCHITECTURE_DIAGRAMS.md`: GitHub-renderable architecture flowcharts.
-- `docs/RULES.md`: architecture rules, projector rules, and guardrails.
-- `docs/todo-add-verus-proofs.md`: TODO plan for adding Verus proofs.
-- `src/core/README.md`: core/runtime responsibility boundaries, including
+- [README.md](README.md): architecture overview and protocol function boundaries.
+- [ARCHITECTURE_DIAGRAMS.md](ARCHITECTURE_DIAGRAMS.md): GitHub-renderable
+  architecture flowcharts.
+- [docs/RULES.md](docs/RULES.md): architecture rules, projector rules, and
+  guardrails.
+- [docs/todo-add-verus-proofs.md](docs/todo-add-verus-proofs.md): TODO plan
+  for adding Verus proofs.
+- [src/core/README.md](src/core/README.md): core/runtime responsibility boundaries, including
   projection and handler commit boundaries.
-- `src/protocol/*/README.md`: fact-scope responsibilities, facts, handlers,
-  row state, and cross-scope interfaces.
+- [src/protocol/README.md](src/protocol/README.md),
+  [auth](src/protocol/auth/README.md),
+  [content](src/protocol/content/README.md),
+  [connection](src/protocol/connection/README.md),
+  [sync](src/protocol/sync/README.md), and
+  [versioning](src/protocol/versioning/README.md): fact-scope
+  responsibilities, facts, handlers, row state, and cross-scope interfaces.
 
 Planning notes live under `docs/archived/`.
