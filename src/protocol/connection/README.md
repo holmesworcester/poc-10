@@ -74,6 +74,9 @@ fact. Request projection consumes invite or membership authority and emits
 `create_connection` after it can also emit or match durable receive metadata.
 Connection projection consumes request, endpoint or ephemeral-secret, invite
 context, and durable receive metadata before offering received connections.
+Sealed request and connection headers key local endpoint needs by endpoint id and
+ephemeral-secret needs by public key; opened plaintext still validates the
+matched secret fact id.
 Frame projectors consume `connection` context plus incoming metadata or durable
 frame-observation context before opening contained facts back into incoming
 projection.
@@ -225,8 +228,9 @@ connection {
 
 Local X25519 handshake secret. Projection requires local scope and public/private
 key consistency, writes `connection_ephemeral_secret_rows`, offers
-`connection_ephemeral_secret`, and deletes/purges itself when close context names
-it.
+`connection_ephemeral_secret` by fact id and
+`connection_ephemeral_secret_public_key` by public key, and deletes/purges
+itself when close context names it.
 
 ### `close` (tag 45)
 
@@ -286,6 +290,7 @@ inbound responder transport observation:
 inbound responder dependency graph:
   request
     needs auth_local_endpoint(to_endpoint)
+    needs connection_ephemeral_secret_public_key(initiator_ephemeral_public_key)
     needs connection_invite_secret(invite_secret) or endpoint_shared
     -> connection_fact_receipt(request) local receive proof
     -> create_connection(request, authority, receipt)

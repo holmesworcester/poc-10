@@ -322,17 +322,21 @@ pub mod authenticate {
         let opened_request = match open_request_from_context(request_fact, context, fact.id) {
             Ok(opened_request) => opened_request,
             Err(_) => {
+                let (endpoint_need, secret_need) = request_opener_needs(fact.id, request_fact)?;
                 return Ok(Authentication::NeedsContext(vec![
                     request_need,
-                    all_local_endpoint_need(fact.id),
-                    all_ephemeral_secret_need(fact.id),
+                    endpoint_need,
+                    secret_need,
                 ]));
             }
         };
         let request = opened_request.request;
         let request_opener_need = opened_request.opener_need;
 
-        let responder_secret_need = all_ephemeral_secret_need(fact.id);
+        let responder_secret_need = ephemeral_secret_public_key_need(
+            fact.id,
+            decode::connection_header_ephemeral_public_key(fact.body())?,
+        );
         for (_, secret_fact) in context.matched_payloads_for(&responder_secret_need) {
             if secret_fact.scope != FactScope::Local {
                 return Err("connection responder secret context must be local".to_string());
@@ -377,7 +381,8 @@ pub mod authenticate {
             ));
         }
 
-        let endpoint_need = all_local_endpoint_need(fact.id);
+        let endpoint_need =
+            local_endpoint_need(fact.id, decode::connection_header_to_endpoint(fact.body())?);
         for (_, endpoint_fact) in context.matched_payloads_for(&endpoint_need) {
             if endpoint_fact.scope != FactScope::Local {
                 return Err("connection endpoint context must be local".to_string());
@@ -461,7 +466,7 @@ pub mod authenticate {
         context: &ProjectionContext,
         owner: FactId,
     ) -> Result<OpenedRequest, String> {
-        let endpoint_need = all_local_endpoint_need(owner);
+        let (endpoint_need, secret_need) = request_opener_needs(owner, request_fact)?;
         for (_, endpoint_fact) in context.matched_payloads_for(&endpoint_need) {
             if let Ok(endpoint) = endpoint::decode_fact_payload(endpoint_fact.body()) {
                 if let Ok(request) =
@@ -474,7 +479,6 @@ pub mod authenticate {
                 }
             }
         }
-        let secret_need = all_ephemeral_secret_need(owner);
         for (_, secret_fact) in context.matched_payloads_for(&secret_need) {
             if let Ok(secret) = ephemeral_secret::decode_fact_payload(secret_fact.body()) {
                 if let Ok(request) =
@@ -488,6 +492,22 @@ pub mod authenticate {
             }
         }
         Err("connection request context cannot be opened locally".to_string())
+    }
+
+    fn request_opener_needs(
+        owner: FactId,
+        request_fact: &Fact,
+    ) -> Result<(ContextNeed, ContextNeed), String> {
+        Ok((
+            local_endpoint_need(
+                owner,
+                request::project::decode::request_header_to_endpoint(request_fact.body())?,
+            ),
+            ephemeral_secret_public_key_need(
+                owner,
+                request::project::decode::request_header_ephemeral_public_key(request_fact.body())?,
+            ),
+        ))
     }
 
     fn validate_connection(
@@ -577,24 +597,20 @@ pub mod authenticate {
         Ok(())
     }
 
-    pub(super) fn all_ephemeral_secret_need(owner: FactId) -> ContextNeed {
-        ContextNeed::range(
+    pub(super) fn ephemeral_secret_public_key_need(
+        owner: FactId,
+        public_key: FactId,
+    ) -> ContextNeed {
+        exact_need(
             owner,
-            "connection_ephemeral_secret",
+            ephemeral_secret::project::CONNECTION_EPHEMERAL_SECRET_PUBLIC_KEY_ROLE,
             FactScope::Local,
-            [0; 32],
-            [0xff; 32],
+            public_key,
         )
     }
 
-    pub(super) fn all_local_endpoint_need(owner: FactId) -> ContextNeed {
-        ContextNeed::range(
-            owner,
-            "auth_local_endpoint",
-            FactScope::Local,
-            [0; 32],
-            [0xff; 32],
-        )
+    pub(super) fn local_endpoint_need(owner: FactId, endpoint_id: FactId) -> ContextNeed {
+        exact_need(owner, "auth_local_endpoint", FactScope::Local, endpoint_id)
     }
 
     pub(super) fn exact_need(
@@ -622,19 +638,29 @@ pub mod authenticate {
 
     #[cfg(test)]
     mod tests {
+        use crate::core::context::{ContextNeed, ContextOffer};
         use crate::core::crypto;
-        use crate::core::facts::{Fact, FactScope};
-        use crate::core::project_fact::ProjectionContext;
+        use crate::core::facts::{Fact, FactId, FactScope};
+        use crate::core::project_fact::{MatchedContext, ProjectionContext};
+        use crate::protocol::auth::endpoint::encode as endpoint_encode;
+        use crate::protocol::auth::endpoint::fact::EndpointFact;
         use crate::protocol::connection::connection::encode;
         use crate::protocol::connection::connection::fact::ConnectionFact;
+        use crate::protocol::connection::request::encode as request_encode;
+        use crate::protocol::connection::request::fact::{
+            ConnectionRequestFact, REQUEST_MODE_MEMBERSHIP,
+        };
 
         fn canonical_fact() -> Fact {
-            let initiator_secret = [9; 32];
+            canonical_connection_fact([3; 32], crypto::x25519_public_key(&[9; 32]))
+        }
+
+        fn canonical_connection_fact(request_id: FactId, to_endpoint: FactId) -> Fact {
             let responder_ephemeral_private_key = [10; 32];
             let connection = ConnectionFact {
                 from_endpoint: [1; 32],
-                to_endpoint: crypto::x25519_public_key(&initiator_secret),
-                request_id: [3; 32],
+                to_endpoint,
+                request_id,
                 responder_addr: Some("127.0.0.1:41002".parse().unwrap()),
                 initiator_addr: Some("127.0.0.1:41001".parse().unwrap()),
                 initiator_ephemeral_secret_fact_id: [4; 32],
@@ -650,6 +676,91 @@ pub mod authenticate {
             Fact::new(FactScope::Local, 100, bytes)
         }
 
+        fn sealed_request_fact(
+            from_endpoint: FactId,
+            to_endpoint: FactId,
+            initiator_ephemeral_private_key: FactId,
+        ) -> Fact {
+            let request = ConnectionRequestFact {
+                mode: REQUEST_MODE_MEMBERSHIP,
+                from_endpoint,
+                to_endpoint,
+                nonce: [3; 32],
+                dialed_addr: None,
+                initiator_addr: None,
+                invite_fact_id: [0; 32],
+                bootstrap_hash: [0; 32],
+                invite_secret_fact_id: [0; 32],
+                invite_signature: [0; crypto::ED25519_SIGNATURE_BYTES],
+                initiator_endpoint_shared_id: [4; 32],
+                endpoint_signature: [5; crypto::ED25519_SIGNATURE_BYTES],
+                initiator_ephemeral_secret_fact_id: [6; 32],
+                initiator_ephemeral_public_key: crypto::x25519_public_key(
+                    &initiator_ephemeral_private_key,
+                ),
+            };
+            Fact::new(
+                FactScope::Global,
+                99,
+                request_encode::seal_fact(&request, &initiator_ephemeral_private_key)
+                    .expect("seal request"),
+            )
+        }
+
+        fn request_match(owner: FactId, request_fact: &Fact) -> MatchedContext {
+            MatchedContext {
+                need: crate::protocol::connection::request::project::connection_request_need(
+                    owner,
+                    request_fact.id,
+                ),
+                offer: crate::protocol::connection::request::project::connection_request_offer(
+                    request_fact.id,
+                    request_fact.id,
+                ),
+                payload: request_fact.clone(),
+            }
+        }
+
+        fn endpoint_match(owner: FactId, endpoint: EndpointFact) -> MatchedContext {
+            let endpoint_fact = Fact::new(
+                FactScope::Local,
+                101,
+                endpoint_encode::encode_fact(&endpoint).expect("endpoint fact"),
+            );
+            MatchedContext {
+                need: super::local_endpoint_need(owner, endpoint.endpoint),
+                offer: ContextOffer::range(
+                    endpoint_fact.id,
+                    "auth_local_endpoint",
+                    FactScope::Local,
+                    endpoint.endpoint,
+                    endpoint.endpoint,
+                ),
+                payload: endpoint_fact,
+            }
+        }
+
+        fn assert_exact_need(need: &ContextNeed, role: &str, key: FactId) {
+            assert_eq!(need.role.as_str(), role);
+            assert_eq!(need.start_key.as_bytes(), key);
+            assert_eq!(need.end_key.as_bytes(), key);
+        }
+
+        fn exact_need_with_key<'a>(
+            needs: &'a [ContextNeed],
+            role: &str,
+            key: FactId,
+        ) -> &'a ContextNeed {
+            needs
+                .iter()
+                .find(|need| {
+                    need.role.as_str() == role
+                        && need.start_key.as_bytes() == key
+                        && need.end_key.as_bytes() == key
+                })
+                .expect("exact need")
+        }
+
         fn authenticate(fact: &Fact) -> Result<super::Authentication, String> {
             super::super::decode::validate_sealed_fact(fact.body())?;
             super::authenticate(fact, &ProjectionContext::default())
@@ -662,6 +773,106 @@ pub mod authenticate {
         #[test]
         fn authenticates_canonical_fact() {
             assert!(!is_invalid(&canonical_fact()));
+        }
+
+        #[test]
+        fn missing_request_opener_needs_are_exact_from_request_header() {
+            let initiator_endpoint = crypto::x25519_public_key(&[11; 32]);
+            let responder_endpoint = crypto::x25519_public_key(&[12; 32]);
+            let initiator_ephemeral_private_key = [13; 32];
+            let request_fact = sealed_request_fact(
+                initiator_endpoint,
+                responder_endpoint,
+                initiator_ephemeral_private_key,
+            );
+            let connection_fact = canonical_connection_fact(request_fact.id, initiator_endpoint);
+            let context = ProjectionContext::from_matches(vec![request_match(
+                connection_fact.id,
+                &request_fact,
+            )]);
+
+            let super::Authentication::NeedsContext(needs) =
+                super::authenticate(&connection_fact, &context).expect("authenticate")
+            else {
+                panic!("connection should park on request opener context");
+            };
+
+            assert_exact_need(
+                exact_need_with_key(&needs, "auth_local_endpoint", responder_endpoint),
+                "auth_local_endpoint",
+                responder_endpoint,
+            );
+            assert_exact_need(
+                exact_need_with_key(
+                    &needs,
+                    crate::protocol::connection::ephemeral_secret::project::CONNECTION_EPHEMERAL_SECRET_PUBLIC_KEY_ROLE,
+                    crypto::x25519_public_key(&initiator_ephemeral_private_key),
+                ),
+                crate::protocol::connection::ephemeral_secret::project::CONNECTION_EPHEMERAL_SECRET_PUBLIC_KEY_ROLE,
+                crypto::x25519_public_key(&initiator_ephemeral_private_key),
+            );
+        }
+
+        #[test]
+        fn missing_connection_openers_need_exact_header_context() {
+            let initiator_endpoint = crypto::x25519_public_key(&[11; 32]);
+            let responder_secret = [12; 32];
+            let responder_endpoint = crypto::x25519_public_key(&responder_secret);
+            let initiator_ephemeral_private_key = [13; 32];
+            let responder_ephemeral_public_key = crypto::x25519_public_key(&[14; 32]);
+            let request_fact = sealed_request_fact(
+                initiator_endpoint,
+                responder_endpoint,
+                initiator_ephemeral_private_key,
+            );
+            let connection = ConnectionFact {
+                from_endpoint: responder_endpoint,
+                to_endpoint: initiator_endpoint,
+                request_id: request_fact.id,
+                responder_addr: None,
+                initiator_addr: None,
+                initiator_ephemeral_secret_fact_id: [6; 32],
+                responder_ephemeral_secret_fact_id: [7; 32],
+                responder_ephemeral_public_key,
+                handshake_hash: [8; 32],
+                connection_secret: [9; 32],
+            };
+            let connection_fact = Fact::new(
+                FactScope::Local,
+                100,
+                encode::seal_fact(&connection, &[14; 32]).expect("seal connection"),
+            );
+            let responder_endpoint_fact = EndpointFact {
+                endpoint: responder_endpoint,
+                secret: responder_secret,
+                signing_public_key: crypto::ed25519_public_key(&[15; 32]),
+                signing_secret: [15; 32],
+            };
+            let context = ProjectionContext::from_matches(vec![
+                request_match(connection_fact.id, &request_fact),
+                endpoint_match(connection_fact.id, responder_endpoint_fact),
+            ]);
+
+            let super::Authentication::NeedsContext(needs) =
+                super::authenticate(&connection_fact, &context).expect("authenticate")
+            else {
+                panic!("connection should park on connection opener context");
+            };
+
+            assert_exact_need(
+                exact_need_with_key(&needs, "auth_local_endpoint", initiator_endpoint),
+                "auth_local_endpoint",
+                initiator_endpoint,
+            );
+            assert_exact_need(
+                exact_need_with_key(
+                    &needs,
+                    crate::protocol::connection::ephemeral_secret::project::CONNECTION_EPHEMERAL_SECRET_PUBLIC_KEY_ROLE,
+                    responder_ephemeral_public_key,
+                ),
+                crate::protocol::connection::ephemeral_secret::project::CONNECTION_EPHEMERAL_SECRET_PUBLIC_KEY_ROLE,
+                responder_ephemeral_public_key,
+            );
         }
 
         #[test]
@@ -1136,8 +1347,8 @@ mod tests {
     fn initiator_semantic(fact_id: FactId, connection: ConnectionFact) -> AuthenticatedConnection {
         AuthenticatedConnection::Initiator {
             request_need: request::project::connection_request_need(fact_id, connection.request_id),
-            request_opener_need: authenticate::all_ephemeral_secret_need(fact_id),
-            endpoint_need: authenticate::all_local_endpoint_need(fact_id),
+            request_opener_need: authenticate::ephemeral_secret_public_key_need(fact_id, [10; 32]),
+            endpoint_need: authenticate::local_endpoint_need(fact_id, connection.to_endpoint),
             initiator_need: authenticate::exact_need(
                 fact_id,
                 "connection_ephemeral_secret",
@@ -1174,9 +1385,14 @@ mod tests {
     #[test]
     fn responder_projection_sends_response_and_seeds_sync() {
         let fact = Fact::new(FactScope::Local, 10, vec![49, 1, 2, 3]);
+        let connection = connection_fact();
         let request_need = request::project::connection_request_need(fact.id, [3; 32]);
-        let request_opener_need = authenticate::all_local_endpoint_need(fact.id);
-        let responder_secret_need = authenticate::all_ephemeral_secret_need(fact.id);
+        let request_opener_need =
+            authenticate::local_endpoint_need(fact.id, connection.from_endpoint);
+        let responder_secret_need = authenticate::ephemeral_secret_public_key_need(
+            fact.id,
+            connection.responder_ephemeral_public_key,
+        );
         let invite_need = authenticate::exact_need(
             fact.id,
             "connection_invite_secret",
@@ -1188,7 +1404,7 @@ mod tests {
             .project_semantic(
                 &fact,
                 AuthenticatedConnection::Responder {
-                    connection: connection_fact(),
+                    connection,
                     request_need,
                     request_opener_need,
                     responder_secret_need,
@@ -1223,8 +1439,10 @@ mod tests {
                 AuthenticatedConnection::Responder {
                     connection: connection_fact(),
                     request_need: request::project::connection_request_need(fact.id, [3; 32]),
-                    request_opener_need: authenticate::all_local_endpoint_need(fact.id),
-                    responder_secret_need: authenticate::all_ephemeral_secret_need(fact.id),
+                    request_opener_need: authenticate::local_endpoint_need(fact.id, [1; 32]),
+                    responder_secret_need: authenticate::ephemeral_secret_public_key_need(
+                        fact.id, [6; 32],
+                    ),
                     invite_need: None,
                 },
                 &ProjectionContext::default().with_mode(ProjectionMode::Replay),

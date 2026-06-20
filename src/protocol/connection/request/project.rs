@@ -344,7 +344,10 @@ pub mod authenticate {
             return Err(error);
         }
 
-        let sender_need = all_ephemeral_secret_need(fact.id);
+        let sender_need = ephemeral_secret_public_key_need(
+            fact.id,
+            decode::request_header_ephemeral_public_key(fact.body())?,
+        );
         for (_, secret_fact) in context.matched_payloads_for(&sender_need) {
             if secret_fact.scope != FactScope::Local {
                 return Err("connection request sender secret context must be local".to_string());
@@ -385,7 +388,8 @@ pub mod authenticate {
             }
         }
 
-        let receiver_need = all_local_endpoint_need(fact.id);
+        let receiver_need =
+            local_endpoint_need(fact.id, decode::request_header_to_endpoint(fact.body())?);
         for (_, endpoint_fact) in context.matched_payloads_for(&receiver_need) {
             if endpoint_fact.scope != FactScope::Local {
                 return Err(
@@ -637,24 +641,20 @@ pub mod authenticate {
         }
     }
 
-    pub(super) fn all_ephemeral_secret_need(owner: FactId) -> ContextNeed {
-        ContextNeed::range(
+    pub(super) fn ephemeral_secret_public_key_need(
+        owner: FactId,
+        public_key: FactId,
+    ) -> ContextNeed {
+        exact_need(
             owner,
-            "connection_ephemeral_secret",
+            ephemeral_secret::project::CONNECTION_EPHEMERAL_SECRET_PUBLIC_KEY_ROLE,
             FactScope::Local,
-            [0; 32],
-            [0xff; 32],
+            public_key,
         )
     }
 
-    pub(super) fn all_local_endpoint_need(owner: FactId) -> ContextNeed {
-        ContextNeed::range(
-            owner,
-            "auth_local_endpoint",
-            FactScope::Local,
-            [0; 32],
-            [0xff; 32],
-        )
+    pub(super) fn local_endpoint_need(owner: FactId, endpoint_id: FactId) -> ContextNeed {
+        exact_need(owner, "auth_local_endpoint", FactScope::Local, endpoint_id)
     }
 
     pub(super) fn invite_secret_need(owner: FactId, invite_secret_id: FactId) -> ContextNeed {
@@ -1201,13 +1201,13 @@ fn merge_projection_output(
 }
 
 #[cfg(test)]
-fn all_ephemeral_secret_need(owner: FactId) -> ContextNeed {
-    authenticate::all_ephemeral_secret_need(owner)
+fn ephemeral_secret_public_key_need(owner: FactId, public_key: FactId) -> ContextNeed {
+    authenticate::ephemeral_secret_public_key_need(owner, public_key)
 }
 
 #[cfg(test)]
-fn all_local_endpoint_need(owner: FactId) -> ContextNeed {
-    authenticate::all_local_endpoint_need(owner)
+fn local_endpoint_need(owner: FactId, endpoint_id: FactId) -> ContextNeed {
+    authenticate::local_endpoint_need(owner, endpoint_id)
 }
 
 fn invite_secret_need(owner: FactId, invite_secret_id: FactId) -> ContextNeed {
@@ -1239,6 +1239,7 @@ mod tests {
     use crate::protocol::auth::endpoint::encode as endpoint_encode;
     use crate::protocol::auth::endpoint::fact::EndpointFact;
     use crate::protocol::auth::invite_secret::{encode as invite_encode, fact::InviteSecretFact};
+    use crate::protocol::connection::ephemeral_secret;
     use crate::protocol::connection::ephemeral_secret::{
         encode as ephemeral_encode, fact::ConnectionEphemeralSecretFact,
     };
@@ -1323,7 +1324,7 @@ mod tests {
         );
         vec![
             MatchedContext {
-                need: all_local_endpoint_need(request_fact.id),
+                need: local_endpoint_need(request_fact.id, responder.endpoint),
                 offer: ContextOffer::range(
                     endpoint_fact.id,
                     "auth_local_endpoint",
@@ -1376,6 +1377,33 @@ mod tests {
         }
     }
 
+    fn assert_exact_need(needs: &[ContextNeed], role: &str, key: FactId) {
+        let need = needs
+            .iter()
+            .find(|need| need.role.as_str() == role)
+            .expect("need role");
+        assert_eq!(need.start_key.as_bytes(), key);
+        assert_eq!(need.end_key.as_bytes(), key);
+    }
+
+    #[test]
+    fn missing_request_context_needs_exact_header_keys() {
+        let local = endpoint([1; 32], [2; 32]);
+        let remote = endpoint([3; 32], [4; 32]);
+        let (_, _, request_fact) = bootstrap_facts(local, remote.endpoint);
+        let projected = ConnectionRequestProjector::new()
+            .project(&request_fact, &ProjectionContext::default())
+            .expect("project request without context");
+
+        assert_exact_need(
+            &projected.needs,
+            ephemeral_secret::project::CONNECTION_EPHEMERAL_SECRET_PUBLIC_KEY_ROLE,
+            decode::request_header_ephemeral_public_key(request_fact.body())
+                .expect("request public key"),
+        );
+        assert_exact_need(&projected.needs, "auth_local_endpoint", remote.endpoint);
+    }
+
     #[test]
     fn sender_request_projection_writes_pending_retry_row() {
         let local = endpoint([1; 32], [2; 32]);
@@ -1384,13 +1412,19 @@ mod tests {
 
         let context = ProjectionContext::from_matches(vec![
             MatchedContext {
-                need: all_ephemeral_secret_need(request_fact.id),
+                need: ephemeral_secret_public_key_need(
+                    request_fact.id,
+                    decode::request_header_ephemeral_public_key(request_fact.body())
+                        .expect("request public key"),
+                ),
                 offer: ContextOffer::range(
                     ephemeral_fact.id,
-                    "connection_ephemeral_secret",
+                    ephemeral_secret::project::CONNECTION_EPHEMERAL_SECRET_PUBLIC_KEY_ROLE,
                     FactScope::Local,
-                    ephemeral_fact.id,
-                    ephemeral_fact.id,
+                    decode::request_header_ephemeral_public_key(request_fact.body())
+                        .expect("request public key"),
+                    decode::request_header_ephemeral_public_key(request_fact.body())
+                        .expect("request public key"),
                 ),
                 payload: ephemeral_fact,
             },

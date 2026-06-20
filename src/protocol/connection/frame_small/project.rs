@@ -570,12 +570,24 @@ fn connection_material_from_context(
     if connection::connection::project::decode::validate_sealed_fact(fact.body()).is_err() {
         return ConnectionMaterialContext::Invalid;
     }
+    let Ok(endpoint_id) =
+        connection::connection::project::decode::connection_header_to_endpoint(fact.body())
+    else {
+        return ConnectionMaterialContext::Invalid;
+    };
+    let Ok(ephemeral_public_key) =
+        connection::connection::project::decode::connection_header_ephemeral_public_key(
+            fact.body(),
+        )
+    else {
+        return ConnectionMaterialContext::Invalid;
+    };
     let endpoint_need = ContextNeed::range(
         owner,
         "auth_local_endpoint",
         FactScope::Local,
-        [0; 32],
-        [0xff; 32],
+        endpoint_id,
+        endpoint_id,
     );
     for (_, endpoint_fact) in context.matched_payloads_for(&endpoint_need) {
         if let Ok(endpoint) = auth::endpoint::decode_fact_payload(endpoint_fact.body()) {
@@ -590,10 +602,10 @@ fn connection_material_from_context(
     }
     let ephemeral_need = ContextNeed::range(
         owner,
-        "connection_ephemeral_secret",
+        connection::ephemeral_secret::project::CONNECTION_EPHEMERAL_SECRET_PUBLIC_KEY_ROLE,
         FactScope::Local,
-        [0; 32],
-        [0xff; 32],
+        ephemeral_public_key,
+        ephemeral_public_key,
     );
     for (_, secret_fact) in context.matched_payloads_for(&ephemeral_need) {
         if let Ok(secret) = connection::ephemeral_secret::decode_fact_payload(secret_fact.body()) {
@@ -620,6 +632,69 @@ fn material_from_connection_fact(
         to_endpoint: connection.to_endpoint,
         request_id: connection.request_id,
         connection_secret: connection.connection_secret,
+    }
+}
+
+#[cfg(test)]
+mod material_tests {
+    use super::*;
+
+    fn sealed_connection_fact() -> Fact {
+        let responder_ephemeral_private_key = [10; 32];
+        let connection = connection::connection::fact::ConnectionFact {
+            from_endpoint: [1; 32],
+            to_endpoint: [2; 32],
+            request_id: [3; 32],
+            responder_addr: None,
+            initiator_addr: None,
+            initiator_ephemeral_secret_fact_id: [4; 32],
+            responder_ephemeral_secret_fact_id: [5; 32],
+            responder_ephemeral_public_key: crypto::x25519_public_key(
+                &responder_ephemeral_private_key,
+            ),
+            handshake_hash: [7; 32],
+            connection_secret: [8; 32],
+        };
+        Fact::new(
+            FactScope::Local,
+            100,
+            connection::connection::encode::seal_fact(
+                &connection,
+                &responder_ephemeral_private_key,
+            )
+            .expect("seal connection"),
+        )
+    }
+
+    #[test]
+    fn missing_material_needs_are_exact_from_connection_header() {
+        let connection_fact = sealed_connection_fact();
+
+        let ConnectionMaterialContext::Needs(needs) = connection_material_from_context(
+            &connection_fact,
+            &ProjectionContext::default(),
+            [9; 32],
+        ) else {
+            panic!("connection material should park on exact context");
+        };
+
+        let endpoint_need = needs
+            .iter()
+            .find(|need| need.role.as_str() == "auth_local_endpoint")
+            .expect("endpoint need");
+        assert_eq!(endpoint_need.start_key.as_bytes(), [2; 32]);
+        assert_eq!(endpoint_need.end_key.as_bytes(), [2; 32]);
+
+        let public_key = crypto::x25519_public_key(&[10; 32]);
+        let secret_need = needs
+            .iter()
+            .find(|need| {
+                need.role.as_str()
+                    == connection::ephemeral_secret::project::CONNECTION_EPHEMERAL_SECRET_PUBLIC_KEY_ROLE
+            })
+            .expect("ephemeral public-key need");
+        assert_eq!(secret_need.start_key.as_bytes(), public_key);
+        assert_eq!(secret_need.end_key.as_bytes(), public_key);
     }
 }
 

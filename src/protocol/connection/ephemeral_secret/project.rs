@@ -221,6 +221,7 @@ pub mod adapt {
 // Request and connection projectors own the context checks that consume this
 // offer.
 
+use crate::core::context::ContextOffer;
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::{RowMutation, Value};
 use crate::core::project_fact::{
@@ -238,6 +239,9 @@ pub const PROJECTOR_INFO: FactProjectorInfo = FactProjectorInfo::projector(
 pub const STORAGE_VERSION: u32 = crate::protocol::versioning::CURRENT_PROTOCOL_VERSION;
 pub const STORAGE_REQUIREMENT: crate::core::effects::StorageRequirement =
     crate::core::effects::StorageRequirement::Current(STORAGE_VERSION);
+pub const CONNECTION_EPHEMERAL_SECRET_ROLE: &str = "connection_ephemeral_secret";
+pub const CONNECTION_EPHEMERAL_SECRET_PUBLIC_KEY_ROLE: &str =
+    "connection_ephemeral_secret_public_key";
 
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionEphemeralSecretProjector;
@@ -245,6 +249,58 @@ pub struct ConnectionEphemeralSecretProjector;
 impl ConnectionEphemeralSecretProjector {
     pub fn new() -> Self {
         Self
+    }
+}
+
+#[cfg(test)]
+mod project_tests {
+    use super::*;
+    use crate::core::crypto;
+    use crate::core::facts::FactId;
+    use crate::protocol::connection::ephemeral_secret::encode;
+    use crate::protocol::connection::ephemeral_secret::fact::ConnectionEphemeralSecretFact;
+
+    fn secret_fact() -> (Fact, ConnectionEphemeralSecretFact) {
+        let ephemeral_private_key = [2; 32];
+        let secret = ConnectionEphemeralSecretFact {
+            owner_endpoint: [1; 32],
+            ephemeral_private_key,
+            ephemeral_public_key: crypto::x25519_public_key(&ephemeral_private_key),
+            created_at_ms: 3,
+        };
+        (
+            Fact::new(
+                FactScope::Local,
+                3,
+                encode::encode_fact(&secret).expect("ephemeral secret"),
+            ),
+            secret,
+        )
+    }
+
+    fn assert_exact_offer(output: &ProjectionOutput, role: &str, key: FactId) {
+        let offer = output
+            .offers
+            .iter()
+            .find(|offer| offer.role.as_str() == role)
+            .expect("offer role");
+        assert_eq!(offer.start_key.as_bytes(), key);
+        assert_eq!(offer.end_key.as_bytes(), key);
+    }
+
+    #[test]
+    fn live_secret_offers_fact_id_and_public_key_context() {
+        let (fact, secret) = secret_fact();
+        let output = ConnectionEphemeralSecretProjector::new()
+            .project(&fact, &ProjectionContext::default())
+            .expect("project ephemeral secret");
+
+        assert_exact_offer(&output, CONNECTION_EPHEMERAL_SECRET_ROLE, fact.id);
+        assert_exact_offer(
+            &output,
+            CONNECTION_EPHEMERAL_SECRET_PUBLIC_KEY_ROLE,
+            secret.ephemeral_public_key,
+        );
     }
 }
 
@@ -298,12 +354,19 @@ impl ConnectionEphemeralSecretProjector {
         // 3. Materialize.
         Ok(ProjectionOutput::new()
             .need(close_need)
-            .offer(crate::core::context::ContextOffer::range(
+            .offer(ContextOffer::range(
                 fact.id,
-                "connection_ephemeral_secret",
-                crate::core::facts::FactScope::Local,
+                CONNECTION_EPHEMERAL_SECRET_ROLE,
+                FactScope::Local,
                 fact.id,
                 fact.id,
+            ))
+            .offer(ContextOffer::range(
+                fact.id,
+                CONNECTION_EPHEMERAL_SECRET_PUBLIC_KEY_ROLE,
+                FactScope::Local,
+                secret.ephemeral_public_key,
+                secret.ephemeral_public_key,
             ))
             .row_mutation(RowMutation::InsertValues(connection_ephemeral_secret_row(
                 fact.id, &secret,
