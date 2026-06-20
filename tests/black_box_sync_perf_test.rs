@@ -12,8 +12,10 @@ use cli_harness::*;
 use rusqlite::{params, Connection};
 
 #[test]
-#[ignore = "manual sync throughput fixture; run with --ignored when measuring two-daemon catch-up"]
+#[ignore = "manual sync throughput fixture; run with cargo test --release -- --ignored when measuring two-daemon catch-up"]
 fn black_box_generated_content_sync_perf_uses_daemon_restart_boundary() {
+    assert_release_perf_fixture();
+
     // `generate` authors real message facts in one process so this can measure
     // sync throughput without paying one process start per `send`.
     let tmp = perf_tempdir();
@@ -154,8 +156,10 @@ fn black_box_generated_content_sync_perf_uses_daemon_restart_boundary() {
 }
 
 #[test]
-#[ignore = "manual live-tail throughput fixture; run with --ignored when measuring two-daemon projection without message catch-up"]
+#[ignore = "manual live-tail throughput fixture; run with cargo test --release -- --ignored when measuring two-daemon projection without message catch-up"]
 fn black_box_generated_content_live_tail_perf_skips_message_catchup() {
+    assert_release_perf_fixture();
+
     // This fixture keeps both daemons connected before generating messages.
     // The measured message window therefore uses live-tail sends emitted by
     // `share_fact_with_sync`, not initial compare/catch-up for the message set.

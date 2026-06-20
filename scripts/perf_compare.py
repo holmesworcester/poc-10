@@ -4,6 +4,8 @@
 The runner intentionally reports only measured command output. When a worktree
 does not have an equivalent harness, it records a skipped row with the reason.
 Results are written under target/perf-compare/, which is ignored by git.
+
+All Cargo-backed benchmark commands in this runner use release mode.
 """
 
 from __future__ import annotations

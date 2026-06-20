@@ -15,6 +15,25 @@ Detailed benchmark runs and unmerged optimization experiments live on the
 write-up, but not the projection batching or storage-tuning commits from that
 branch.
 
+## Benchmark Run Mode
+
+Performance fixtures must be run in release mode. Debug Rust builds make the
+crypto and projection paths too slow to produce useful throughput numbers.
+
+Use `scripts/perf_compare.py` for comparison runs; its Cargo invocations build
+and test with `--release`. When running an ignored perf fixture directly, include
+`cargo test --release`, for example:
+
+```sh
+TOPO_REPLAY_PERF_MESSAGES=1000 \
+  cargo test --release --test poc10_replay_cli_test \
+  replay_cli_generated_messages_perf_rebuilds_normal_message_facts \
+  -- --ignored --nocapture --test-threads=1
+```
+
+The manual perf fixtures also assert this at runtime. A debug `cargo test
+-- --ignored` run should fail fast instead of recording misleading numbers.
+
 ## Current Conclusion
 
 poc-10 is slower than poc-7 for generated messages primarily because the current
