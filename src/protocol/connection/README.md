@@ -7,14 +7,14 @@ sessions, and ask core networking to move bytes.
 
 ```mermaid
 flowchart LR
-    Request["request fact"]
-    Create["create_connection"]
-    Connection["connection fact"]
-    Session["live connection"]
-    Frame["connection frame fact"]
-    Child["opened child facts"]
-    Projectors["owning projectors"]
-    Sync["sync selects ids"]
+    Request["request fact"]:::fact
+    Create(["create_connection"]):::step
+    Connection["connection fact"]:::fact
+    Session(["materialize live connection"]):::step
+    Frame["connection frame fact"]:::fact
+    Child["opened child facts"]:::fact
+    Projectors(["owning projectors"]):::step
+    Sync(["sync selects ids"]):::step
 
     Request --> Create
     Create --> Connection
@@ -24,7 +24,12 @@ flowchart LR
     Child --> Projectors
     Projectors --> Sync
     Sync --> Frame
+
+    classDef fact fill:#eef6ff,stroke:#235a97,stroke-width:1px;
+    classDef step fill:#fff7df,stroke:#8a6418,stroke-width:1px;
 ```
+
+Rectangles are facts; ovals are process or runtime steps.
 
 ## Bootstrap And Membership
 
