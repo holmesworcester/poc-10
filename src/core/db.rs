@@ -1,39 +1,42 @@
-//! SQLite connection and generic row-mutation plumbing.
+//! SQLite connection, transaction boundaries, and typed row mutation helpers.
 //!
 //! `Db` is the lowest runtime layer above SQLite. It opens the connection,
-//! applies schema batches, records how to read the storage-version marker
-//! declared by those schema batches, runs explicit transactions, quotes trusted
-//! table and column identifiers for syntax safety, and applies typed row
-//! mutations. It does not own fact persistence, projection queues, intent
-//! queues, state-summary diagnostics, network queues, or protocol query SQL;
-//! those modules use `Db::conn()` and `write_transaction()` to own their table
+//! applies schema batches, runs explicit transactions, quotes trusted table and
+//! column identifiers for syntax safety, and applies typed row mutations. It
+//! does not own fact persistence, projection queues, intent queues,
+//! state-summary diagnostics, network queues, or protocol query SQL; those
+//! modules use `Db::conn()` and `write_transaction()` to own their table
 //! behavior directly.
-//!
-//! The storage-version marker is also protocol-owned state. A `SchemaSource`
-//! may declare a `StorageVersionSource`: the marker table, the version column,
-//! and the columns that sort newest marker rows first. `Db` records only that
-//! read recipe when it opens schema sources. `current_storage_version()` then
-//! asks "what storage version does this database currently project?" by reading
-//! the latest declared marker row, for example
-//! `protocol_version_rows.protocol_version ORDER BY applied_at_ms DESC,
-//! update_fact_id DESC LIMIT 1`. Fresh or stale databases are repaired by the
-//! protocol's versioning update path; core only reads the marker to enforce
-//! declared commit preconditions: projection and intent writes compiled for a
-//! different storage version are consumed without row effects, and query
-//! helpers that opt into current-storage checks use the same marker to return a
-//! mismatch error before reading incompatible materialized rows.
 //!
 //! All atomicity comes from callers choosing the transaction closure. `Db`
 //! supplies `BEGIN IMMEDIATE`, rollback, and `COMMIT`; owning modules decide
 //! which facts, rows, queue entries, or diagnostics belong in that boundary.
 //!
+//! The first exported path below is the one fact families use most often:
+//! declare a `TypedTableSchema`, build `TableInsert` or `TableDeleteWhere`
+//! values from decoded facts, emit `RowMutation`s, and keep direct read SQL in
+//! the owning query module.
+//!
+//! The storage-version marker is protocol-owned state. A `SchemaSource` may
+//! declare a `StorageVersionSource`: the marker table, the version column, and
+//! the columns that sort newest marker rows first. `Db` records only that read
+//! recipe when it opens schema sources. `current_storage_version()` then asks
+//! "what storage version does this database currently project?" by reading the
+//! latest declared marker row, for example
+//! `protocol_version_rows.protocol_version ORDER BY applied_at_ms DESC,
+//! update_fact_id DESC LIMIT 1`. Fresh or stale databases are repaired by the
+//! protocol's versioning update path; core only reads the marker to enforce
+//! declared commit preconditions. Query helpers that opt into current-storage
+//! checks use the same marker to return a mismatch error before reading
+//! incompatible materialized rows.
+//!
 //! The exported surface is split by responsibility:
 //!
 //! - `Db` is the reusable SQLite handle and transaction boundary.
-//! - `SchemaSource`, `StorageVersionSource`, and `ReplayTables` let runtime
-//!   owners declare schema, upgrade-marker, and rebuild lifecycle metadata.
 //! - `TableName`, `TypedTableSchema`, `TableInsert`, `TableDeleteWhere`,
 //!   `RowMutation`, and `Value` are the typed-row mutation vocabulary.
+//! - `SchemaSource`, `StorageVersionSource`, and `ReplayTables` let runtime
+//!   owners declare schema, upgrade-marker, and rebuild lifecycle metadata.
 //! - The crate-visible quoting helpers are for modules that own direct SQL but
 //!   still need the same trusted-identifier validation as the row helpers.
 
@@ -45,7 +48,7 @@ use std::path::Path;
 use std::time::Duration;
 
 // =============================================================================
-// Exported Vocabulary
+// Query Defaults
 // =============================================================================
 
 /// Temporary upper bound for read helpers that still return Vec-backed pages.
@@ -53,6 +56,10 @@ use std::time::Duration;
 /// Query modules should shrink this surface into caller-supplied paging or
 /// narrower SQL predicates as their fact families migrate fully to SQL.
 pub const DEFAULT_QUERY_LIMIT: usize = 10_000;
+
+// =============================================================================
+// Typed Row Vocabulary
+// =============================================================================
 
 /// A static, trusted row-table name.
 ///
@@ -72,57 +79,6 @@ impl TableName {
     pub fn as_str(self) -> &'static str {
         self.0
     }
-}
-
-/// Rebuild lifecycle declarations for tables created by one schema source.
-///
-/// `protected` tables are retained fact-storage tables and are never cleared by
-/// rebuild. `reset` tables are derived, queued, or local runtime state that a
-/// rebuild can clear before replay-mode projection. `summary` tables are
-/// hashed by `state-summary`.
-#[derive(Debug, Clone, Copy)]
-pub struct ReplayTables {
-    /// Retained fact-storage tables that rebuild reset must not clear.
-    pub protected: &'static [TableName],
-    /// Tables cleared by rebuild reset.
-    pub reset: &'static [TableName],
-    /// Tables included in state summaries.
-    pub summary: &'static [TableName],
-}
-
-impl ReplayTables {
-    /// Empty rebuild lifecycle declarations for tests and non-rebuild schemas.
-    pub const EMPTY: Self = Self {
-        protected: &[],
-        reset: &[],
-        summary: &[],
-    };
-}
-
-/// Trusted declaration for the protocol-owned storage-version marker.
-///
-/// Core uses this only to compare a commit's required version with the latest
-/// marker row. The table and columns are still protocol-owned projected state.
-#[derive(Debug, Clone, Copy)]
-pub struct StorageVersionSource {
-    /// Table that stores projected version marker rows.
-    pub table: TableName,
-    /// Column containing the storage version.
-    pub version_column: &'static str,
-    /// Columns ordered descending to select the latest marker row.
-    pub order_by_columns: &'static [&'static str],
-}
-
-/// One executable schema batch plus rebuild lifecycle declarations.
-#[derive(Debug, Clone, Copy)]
-pub struct SchemaSource {
-    /// SQL batch applied when the database opens.
-    pub ddl: &'static str,
-    /// Protocol-owned storage-version marker declaration, when this source owns one.
-    pub storage_version: Option<StorageVersionSource>,
-    /// Rebuild reset and summary lifecycle declarations for this source's
-    /// tables.
-    pub replay: ReplayTables,
 }
 
 /// SQLite value carried by typed-table row mutations and internal SQL helpers.
@@ -238,10 +194,7 @@ pub enum RowMutation {
 /// single SQL path, and `write_transaction` rollback covers both classes.
 pub struct Db {
     conn: SqliteConnection,
-    storage_version_source: Option<StorageVersionSource>,
-    replay_protected_tables: Vec<TableName>,
-    replay_reset_tables: Vec<TableName>,
-    replay_summary_tables: Vec<TableName>,
+    schema: SchemaCatalog,
 }
 
 impl Db {
@@ -304,131 +257,7 @@ impl Db {
     }
 
     // =========================================================================
-    // Schema Opening Stages
-    // =========================================================================
-
-    fn from_connection_with_schema_sources(
-        conn: SqliteConnection,
-        sources: &[SchemaSource],
-    ) -> rusqlite::Result<Self> {
-        let replay_protected_tables = unique_table_names(
-            sources
-                .iter()
-                .flat_map(|source| source.replay.protected.iter().copied()),
-        );
-        let replay_reset_tables = unique_table_names(
-            sources
-                .iter()
-                .flat_map(|source| source.replay.reset.iter().copied()),
-        );
-        let replay_summary_tables = unique_table_names(
-            sources
-                .iter()
-                .flat_map(|source| source.replay.summary.iter().copied()),
-        );
-        let storage_version_source = declared_storage_version_source(sources)?;
-        validate_replay_lifecycle(&replay_protected_tables, &replay_reset_tables)?;
-        let db = Self::from_connection_parts(
-            conn,
-            storage_version_source,
-            replay_protected_tables,
-            replay_reset_tables,
-            replay_summary_tables,
-        )?;
-        for source in sources {
-            db.conn.execute_batch(source.ddl)?;
-        }
-        Ok(db)
-    }
-
-    fn from_connection_parts(
-        conn: SqliteConnection,
-        storage_version_source: Option<StorageVersionSource>,
-        replay_protected_tables: Vec<TableName>,
-        replay_reset_tables: Vec<TableName>,
-        replay_summary_tables: Vec<TableName>,
-    ) -> rusqlite::Result<Self> {
-        conn.busy_timeout(Duration::from_secs(5))?;
-        conn.execute_batch(
-            "PRAGMA journal_mode = WAL;
-             PRAGMA synchronous = NORMAL;
-             PRAGMA temp_store = MEMORY;",
-        )?;
-        Ok(Self {
-            conn,
-            storage_version_source,
-            replay_protected_tables,
-            replay_reset_tables,
-            replay_summary_tables,
-        })
-    }
-
-    // =========================================================================
-    // Replay Lifecycle Views
-    // =========================================================================
-
-    /// Tables protected from rebuild reset.
-    pub fn replay_protected_tables(&self) -> &[TableName] {
-        &self.replay_protected_tables
-    }
-
-    /// Tables rebuild reset is allowed to clear.
-    pub fn replay_reset_tables(&self) -> &[TableName] {
-        &self.replay_reset_tables
-    }
-
-    /// Tables state-summary hashes as protocol/runtime state.
-    pub fn replay_summary_tables(&self) -> &[TableName] {
-        &self.replay_summary_tables
-    }
-
-    // =========================================================================
-    // Storage-Version Marker Reads
-    // =========================================================================
-
-    /// Return the current core storage-version marker, if the database has one.
-    pub fn current_storage_version(&self) -> rusqlite::Result<Option<u32>> {
-        let Some(source) = self.storage_version_source else {
-            return Ok(None);
-        };
-        let table = quoted_table_name(source.table)?;
-        let version_column = quoted_identifier(source.version_column)?;
-        let order_by = storage_version_order_by(source.order_by_columns)?;
-        self.conn
-            .query_row(
-                &format!("SELECT {version_column} FROM {table}{order_by} LIMIT 1"),
-                [],
-                |row| {
-                    let version = row.get::<_, i64>(0)?;
-                    u32::try_from(version)
-                        .map_err(|_| db_error("stored storage version is outside u32 range"))
-                },
-            )
-            .optional()
-    }
-
-    /// Return true when the stored marker matches the expected table version.
-    pub fn storage_version_is(&self, expected: u32) -> rusqlite::Result<bool> {
-        self.current_storage_version()
-            .map(|stored| stored == Some(expected))
-    }
-
-    /// Enforce the storage-version precondition for a commit boundary.
-    pub(crate) fn require_storage_version(&self, expected: u32) -> Result<(), String> {
-        match self.current_storage_version() {
-            Ok(Some(stored)) if stored == expected => Ok(()),
-            Ok(Some(stored)) => Err(format!(
-                "storage version mismatch: required_version={expected} stored_version={stored}"
-            )),
-            Ok(None) => Err(format!(
-                "storage version mismatch: required_version={expected} stored_version=missing"
-            )),
-            Err(err) => Err(format!("read storage version marker: {err}")),
-        }
-    }
-
-    // =========================================================================
-    // Typed Row Mutation Stages
+    // Typed Row Mutation Operations
     // =========================================================================
 
     /// Insert typed table rows idempotently in their declared tables.
@@ -520,6 +349,206 @@ impl Db {
             )
             .optional()
             .map(|row| row.is_some())
+    }
+}
+
+// =============================================================================
+// Schema Source Vocabulary
+// =============================================================================
+
+/// One executable schema batch plus rebuild lifecycle declarations.
+#[derive(Debug, Clone, Copy)]
+pub struct SchemaSource {
+    /// SQL batch applied when the database opens.
+    pub ddl: &'static str,
+    /// Protocol-owned storage-version marker declaration, when this source owns one.
+    pub storage_version: Option<StorageVersionSource>,
+    /// Rebuild reset and summary lifecycle declarations for this source's
+    /// tables.
+    pub replay: ReplayTables,
+}
+
+/// Rebuild lifecycle declarations for tables created by one schema source.
+///
+/// `protected` tables are retained fact-storage tables and are never cleared by
+/// rebuild. `reset` tables are derived, queued, or local runtime state that a
+/// rebuild can clear before replay-mode projection. `summary` tables are
+/// hashed by `state-summary`.
+#[derive(Debug, Clone, Copy)]
+pub struct ReplayTables {
+    /// Retained fact-storage tables that rebuild reset must not clear.
+    pub protected: &'static [TableName],
+    /// Tables cleared by rebuild reset.
+    pub reset: &'static [TableName],
+    /// Tables included in state summaries.
+    pub summary: &'static [TableName],
+}
+
+impl ReplayTables {
+    /// Empty rebuild lifecycle declarations for tests and non-rebuild schemas.
+    pub const EMPTY: Self = Self {
+        protected: &[],
+        reset: &[],
+        summary: &[],
+    };
+}
+
+/// Trusted declaration for the protocol-owned storage-version marker.
+///
+/// Core uses this only to compare a commit's required version with the latest
+/// marker row. The table and columns are still protocol-owned projected state.
+#[derive(Debug, Clone, Copy)]
+pub struct StorageVersionSource {
+    /// Table that stores projected version marker rows.
+    pub table: TableName,
+    /// Column containing the storage version.
+    pub version_column: &'static str,
+    /// Columns ordered descending to select the latest marker row.
+    pub order_by_columns: &'static [&'static str],
+}
+
+impl Db {
+    // =========================================================================
+    // Schema Opening Stages
+    // =========================================================================
+
+    fn from_connection_with_schema_sources(
+        conn: SqliteConnection,
+        sources: &[SchemaSource],
+    ) -> rusqlite::Result<Self> {
+        let schema = SchemaCatalog::from_sources(sources)?;
+        let db = Self::from_connection_parts(conn, schema)?;
+        for source in sources {
+            db.conn.execute_batch(source.ddl)?;
+        }
+        Ok(db)
+    }
+
+    fn from_connection_parts(
+        conn: SqliteConnection,
+        schema: SchemaCatalog,
+    ) -> rusqlite::Result<Self> {
+        conn.busy_timeout(Duration::from_secs(5))?;
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA temp_store = MEMORY;",
+        )?;
+        Ok(Self { conn, schema })
+    }
+
+    // =========================================================================
+    // Replay Lifecycle Views
+    // =========================================================================
+
+    /// Tables protected from rebuild reset.
+    pub fn replay_protected_tables(&self) -> &[TableName] {
+        &self.schema.replay.protected
+    }
+
+    /// Tables rebuild reset is allowed to clear.
+    pub fn replay_reset_tables(&self) -> &[TableName] {
+        &self.schema.replay.reset
+    }
+
+    /// Tables state-summary hashes as protocol/runtime state.
+    pub fn replay_summary_tables(&self) -> &[TableName] {
+        &self.schema.replay.summary
+    }
+
+    // =========================================================================
+    // Storage-Version Marker Reads
+    // =========================================================================
+
+    /// Return the current core storage-version marker, if the database has one.
+    pub fn current_storage_version(&self) -> rusqlite::Result<Option<u32>> {
+        let Some(source) = self.schema.storage_version else {
+            return Ok(None);
+        };
+        let table = quoted_table_name(source.table)?;
+        let version_column = quoted_identifier(source.version_column)?;
+        let order_by = storage_version_order_by(source.order_by_columns)?;
+        self.conn
+            .query_row(
+                &format!("SELECT {version_column} FROM {table}{order_by} LIMIT 1"),
+                [],
+                |row| {
+                    let version = row.get::<_, i64>(0)?;
+                    u32::try_from(version)
+                        .map_err(|_| db_error("stored storage version is outside u32 range"))
+                },
+            )
+            .optional()
+    }
+
+    /// Return true when the stored marker matches the expected table version.
+    pub fn storage_version_is(&self, expected: u32) -> rusqlite::Result<bool> {
+        self.current_storage_version()
+            .map(|stored| stored == Some(expected))
+    }
+
+    /// Enforce the storage-version precondition for a commit boundary.
+    pub(crate) fn require_storage_version(&self, expected: u32) -> Result<(), String> {
+        match self.current_storage_version() {
+            Ok(Some(stored)) if stored == expected => Ok(()),
+            Ok(Some(stored)) => Err(format!(
+                "storage version mismatch: required_version={expected} stored_version={stored}"
+            )),
+            Ok(None) => Err(format!(
+                "storage version mismatch: required_version={expected} stored_version=missing"
+            )),
+            Err(err) => Err(format!("read storage version marker: {err}")),
+        }
+    }
+}
+
+// =============================================================================
+// Compiled Schema Metadata
+// =============================================================================
+
+struct SchemaCatalog {
+    storage_version: Option<StorageVersionSource>,
+    replay: ReplayCatalog,
+}
+
+impl SchemaCatalog {
+    fn from_sources(sources: &[SchemaSource]) -> rusqlite::Result<Self> {
+        Ok(Self {
+            storage_version: declared_storage_version_source(sources)?,
+            replay: ReplayCatalog::from_sources(sources)?,
+        })
+    }
+}
+
+struct ReplayCatalog {
+    protected: Vec<TableName>,
+    reset: Vec<TableName>,
+    summary: Vec<TableName>,
+}
+
+impl ReplayCatalog {
+    fn from_sources(sources: &[SchemaSource]) -> rusqlite::Result<Self> {
+        let protected = unique_table_names(
+            sources
+                .iter()
+                .flat_map(|source| source.replay.protected.iter().copied()),
+        );
+        let reset = unique_table_names(
+            sources
+                .iter()
+                .flat_map(|source| source.replay.reset.iter().copied()),
+        );
+        let summary = unique_table_names(
+            sources
+                .iter()
+                .flat_map(|source| source.replay.summary.iter().copied()),
+        );
+        validate_replay_lifecycle(&protected, &reset)?;
+        Ok(Self {
+            protected,
+            reset,
+            summary,
+        })
     }
 }
 
@@ -691,6 +720,20 @@ fn placeholders(count: usize) -> String {
 mod tests {
     use super::*;
 
+    const TEST_ROWS: TableName = TableName::new("test_rows");
+    const TEST_COLUMNS: &[&str] = &["id", "payload"];
+    const TEST_KEY_COLUMNS: &[&str] = &["id"];
+    const TEST_SCHEMA: SchemaSource = SchemaSource {
+        ddl: r#"
+CREATE TABLE IF NOT EXISTS test_rows (
+    id BLOB PRIMARY KEY NOT NULL,
+    payload BLOB NOT NULL
+);
+"#,
+        storage_version: None,
+        replay: ReplayTables::EMPTY,
+    };
+
     #[test]
     fn db_connections_keep_temp_storage_in_memory() {
         let store = Db::open_memory().expect("open memory db");
@@ -704,5 +747,105 @@ mod tests {
             temp_store, 2,
             "SQLite temp_store MEMORY has numeric value 2"
         );
+    }
+
+    #[test]
+    fn row_mutations_insert_delete_and_roll_back_as_one_transaction() {
+        let store = Db::open_memory_with_schema_sources(&[TEST_SCHEMA]).expect("open memory db");
+        let first = test_insert(b"one", b"first");
+        let replacement = test_insert(b"one", b"replacement");
+
+        store
+            .write_transaction(|tx| {
+                tx.apply_row_mutations_in_tx(&[RowMutation::InsertValues(first)])
+            })
+            .expect("insert first row");
+        assert_eq!(store.table_row_count(TEST_ROWS).expect("count rows"), 1);
+
+        store
+            .write_transaction(|tx| {
+                tx.apply_row_mutations_in_tx(&[
+                    RowMutation::DeleteWhere(test_delete(b"one")),
+                    RowMutation::InsertValues(replacement.clone()),
+                ])
+            })
+            .expect("replace row");
+        assert_eq!(test_payload(&store, b"one"), b"replacement".to_vec());
+
+        let rollback: rusqlite::Result<()> = store.write_transaction(|tx| {
+            tx.apply_row_mutations_in_tx(&[
+                RowMutation::DeleteWhere(test_delete(b"one")),
+                RowMutation::InsertValues(test_insert(b"two", b"second")),
+            ])?;
+            Err(db_error("force rollback after row mutations"))
+        });
+        assert!(rollback.is_err(), "forced error should roll back");
+
+        assert_eq!(store.table_row_count(TEST_ROWS).expect("count rows"), 1);
+        assert_eq!(test_payload(&store, b"one"), b"replacement".to_vec());
+        assert!(
+            !row_exists(&store, b"two").expect("query second row"),
+            "rolled-back insert should not remain"
+        );
+    }
+
+    #[test]
+    fn row_mutations_reject_mismatched_columns_without_partial_commit() {
+        let store = Db::open_memory_with_schema_sources(&[TEST_SCHEMA]).expect("open memory db");
+        let err = store
+            .write_transaction(|tx| {
+                tx.apply_row_mutations_in_tx(&[
+                    RowMutation::InsertValues(test_insert(b"one", b"first")),
+                    RowMutation::InsertValues(TableInsert {
+                        table: TEST_ROWS,
+                        columns: TEST_COLUMNS,
+                        values: vec![Value::Bytes(b"missing-payload".to_vec())],
+                    }),
+                ])
+            })
+            .expect_err("mismatched row should reject");
+
+        assert!(
+            err.to_string().contains("column/value count mismatch"),
+            "{err}"
+        );
+        assert_eq!(
+            store.table_row_count(TEST_ROWS).expect("count rows"),
+            0,
+            "failed mutation batch should roll back earlier row writes"
+        );
+    }
+
+    fn test_insert(id: &[u8], payload: &[u8]) -> TableInsert {
+        TableInsert {
+            table: TEST_ROWS,
+            columns: TEST_COLUMNS,
+            values: vec![Value::Bytes(id.to_vec()), Value::Bytes(payload.to_vec())],
+        }
+    }
+
+    fn test_delete(id: &[u8]) -> TableDeleteWhere {
+        TableDeleteWhere {
+            table: TEST_ROWS,
+            columns: TEST_KEY_COLUMNS,
+            values: vec![Value::Bytes(id.to_vec())],
+        }
+    }
+
+    fn test_payload(store: &Db, id: &[u8]) -> Vec<u8> {
+        store
+            .conn()
+            .query_row("SELECT payload FROM test_rows WHERE id = ?1", [id], |row| {
+                row.get::<_, Vec<u8>>(0)
+            })
+            .expect("query test payload")
+    }
+
+    fn row_exists(store: &Db, id: &[u8]) -> rusqlite::Result<bool> {
+        store
+            .conn()
+            .query_row("SELECT 1 FROM test_rows WHERE id = ?1", [id], |_| Ok(()))
+            .optional()
+            .map(|row| row.is_some())
     }
 }
