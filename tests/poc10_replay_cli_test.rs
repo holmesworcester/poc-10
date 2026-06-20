@@ -110,7 +110,9 @@ fn spawn_worker_daemon(db: &str) -> StartedDaemon {
 
 fn wait_for_runtime_idle(db: &str) {
     let started = Instant::now();
-    let timeout = Duration::from_secs(10);
+    let timeout = env_u64("TOPO_RUNTIME_IDLE_TIMEOUT_MS")
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_secs(10));
     loop {
         let output = topo(&["--db", db, "count"]);
         if !output.status.success() {
