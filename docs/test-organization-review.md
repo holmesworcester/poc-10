@@ -59,9 +59,12 @@ tests prove the bytes are well-formed but not how the fact *behaves*. Affected
 `sync/range_request`, `connection/fact_receipt`, `connection/frame_observation`,
 `connection/close`, `connection/frame_small`, `auth/invite_secret`,
 `auth/key_wrap`, `auth/endpoint_shared`, `auth/local_history_node_secret`,
-`auth/key_wrap_creation`, `auth/key_wrap_recovery`, `content/file`,
-`content/reaction`, `content/file_slice` (project layer). Several are covered
-indirectly by `tests/` black-box suites, but not at the unit level.
+`auth/key_wrap_creation`, `auth/key_wrap_recovery`, `auth/endpoint`,
+`auth/device_invite`, `auth/admin`, `auth/user_invite`, `auth/invite_server`,
+`content/file`, `content/reaction`, `content/file_slice` (project layer). Several
+are covered indirectly by `tests/` black-box suites, but not at the unit level.
+Note these projectors do **not** share one behavior shape — see P1 for the
+per-projector contracts.
 
 **5. Where projectors *are* tested, the ranking is clean and convincing.** Files
 like `content/message`, `content/message_deletion`, `connection/connection`,
@@ -100,34 +103,63 @@ modules use plain `//` headings even in banner files, matching local context.
 
 ## Proposal for subsequent work
 
-Prioritized by correctness ROI, then by cleanup value.
+Strictly ordered by correctness ROI first, then cleanup. P1 and P2 add missing
+correctness coverage; P3 onward is cleanup with no behavior change.
 
-**P1 — Close the projector-semantic coverage gap (highest ROI).** For each fact
-family whose `project_semantic` is untested in-file (trend #4), add a minimal
-pair: one "context-wait → materialize" happy-path test and one
-"deletion/expiry/close → retract/purge" test. This is the difference between
-"the bytes parse" and "the fact behaves correctly," and it makes the per-file
-`ReaderVerdict` go from partial to yes. Suggested order: key material
-(`invite_secret`, `key_wrap`, `endpoint_shared`, `local_history_node_secret`) →
-connection (`fact_receipt`, `frame_small`, `close`, `frame_observation`) → sync
-(`shared_fact`, `range_request`) → content (`file`, `reaction`, `file_slice`).
+**P1 — Close the projector-semantic coverage gap (highest ROI).** Add unit tests
+for `project_semantic` in every fact family that currently tests only decode +
+authenticate. There is **no single recipe** — each projector implements a
+distinct contract, and the test must assert the contract it actually has
+(verified against the projector source). The untested projectors fall into four
+shapes:
 
-**P2 — De-duplicate the `authenticate`/decode rejection quartet (trend #3).**
-Introduce one `assert_authenticate_rejections!(canonical_fact)` macro (or a
-table-driven helper) generating the canonical/id/wrong_tag/truncated cases from a
-fixture, and adopt it across the ~25 fact families. Removes the largest source of
-test boilerplate without losing coverage. Decide deliberately: macro (max
-compaction) vs. status quo (max locality) — recommend the macro.
+- **Local-scope → emit offer(s) [+ row]; no wait, no purge.** Assert the offer
+  role(s)/key(s) and any row, and that a non-local (or wrong-workspace) scope is
+  rejected. Two-run wait tests do **not** apply here.
+  - `auth/invite_secret` — local scope → `auth_invite_secret` + `connection_invite_secret` offers + invite-secret row.
+  - `auth/endpoint` — local scope → `auth_local_endpoint` offer (+ row).
+  - `connection/fact_receipt` — local scope (`validate_local_receipt_scope`) → receipt offer + receipt row.
+  - `connection/frame_observation` — local scope → observation offer keyed by `frame_fact_id`.
+  - `sync/shared_fact` — fact scope must equal the body's workspace scope → single `sync_exact_fact` offer (no row).
+  - `sync/range_request` — scope-match check → assert the scope-mismatch rejection.
+- **Context-wait → materialize.** Drive the projector twice: empty context
+  (assert it parks on the expected exact needs), then matched payloads (assert
+  the rows/offers it then emits).
+  - `auth/key_wrap`, `auth/key_wrap_creation`, `auth/key_wrap_recovery` — signer/recipient/frontier context → wrap / local-recovery emission.
+  - `auth/endpoint_shared` — device-invite vs invite-server authority gating.
+  - `auth/device_invite`, `auth/admin`, `auth/user_invite`, `auth/invite_server` — the two authority paths (user- vs endpoint-authorized).
+  - `auth/local_history_node_secret` — frontier/source/tombstone validation, retirement/self-purge, child addressing.
+  - `content/file`, `content/reaction`, `content/file_slice` (project layer) — parent-message match + index/range checks (+ deletion-retract for those that have it).
+  - `connection/frame_small` — parks on material needs, then `project_observed_frame` opens the frame and emits incoming facts + receipts + purge.
+- **Wait → emit offer; no purge.** `connection/close` — parks on the local
+  connection need, then emits a `connection_closed` offer (need + offer). Assert
+  it does **not** purge, and that non-local connection context is rejected.
+- **Retract / self-purge branch.** `connection/ephemeral_secret` already tests
+  the live-offer branch; add the close-gate branch (a local `connection_close`
+  naming the secret → delete row + `purge_self`) plus non-local rejection. (The
+  message family's retract/purge is already covered.)
 
-**P3 — Add the unguarded unique invariants (trend #8).** Cheap, targeted tests:
-`recipient_key` self-supersession; `registry` completeness; `wire`
-`Reader::finish`/`take` overflow/`FixedText`; `db` storage-version marker +
-insert-conflict; `network` queue idempotence; `handle_intent` id-collision
-retry. Each is a single test pinning a real invariant with no current guard.
+Sequencing: key material → connection → sync → content.
 
-**P4 — Fold the flagged near-duplicate pairs into table-driven tests (trend
-#7).** Mechanical compaction; do it opportunistically alongside P1/P2 in the same
-files.
+**P2 — Add the unguarded unique-invariant tests (correctness; do before P3).**
+Each pins a real branch with no current guard:
+- `auth/recipient_key` — self-supersession rejection (`previous_recipient_key_id == fact_id`); the branch exists in `authenticate` but only canonical/id/tag/truncated are tested.
+- `registry` — route/admission completeness (every routed tag has an admission arm, and vice versa).
+- `wire` — `Reader::finish` trailing-byte, `take` overflow, string codecs, `FixedText` (new/from_padded/interior-NUL/UTF-8).
+- `db` — storage-version marker reads + insert-conflict path.
+- `network` — SQLite outgoing/incoming queue idempotence.
+- `handle_intent` — intent-id collision retry loop.
+
+**P3 — De-duplicate the `authenticate`/decode rejection quartet (cleanup,
+optional; trend #3).** The canonical/id/wrong_tag/truncated quartet repeats across
+~25 families. A shared `assert_authenticate_rejections!(canonical_fact)` macro (or
+table-driven helper) would remove the boilerplate at the cost of locality — a
+pure refactor with no behavior change, so it ranks below the correctness work.
+Recommend the macro if adopted.
+
+**P4 — Fold the flagged near-duplicate pairs into table-driven tests (cleanup;
+trend #7).** Mechanical compaction; do it opportunistically alongside P1/P3 in
+the same files.
 
 **P5 — Extend the pass to `tests/` and adopt the "thesis-test pointer"
 convention.** Run the same bottom-placement+ranking on integration files, and add
@@ -137,7 +169,7 @@ rot.
 
 **P6 — Minor tidy:** relocate the stray module-overview comment that sits between
 `project_fact`'s two bottom test modules; consider whether the family-shared
-`canonical_fact()` fixtures should move to a shared test-support module if P2 is
+`canonical_fact()` fixtures should move to a shared test-support module if P3 is
 adopted.
 
 ---
