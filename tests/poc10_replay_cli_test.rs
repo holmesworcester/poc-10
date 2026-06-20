@@ -452,12 +452,183 @@ fn runtime_turn_repairs_stale_marker_and_replays_pending_fact() {
     assert!(messages.contains("second message"), "{messages}");
 }
 
+#[test]
+#[ignore = "manual replay throughput fixture; run with --ignored when measuring one-client derived-state rebuild"]
+fn replay_cli_generated_messages_perf_rebuilds_normal_message_facts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = temp_db(&tmp, "replay-generated-messages-perf.db");
+    let message_count = env_usize("TOPO_REPLAY_PERF_MESSAGES").unwrap_or(1_000);
+    let message_text_bytes = env_usize("TOPO_REPLAY_PERF_MESSAGE_TEXT_BYTES").unwrap_or(128);
+    let timeout_ms = env_u64("TOPO_REPLAY_PERF_TIMEOUT_MS")
+        .unwrap_or_else(|| 120_000_u64.max(message_count as u64 * 120));
+
+    let setup_started = Instant::now();
+    let workspace_id = create_workspace(&db, "Replay Perf", "alice", "laptop");
+    let daemon = spawn_worker_daemon(&db);
+    create_local_content_key(&db, &workspace_id);
+    let generated = con_cli_with_env(
+        &[
+            "--db",
+            &db,
+            "--at",
+            "4000000000000",
+            "generate",
+            &workspace_id,
+            &message_count.to_string(),
+            &message_text_bytes.to_string(),
+        ],
+        &[("TOPO_PROFILE_GENERATE", "1")],
+    );
+    assert!(
+        generated.status.success(),
+        "generate failed\nstdout={}\nstderr={}",
+        stdout(&generated),
+        stderr(&generated)
+    );
+    assert_eq!(
+        line_value(&stdout(&generated), "generated_facts"),
+        message_count.to_string()
+    );
+    wait_for_content_count_at_least(
+        &db,
+        &workspace_id,
+        message_count,
+        Duration::from_millis(timeout_ms),
+    );
+    wait_for_runtime_idle(&db);
+    drop(daemon);
+    let setup_ms = setup_started.elapsed().as_millis();
+
+    let before = assert_success(topo(&["--db", &db, "count"]));
+    let retained_before = parse_count_value(&before, "facts");
+    assert_eq!(
+        content_message_count(&db, &workspace_id),
+        message_count,
+        "setup should fully project generated messages before replay"
+    );
+
+    let replay_started = Instant::now();
+    let update_started = Instant::now();
+    let update = assert_success(topo(&["--db", &db, "update"]));
+    let update_ms = update_started.elapsed().as_millis();
+    let pending_after_update = parse_count_value(&update, "pending_projection");
+    assert_eq!(
+        pending_after_update, 1,
+        "CLI update should first queue the update fact; daemon projection performs the rebuild\n{update}"
+    );
+
+    let drain_started = Instant::now();
+    let replay_daemon = spawn_worker_daemon(&db);
+    wait_for_content_count_at_least(
+        &db,
+        &workspace_id,
+        message_count,
+        Duration::from_millis(timeout_ms),
+    );
+    wait_for_runtime_idle(&db);
+    let drain_ms = drain_started.elapsed().as_millis();
+    drop(replay_daemon);
+    let total_ms = replay_started.elapsed().as_millis();
+
+    let after = assert_success(topo(&["--db", &db, "count"]));
+    let retained_after = parse_count_value(&after, "facts");
+    let applied_after = parse_count_value(&after, "applied_facts");
+    let pending_intents_after = parse_count_value(&after, "pending_intents");
+    assert_eq!(
+        retained_after, applied_after,
+        "replay should drain:\n{after}"
+    );
+    assert_eq!(
+        pending_intents_after, 0,
+        "replay should drain intents:\n{after}"
+    );
+    assert_eq!(
+        content_message_count(&db, &workspace_id),
+        message_count,
+        "replay should rebuild generated message rows"
+    );
+
+    let replayed_retained_facts = retained_after;
+    let drain_seconds = (drain_ms as f64 / 1000.0).max(0.001);
+    let total_seconds = (total_ms as f64 / 1000.0).max(0.001);
+    let drain_facts_per_second = replayed_retained_facts as f64 / drain_seconds;
+    let total_facts_per_second = replayed_retained_facts as f64 / total_seconds;
+    let drain_messages_per_second = message_count as f64 / drain_seconds;
+    eprintln!(
+        "black_box_replay_generated_messages_perf order=runtime_replay messages={} message_text_bytes={} setup_ms={} update_ms={} drain_ms={} total_ms={} retained_before={} retained_after={} pending_after_update={} replayed_retained_facts={} drain_facts_per_s={:.2} total_facts_per_s={:.2} drain_messages_per_s={:.2} generate_profile={}",
+        message_count,
+        message_text_bytes,
+        setup_ms,
+        update_ms,
+        drain_ms,
+        total_ms,
+        retained_before,
+        retained_after,
+        pending_after_update,
+        replayed_retained_facts,
+        drain_facts_per_second,
+        total_facts_per_second,
+        drain_messages_per_second,
+        stderr(&generated).trim()
+    );
+}
+
 fn area_line(summary: &str, area: &str) -> String {
     summary
         .lines()
         .find(|line| line.starts_with(&format!("area_{area}:")))
         .unwrap_or_else(|| panic!("state-summary missing area {area}:\n{summary}"))
         .to_string()
+}
+
+fn wait_for_content_count_at_least(
+    db: &str,
+    workspace_id: &str,
+    expected: usize,
+    timeout: Duration,
+) {
+    let started = Instant::now();
+    loop {
+        let output = topo(&["--db", db, "content-count", workspace_id]);
+        let last = if output.status.success() {
+            let out = stdout(&output);
+            if parse_count_value(&out, "content_messages") >= expected {
+                return;
+            }
+            out
+        } else {
+            stderr(&output)
+        };
+        assert!(
+            started.elapsed() < timeout,
+            "content count did not reach {expected} within {:?}:\n{last}",
+            timeout
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn content_message_count(db: &str, workspace_id: &str) -> usize {
+    let out = assert_success(topo(&["--db", db, "content-count", workspace_id]));
+    parse_count_value(&out, "content_messages")
+}
+
+fn parse_count_value(output: &str, key: &str) -> usize {
+    line_value(output, key)
+        .parse()
+        .unwrap_or_else(|err| panic!("parse {key} from output as usize: {err}\n{output}"))
+}
+
+fn env_usize(name: &str) -> Option<usize> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.parse().expect("usize env var"))
+}
+
+fn env_u64(name: &str) -> Option<u64> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.parse().expect("u64 env var"))
 }
 
 fn area_count(summary: &str, area: &str) -> u64 {
