@@ -42,7 +42,7 @@ context_range_edges               standing true-range needs and offers
 pending_projection_matches        offers that matched a parked need
 time_wakes                        facts scheduled to reproject at a time
 intents (+ local_intents)         bounded work waiting for a handler (local is temp)
-network_outgoing                  sealed bytes waiting for the TCP pump
+network_outgoing                  sealed bytes waiting for the TCP pump (temp)
 <scope>_rows                      materialized state, read by queries and handlers, never by projectors
 ```
 
@@ -125,7 +125,7 @@ flowchart TD
     INTENTS --> HANDLER
     HANDLER -->|facts| FACTS
     HANDLER -->|rows| ROWS
-    HANDLER -->|sealed bytes| OUT
+    HANDLER -->|sealed bytes / route work| OUT
 
     OUT -->|TCP pump| NETOUT
     ROWS --> QUERY

@@ -119,6 +119,8 @@ fn architecture_diagrams_cover_current_runtime_relationships() {
         "emit durable `frame_observation` and `connection_fact_receipt` facts",
         "There is no `send_network_frame` handler",
         "Both paths add opaque bytes to network_outgoing",
+        "network_outgoing sealed bytes waiting for the TCP pump (temp)",
+        "HANDLER -->|sealed bytes / route work| OUT",
         "The runtime and bootstrap diagrams above describe one node's loop",
     ] {
         assert!(
@@ -134,6 +136,27 @@ fn architecture_diagrams_cover_current_runtime_relationships() {
         !diagrams.contains("A parked in pending_projection"),
         "ARCHITECTURE_DIAGRAMS.md should not show context needs as retained pending work"
     );
+    for stale in [
+        "drain_projection_once",
+        "drain_intents_once",
+        "ephemeral_projection_inputs",
+        "network inbound rows",
+        "convert inbound rows",
+        "receive_network_frame handler",
+        "send_network_frame handler",
+        "PipelineEffects",
+        "CMD_SETTLE",
+        "Q_SETTLE",
+        "one projection batch",
+        "one intent batch",
+        "process_all_work_until_idle",
+        "Command-side settling",
+    ] {
+        assert!(
+            !normalized.contains(stale),
+            "ARCHITECTURE_DIAGRAMS.md still contains stale runtime/daemon wording {stale:?}"
+        );
+    }
     assert!(
         !root.join("ARCHITECTURE_DIAGRAMS_ALT.md").exists(),
         "alternate architecture diagram doc should remain folded into ARCHITECTURE_DIAGRAMS.md"
