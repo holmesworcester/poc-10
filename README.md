@@ -21,7 +21,7 @@ durable retry in one model.
 
 ## Quickstart
 
-If a reader can understand five source files, start with these:
+Understanding these source files should be enough to grasp the design:
 
 1. `src/core/project_fact.rs`: the core fact-to-state transaction. It shows how
    one queued fact is loaded with matched context, projected once, and committed
