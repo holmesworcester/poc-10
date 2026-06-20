@@ -862,6 +862,31 @@ fn command_module_docs_explain_command_system_role() {
 }
 
 #[test]
+fn db_module_docs_explain_identifier_quoting_and_storage_marker_reads() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let db_path = root.join("src/core/db.rs");
+    let db_doc = rust_module_doc_text(&db_path);
+    let normalized_doc = normalize_whitespace(&db_doc);
+
+    for required in [
+        "quotes trusted table and column identifiers for syntax safety",
+        "The storage-version marker is also protocol-owned state",
+        "A `SchemaSource` may declare a `StorageVersionSource`: the marker table, the version column, and the columns that sort newest marker rows first",
+        "`Db` records only that read recipe when it opens schema sources",
+        "`current_storage_version()` then asks \"what storage version does this database currently project?\"",
+        "`protocol_version_rows.protocol_version ORDER BY applied_at_ms DESC, update_fact_id DESC LIMIT 1`",
+        "Fresh or stale databases are repaired by the protocol's versioning update path",
+        "core only reads the marker to enforce declared commit preconditions: projection and intent writes compiled for a different storage version are consumed without row effects",
+        "query helpers that opt into current-storage checks use the same marker to return a mismatch error before reading incompatible materialized rows",
+    ] {
+        assert!(
+            normalized_doc.contains(required),
+            "src/core/db.rs module docs should explain quoting and storage marker reads: {required:?}"
+        );
+    }
+}
+
+#[test]
 fn architecture_docs_match_current_module_and_context_names() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
 

@@ -3,10 +3,25 @@
 //! `Db` is the lowest runtime layer above SQLite. It opens the connection,
 //! applies schema batches, records how to read the storage-version marker
 //! declared by those schema batches, runs explicit transactions, quotes trusted
-//! table and column identifiers, and applies typed row mutations. It does not
-//! own fact persistence, projection queues, intent queues, state-summary
-//! diagnostics, network queues, or protocol query SQL; those modules use `Db::conn()` and
-//! `write_transaction()` to own their table behavior directly.
+//! table and column identifiers for syntax safety, and applies typed row
+//! mutations. It does not own fact persistence, projection queues, intent
+//! queues, state-summary diagnostics, network queues, or protocol query SQL;
+//! those modules use `Db::conn()` and `write_transaction()` to own their table
+//! behavior directly.
+//!
+//! The storage-version marker is also protocol-owned state. A `SchemaSource`
+//! may declare a `StorageVersionSource`: the marker table, the version column,
+//! and the columns that sort newest marker rows first. `Db` records only that
+//! read recipe when it opens schema sources. `current_storage_version()` then
+//! asks "what storage version does this database currently project?" by reading
+//! the latest declared marker row, for example
+//! `protocol_version_rows.protocol_version ORDER BY applied_at_ms DESC,
+//! update_fact_id DESC LIMIT 1`. Fresh or stale databases are repaired by the
+//! protocol's versioning update path; core only reads the marker to enforce
+//! declared commit preconditions: projection and intent writes compiled for a
+//! different storage version are consumed without row effects, and query
+//! helpers that opt into current-storage checks use the same marker to return a
+//! mismatch error before reading incompatible materialized rows.
 //!
 //! All atomicity comes from callers choosing the transaction closure. `Db`
 //! supplies `BEGIN IMMEDIATE`, rollback, and `COMMIT`; owning modules decide
