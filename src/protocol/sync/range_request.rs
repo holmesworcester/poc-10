@@ -8,6 +8,7 @@
 pub mod encode;
 pub mod fact;
 pub mod project;
+pub mod proofs;
 
 pub const TYPE_SYNC_RANGE_REQUEST: u8 = encode::TYPE_SYNC_RANGE_REQUEST;
 

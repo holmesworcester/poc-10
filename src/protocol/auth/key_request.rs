@@ -7,6 +7,7 @@
 pub mod encode;
 pub mod fact;
 pub mod project;
+pub mod proofs;
 
 pub const TYPE_KEY_REQUEST: u8 = encode::TYPE_KEY_REQUEST;
 

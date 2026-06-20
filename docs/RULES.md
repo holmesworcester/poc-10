@@ -58,14 +58,15 @@ in `src/core` or `src/protocol`.
 - `src/protocol/<scope>/<fact_family>/` owns one fact family's role files:
   fact shape (`fact.rs`), canonical byte encoding (`encode.rs`), local authoring
   (`author.rs`), typed operations (`api.rs`), projection, schema-backed row
-  materialization, queries, CLI adapters, and context helpers as applicable.
-  Primary byte parsing, primary-fact authentication, and semantic adaptation
-  live as local `decode`, `authenticate`, and `adapt` modules inside
-  `project.rs`.
+  materialization, family-local formal proof obligations (`proofs.rs`),
+  queries, CLI adapters, and context helpers as applicable. Primary byte
+  parsing, primary-fact authentication, and semantic adaptation live as local
+  `decode`, `authenticate`, and `adapt` modules inside `project.rs`.
 - Routed fact families use the settled role-file split. Byte construction rules
   live in `encode.rs`; byte parsing rules live in the projector-local `decode`
   module; pure fact construction, signing, encryption, and assembly live in
-  `author.rs`; API gathering and receipt construction remain in `api.rs`; row shape is
+  `author.rs`; API gathering and receipt construction remain in `api.rs`;
+  family-local formal proof stubs and lemmas live in `proofs.rs`; row shape is
   declared through schema metadata or clearly named non-family modules such as
   sync `index.rs` / `staging.rs`.
 - `src/protocol/<scope>/<verb_object>.rs` owns one deferred effect boundary.

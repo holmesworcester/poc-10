@@ -16,6 +16,7 @@ pub mod author;
 pub mod encode;
 pub mod fact;
 pub mod project;
+pub mod proofs;
 
 pub use project::{
     connection_closed_need, connection_closed_offer, ephemeral_secret_closed_need,

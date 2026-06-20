@@ -12,6 +12,7 @@ pub mod cli;
 pub mod encode;
 pub mod fact;
 pub mod project;
+pub mod proofs;
 pub mod queries;
 
 pub const TYPE_CONTENT_FILE_DELETION: u8 = encode::TYPE_CONTENT_FILE_DELETION;

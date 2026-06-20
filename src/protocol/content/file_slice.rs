@@ -10,6 +10,7 @@ pub mod author;
 pub mod encode;
 pub mod fact;
 pub mod project;
+pub mod proofs;
 pub mod queries;
 
 pub const TYPE_CONTENT_FILE_SLICE: u8 = encode::TYPE_CONTENT_FILE_SLICE;

@@ -13,6 +13,7 @@ pub mod author;
 pub mod encode;
 pub mod fact;
 pub mod project;
+pub mod proofs;
 
 pub use project::{secret_retired_need, secret_retired_offer};
 
