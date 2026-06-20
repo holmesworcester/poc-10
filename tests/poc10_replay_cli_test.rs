@@ -6,6 +6,7 @@
 
 mod cli_harness;
 
+use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader};
 use std::process::Child;
 use std::thread;
@@ -456,12 +457,36 @@ fn runtime_turn_repairs_stale_marker_and_replays_pending_fact() {
 #[ignore = "manual replay throughput fixture; run with --ignored when measuring one-client derived-state rebuild"]
 fn replay_cli_generated_messages_perf_rebuilds_normal_message_facts() {
     let tmp = tempfile::tempdir().unwrap();
-    let db = temp_db(&tmp, "replay-generated-messages-perf.db");
     let message_count = env_usize("TOPO_REPLAY_PERF_MESSAGES").unwrap_or(1_000);
     let message_text_bytes = env_usize("TOPO_REPLAY_PERF_MESSAGE_TEXT_BYTES").unwrap_or(128);
     let timeout_ms = env_u64("TOPO_REPLAY_PERF_TIMEOUT_MS")
         .unwrap_or_else(|| 120_000_u64.max(message_count as u64 * 120));
+    let random_seed = env_u64("TOPO_REPLAY_PERF_RANDOM_SEED").unwrap_or(0x5eed_5eed_cafe_babe);
 
+    for order in replay_perf_orders() {
+        run_replay_generated_messages_perf_order(
+            &tmp,
+            order,
+            message_count,
+            message_text_bytes,
+            timeout_ms,
+            random_seed,
+        );
+    }
+}
+
+fn run_replay_generated_messages_perf_order(
+    tmp: &tempfile::TempDir,
+    order: ReplayPerfOrder,
+    message_count: usize,
+    message_text_bytes: usize,
+    timeout_ms: u64,
+    random_seed: u64,
+) {
+    let db = temp_db(
+        tmp,
+        &format!("replay-generated-messages-perf-{}.db", order.as_str()),
+    );
     let setup_started = Instant::now();
     let workspace_id = create_workspace(&db, "Replay Perf", "alice", "laptop");
     let daemon = spawn_worker_daemon(&db);
@@ -516,6 +541,17 @@ fn replay_cli_generated_messages_perf_rebuilds_normal_message_facts() {
         pending_after_update, 1,
         "CLI update should first queue the update fact; daemon projection performs the rebuild\n{update}"
     );
+    let mut prepared_replay = 0;
+    let mut prepare_ms = 0;
+    if order.uses_manual_queue_setup() {
+        let prepare_started = Instant::now();
+        prepared_replay = prepare_ordered_replay_queue(&db, order, random_seed);
+        prepare_ms = prepare_started.elapsed().as_millis();
+        assert!(
+            prepared_replay >= retained_before,
+            "ordered replay setup should queue retained facts\nbefore={before}\nprepared={prepared_replay}"
+        );
+    }
 
     let drain_started = Instant::now();
     let replay_daemon = spawn_worker_daemon(&db);
@@ -548,29 +584,196 @@ fn replay_cli_generated_messages_perf_rebuilds_normal_message_facts() {
         "replay should rebuild generated message rows"
     );
 
-    let replayed_retained_facts = retained_after;
+    let replayed_retained_facts = if order.uses_manual_queue_setup() {
+        prepared_replay
+    } else {
+        retained_after
+    };
     let drain_seconds = (drain_ms as f64 / 1000.0).max(0.001);
     let total_seconds = (total_ms as f64 / 1000.0).max(0.001);
     let drain_facts_per_second = replayed_retained_facts as f64 / drain_seconds;
     let total_facts_per_second = replayed_retained_facts as f64 / total_seconds;
     let drain_messages_per_second = message_count as f64 / drain_seconds;
     eprintln!(
-        "black_box_replay_generated_messages_perf order=runtime_replay messages={} message_text_bytes={} setup_ms={} update_ms={} drain_ms={} total_ms={} retained_before={} retained_after={} pending_after_update={} replayed_retained_facts={} drain_facts_per_s={:.2} total_facts_per_s={:.2} drain_messages_per_s={:.2} generate_profile={}",
+        "black_box_replay_generated_messages_perf order={} messages={} message_text_bytes={} setup_ms={} update_ms={} prepare_ms={} drain_ms={} total_ms={} retained_before={} retained_after={} pending_after_update={} prepared_replay={} replayed_retained_facts={} drain_facts_per_s={:.2} total_facts_per_s={:.2} drain_messages_per_s={:.2} random_seed={} generate_profile={}",
+        order.as_str(),
         message_count,
         message_text_bytes,
         setup_ms,
         update_ms,
+        prepare_ms,
         drain_ms,
         total_ms,
         retained_before,
         retained_after,
         pending_after_update,
+        prepared_replay,
         replayed_retained_facts,
         drain_facts_per_second,
         total_facts_per_second,
         drain_messages_per_second,
+        random_seed,
         stderr(&generated).trim()
     );
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplayPerfOrder {
+    Runtime,
+    Reverse,
+    Random,
+}
+
+impl ReplayPerfOrder {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Runtime => "runtime",
+            Self::Reverse => "reverse",
+            Self::Random => "random",
+        }
+    }
+
+    fn parse(value: &str) -> Self {
+        match value {
+            "runtime" | "normal" => Self::Runtime,
+            "reverse" => Self::Reverse,
+            "random" => Self::Random,
+            other => panic!(
+                "unknown TOPO_REPLAY_PERF_ORDER {other:?}; expected runtime, reverse, random, or all"
+            ),
+        }
+    }
+
+    fn uses_manual_queue_setup(self) -> bool {
+        !matches!(self, Self::Runtime)
+    }
+}
+
+fn replay_perf_orders() -> Vec<ReplayPerfOrder> {
+    let configured =
+        std::env::var("TOPO_REPLAY_PERF_ORDER").unwrap_or_else(|_| "runtime".to_string());
+    let orders = configured
+        .split(',')
+        .flat_map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            if value.is_empty() {
+                Vec::new()
+            } else if value == "all" {
+                vec![
+                    ReplayPerfOrder::Runtime,
+                    ReplayPerfOrder::Reverse,
+                    ReplayPerfOrder::Random,
+                ]
+            } else {
+                vec![ReplayPerfOrder::parse(&value)]
+            }
+        })
+        .collect::<Vec<_>>();
+    if orders.is_empty() {
+        vec![ReplayPerfOrder::Runtime]
+    } else {
+        orders
+    }
+}
+
+fn prepare_ordered_replay_queue(db: &str, order: ReplayPerfOrder, random_seed: u64) -> usize {
+    let mut conn = Connection::open(db).expect("open replay perf db");
+    conn.busy_timeout(Duration::from_secs(5))
+        .expect("set busy timeout");
+    let tx = conn.transaction().expect("begin replay queue setup");
+    for table in replay_reset_table_names() {
+        if sqlite_table_exists(&tx, table) {
+            tx.execute(&format!("DELETE FROM {}", quote_ident(table)), [])
+                .unwrap_or_else(|err| panic!("clear replay reset table {table}: {err}"));
+        }
+    }
+    tx.execute(
+        "INSERT OR IGNORE INTO pending_projection (owner, queued_at, priority, replay)
+         SELECT f.id, m.received_at, 100, 1
+         FROM facts f
+         JOIN local_fact_admissions m ON m.fact_id = f.id",
+        [],
+    )
+    .expect("queue retained facts for replay");
+
+    let mut owners = pending_projection_owners(&tx);
+    match order {
+        ReplayPerfOrder::Runtime => {}
+        ReplayPerfOrder::Reverse => owners.reverse(),
+        ReplayPerfOrder::Random => {
+            owners.sort_by_key(|owner| replay_random_key(owner, random_seed))
+        }
+    }
+    for (queued_at, owner) in owners.iter().enumerate() {
+        tx.execute(
+            "UPDATE pending_projection
+             SET queued_at = ?1,
+                 priority = 100,
+                 replay = 1
+             WHERE owner = ?2",
+            params![queued_at as i64, owner.as_slice()],
+        )
+        .expect("rewrite replay queue order");
+    }
+    let queued = owners.len();
+    tx.commit().expect("commit replay queue setup");
+    queued
+}
+
+fn replay_reset_table_names() -> Vec<&'static str> {
+    let mut names = BTreeSet::new();
+    names.extend(
+        topo::core::schema::CORE_SCHEMA_SOURCE
+            .replay
+            .reset
+            .iter()
+            .map(|table| table.as_str()),
+    );
+    for source in topo::protocol::app::CONTEXT_RUNTIME.schema_sources {
+        names.extend(source.replay.reset.iter().map(|table| table.as_str()));
+    }
+    names.into_iter().collect()
+}
+
+fn sqlite_table_exists(tx: &rusqlite::Transaction<'_>, table: &str) -> bool {
+    tx.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1
+            UNION ALL
+            SELECT 1 FROM sqlite_temp_master WHERE type = 'table' AND name = ?1
+         )",
+        params![table],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|value| value != 0)
+    .unwrap_or(false)
+}
+
+fn pending_projection_owners(tx: &rusqlite::Transaction<'_>) -> Vec<Vec<u8>> {
+    let mut stmt = tx
+        .prepare(
+            "SELECT owner
+             FROM pending_projection
+             ORDER BY priority, queued_at, owner",
+        )
+        .expect("prepare replay queue order query");
+    stmt.query_map([], |row| row.get::<_, Vec<u8>>(0))
+        .expect("query replay queue owners")
+        .map(|row| row.expect("replay queue owner"))
+        .collect()
+}
+
+fn replay_random_key(owner: &[u8], seed: u64) -> (u64, Vec<u8>) {
+    let mut hash = seed ^ 0xcbf2_9ce4_8422_2325;
+    for byte in owner {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x1000_0000_01b3);
+    }
+    (hash, owner.to_vec())
+}
+
+fn quote_ident(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
 fn area_line(summary: &str, area: &str) -> String {
