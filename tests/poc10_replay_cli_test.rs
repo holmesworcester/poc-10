@@ -479,8 +479,10 @@ fn runtime_turn_repairs_stale_marker_and_replays_pending_fact() {
 }
 
 #[test]
-#[ignore = "manual replay throughput fixture; run with --ignored when measuring one-client derived-state rebuild"]
+#[ignore = "manual replay throughput fixture; run with cargo test --release -- --ignored when measuring one-client derived-state rebuild"]
 fn replay_cli_generated_messages_perf_rebuilds_normal_message_facts() {
+    assert_release_perf_fixture();
+
     let tmp = tempfile::tempdir().unwrap();
     let message_count = env_usize("TOPO_REPLAY_PERF_MESSAGES").unwrap_or(1_000);
     let message_text_bytes = env_usize("TOPO_REPLAY_PERF_MESSAGE_TEXT_BYTES").unwrap_or(128);

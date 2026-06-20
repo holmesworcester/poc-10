@@ -461,8 +461,10 @@ fn cli_two_long_running_daemons_download_multislice_file_via_proxied_invite_path
 }
 
 #[test]
-#[ignore = "manual cable-bound download throughput fixture; run with --ignored when measuring daemon transfer speed"]
+#[ignore = "manual cable-bound download throughput fixture; run with cargo test --release -- --ignored when measuring daemon transfer speed"]
 fn cli_cable_bound_download_perf_isolates_authoring_sync_and_save() {
+    assert_release_perf_fixture();
+
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice-download-perf.db");
     let bob = temp_db(&tmp, "bob-download-perf.db");

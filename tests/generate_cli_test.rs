@@ -97,8 +97,10 @@ fn generate_cli_can_profile_runtime_phases_to_stderr() {
 }
 
 #[test]
-#[ignore = "manual bulk generation fixture; run with --ignored when measuring generated message admission"]
+#[ignore = "manual bulk generation fixture; run with cargo test --release -- --ignored when measuring generated message admission"]
 fn generate_cli_bulk_perf_isolates_authoring_and_admission_from_projection() {
+    assert_release_perf_fixture();
+
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "bulk-generate-perf.db");
     let workspace_id = create_workspace(&db);

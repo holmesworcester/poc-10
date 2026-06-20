@@ -85,6 +85,19 @@ pub fn spawn_con_with_stderr_file(args: &[&str], stderr_path: &Path) -> Child {
         .expect("spawn con")
 }
 
+pub fn assert_release_perf_fixture() {
+    assert!(
+        !cfg!(debug_assertions),
+        "perf fixtures must be run with optimized Rust code; use `cargo test --release ... -- --ignored --nocapture --test-threads=1`"
+    );
+
+    let cli_profile = std::env::var("TOPO_CLI_PROFILE").unwrap_or_else(|_| "release".to_string());
+    assert_eq!(
+        cli_profile, "release",
+        "perf fixtures must run the CLI in release mode; unset TOPO_CLI_PROFILE or set TOPO_CLI_PROFILE=release"
+    );
+}
+
 fn con_bin() -> &'static Path {
     static CON_BIN: OnceLock<PathBuf> = OnceLock::new();
     CON_BIN.get_or_init(|| {
