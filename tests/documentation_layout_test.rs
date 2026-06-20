@@ -801,6 +801,33 @@ fn app_module_docs_stay_file_scoped_and_hierarchical() {
 }
 
 #[test]
+fn runtime_module_docs_define_turn_jargon_for_newcomers() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let runtime_path = root.join("src/core/runtime.rs");
+    let module_doc = rust_module_doc_text(&runtime_path);
+    let normalized_doc = normalize_whitespace(&module_doc);
+
+    for required in [
+        "Runtime is where the protocol-neutral core engine becomes one executable protocol instance",
+        "a fact is an immutable protocol record",
+        "projection is the deterministic step that turns facts into context, rows, and follow-up work",
+        "an intent is queued stateful work",
+        "a handler is the registered function that performs one intent",
+        "a time wake is a scheduled reminder",
+        "Durable work is persisted in SQLite; local work is process-local and disappears on restart",
+        "## Recurring Intents",
+        "Recurring intents are protocol-declared maintenance checks",
+        "They are not persisted timers",
+        "shares the same handler contract and queue ordering as explicit local work",
+    ] {
+        assert!(
+            normalized_doc.contains(required),
+            "src/core/runtime.rs module docs should define runtime jargon for newcomers: {required:?}"
+        );
+    }
+}
+
+#[test]
 fn cli_module_keeps_dispatch_core_above_helpers() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let cli = source_text(&root.join("src/core/cli.rs"));

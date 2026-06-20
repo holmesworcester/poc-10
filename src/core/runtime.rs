@@ -1,11 +1,16 @@
 //! Generic target runtime and bounded turn scheduler.
 //!
-//! Runtime is the place where the protocol-neutral core engine becomes one
-//! executable protocol instance. It owns the SQLite connection, core plus
-//! protocol schema, fact and intent admission, projection, handler dispatch,
-//! time-wake admission, and the bounded order for one runtime turn. Protocol code
-//! supplies the schema sources, projector router, handler registry, row mutation
-//! allowlist, and live-host declarations that make those mechanics meaningful.
+//! Runtime is where the protocol-neutral core engine becomes one executable
+//! protocol instance. It owns the SQLite connection, core plus protocol schema,
+//! fact admission, intent admission, projection, handler dispatch, time-wake
+//! admission, and the bounded order for one runtime turn. In this file, a fact is
+//! an immutable protocol record; projection is the deterministic step that turns
+//! facts into context, rows, and follow-up work; an intent is queued stateful
+//! work; a handler is the registered function that performs one intent; and a
+//! time wake is a scheduled reminder that asks projection to reconsider a fact
+//! after time has passed. Protocol code supplies the schema sources, projector
+//! router, handler registry, row mutation allowlist, and live-host declarations
+//! that make those mechanics meaningful.
 //!
 //! `core::app` opens a `Runtime` for either a long-running `start` process or a
 //! one-shot command process. `core::daemon` only provides the daemon process
@@ -14,15 +19,25 @@
 //! host resources are present. Daemon-host turns can accept network bytes,
 //! dispatch durable handlers, and pump outgoing frames. Local command turns use
 //! the same order without a listener, so durable handler dispatch and network
-//! adapters are skipped.
+//! adapters are skipped. Durable work is persisted in SQLite; local work is
+//! process-local and disappears on restart.
 //!
 //! A turn does not interpret protocol bytes or choose protocol actions. It gives
-//! recurring builders a chance to queue local work, drains local and durable
-//! queues, stages protocol-classified incoming facts, admits declared time wakes,
-//! and leaves semantic decisions to projectors and handlers. Handler-emitted
-//! facts remain queued for later projection work, so output ordering is stable
-//! regardless of whether work came from a CLI command, daemon tick, sync, or
-//! protocol handler.
+//! recurring builders, which are protocol callbacks for maintenance work, a
+//! chance to queue local work, drains local and durable queues, stages incoming
+//! facts that protocol code classified from network bytes, admits declared time
+//! wakes, and leaves semantic decisions to projectors and handlers.
+//! Handler-emitted facts remain queued for later projection work, so output
+//! ordering is stable regardless of whether work came from a CLI command, daemon
+//! tick, sync, or protocol handler.
+//!
+//! ## Recurring Intents
+//!
+//! Recurring intents are protocol-declared maintenance checks that run at the
+//! start of each turn. They are not persisted timers. Each builder looks at the
+//! current database, clock, and host resources, and may enqueue one local intent.
+//! The normal local-intent path then handles that work, so recurring behavior
+//! shares the same handler contract and queue ordering as explicit local work.
 //!
 //! Change this file when runtime storage, queue commit boundaries, or turn order
 //! changes. Change `daemon.rs` when long-running process lifecycle changes.
@@ -55,13 +70,17 @@ const RUNTIME_TURN_PROFILE_ENV: &str = "TOPO_PROFILE_RUNTIME_TURNS";
 const LEGACY_DAEMON_TURN_PROFILE_ENV: &str = "TOPO_PROFILE_DAEMON_TURNS";
 
 /// Factory for the protocol's projector implementation.
+///
+/// A projector is protocol code that derives context, rows, time wakes, and
+/// follow-up intents from one fact plus any matched context.
 pub type ProjectorFactory = fn() -> Box<dyn Projector>;
-/// Protocol-owned declarations needed by core's runtime engine.
+/// Protocol-owned declarations needed to open core's runtime engine.
 ///
 /// The description is static so a runtime instance cannot drift after opening
 /// its database. `schema_sources` declare protocol tables, `row_mutation_tables`
-/// is the allowlist for effects, `projector` defines projection, and `handlers`
-/// define the queued work core may handle.
+/// is the allowlist for effect-written rows, `projector` defines how facts turn
+/// into context/rows/follow-up work, and `handlers` define which queued intents
+/// core may dispatch.
 #[derive(Clone, Copy)]
 pub struct RuntimeDescription {
     /// Protocol table declarations appended after the core schema.
@@ -71,12 +90,13 @@ pub struct RuntimeDescription {
     /// Factory for the projector router.
     pub projector: ProjectorFactory,
     /// Per-fact-type projector routes used for registry diagnostics and
-    /// version-manifest checks. Replay policy is projector-owned through
+    /// version-manifest checks. A route selects which projector handles a fact
+    /// type; replay policy is projector-owned through
     /// `ProjectionContext::is_replay()`, not a route-table flag.
     pub fact_routes: &'static [FactRoute],
     /// Optional protocol-owned fact admission check run before core stores facts.
     pub fact_admission: Option<FactAdmissionFn>,
-    /// Intent handlers this runtime may handle.
+    /// Intent handlers this runtime may dispatch for queued stateful work.
     pub handlers: &'static [HandlerRoute],
 }
 
@@ -84,17 +104,17 @@ pub struct RuntimeDescription {
 ///
 /// The same declaration is used by daemon-host turns and local command turns.
 /// Host mode controls whether network adapters and durable handler dispatch are
-/// available; the declaration only tells core how to classify inbound frames and
-/// which time-wake timelines should be admitted.
+/// available; the declaration only tells core how protocol bytes become incoming
+/// facts and which time-wake timelines should be admitted.
 #[derive(Clone, Copy)]
 pub struct RuntimeTurnDescription {
     /// Classifier from inbound network bytes to protocol-owned incoming facts.
     pub inbound_network_intake: Option<InboundNetworkIntake>,
-    /// Time-wake schedules runtime turns should admit.
+    /// Scheduled projection reminders runtime turns should admit.
     pub time_wakes: &'static [RuntimeTimeWake],
 }
 
-/// Function that turns an inbound frame into incoming projection inputs.
+/// Function that turns one inbound network frame into incoming facts.
 pub type InboundNetworkIntake = fn(InboundNetworkFrame) -> Result<Vec<Fact>, String>;
 
 /// Opaque inbound TCP frame plus local receipt metadata.
@@ -104,11 +124,12 @@ pub struct InboundNetworkFrame {
     pub received_at_local_ms: u64,
 }
 
-/// One runtime-owned time wake declaration.
+/// One runtime-owned time-wake declaration.
 ///
-/// The protocol supplies both the timeline and the current high-water mark.
-/// Core turns due rows in that interval into pending projection; projectors
-/// decide whether the due time proves anything semantic.
+/// A time wake is a scheduled reminder for projection. The protocol supplies
+/// both the timeline and the current high-water mark. Core turns due rows in
+/// that interval into pending projection; projectors decide whether the due time
+/// proves anything semantic.
 #[derive(Clone, Copy)]
 pub struct RuntimeTimeWake {
     /// Timeline namespace to process.
