@@ -1,16 +1,11 @@
 //! Generic target runtime and bounded turn scheduler.
 //!
 //! Runtime is where the protocol-neutral core engine becomes one executable
-//! protocol instance. It owns the SQLite connection, core plus protocol schema,
-//! fact admission, intent admission, projection, handler dispatch, time-wake
-//! admission, and the bounded order for one runtime turn. In this file, a fact is
-//! an immutable protocol record; projection is the deterministic step that turns
-//! facts into context, rows, and follow-up work; an intent is queued stateful
-//! work; a handler is the registered function that performs one intent; and a
-//! time wake is a scheduled reminder that asks projection to reconsider a fact
-//! after time has passed. Protocol code supplies the schema sources, projector
-//! router, handler registry, row mutation allowlist, and live-host declarations
-//! that make those mechanics meaningful.
+//! protocol instance. It owns the SQLite connection, applies core plus protocol
+//! schema, exposes admission APIs, and defines the bounded order for one runtime
+//! turn. Protocol code supplies the schemas, projector router, handler registry,
+//! row mutation allowlist, and live-host declarations that make those mechanics
+//! meaningful.
 //!
 //! `core::app` opens a `Runtime` for either a long-running `start` process or a
 //! one-shot command process. `core::daemon` only provides the daemon process
@@ -22,14 +17,13 @@
 //! adapters are skipped. Durable work is persisted in SQLite; local work is
 //! process-local and disappears on restart.
 //!
-//! A turn does not interpret protocol bytes or choose protocol actions. It gives
-//! recurring builders, which are protocol callbacks for maintenance work, a
-//! chance to queue local work, drains local and durable queues, stages incoming
-//! facts that protocol code classified from network bytes, admits declared time
-//! wakes, and leaves semantic decisions to projectors and handlers.
-//! Handler-emitted facts remain queued for later projection work, so output
-//! ordering is stable regardless of whether work came from a CLI command, daemon
-//! tick, sync, or protocol handler.
+//! A turn does not interpret protocol bytes or choose protocol actions. It
+//! offers recurring maintenance, drains local and durable intent queues, stages
+//! incoming facts that protocol code classified from network bytes, admits due
+//! time wakes, drains projection queues, and leaves semantic decisions to
+//! projectors and handlers. Handler-emitted facts remain queued for later
+//! projection work, so output ordering is stable regardless of whether work came
+//! from a CLI command, daemon tick, sync, or protocol handler.
 //!
 //! ## Recurring Intents
 //!
@@ -38,6 +32,16 @@
 //! current database, clock, and host resources, and may enqueue one local intent.
 //! The normal local-intent path then handles that work, so recurring behavior
 //! shares the same handler contract and queue ordering as explicit local work.
+//!
+//! ## Terms Used Below
+//!
+//! A fact is an immutable protocol record. Projection is the deterministic step
+//! that turns facts into context, rows, time wakes, and follow-up work. A
+//! projector is the protocol code that performs projection for one fact type. An
+//! intent is queued stateful work, and a handler is the registered function that
+//! performs one intent. A time wake is a scheduled reminder that asks projection
+//! to reconsider a fact after time has passed. Durable work is persisted in
+//! SQLite; local work is process-local and disappears on restart.
 //!
 //! Change this file when runtime storage, queue commit boundaries, or turn order
 //! changes. Change `daemon.rs` when long-running process lifecycle changes.

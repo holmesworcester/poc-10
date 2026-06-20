@@ -809,22 +809,39 @@ fn runtime_module_docs_define_turn_jargon_for_newcomers() {
 
     for required in [
         "Runtime is where the protocol-neutral core engine becomes one executable protocol instance",
-        "a fact is an immutable protocol record",
-        "projection is the deterministic step that turns facts into context, rows, and follow-up work",
-        "an intent is queued stateful work",
-        "a handler is the registered function that performs one intent",
-        "a time wake is a scheduled reminder",
-        "Durable work is persisted in SQLite; local work is process-local and disappears on restart",
+        "defines the bounded order for one runtime turn",
+        "offers recurring maintenance, drains local and durable intent queues",
         "## Recurring Intents",
         "Recurring intents are protocol-declared maintenance checks",
         "They are not persisted timers",
         "shares the same handler contract and queue ordering as explicit local work",
+        "## Terms Used Below",
+        "A fact is an immutable protocol record",
+        "Projection is the deterministic step that turns facts into context, rows, time wakes, and follow-up work",
+        "An intent is queued stateful work",
+        "a handler is the registered function that performs one intent",
+        "A time wake is a scheduled reminder",
+        "Durable work is persisted in SQLite; local work is process-local and disappears on restart",
     ] {
         assert!(
             normalized_doc.contains(required),
             "src/core/runtime.rs module docs should define runtime jargon for newcomers: {required:?}"
         );
     }
+
+    let runtime_intro = normalized_doc
+        .find("Runtime is where the protocol-neutral core engine becomes one executable protocol instance")
+        .expect("runtime docs explain the main runtime role");
+    let recurring_section = normalized_doc
+        .find("## Recurring Intents")
+        .expect("runtime docs have a recurring-intents section");
+    let terms_section = normalized_doc
+        .find("## Terms Used Below")
+        .expect("runtime docs have a terms section");
+    assert!(
+        runtime_intro < recurring_section && recurring_section < terms_section,
+        "src/core/runtime.rs module docs should explain the main action before vocabulary details"
+    );
 }
 
 #[test]
