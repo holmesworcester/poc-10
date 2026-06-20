@@ -181,7 +181,10 @@ Established transfer uses runtime-local frame facts. Sync chooses fact ids and
 queues `send_facts_on_connection`; connection loads those facts, rejects
 local/private tags, batches the bytes into `frame_small`, `frame_file_slice`, or
 `frame_bundle`, seals the frame with the connection secret, resolves the route,
-and asks core networking to send opaque bytes. On receipt, each frame projector
+and asks core networking to send the encoded connection-family frame fact bytes
+as opaque bytes. The network row does not contain a separate packet type outside
+the fact model: the frame itself is the connection fact, and its sealed payload
+slot contains the selected child fact bytes. On receipt, each frame projector
 needs connection context and receive metadata, opens contained child facts,
 stages those bytes as incoming facts, and emits durable `fact_receipt` evidence.
 If a frame must park after volatile receive metadata would otherwise disappear,

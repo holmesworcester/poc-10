@@ -347,6 +347,13 @@ connection context. They are separate from auth, content, and sync semantics:
 frames move bytes and produce receipts, while the owning fact projector
 validates every recovered fact.
 
+Byte-wise, those envelopes are still facts. Core writes canonical
+connection-family fact bytes to the socket: sealed `request` and `connection`
+facts during the handshake, then `frame_small`, `frame_file_slice`, or
+`frame_bundle` facts for established traffic. Established frame facts contain
+sealed slots filled with the selected child fact bytes, and opening a frame
+re-admits those child bytes as ordinary incoming facts.
+
 This keeps core's network interface minimal. Core owns TCP accept/write
 mechanics, the volatile outgoing frame queue, and the active-target scheduling
 index. It does not know whether a byte string is a bootstrap request, bootstrap

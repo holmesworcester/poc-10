@@ -85,10 +85,13 @@ projection.
 
 Sync decides which fact ids should be sent on a connection by queuing
 connection-owned send work. Connection loads those ids, checks sendability,
-batches them into frames, and sends opaque network bytes. Content, auth, and
-sync facts can travel inside established frames only if they are non-local and
-not tagged as private/local. Once opened, they are admitted as ordinary child
-facts and validated by their owning projectors.
+batches them into frames, and sends opaque network bytes. The bytes sent for an
+established frame are canonical connection-family fact bytes
+(`frame_small`, `frame_file_slice`, or `frame_bundle`), with sealed payload slots
+that contain the selected child fact bytes. Content, auth, and sync facts can
+travel inside established frames only if they are non-local and not tagged as
+private/local. Once opened, they are admitted as ordinary child facts and
+validated by their owning projectors.
 
 Established frame logic is deliberately flat inside the concrete fact families.
 `frame_small`, `frame_file_slice`, and `frame_bundle` each own their fixed
