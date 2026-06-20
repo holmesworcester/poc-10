@@ -80,6 +80,28 @@ enum LoadedIntent<'a> {
     TerminalDrop(TerminalIntentDrop),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IntentQueue {
+    Durable,
+    Local,
+}
+
+impl IntentQueue {
+    fn table(self) -> TableName {
+        match self {
+            Self::Durable => INTENTS,
+            Self::Local => LOCAL_INTENTS,
+        }
+    }
+
+    fn context_table(self) -> TableName {
+        match self {
+            Self::Durable => INTENT_CONTEXT,
+            Self::Local => LOCAL_INTENT_CONTEXT,
+        }
+    }
+}
+
 // =============================================================================
 // Runtime Entry Point
 // =============================================================================
@@ -287,6 +309,103 @@ fn drop_terminal_queued_intent(store: &Db, drop: TerminalIntentDrop) -> Result<b
 }
 
 // =============================================================================
+// Stage 1 Helpers
+// =============================================================================
+
+/// Return the first queued intent in queue order.
+///
+/// This is the test-facing mirror of Stage 1's row reconstruction path.
+#[cfg(test)]
+fn next_queued_intent_in_queue(
+    store: &Db,
+    queue: IntentQueue,
+) -> Result<Option<QueuedIntent>, String> {
+    next_intent_row(store, queue)
+        .map_err(|err| format!("load queued intent: {err}"))?
+        .map(|row| {
+            let QueuedIntentRow {
+                intent_id,
+                kind,
+                intent_key,
+                payload,
+                mode,
+            } = row;
+            let context_fact_ids = intent_context_fact_ids(store, queue, &intent_id)
+                .map_err(|err| format!("load queued intent context: {err}"))?;
+            let kind = IntentKind::new(kind)
+                .map_err(|err| format!("invalid queued intent kind: {err}"))?;
+            Ok(QueuedIntent {
+                intent_id,
+                queue,
+                intent: Intent::new(kind, intent_key, payload)
+                    .with_context_fact_ids(context_fact_ids),
+                mode,
+            })
+        })
+        .transpose()
+}
+
+/// Select the next queued intent row in queue order.
+fn next_intent_row(db: &Db, queue: IntentQueue) -> rusqlite::Result<Option<QueuedIntentRow>> {
+    let table_name = quoted_table_name(queue.table())?;
+    db.conn()
+        .query_row(
+            &format!(
+                "SELECT intent_id, kind, intent_key, payload, replay
+                 FROM {table_name}
+                 ORDER BY rowid
+                 LIMIT 1"
+            ),
+            [],
+            |row| {
+                Ok(QueuedIntentRow {
+                    intent_id: row.get(0)?,
+                    kind: row.get(1)?,
+                    intent_key: row.get(2)?,
+                    payload: row.get(3)?,
+                    mode: handler_mode_from_replay_flag(row.get(4)?),
+                })
+            },
+        )
+        .optional()
+}
+
+/// Load the exact attached fact ids for one selected queue row.
+fn intent_context_fact_ids(
+    db: &Db,
+    queue: IntentQueue,
+    intent_id: &[u8],
+) -> rusqlite::Result<Vec<FactId>> {
+    let table_name = quoted_table_name(queue.context_table())?;
+    let mut stmt = db.conn().prepare(&format!(
+        "SELECT fact_id
+         FROM {table_name}
+         WHERE intent_id = ?1
+         ORDER BY ordinal"
+    ))?;
+    let fact_ids = stmt
+        .query_map(params![intent_id], |row| row.get::<_, FactId>(0))?
+        .collect();
+    fact_ids
+}
+
+struct QueuedIntentRow {
+    intent_id: Vec<u8>,
+    kind: String,
+    intent_key: Vec<u8>,
+    payload: Vec<u8>,
+    mode: HandlerMode,
+}
+
+fn handler_mode_from_replay_flag(replay: i64) -> HandlerMode {
+    if replay == 0 {
+        HandlerMode::Live
+    } else {
+        HandlerMode::Replay
+    }
+}
+
+// =============================================================================
 // Stage 2 Helpers
 // =============================================================================
 
@@ -399,38 +518,48 @@ fn handler_storage_requirement_satisfied(
 }
 
 // =============================================================================
-// Stage 1 Test Helpers
+// Stage 2 And 3 Queue Consumption Helpers
 // =============================================================================
 
-/// Return the first queued intent in queue order.
-#[cfg(test)]
-fn next_queued_intent_in_queue(
-    store: &Db,
+/// Consume exactly one queue row and its attached context rows.
+///
+/// Returning `false` means the selected row disappeared before the transaction
+/// reached it, so the caller must not run handler code or commit effects.
+fn consume_queued_intent_in_tx(
+    db: &Db,
     queue: IntentQueue,
-) -> Result<Option<QueuedIntent>, String> {
-    next_intent_row(store, queue)
-        .map_err(|err| format!("load queued intent: {err}"))?
-        .map(|row| {
-            let QueuedIntentRow {
-                intent_id,
-                kind,
-                intent_key,
-                payload,
-                mode,
-            } = row;
-            let context_fact_ids = intent_context_fact_ids(store, queue, &intent_id)
-                .map_err(|err| format!("load queued intent context: {err}"))?;
-            let kind = IntentKind::new(kind)
-                .map_err(|err| format!("invalid queued intent kind: {err}"))?;
-            Ok(QueuedIntent {
-                intent_id,
-                queue,
-                intent: Intent::new(kind, intent_key, payload)
-                    .with_context_fact_ids(context_fact_ids),
-                mode,
-            })
-        })
-        .transpose()
+    intent_id: &[u8],
+) -> rusqlite::Result<bool> {
+    if delete_intent_row_in_tx(db, queue, intent_id)? == 0 {
+        return Ok(false);
+    }
+    delete_intent_context_rows_in_tx(db, queue, intent_id)?;
+    Ok(true)
+}
+
+/// Delete one queued intent row by its queue row id.
+fn delete_intent_row_in_tx(
+    db: &Db,
+    queue: IntentQueue,
+    intent_id: &[u8],
+) -> rusqlite::Result<usize> {
+    let table_name = quoted_table_name(queue.table())?;
+    db.conn().execute(
+        &format!("DELETE FROM {table_name} WHERE intent_id = ?1"),
+        params![intent_id],
+    )
+}
+
+fn delete_intent_context_rows_in_tx(
+    db: &Db,
+    queue: IntentQueue,
+    intent_id: &[u8],
+) -> rusqlite::Result<usize> {
+    let table_name = quoted_table_name(queue.context_table())?;
+    db.conn().execute(
+        &format!("DELETE FROM {table_name} WHERE intent_id = ?1"),
+        params![intent_id],
+    )
 }
 
 // =============================================================================
@@ -545,30 +674,8 @@ pub(crate) fn validate_intent_kind_registered(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum IntentQueue {
-    Durable,
-    Local,
-}
-
-impl IntentQueue {
-    fn table(self) -> TableName {
-        match self {
-            Self::Durable => INTENTS,
-            Self::Local => LOCAL_INTENTS,
-        }
-    }
-
-    fn context_table(self) -> TableName {
-        match self {
-            Self::Durable => INTENT_CONTEXT,
-            Self::Local => LOCAL_INTENT_CONTEXT,
-        }
-    }
-}
-
 // =============================================================================
-// Queue SQL Helpers
+// Queue Insert Helpers
 // =============================================================================
 
 fn intent_queue_error(message: impl Into<String>) -> rusqlite::Error {
@@ -641,106 +748,6 @@ fn replay_flag_for_handler_mode(mode: HandlerMode) -> i64 {
         1
     } else {
         0
-    }
-}
-
-/// Consume exactly one queue row and its attached context rows.
-///
-/// Returning `false` means the selected row disappeared before the transaction
-/// reached it, so the caller must not run handler code or commit effects.
-fn consume_queued_intent_in_tx(
-    db: &Db,
-    queue: IntentQueue,
-    intent_id: &[u8],
-) -> rusqlite::Result<bool> {
-    if delete_intent_row_in_tx(db, queue, intent_id)? == 0 {
-        return Ok(false);
-    }
-    delete_intent_context_rows_in_tx(db, queue, intent_id)?;
-    Ok(true)
-}
-
-/// Delete one queued intent row by its queue row id.
-fn delete_intent_row_in_tx(
-    db: &Db,
-    queue: IntentQueue,
-    intent_id: &[u8],
-) -> rusqlite::Result<usize> {
-    let table_name = quoted_table_name(queue.table())?;
-    db.conn().execute(
-        &format!("DELETE FROM {table_name} WHERE intent_id = ?1"),
-        params![intent_id],
-    )
-}
-
-fn delete_intent_context_rows_in_tx(
-    db: &Db,
-    queue: IntentQueue,
-    intent_id: &[u8],
-) -> rusqlite::Result<usize> {
-    let table_name = quoted_table_name(queue.context_table())?;
-    db.conn().execute(
-        &format!("DELETE FROM {table_name} WHERE intent_id = ?1"),
-        params![intent_id],
-    )
-}
-
-/// Select the next queued intent row in queue order.
-fn next_intent_row(db: &Db, queue: IntentQueue) -> rusqlite::Result<Option<QueuedIntentRow>> {
-    let table_name = quoted_table_name(queue.table())?;
-    db.conn()
-        .query_row(
-            &format!(
-                "SELECT intent_id, kind, intent_key, payload, replay
-                 FROM {table_name}
-                 ORDER BY rowid
-                 LIMIT 1"
-            ),
-            [],
-            |row| {
-                Ok(QueuedIntentRow {
-                    intent_id: row.get(0)?,
-                    kind: row.get(1)?,
-                    intent_key: row.get(2)?,
-                    payload: row.get(3)?,
-                    mode: handler_mode_from_replay_flag(row.get(4)?),
-                })
-            },
-        )
-        .optional()
-}
-
-fn intent_context_fact_ids(
-    db: &Db,
-    queue: IntentQueue,
-    intent_id: &[u8],
-) -> rusqlite::Result<Vec<FactId>> {
-    let table_name = quoted_table_name(queue.context_table())?;
-    let mut stmt = db.conn().prepare(&format!(
-        "SELECT fact_id
-         FROM {table_name}
-         WHERE intent_id = ?1
-         ORDER BY ordinal"
-    ))?;
-    let fact_ids = stmt
-        .query_map(params![intent_id], |row| row.get::<_, FactId>(0))?
-        .collect();
-    fact_ids
-}
-
-struct QueuedIntentRow {
-    intent_id: Vec<u8>,
-    kind: String,
-    intent_key: Vec<u8>,
-    payload: Vec<u8>,
-    mode: HandlerMode,
-}
-
-fn handler_mode_from_replay_flag(replay: i64) -> HandlerMode {
-    if replay == 0 {
-        HandlerMode::Live
-    } else {
-        HandlerMode::Replay
     }
 }
 
