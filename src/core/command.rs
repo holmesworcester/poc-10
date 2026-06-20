@@ -1,8 +1,25 @@
 //! Protocol-neutral command authoring primitives.
 //!
-//! User-facing commands may query the database directly and read an injected
-//! command clock. Commands return authored facts plus a typed receipt; runtime
-//! submission is the only path that retains those facts and wakes projection.
+//! Commands are the system's explicit user/API write path. A command starts from
+//! caller intent and the currently projected database state, may query
+//! protocol-owned local capabilities, stamps deterministic command time through a
+//! `CommandClock`, and returns authored fact bytes plus a receipt. Those facts do
+//! not become visible rows immediately; runtime submission retains them and lets
+//! ordinary projection publish context, rows, intents, and later visibility.
+//!
+//! Command implementation still belongs with the protocol fact family that owns
+//! the operation. Fact-family `cli.rs` modules parse argv and format display
+//! output, `api.rs` modules decide what facts to author, and `author.rs` /
+//! `encode.rs` modules build canonical signed or encrypted bytes. Commands may
+//! compose several newly authored facts in memory, but they do not write rows,
+//! drive projection, dispatch handlers, emit intents directly, or privately
+//! drain their own output.
+//!
+//! This file is the shared core vocabulary for that boundary. It defines the
+//! command clock, local capability value types that command code may borrow from
+//! protocol-owned state, and `AuthoredFacts`, the narrow receipt-plus-facts bundle
+//! accepted by runtime submission. It deliberately does not register command
+//! names, parse CLI argv, know protocol layouts, or decide command semantics.
 
 use crate::core::facts::{Fact, FactId};
 
@@ -84,5 +101,33 @@ impl<T> AuthoredFacts<T> {
 
     pub fn into_parts(self) -> (T, Vec<Fact>) {
         (self.receipt, self.facts)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AuthoredFacts, CommandClock, FnClock};
+    use crate::core::facts::{Fact, FactScope};
+
+    #[test]
+    fn fn_clock_delegates_to_injected_time_source() {
+        let clock = FnClock(|| 123_456u64);
+
+        assert_eq!(clock.next_timestamp(), 123_456);
+    }
+
+    #[test]
+    fn authored_facts_preserves_receipt_and_fact_list() {
+        let facts = vec![
+            Fact::new(FactScope::Local, 10, b"first command fact".to_vec()),
+            Fact::new(FactScope::Local, 11, b"second command fact".to_vec()),
+        ];
+
+        let (receipt, emitted) = AuthoredFacts::new("receipt")
+            .with_facts(facts.clone())
+            .into_parts();
+
+        assert_eq!(receipt, "receipt");
+        assert_eq!(emitted, facts);
     }
 }

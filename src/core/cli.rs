@@ -112,6 +112,11 @@ pub fn run<C>(
         .map_err(|err| format!("{}: {err}", command.name))
 }
 
+// =============================================================================
+// Helper Functions
+// =============================================================================
+
+/// Validate that every registered command name is unique.
 fn validate_command_names<C>(commands: &[CliCommand<C>]) -> Result<(), String> {
     for (index, left) in commands.iter().enumerate() {
         if commands[index + 1..]

@@ -1,31 +1,20 @@
 //! Generic protocol application runner.
 //!
-//! Core can launch any protocol that exports a `ProtocolDescription`: the
-//! description names its runtime declaration, daemon declarations, and command
-//! table. Core owns the fixed runtime turn through `core::daemon`: give
-//! recurring builders a chance to enqueue local work, optionally accept network
-//! bytes when the host supplies a listener, classify them into incoming facts,
-//! process declared time wakes, drain durable projection, drain incoming
-//! projection, optionally drain durable intents when the host supplies a
-//! listener, drain local intents, then optionally pump outgoing network rows.
+//! This file owns product-independent CLI hosting for a protocol declaration. It
+//! parses top-level argv, prints help, handles daemon lifecycle commands, opens
+//! the selected runtime for command turns, dispatches registered protocol
+//! commands, and implements the generic `assert eventually` polling wrapper.
 //!
-//! Core still does not know command semantics. For non-daemon commands it opens
-//! the declared runtime, runs one bounded turn without network host adapters or
-//! durable handler dispatch, constructs the protocol-owned context, calls the
-//! registered function, and prints the returned `CliOutput`. The generic
-//! `assert eventually` wrapper repeats that same command path and compares only
-//! scalar `field: value` output lines.
+//! `main.rs` supplies argv. The protocol supplies a `ProtocolDescription`: names,
+//! runtime and daemon declarations, the command table, and a context builder.
+//! This runner supplies the stable process shape around those declarations:
+//! `--db`, optional command time, daemon lifecycle commands, help text, runtime
+//! opening, command dispatch, and display-line printing.
 //!
-//! This file sits between `main.rs` and the protocol. The binary supplies argv;
-//! the protocol supplies declarations; this runner supplies the stable process
-//! shape: `--db`, optional command time, daemon lifecycle commands, help,
-//! runtime opening, and command dispatch. Change this file when every protocol
-//! should gain a new hosting behavior. Change the protocol registry or command
-//! modules when only the concrete protocol changes.
-//!
-//! The runner deliberately returns display lines only at the edge. Commands
-//! produce facts, intents, rows, or query output through their own modules; core
-//! does not inspect that domain data while routing the CLI.
+//! The file does not own fact layouts, projector policy, handler policy, row
+//! meaning, or concrete command semantics. Change it when every protocol should
+//! gain a process-level hosting behavior. Change the protocol registry or
+//! command modules when only one protocol's behavior changes.
 
 use crate::core::cli::{self, CliArgs, CliCommand, CliOutput};
 use crate::core::daemon::{self, DaemonDescription};
@@ -51,11 +40,17 @@ pub struct ProtocolDescription<C: 'static> {
     pub context: fn(Runtime, Option<PathBuf>, Option<u64>) -> C,
 }
 
+// =============================================================================
+// Central Procedure
+// =============================================================================
+
 /// Run one protocol CLI invocation.
 ///
-/// `app` owns the generic command split: help, daemon lifecycle commands, and
-/// protocol command dispatch. Protocol modules still own their command parsers
-/// and output formatting through their registered `CliCommand`s.
+/// This is the process edge for a protocol binary. It parses top-level options,
+/// handles help before touching storage, runs the selected command path, and
+/// prints the returned display lines. Protocol modules still own command
+/// argument parsing and output construction through their registered
+/// `CliCommand`s.
 pub fn run<C: 'static>(
     description: &'static ProtocolDescription<C>,
     argv: Vec<String>,
@@ -80,32 +75,15 @@ pub fn run<C: 'static>(
     Ok(())
 }
 
-/// Build top-level usage with daemon commands plus protocol commands.
-pub fn usage<C: 'static>(description: &ProtocolDescription<C>, reason: &str) -> String {
-    let mut lines = vec![reason.to_string(), "usage:".to_string()];
-    lines.extend([
-        format!(
-            "  {} --db PATH start --listen IP PORT [--tick-ms N] [--quiet-ms N]",
-            description.command_name
-        ),
-        format!("  {} --db PATH stop", description.command_name),
-        format!("  {} --db PATH reset", description.command_name),
-        format!(
-            "  {} --db PATH assert eventually COMMAND [ARGS...] FIELD OP VALUE [--timeout-ms N] [--poll-ms N]",
-            description.command_name
-        ),
-    ]);
-    for command in description.commands {
-        lines.push(format!(
-            "  {} --db PATH [--at TIMESTAMP_MS] {}",
-            description.command_name, command.usage
-        ));
-    }
-    lines.push(String::new());
-    lines.push("available commands run through the target core runtime facade".to_string());
-    lines.join("\n")
-}
+// =============================================================================
+// Command Dispatch Stages
+// =============================================================================
 
+/// Route parsed top-level command words to the generic hosting stage.
+///
+/// The split here is intentionally shallow: daemon lifecycle words are owned by
+/// this runner, `assert` is the generic polling wrapper, and every other command
+/// must be present in the protocol command table.
 fn run_parsed<C: 'static>(
     description: &'static ProtocolDescription<C>,
     parsed: ParsedArgs,
@@ -122,6 +100,11 @@ fn run_parsed<C: 'static>(
     }
 }
 
+/// Start the long-running daemon for the selected database.
+///
+/// Startup opens the runtime once, installs process-local recurring work, and
+/// then delegates listener parsing, stop-file handling, and daemon turn driving
+/// to `core::daemon`.
 fn run_start<C: 'static>(
     description: &'static ProtocolDescription<C>,
     parsed: ParsedArgs,
@@ -148,6 +131,10 @@ fn run_start<C: 'static>(
     )
 }
 
+/// Stop a running daemon for the selected database.
+///
+/// The command is database-scoped but does not open the protocol runtime; daemon
+/// lifecycle storage is owned by `core::daemon`.
 fn run_stop(parsed: ParsedArgs) -> Result<CliOutput, String> {
     let db = parsed
         .db
@@ -155,6 +142,10 @@ fn run_stop(parsed: ParsedArgs) -> Result<CliOutput, String> {
     daemon::stop(&db, CliArgs::new(&parsed.command[1..]))
 }
 
+/// Reset daemon lifecycle state for the selected database.
+///
+/// This clears daemon-owned process coordination state without interpreting
+/// protocol commands or protocol rows.
 fn run_reset(parsed: ParsedArgs) -> Result<CliOutput, String> {
     let db = parsed
         .db
@@ -162,6 +153,12 @@ fn run_reset(parsed: ParsedArgs) -> Result<CliOutput, String> {
     daemon::reset(&db, CliArgs::new(&parsed.command[1..]))
 }
 
+/// Poll one protocol command until a scalar output field satisfies a comparison.
+///
+/// `assert eventually` reuses the normal protocol-command path on every poll, so
+/// it observes whatever runtime progress that path performs before command
+/// dispatch. The assertion layer only parses `field: value` display lines; it
+/// does not inspect protocol state directly.
 fn run_assert<C: 'static>(
     description: &'static ProtocolDescription<C>,
     parsed: ParsedArgs,
@@ -219,6 +216,12 @@ fn run_assert<C: 'static>(
     }
 }
 
+/// Run a registered protocol command inside one serialized command turn.
+///
+/// The runner validates the command name, acquires the database turn lock, opens
+/// the declared runtime, performs the command-turn runtime work, builds the
+/// protocol-owned CLI context, and then delegates argument parsing and output to
+/// the registered command function.
 fn run_protocol_command<C: 'static>(
     description: &'static ProtocolDescription<C>,
     parsed: ParsedArgs,
@@ -260,6 +263,57 @@ fn run_protocol_command<C: 'static>(
     .map_err(|err| with_usage_footer(description, err))
 }
 
+// =============================================================================
+// Usage Helpers
+// =============================================================================
+
+/// Build top-level usage with daemon commands plus protocol commands.
+///
+/// Usage is generated from the protocol declaration so the generic daemon,
+/// assertion, and command-time forms stay consistent across binaries while each
+/// protocol owns only its concrete command usage strings.
+pub fn usage<C: 'static>(description: &ProtocolDescription<C>, reason: &str) -> String {
+    let mut lines = vec![reason.to_string(), "usage:".to_string()];
+    lines.extend([
+        format!(
+            "  {} --db PATH start --listen IP PORT [--tick-ms N] [--quiet-ms N]",
+            description.command_name
+        ),
+        format!("  {} --db PATH stop", description.command_name),
+        format!("  {} --db PATH reset", description.command_name),
+        format!(
+            "  {} --db PATH assert eventually COMMAND [ARGS...] FIELD OP VALUE [--timeout-ms N] [--poll-ms N]",
+            description.command_name
+        ),
+    ]);
+    for command in description.commands {
+        lines.push(format!(
+            "  {} --db PATH [--at TIMESTAMP_MS] {}",
+            description.command_name, command.usage
+        ));
+    }
+    lines.push(String::new());
+    lines.push("available commands run through the target core runtime facade".to_string());
+    lines.join("\n")
+}
+
+/// Attach the top-level command list when a command reports its own usage block.
+fn with_usage_footer<C: 'static>(description: &ProtocolDescription<C>, err: String) -> String {
+    if err.contains("\nusage:\n") {
+        usage(description, &err)
+    } else {
+        err
+    }
+}
+
+// =============================================================================
+// Assert Eventually Helpers
+// =============================================================================
+
+/// Parsed form of the generic polling assertion.
+///
+/// The wrapped command is always a protocol command. The comparison is evaluated
+/// against one scalar `field: value` line from that command's `CliOutput`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct EventuallyAssertion {
     command: Vec<String>,
@@ -271,6 +325,11 @@ struct EventuallyAssertion {
 }
 
 impl EventuallyAssertion {
+    /// Parse `assert eventually` body words and validate the wrapped command.
+    ///
+    /// Option flags may appear anywhere in the assertion words. The final three
+    /// non-option words are the field name, comparison operator, and expected
+    /// value; all preceding non-option words form the wrapped protocol command.
     fn parse<C: 'static>(
         description: &ProtocolDescription<C>,
         args: &[String],
@@ -314,6 +373,11 @@ impl EventuallyAssertion {
     }
 }
 
+/// Remove assertion options and return remaining assertion words plus timing.
+///
+/// Unknown words are preserved for the command/field/operator/value split.
+/// Timing defaults keep ordinary CLI use responsive while allowing slower
+/// daemon-observed conditions to opt into longer waits.
 fn parse_assert_options<C: 'static>(
     description: &ProtocolDescription<C>,
     args: &[String],
@@ -347,6 +411,7 @@ fn parse_assert_options<C: 'static>(
     Ok((remaining, timeout_ms, poll_ms))
 }
 
+/// Parse a strictly positive millisecond option for assertion timing.
 fn parse_positive_u64<C: 'static>(
     description: &ProtocolDescription<C>,
     value: &str,
@@ -358,6 +423,7 @@ fn parse_positive_u64<C: 'static>(
         .ok_or_else(|| assert_usage(description))
 }
 
+/// Build the focused usage text for malformed `assert eventually` invocations.
 fn assert_usage<C: 'static>(description: &ProtocolDescription<C>) -> String {
     format!(
         "assert eventually COMMAND [ARGS...] FIELD OP VALUE [--timeout-ms N] [--poll-ms N]\nusage:\n  {} --db PATH assert eventually COMMAND [ARGS...] FIELD OP VALUE [--timeout-ms N] [--poll-ms N]",
@@ -365,6 +431,10 @@ fn assert_usage<C: 'static>(description: &ProtocolDescription<C>) -> String {
     )
 }
 
+/// Extract unique scalar output fields from protocol command display lines.
+///
+/// Lines without `:` are ignored. Duplicate field names are rejected because an
+/// assertion should compare against exactly one observed value.
 fn output_fields(output: &CliOutput) -> Result<BTreeMap<String, String>, String> {
     let mut fields = BTreeMap::new();
     for line in &output.lines {
@@ -385,6 +455,7 @@ fn output_fields(output: &CliOutput) -> Result<BTreeMap<String, String>, String>
     Ok(fields)
 }
 
+/// Supported comparisons for `assert eventually`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CompareOp {
     Eq,
@@ -396,6 +467,7 @@ enum CompareOp {
 }
 
 impl CompareOp {
+    /// Parse the user-facing comparison operator spelling.
     fn parse<C: 'static>(
         description: &ProtocolDescription<C>,
         value: &str,
@@ -411,6 +483,7 @@ impl CompareOp {
         }
     }
 
+    /// Return the canonical operator spelling used in successful output.
     fn as_str(self) -> &'static str {
         match self {
             Self::Eq => "==",
@@ -422,6 +495,10 @@ impl CompareOp {
         }
     }
 
+    /// Compare one observed output value against the expected value.
+    ///
+    /// Equality is string equality. Ordering comparisons are numeric `u64`
+    /// comparisons so status counters and timestamps can be asserted directly.
     fn matches(self, observed: &str, expected: &str) -> Result<bool, String> {
         match self {
             Self::Eq => Ok(observed == expected),
@@ -445,14 +522,14 @@ impl CompareOp {
     }
 }
 
-fn with_usage_footer<C: 'static>(description: &ProtocolDescription<C>, err: String) -> String {
-    if err.contains("\nusage:\n") {
-        usage(description, &err)
-    } else {
-        err
-    }
-}
+// =============================================================================
+// Argument Parsing Helpers
+// =============================================================================
 
+/// Parsed top-level argv before command-specific parsing.
+///
+/// Only process-wide options live here. Once the first command word is seen, all
+/// remaining words are preserved for the selected command path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedArgs {
     db: Option<PathBuf>,
@@ -461,6 +538,11 @@ struct ParsedArgs {
 }
 
 impl ParsedArgs {
+    /// Parse process-wide `--db` and `--at` options from argv.
+    ///
+    /// The parser stops option handling at the first command word so
+    /// protocol-owned command arguments can reuse ordinary flag syntax without
+    /// being interpreted by the app runner.
     fn parse(argv: Vec<String>) -> Result<Self, String> {
         let mut db = None;
         let mut at = None;

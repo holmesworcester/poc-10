@@ -731,6 +731,137 @@ fn core_readmes_document_runtime_boundaries() {
 }
 
 #[test]
+fn app_module_docs_stay_file_scoped_and_hierarchical() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let app_path = root.join("src/core/app.rs");
+    let app = source_text(&app_path);
+    let module_doc = rust_module_doc_text(&app_path);
+    let normalized_doc = normalize_whitespace(&module_doc);
+
+    for required in [
+        "This file owns product-independent CLI hosting for a protocol declaration",
+        "parses top-level argv, prints help, handles daemon lifecycle commands, opens the selected runtime for command turns, dispatches registered protocol commands",
+        "`main.rs` supplies argv",
+        "The protocol supplies a `ProtocolDescription`",
+        "The file does not own fact layouts, projector policy, handler policy, row meaning, or concrete command semantics",
+    ] {
+        assert!(
+            normalized_doc.contains(required),
+            "src/core/app.rs module docs should explain the app runner's own role: {required:?}"
+        );
+    }
+
+    for forbidden in [
+        "Core can launch any protocol",
+        "classify them into incoming facts",
+        "process declared time wakes",
+        "drain durable projection",
+        "drain incoming projection",
+        "pump outgoing network rows",
+    ] {
+        assert!(
+            !normalized_doc.contains(forbidden),
+            "src/core/app.rs module docs should not retell runtime internals: {forbidden:?}"
+        );
+    }
+
+    let central = app
+        .find("// Central Procedure")
+        .expect("src/core/app.rs has a central procedure section");
+    let dispatch = app
+        .find("// Command Dispatch Stages")
+        .expect("src/core/app.rs has command dispatch stages");
+    let usage = app
+        .find("// Usage Helpers")
+        .expect("src/core/app.rs has usage helpers");
+    let assertion = app
+        .find("// Assert Eventually Helpers")
+        .expect("src/core/app.rs has assertion helpers");
+    let args = app
+        .find("// Argument Parsing Helpers")
+        .expect("src/core/app.rs has argument parsing helpers");
+    assert!(
+        central < dispatch && dispatch < usage && usage < assertion && assertion < args,
+        "src/core/app.rs should be ordered central procedure, stages, then helpers"
+    );
+
+    for required in [
+        "/// Route parsed top-level command words to the generic hosting stage.",
+        "/// Start the long-running daemon for the selected database.",
+        "/// Poll one protocol command until a scalar output field satisfies a comparison.",
+        "/// Run a registered protocol command inside one serialized command turn.",
+        "/// Remove assertion options and return remaining assertion words plus timing.",
+        "/// Parse process-wide `--db` and `--at` options from argv.",
+    ] {
+        assert!(
+            app.contains(required),
+            "src/core/app.rs should document its important functions: {required:?}"
+        );
+    }
+}
+
+#[test]
+fn cli_module_keeps_dispatch_core_above_helpers() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let cli = source_text(&root.join("src/core/cli.rs"));
+
+    let run = cli
+        .find("pub fn run<C>")
+        .expect("src/core/cli.rs exposes the registry runner");
+    let helpers = cli
+        .find("// Helper Functions")
+        .expect("src/core/cli.rs marks helper functions");
+    assert!(
+        run < helpers,
+        "src/core/cli.rs should keep the registry runner above helper functions"
+    );
+
+    for helper in [
+        "fn validate_command_names<C>",
+        "pub fn usage<C>",
+        "pub fn decode_hex_32(",
+        "pub fn decode_hex_32_named(",
+        "pub fn encode_hex_32(",
+        "pub fn encode_hex(",
+        "pub fn read_file_bytes(",
+        "pub fn write_file_bytes(",
+        "fn hex_nibble(",
+    ] {
+        let helper_offset = cli
+            .find(helper)
+            .unwrap_or_else(|| panic!("src/core/cli.rs is missing helper {helper:?}"));
+        assert!(
+            helpers < helper_offset,
+            "src/core/cli.rs helper {helper:?} should live below the helper section"
+        );
+    }
+}
+
+#[test]
+fn command_module_docs_explain_command_system_role() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let command_path = root.join("src/core/command.rs");
+    let command_doc = rust_module_doc_text(&command_path);
+    let normalized_doc = normalize_whitespace(&command_doc);
+
+    for required in [
+        "Commands are the system's explicit user/API write path",
+        "A command starts from caller intent and the currently projected database state",
+        "stamps deterministic command time through a `CommandClock`",
+        "runtime submission retains them and lets ordinary projection publish context, rows, intents, and later visibility",
+        "Command implementation still belongs with the protocol fact family that owns the operation",
+        "This file is the shared core vocabulary for that boundary",
+        "`AuthoredFacts`, the narrow receipt-plus-facts bundle accepted by runtime submission",
+        "It deliberately does not register command names, parse CLI argv, know protocol layouts, or decide command semantics",
+    ] {
+        assert!(
+            normalized_doc.contains(required),
+            "src/core/command.rs module docs should explain command system role: {required:?}"
+        );
+    }
+}
+
+#[test]
 fn architecture_docs_match_current_module_and_context_names() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
 
