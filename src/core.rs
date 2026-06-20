@@ -35,6 +35,7 @@ pub mod intents;
 pub mod network;
 pub mod perf_profile;
 pub mod project_fact;
+pub mod proofs;
 pub mod runtime;
 pub mod schema;
 pub mod wire;
