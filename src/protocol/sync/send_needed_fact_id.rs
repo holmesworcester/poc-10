@@ -48,7 +48,7 @@ pub fn decode_send_needed_fact_id(intent: &Intent) -> Result<SendNeededFactId, S
     }
     let have_fact_id = intent.payload[1..33].try_into().unwrap();
     let input = SendNeededFactId { have_fact_id };
-    if intent.key != send_needed_fact_id_key(&input) {
+    if intent.handler_key != send_needed_fact_id_key(&input) {
         return Err("send_needed_fact_id intent key does not match payload".into());
     }
     Ok(input)

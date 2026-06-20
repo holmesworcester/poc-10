@@ -34,10 +34,10 @@ pub struct CreateConnection {
 
 pub fn create_connection_intent(input: CreateConnection) -> Intent {
     let payload = encode_payload(&input);
-    let key = intent_key(&input);
+    let handler_key = intent_key(&input);
     Intent::new(
         IntentKind::new(CREATE_CONNECTION).expect("valid create connection intent kind"),
-        key,
+        handler_key,
         payload,
     )
     .with_context_fact_ids([
@@ -59,7 +59,7 @@ pub fn decode_create_connection_intent(intent: &Intent) -> Result<CreateConnecti
         initiator_endpoint_shared_id: take_id(&intent.payload, 1),
         receive_id: take_id(&intent.payload, 2),
     };
-    if intent.key != intent_key(&input) {
+    if intent.handler_key != intent_key(&input) {
         return Err("create_connection intent key does not match payload".into());
     }
     Ok(input)
@@ -121,8 +121,8 @@ mod tests {
         let mut duplicate_receive = sample();
         duplicate_receive.receive_id = [9; 32];
         assert_eq!(
-            create_connection_intent(sample()).key,
-            create_connection_intent(duplicate_receive).key
+            create_connection_intent(sample()).handler_key,
+            create_connection_intent(duplicate_receive).handler_key
         );
     }
 }

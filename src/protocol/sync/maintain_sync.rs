@@ -61,7 +61,7 @@ fn decode_maintain_sync(intent: &Intent) -> Result<MaintainSync, String> {
         return Err("maintain_sync payload is malformed".to_string());
     }
     let run_at_ms = u64::from_be_bytes(intent.payload[1..9].try_into().unwrap());
-    if intent.key != maintain_sync_key(run_at_ms) {
+    if intent.handler_key != maintain_sync_key(run_at_ms) {
         return Err("maintain_sync key does not match payload".to_string());
     }
     Ok(MaintainSync { run_at_ms })

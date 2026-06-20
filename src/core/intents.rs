@@ -70,17 +70,17 @@ impl IntentKind {
 /// One unit of handler work.
 ///
 /// Core uses `kind` for routing and treats every enqueued row as distinct work.
-/// The `key` remains available to handlers as a stable semantic key for their
-/// own protocol checks, payload validation, and row writes. Context fact ids are
-/// exact inputs that core loads into `HandlerContext` before calling the
-/// handler; handlers still decode the payload to interpret what those facts
+/// The `handler_key` remains available to handlers as a stable semantic key for
+/// their own protocol checks, payload validation, and row writes. Context fact
+/// ids are exact inputs that core loads into `HandlerContext` before calling
+/// the handler; handlers still decode the payload to interpret what those facts
 /// mean.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Intent {
     /// Handler routing key.
     pub kind: IntentKind,
     /// Handler-owned semantic key within `kind`.
-    pub key: Vec<u8>,
+    pub handler_key: Vec<u8>,
     /// Opaque handler-owned payload bytes.
     pub payload: Vec<u8>,
     /// Exact fact inputs dispatch should preload for the handler.
@@ -88,10 +88,14 @@ pub struct Intent {
 }
 
 impl Intent {
-    pub fn new(kind: IntentKind, key: impl Into<Vec<u8>>, payload: impl Into<Vec<u8>>) -> Self {
+    pub fn new(
+        kind: IntentKind,
+        handler_key: impl Into<Vec<u8>>,
+        payload: impl Into<Vec<u8>>,
+    ) -> Self {
         Self {
             kind,
-            key: key.into(),
+            handler_key: handler_key.into(),
             payload: payload.into(),
             context_fact_ids: Vec::new(),
         }
@@ -277,7 +281,7 @@ mod tests {
             b"same-work",
             b"payload",
         );
-        assert_eq!(intent.key, b"same-work");
+        assert_eq!(intent.handler_key, b"same-work");
     }
 
     #[test]

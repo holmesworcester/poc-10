@@ -612,7 +612,7 @@ pub(crate) fn insert_intent_in_tx(
             params![
                 intent_id.as_slice(),
                 intent.kind.as_str(),
-                intent.key.as_slice(),
+                intent.handler_key.as_slice(),
                 intent.payload.as_slice(),
                 replay_flag_for_handler_mode(mode)
             ],
@@ -967,7 +967,7 @@ mod tests {
                 .expect("next durable intent")
                 .expect("queued durable intent")
                 .intent
-                .key,
+                .handler_key,
             b"first".to_vec(),
             "validation errors should not consume the row"
         );
@@ -1445,7 +1445,7 @@ mod tests {
                         "INSERT INTO {TEST_HANDLER_STATE_TABLE} (intent_key)
                          VALUES (?1)"
                     ),
-                    params![intent.key.as_slice()],
+                    params![intent.handler_key.as_slice()],
                 )
                 .map_err(|err| HandlerError::fatal(format!("write handler state: {err}")))?;
             Ok(
@@ -1470,7 +1470,7 @@ mod tests {
                         "INSERT INTO {TEST_HANDLER_STATE_TABLE} (intent_key)
                          VALUES (?1)"
                     ),
-                    params![intent.key.as_slice()],
+                    params![intent.handler_key.as_slice()],
                 )
                 .map_err(|err| HandlerError::fatal(format!("write handler state: {err}")))?;
             Err(HandlerError::fatal("test fatal after write"))

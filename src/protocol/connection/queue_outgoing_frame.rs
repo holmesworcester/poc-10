@@ -67,7 +67,7 @@ pub fn decode_queue_outgoing_frame(intent: &Intent) -> Result<QueueOutgoingFrame
     reader.finish().map_err(payload_error)?;
 
     let input = QueueOutgoingFrame { routing_key, frame };
-    if intent.key != queue_outgoing_frame_key(&input) {
+    if intent.handler_key != queue_outgoing_frame_key(&input) {
         return Err("queue_outgoing_frame intent key does not match payload".into());
     }
     Ok(input)

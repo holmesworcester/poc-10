@@ -1090,7 +1090,7 @@ mod tests {
     impl IntentHandler for RecurringHandler {
         fn handle(&self, intent: &Intent, _context: &HandlerContext<'_>) -> HandlerResult {
             assert_eq!(intent.kind.as_str(), "recurring_tick");
-            assert_eq!(intent.key, b"cycle".to_vec());
+            assert_eq!(intent.handler_key, b"cycle".to_vec());
             RECURRING_HANDLER_CALLS.fetch_add(1, Ordering::SeqCst);
             Ok(RuntimeEffects::new())
         }

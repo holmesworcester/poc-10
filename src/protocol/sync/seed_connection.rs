@@ -46,7 +46,7 @@ pub fn decode_seed_connection_sync(intent: &Intent) -> Result<SeedConnectionSync
     let input = SeedConnectionSync {
         connection_id: intent.payload[1..33].try_into().unwrap(),
     };
-    if intent.key != seed_connection_sync_key(input.connection_id) {
+    if intent.handler_key != seed_connection_sync_key(input.connection_id) {
         return Err("seed_connection_sync key does not match payload".into());
     }
     Ok(input)

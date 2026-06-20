@@ -177,7 +177,7 @@ pub(crate) fn project_one(
         }
     };
 
-    commit_projection_outcome(
+    commit_projection_effects(
         store,
         &outcome,
         allowed_tables,
@@ -266,7 +266,7 @@ fn evaluate_loaded_projection_input(
 ///
 /// This is the commit_projection_effects work item named in the architecture
 /// contract tests.
-fn commit_projection_outcome(
+fn commit_projection_effects(
     store: &Db,
     outcome: &ProjectionOutcome,
     allowed_tables: &[TableName],
@@ -3318,7 +3318,7 @@ mod contract_tests {
             .expect("load retained fact")
             .is_some());
 
-        commit_projection_outcome(&store, &outcome, &[], &[], None).expect("commit rejection");
+        commit_projection_effects(&store, &outcome, &[], &[], None).expect("commit rejection");
 
         assert_eq!(pending_projection_count(&store, fact.id), 0);
         assert!(retained_fact(&store, &fact.id)
@@ -3356,7 +3356,7 @@ mod contract_tests {
             .expect("load incoming fact")
             .is_some());
 
-        commit_projection_outcome(&store, &outcome, &[], &[], None).expect("commit rejection");
+        commit_projection_effects(&store, &outcome, &[], &[], None).expect("commit rejection");
 
         assert!(incoming_fact_by_id(&store, &fact.id)
             .expect("load incoming fact")

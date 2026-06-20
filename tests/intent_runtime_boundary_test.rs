@@ -11,7 +11,7 @@ impl IntentHandler for EmitsFactAndFollowup {
         let fact = Fact::new(FactScope::Local, 42, b"handler-produced-fact".to_vec());
         let followup = Intent::new(
             IntentKind::new("followup_work").unwrap(),
-            intent.key.clone(),
+            intent.handler_key.clone(),
             b"followup-payload".to_vec(),
         );
 
@@ -24,7 +24,7 @@ fn intent_runtime_output_boundary_is_facts_and_followup_intents_only() {
     let store = Db::open_memory().expect("open db");
     let input = Intent::new(
         IntentKind::new("incoming_work").unwrap(),
-        b"idempotence-key",
+        b"handler-key",
         b"opaque-intent-payload",
     );
 
@@ -64,13 +64,13 @@ fn intent_runtime_output_boundary_is_facts_and_followup_intents_only() {
     assert_eq!(intents.len(), 1);
     let Intent {
         kind,
-        key,
+        handler_key,
         payload,
         context_fact_ids,
     } = &intents[0];
 
     assert_eq!(kind.as_str(), "followup_work");
-    assert_eq!(key, b"idempotence-key");
+    assert_eq!(handler_key, b"handler-key");
     assert_eq!(payload, b"followup-payload");
     assert!(context_fact_ids.is_empty());
 }
@@ -91,13 +91,13 @@ fn intent_metadata_is_protocol_neutral() {
     for intent in [first, second] {
         let Intent {
             kind,
-            key,
+            handler_key,
             payload,
             context_fact_ids,
         } = intent;
 
         assert!(!kind.as_str().is_empty());
-        assert_eq!(key, b"same-work");
+        assert_eq!(handler_key, b"same-work");
         assert!(!payload.is_empty());
         assert!(context_fact_ids.is_empty());
     }

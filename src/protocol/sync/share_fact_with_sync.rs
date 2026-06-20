@@ -141,7 +141,7 @@ pub fn decode_share_fact_with_sync(intent: &Intent) -> Result<ShareFactWithSync,
         state,
         context_have,
     };
-    if intent.key != share_fact_with_sync_key(&input) {
+    if intent.handler_key != share_fact_with_sync_key(&input) {
         return Err("share_fact_with_sync intent key does not match payload".into());
     }
     Ok(input)

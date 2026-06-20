@@ -207,9 +207,9 @@ fn handler_keys_distinguish_parallel_batches_on_same_route() {
         fact_ids: vec![[2; 32], [4; 32]],
     });
 
-    assert_eq!(first_batch.key, first_batch_duplicate.key);
+    assert_eq!(first_batch.handler_key, first_batch_duplicate.handler_key);
     assert_ne!(
-        first_batch.key, second_batch.key,
+        first_batch.handler_key, second_batch.handler_key,
         "same connection may have multiple pending fact bundles"
     );
 
@@ -222,7 +222,7 @@ fn handler_keys_distinguish_parallel_batches_on_same_route() {
         frame: b"frame:b".to_vec(),
     });
     assert_ne!(
-        first_frame.key, second_frame.key,
+        first_frame.handler_key, second_frame.handler_key,
         "same route may have multiple pending frames"
     );
 }

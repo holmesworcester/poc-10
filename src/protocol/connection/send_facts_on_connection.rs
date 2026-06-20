@@ -158,7 +158,7 @@ fn decode_send_facts_on_connection_work(
             if fact_ids.is_empty() {
                 return Err("send_facts_on_connection must name at least one fact".into());
             }
-            if intent.key != connection_fact_ids_key(connection_id, &fact_ids) {
+            if intent.handler_key != connection_fact_ids_key(connection_id, &fact_ids) {
                 return Err("send_facts_on_connection key does not match payload".into());
             }
             Ok(SendFactsOnConnectionWork::Explicit(SendFactsOnConnection {
@@ -175,7 +175,7 @@ fn decode_send_facts_on_connection_work(
             if start_timestamp_ms > end_timestamp_ms {
                 return Err("send_facts_on_connection shareable range is inverted".into());
             }
-            if intent.key
+            if intent.handler_key
                 != shareable_range_key(
                     connection_id,
                     start_timestamp_ms,
@@ -484,7 +484,7 @@ mod tests {
         let second =
             send_shareable_bucket_on_connection_intent(connection_id, timestamp_ms, [2; 32]);
 
-        assert_ne!(first.key, second.key);
+        assert_ne!(first.handler_key, second.handler_key);
         assert_eq!(first.kind, second.kind);
     }
 

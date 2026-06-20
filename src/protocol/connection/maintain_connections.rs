@@ -111,7 +111,7 @@ fn decode_maintain_connections(intent: &Intent) -> Result<MaintainConnections, S
         created_at_ms,
         local_addr,
     };
-    if intent.key != maintain_connections_key(&input) {
+    if intent.handler_key != maintain_connections_key(&input) {
         return Err("maintain_connections intent key does not match payload".to_string());
     }
     Ok(input)
