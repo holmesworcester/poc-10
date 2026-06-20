@@ -303,25 +303,42 @@ by `frame_fact_id`.
 
 ## Example Fact Graph
 
+Rectangles are facts. Ovals are the few process steps needed to show which
+fact creates or consumes the next fact.
+
 ```mermaid
 flowchart LR
-    Request["request fact"]
-    Retry["request row + maintain_connections"]
-    Network["network_outgoing bytes"]
-    Incoming["incoming request + metadata"]
-    Create["create_connection"]
-    Connection["connection fact"]
-    Session["connection row + offer"]
-    Frame["connection frame fact"]
-    Child["opened child facts"]
-    Projectors["owning projectors"]
-    Sync["sync selected ids"]
+    Authority["invite_secret / endpoint_shared"]:::fact
+    Ephemeral["ephemeral_secret"]:::fact
+    Request["request"]:::fact
+    Receipt["connection_fact_receipt(request)"]:::fact
+    Create(["create_connection"]):::step
+    Connection["connection"]:::fact
+    Send(["sync + send_facts_on_connection"]):::step
+    Frame["frame_small / frame_bundle / frame_file_slice"]:::fact
+    Observation["frame_observation"]:::fact
+    Open(["frame projection"]):::step
+    Child["opened child facts"]:::fact
+    ChildReceipt["fact_receipt(child)"]:::fact
 
-    Request --> Retry --> Network --> Incoming
-    Incoming --> Create
-    Create --> Connection --> Session
-    Session --> Frame --> Child --> Projectors
-    Projectors --> Sync --> Frame
+    Authority --> Request
+    Ephemeral --> Request
+    Request --> Receipt
+    Authority --> Create
+    Request --> Create
+    Receipt --> Create
+    Create --> Connection
+    Connection --> Send
+    Child --> Send
+    Send --> Frame
+    Frame --> Observation
+    Frame --> Open
+    Connection --> Open
+    Open --> Child
+    Open --> ChildReceipt
+
+    classDef fact fill:#eef6ff,stroke:#235a97,stroke-width:1px;
+    classDef step fill:#fff7df,stroke:#8a6418,stroke-width:1px;
 ```
 
 ```text
