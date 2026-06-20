@@ -246,6 +246,22 @@ pub struct ContextNeed {
 }
 
 impl ContextNeed {
+    pub fn for_key(
+        owner: FactId,
+        role: impl Into<Role>,
+        scope: FactScope,
+        key: impl Into<Vec<u8>>,
+    ) -> Self {
+        let key = ContextKey::from_bytes(key);
+        Self {
+            owner,
+            role: role.into(),
+            scope,
+            start_key: key.clone(),
+            end_key: key,
+        }
+    }
+
     pub fn for_key_parts<'a, I, P>(
         owner: FactId,
         role: impl Into<Role>,
@@ -302,6 +318,22 @@ pub struct ContextOffer {
 }
 
 impl ContextOffer {
+    pub fn for_key(
+        owner: FactId,
+        role: impl Into<Role>,
+        scope: FactScope,
+        key: impl Into<Vec<u8>>,
+    ) -> Self {
+        let key = ContextKey::from_bytes(key);
+        Self {
+            owner,
+            role: role.into(),
+            scope,
+            start_key: key.clone(),
+            end_key: key,
+        }
+    }
+
     pub fn for_key_parts<'a, I, P>(
         owner: FactId,
         role: impl Into<Role>,
@@ -487,6 +519,20 @@ mod tests {
         let offer = ContextOffer::for_key_parts(owner, "composite", scope, [&first, &second])
             .expect("offer");
 
+        assert_eq!(need.start_key, need.end_key);
+        assert_eq!(offer.start_key, offer.end_key);
+        assert_eq!(need.start_key, offer.start_key);
+    }
+
+    #[test]
+    fn exact_key_need_and_offer_are_degenerate_ranges() {
+        let owner = [1; 32];
+        let scope = FactScope::Global;
+        let key = [2; 32];
+        let need = ContextNeed::for_key(owner, "exact", scope.clone(), key);
+        let offer = ContextOffer::for_key(owner, "exact", scope, key);
+
+        assert_eq!(need.start_key, ContextKey::from_bytes(key));
         assert_eq!(need.start_key, need.end_key);
         assert_eq!(offer.start_key, offer.end_key);
         assert_eq!(need.start_key, offer.start_key);

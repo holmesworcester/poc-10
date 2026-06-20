@@ -6,7 +6,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use rusqlite::{params, Connection, OptionalExtension};
-use topo::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
+use topo::core::context::{ContextNeed, ContextOffer};
 use topo::core::crypto;
 use topo::core::daemon::{self, RuntimeTurnHost};
 use topo::core::db::TableName;
@@ -125,23 +125,9 @@ fn exact_match(
     key: [u8; 32],
     payload: Fact,
 ) -> MatchedContext {
-    let role = Role::from(role);
-    let key = ContextKey::from_bytes(key);
     MatchedContext {
-        need: ContextNeed {
-            owner,
-            role: role.clone(),
-            scope: scope.clone(),
-            start_key: key.clone(),
-            end_key: key.clone(),
-        },
-        offer: ContextOffer {
-            owner: payload.id,
-            role,
-            scope,
-            start_key: key.clone(),
-            end_key: key,
-        },
+        need: ContextNeed::for_key(owner, role, scope.clone(), key),
+        offer: ContextOffer::for_key(payload.id, role, scope, key),
         payload,
     }
 }
@@ -160,18 +146,16 @@ fn local_endpoint_match(frame_fact_id: [u8; 32], endpoint: &EndpointFact) -> Mat
         endpoint_layout::encode_fact(endpoint).expect("encode endpoint"),
     );
     MatchedContext {
-        need: ContextNeed::range(
+        need: ContextNeed::for_key(
             frame_fact_id,
             "auth_local_endpoint",
             FactScope::Local,
-            [0u8; 32],
-            [0xffu8; 32],
+            endpoint.endpoint,
         ),
-        offer: ContextOffer::range(
+        offer: ContextOffer::for_key(
             endpoint_fact.id,
             "auth_local_endpoint",
             FactScope::Local,
-            endpoint.endpoint,
             endpoint.endpoint,
         ),
         payload: endpoint_fact,

@@ -619,7 +619,7 @@ pub mod authenticate {
         scope: FactScope,
         key: FactId,
     ) -> ContextNeed {
-        ContextNeed::range(owner, role, scope, key, key)
+        ContextNeed::for_key(owner, role, scope, key)
     }
 
     fn bootstrap_invite_need(
@@ -729,11 +729,10 @@ pub mod authenticate {
             );
             MatchedContext {
                 need: super::local_endpoint_need(owner, endpoint.endpoint),
-                offer: ContextOffer::range(
+                offer: ContextOffer::for_key(
                     endpoint_fact.id,
                     "auth_local_endpoint",
                     FactScope::Local,
-                    endpoint.endpoint,
                     endpoint.endpoint,
                 ),
                 payload: endpoint_fact,
@@ -972,23 +971,11 @@ use authenticate::AuthenticatedConnection;
 const CONNECTION_ROLE: &str = "connection";
 
 pub fn connection_need(owner: FactId, connection_id: FactId) -> ContextNeed {
-    ContextNeed::range(
-        owner,
-        CONNECTION_ROLE,
-        FactScope::Local,
-        connection_id,
-        connection_id,
-    )
+    ContextNeed::for_key(owner, CONNECTION_ROLE, FactScope::Local, connection_id)
 }
 
 pub fn connection_offer(owner: FactId, connection_id: FactId) -> ContextOffer {
-    ContextOffer::range(
-        owner,
-        CONNECTION_ROLE,
-        FactScope::Local,
-        connection_id,
-        connection_id,
-    )
+    ContextOffer::for_key(owner, CONNECTION_ROLE, FactScope::Local, connection_id)
 }
 
 /// Projector route metadata for the connection fact.

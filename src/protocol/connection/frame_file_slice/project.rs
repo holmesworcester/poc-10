@@ -585,13 +585,8 @@ fn connection_material_from_context(
     else {
         return ConnectionMaterialContext::Invalid;
     };
-    let endpoint_need = ContextNeed::range(
-        owner,
-        "auth_local_endpoint",
-        FactScope::Local,
-        endpoint_id,
-        endpoint_id,
-    );
+    let endpoint_need =
+        ContextNeed::for_key(owner, "auth_local_endpoint", FactScope::Local, endpoint_id);
     for (_, endpoint_fact) in context.matched_payloads_for(&endpoint_need) {
         if let Ok(endpoint) = auth::endpoint::decode_fact_payload(endpoint_fact.body()) {
             if let Ok(connection) =
@@ -603,11 +598,10 @@ fn connection_material_from_context(
             }
         }
     }
-    let ephemeral_need = ContextNeed::range(
+    let ephemeral_need = ContextNeed::for_key(
         owner,
         connection::ephemeral_secret::project::CONNECTION_EPHEMERAL_SECRET_PUBLIC_KEY_ROLE,
         FactScope::Local,
-        ephemeral_public_key,
         ephemeral_public_key,
     );
     for (_, secret_fact) in context.matched_payloads_for(&ephemeral_need) {

@@ -359,21 +359,19 @@ pub fn connection_fact_receipt_for_path(
 pub const CONNECTION_FACT_RECEIPT_ROLE: &str = "connection_fact_receipt";
 
 pub fn connection_fact_receipt_need(owner: FactId, received_fact_id: FactId) -> ContextNeed {
-    ContextNeed::range(
+    ContextNeed::for_key(
         owner,
         CONNECTION_FACT_RECEIPT_ROLE,
         FactScope::Local,
-        received_fact_id,
         received_fact_id,
     )
 }
 
 pub fn connection_fact_receipt_offer(owner: FactId, received_fact_id: FactId) -> ContextOffer {
-    ContextOffer::range(
+    ContextOffer::for_key(
         owner,
         CONNECTION_FACT_RECEIPT_ROLE,
         FactScope::Local,
-        received_fact_id,
         received_fact_id,
     )
 }

@@ -681,7 +681,7 @@ pub mod authenticate {
         scope: FactScope,
         key: FactId,
     ) -> ContextNeed {
-        ContextNeed::range(owner, role, scope, key, key)
+        ContextNeed::for_key(owner, role, scope, key)
     }
 
     #[cfg(test)]
@@ -854,41 +854,37 @@ const CONNECTION_REQUEST_ROLE: &str = "connection_request";
 const CONNECTION_FOR_REQUEST_ROLE: &str = "connection_for_request";
 
 pub fn connection_request_need(owner: FactId, request_id: FactId) -> ContextNeed {
-    ContextNeed::range(
+    ContextNeed::for_key(
         owner,
         CONNECTION_REQUEST_ROLE,
         FactScope::Global,
-        request_id,
         request_id,
     )
 }
 
 pub fn connection_request_offer(owner: FactId, request_id: FactId) -> ContextOffer {
-    ContextOffer::range(
+    ContextOffer::for_key(
         owner,
         CONNECTION_REQUEST_ROLE,
         FactScope::Global,
-        request_id,
         request_id,
     )
 }
 
 pub fn connection_for_request_need(owner: FactId, request_id: FactId) -> ContextNeed {
-    ContextNeed::range(
+    ContextNeed::for_key(
         owner,
         CONNECTION_FOR_REQUEST_ROLE,
         FactScope::Local,
-        request_id,
         request_id,
     )
 }
 
 pub fn connection_for_request_offer(owner: FactId, request_id: FactId) -> ContextOffer {
-    ContextOffer::range(
+    ContextOffer::for_key(
         owner,
         CONNECTION_FOR_REQUEST_ROLE,
         FactScope::Local,
-        request_id,
         request_id,
     )
 }
@@ -1219,11 +1215,10 @@ fn endpoint_shared_need(owner: FactId, endpoint_shared_id: FactId) -> ContextNee
 }
 
 fn content_signer_need(owner: FactId, workspace_id: FactId, endpoint_id: FactId) -> ContextNeed {
-    ContextNeed::range(
+    ContextNeed::for_key(
         owner,
         "content_signer",
         workspace::scope(workspace_id),
-        endpoint_id,
         endpoint_id,
     )
 }
@@ -1325,28 +1320,25 @@ mod tests {
         vec![
             MatchedContext {
                 need: local_endpoint_need(request_fact.id, responder.endpoint),
-                offer: ContextOffer::range(
+                offer: ContextOffer::for_key(
                     endpoint_fact.id,
                     "auth_local_endpoint",
                     FactScope::Local,
-                    responder.endpoint,
                     responder.endpoint,
                 ),
                 payload: endpoint_fact,
             },
             MatchedContext {
-                need: ContextNeed::range(
+                need: ContextNeed::for_key(
                     request_fact.id,
                     "connection_invite_secret",
                     FactScope::Local,
                     invite_fact.id,
-                    invite_fact.id,
                 ),
-                offer: ContextOffer::range(
+                offer: ContextOffer::for_key(
                     invite_fact.id,
                     "connection_invite_secret",
                     FactScope::Local,
-                    invite_fact.id,
                     invite_fact.id,
                 ),
                 payload: invite_fact.clone(),
@@ -1417,30 +1409,26 @@ mod tests {
                     decode::request_header_ephemeral_public_key(request_fact.body())
                         .expect("request public key"),
                 ),
-                offer: ContextOffer::range(
+                offer: ContextOffer::for_key(
                     ephemeral_fact.id,
                     ephemeral_secret::project::CONNECTION_EPHEMERAL_SECRET_PUBLIC_KEY_ROLE,
                     FactScope::Local,
-                    decode::request_header_ephemeral_public_key(request_fact.body())
-                        .expect("request public key"),
                     decode::request_header_ephemeral_public_key(request_fact.body())
                         .expect("request public key"),
                 ),
                 payload: ephemeral_fact,
             },
             MatchedContext {
-                need: ContextNeed::range(
+                need: ContextNeed::for_key(
                     request_fact.id,
                     "connection_invite_secret",
                     FactScope::Local,
                     invite_fact.id,
-                    invite_fact.id,
                 ),
-                offer: ContextOffer::range(
+                offer: ContextOffer::for_key(
                     invite_fact.id,
                     "connection_invite_secret",
                     FactScope::Local,
-                    invite_fact.id,
                     invite_fact.id,
                 ),
                 payload: invite_fact,

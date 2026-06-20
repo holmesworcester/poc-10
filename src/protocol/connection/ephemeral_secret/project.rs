@@ -354,18 +354,16 @@ impl ConnectionEphemeralSecretProjector {
         // 3. Materialize.
         Ok(ProjectionOutput::new()
             .need(close_need)
-            .offer(ContextOffer::range(
+            .offer(ContextOffer::for_key(
                 fact.id,
                 CONNECTION_EPHEMERAL_SECRET_ROLE,
                 FactScope::Local,
                 fact.id,
-                fact.id,
             ))
-            .offer(ContextOffer::range(
+            .offer(ContextOffer::for_key(
                 fact.id,
                 CONNECTION_EPHEMERAL_SECRET_PUBLIC_KEY_ROLE,
                 FactScope::Local,
-                secret.ephemeral_public_key,
                 secret.ephemeral_public_key,
             ))
             .row_mutation(RowMutation::InsertValues(connection_ephemeral_secret_row(
