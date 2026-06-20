@@ -87,7 +87,7 @@ pub const CORE_SCHEMA_SOURCE: SchemaSource = SchemaSource {
 CREATE TABLE IF NOT EXISTS facts (
     id BLOB PRIMARY KEY NOT NULL,
     bytes BLOB NOT NULL
-);
+) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS local_fact_admissions (
     id BLOB PRIMARY KEY NOT NULL,
@@ -97,7 +97,7 @@ CREATE TABLE IF NOT EXISTS local_fact_admissions (
     scope_id BLOB NOT NULL,
     received_at INTEGER NOT NULL,
     bytes BLOB NOT NULL
-);
+) WITHOUT ROWID;
 CREATE UNIQUE INDEX IF NOT EXISTS local_fact_admissions_by_fact
     ON local_fact_admissions (fact_id);
 CREATE INDEX IF NOT EXISTS local_fact_admissions_by_scope_received_at
@@ -110,11 +110,9 @@ CREATE TABLE IF NOT EXISTS context_exact_edges (
     scope_key BLOB NOT NULL,
     key BLOB NOT NULL,
     PRIMARY KEY (owner, direction, role, scope_key, key)
-);
+) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS context_exact_edges_by_key
     ON context_exact_edges (direction, role, scope_key, key, owner);
-CREATE INDEX IF NOT EXISTS context_exact_edges_by_owner
-    ON context_exact_edges (owner);
 
 CREATE TABLE IF NOT EXISTS context_range_edges (
     owner BLOB NOT NULL,
@@ -124,20 +122,18 @@ CREATE TABLE IF NOT EXISTS context_range_edges (
     start_key BLOB NOT NULL,
     end_key BLOB NOT NULL,
     PRIMARY KEY (owner, direction, role, scope_key, start_key, end_key)
-);
+) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS context_range_edges_by_range_start
     ON context_range_edges (direction, role, scope_key, start_key);
 CREATE INDEX IF NOT EXISTS context_range_edges_by_range_end
     ON context_range_edges (direction, role, scope_key, end_key);
-CREATE INDEX IF NOT EXISTS context_range_edges_by_owner
-    ON context_range_edges (owner);
 
 CREATE TABLE IF NOT EXISTS time_wakes (
     timeline TEXT NOT NULL,
     at INTEGER NOT NULL,
     owner BLOB NOT NULL,
     PRIMARY KEY (timeline, at, owner)
-);
+) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS time_wakes_by_owner
     ON time_wakes (owner);
 
@@ -146,7 +142,7 @@ CREATE TABLE IF NOT EXISTS pending_projection (
     queued_at INTEGER NOT NULL,
     priority INTEGER NOT NULL DEFAULT 100,
     replay INTEGER NOT NULL DEFAULT 0
-);
+) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS pending_projection_by_queue
     ON pending_projection (queued_at, owner);
 CREATE INDEX IF NOT EXISTS pending_projection_by_priority_queue
@@ -171,7 +167,7 @@ CREATE TABLE IF NOT EXISTS pending_projection_matches (
         offer_start_key,
         offer_end_key
     )
-);
+) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS pending_projection_matches_by_offer
     ON pending_projection_matches (offer_owner);
 
@@ -182,7 +178,7 @@ CREATE TABLE IF NOT EXISTS pending_time_ranges (
     start_exclusive INTEGER NOT NULL,
     end_inclusive INTEGER NOT NULL,
     PRIMARY KEY (owner, timeline, has_start, start_exclusive, end_inclusive)
-);
+) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS intents (
     intent_id BLOB PRIMARY KEY NOT NULL,
@@ -197,7 +193,7 @@ CREATE TABLE IF NOT EXISTS intent_context (
     ordinal INTEGER NOT NULL,
     fact_id BLOB NOT NULL,
     PRIMARY KEY (intent_id, ordinal)
-);
+) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS intent_context_by_fact
     ON intent_context (fact_id);
 
@@ -214,7 +210,7 @@ CREATE TEMP TABLE IF NOT EXISTS local_intent_context (
     ordinal INTEGER NOT NULL,
     fact_id BLOB NOT NULL,
     PRIMARY KEY (intent_id, ordinal)
-);
+) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS local_intent_context_by_fact
     ON local_intent_context (fact_id);
 
@@ -228,7 +224,7 @@ CREATE TEMP TABLE IF NOT EXISTS incoming_facts (
     bytes BLOB NOT NULL,
     origin_addr BLOB,
     origin_received_at INTEGER
-);
+) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS incoming_facts_by_received_at
     ON incoming_facts (received_at, id);
 
@@ -243,7 +239,7 @@ CREATE TABLE IF NOT EXISTS projection_timings (
     projected_at INTEGER NOT NULL,
     projection_count INTEGER NOT NULL,
     retained INTEGER NOT NULL
-);
+) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS projection_timings_by_projected_at
     ON projection_timings (projected_at, fact_id);
 CREATE INDEX IF NOT EXISTS projection_timings_by_origin_received_at

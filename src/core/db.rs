@@ -382,6 +382,7 @@ impl Db {
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
+             PRAGMA cache_size = -64000;
              PRAGMA temp_store = MEMORY;",
         )?;
         Ok(Self {
@@ -635,5 +636,48 @@ mod tests {
             temp_store, 2,
             "SQLite temp_store MEMORY has numeric value 2"
         );
+    }
+
+    #[test]
+    fn db_connections_apply_projection_sized_cache() {
+        let store = Db::open_memory().expect("open memory db");
+
+        let cache_size = store
+            .conn()
+            .query_row("PRAGMA cache_size", [], |row| row.get::<_, i64>(0))
+            .expect("query cache_size pragma");
+
+        assert_eq!(
+            cache_size, -64000,
+            "negative SQLite cache_size values are kibibytes"
+        );
+    }
+
+    #[test]
+    fn hot_core_tables_use_declared_primary_key_without_rowid() {
+        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+            .expect("open memory db");
+
+        for table in [
+            "facts",
+            "local_fact_admissions",
+            "context_exact_edges",
+            "context_range_edges",
+            "time_wakes",
+            "pending_projection",
+            "pending_projection_matches",
+            "pending_time_ranges",
+            "incoming_facts",
+            "projection_timings",
+        ] {
+            let err = store
+                .conn()
+                .prepare(&format!("SELECT rowid FROM {table} LIMIT 0"))
+                .expect_err("WITHOUT ROWID table should not expose rowid");
+            assert!(
+                err.to_string().contains("no such column: rowid"),
+                "unexpected rowid probe error for {table}: {err}"
+            );
+        }
     }
 }

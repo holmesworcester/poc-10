@@ -643,25 +643,25 @@ impl ProjectionSource {
 /// The item commit removes the row only after projection succeeds. Missing
 /// facts are handled by the queue driver as stale pending rows.
 fn next_durable_projection_item(store: &Db) -> Result<Option<PendingProjectionItem>, String> {
-    store
+    let mut stmt = store
         .conn()
-        .query_row(
+        .prepare_cached(
             r#"
             SELECT owner, replay
             FROM pending_projection
             ORDER BY priority, queued_at, owner
             LIMIT 1
             "#,
-            [],
-            |row| {
-                Ok(PendingProjectionItem {
-                    owner: fact_id_column(row.get::<_, Vec<u8>>(0)?, "owner")?,
-                    mode: projection_mode_from_replay_flag(row.get(1)?),
-                })
-            },
         )
-        .optional()
-        .map_err(|err| format!("load pending projection: {err}"))
+        .map_err(|err| format!("load pending projection: {err}"))?;
+    stmt.query_row([], |row| {
+        Ok(PendingProjectionItem {
+            owner: fact_id_column(row.get::<_, Vec<u8>>(0)?, "owner")?,
+            mode: projection_mode_from_replay_flag(row.get(1)?),
+        })
+    })
+    .optional()
+    .map_err(|err| format!("load pending projection: {err}"))
 }
 
 /// Read the oldest incoming first-pass fact id without mutating intake.
@@ -670,25 +670,25 @@ fn next_durable_projection_item(store: &Db) -> Result<Option<PendingProjectionIt
 /// projection needs context and retains the fact, the commit moves it into
 /// durable fact storage where later wakeups use `pending_projection`.
 fn next_incoming_projection_item(store: &Db) -> Result<Option<PendingProjectionItem>, String> {
-    store
+    let mut stmt = store
         .conn()
-        .query_row(
+        .prepare_cached(
             r#"
             SELECT id
             FROM incoming_facts
             ORDER BY received_at, id
             LIMIT 1
             "#,
-            [],
-            |row| {
-                Ok(PendingProjectionItem {
-                    owner: fact_id_column(row.get::<_, Vec<u8>>(0)?, "incoming id")?,
-                    mode: ProjectionMode::Normal,
-                })
-            },
         )
-        .optional()
-        .map_err(|err| format!("load incoming facts: {err}"))
+        .map_err(|err| format!("load incoming facts: {err}"))?;
+    stmt.query_row([], |row| {
+        Ok(PendingProjectionItem {
+            owner: fact_id_column(row.get::<_, Vec<u8>>(0)?, "incoming id")?,
+            mode: ProjectionMode::Normal,
+        })
+    })
+    .optional()
+    .map_err(|err| format!("load incoming facts: {err}"))
 }
 
 /// Decode the replay bit stored on durable pending projection rows.
@@ -1108,10 +1108,10 @@ fn delete_rows_by_owner_in_tx(
     owner: FactId,
 ) -> rusqlite::Result<usize> {
     let table = quoted_table_name(table)?;
-    store.conn().execute(
-        &format!("DELETE FROM {table} WHERE owner = ?1"),
-        params![owner.as_slice()],
-    )
+    let mut stmt = store
+        .conn()
+        .prepare_cached(&format!("DELETE FROM {table} WHERE owner = ?1"))?;
+    stmt.execute(params![owner.as_slice()])
 }
 
 /// Replace all time wakes owned by this fact.
@@ -2048,7 +2048,7 @@ pub(crate) mod context_db {
     ) -> Result<Vec<ContextNeed>, String> {
         let mut stmt = store
             .conn()
-            .prepare(sql)
+            .prepare_cached(sql)
             .map_err(|err| format!("load exact context needs: {err}"))?;
         bind_named_params(&mut stmt, params)
             .map_err(|err| format!("load exact context needs: {err}"))?;
@@ -2067,7 +2067,7 @@ pub(crate) mod context_db {
     ) -> Result<Vec<ContextNeed>, String> {
         let mut stmt = store
             .conn()
-            .prepare(sql)
+            .prepare_cached(sql)
             .map_err(|err| format!("load range context needs: {err}"))?;
         bind_named_params(&mut stmt, params)
             .map_err(|err| format!("load range context needs: {err}"))?;
@@ -2086,7 +2086,7 @@ pub(crate) mod context_db {
     ) -> Result<Vec<ContextOffer>, String> {
         let mut stmt = store
             .conn()
-            .prepare(sql)
+            .prepare_cached(sql)
             .map_err(|err| format!("load exact context offers: {err}"))?;
         bind_named_params(&mut stmt, params)
             .map_err(|err| format!("load exact context offers: {err}"))?;
@@ -2105,7 +2105,7 @@ pub(crate) mod context_db {
     ) -> Result<Vec<ContextOffer>, String> {
         let mut stmt = store
             .conn()
-            .prepare(sql)
+            .prepare_cached(sql)
             .map_err(|err| format!("load range context offers: {err}"))?;
         bind_named_params(&mut stmt, params)
             .map_err(|err| format!("load range context offers: {err}"))?;
@@ -2312,7 +2312,7 @@ pub(crate) mod context_db {
         let pairs = perf::measure_result("context_pending_matches_select", || {
             let mut stmt = store
                 .conn()
-                .prepare(
+                .prepare_cached(
                     r#"
                 SELECT need_role,
                        need_scope_key,
@@ -2705,9 +2705,9 @@ pub(crate) mod context_db {
         }
         let scope_key = scope_key(&need.scope);
         perf::measure_result("context_pending_match_insert", || {
-            store
+            let mut stmt = store
                 .conn()
-                .execute(
+                .prepare_cached(
                     "INSERT OR IGNORE INTO pending_projection_matches
                     (owner,
                      need_role,
@@ -2717,19 +2717,20 @@ pub(crate) mod context_db {
                      offer_owner,
                      offer_start_key,
                      offer_end_key)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    params![
-                        need.owner.as_slice(),
-                        need.role.as_str(),
-                        scope_key.as_slice(),
-                        need.start_key.as_bytes(),
-                        need.end_key.as_bytes(),
-                        offer.owner.as_slice(),
-                        offer.start_key.as_bytes(),
-                        offer.end_key.as_bytes(),
-                    ],
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 )
-                .map_err(|err| format!("record pending projection match: {err}"))
+                .map_err(|err| format!("record pending projection match: {err}"))?;
+            stmt.execute(params![
+                need.owner.as_slice(),
+                need.role.as_str(),
+                scope_key.as_slice(),
+                need.start_key.as_bytes(),
+                need.end_key.as_bytes(),
+                offer.owner.as_slice(),
+                offer.start_key.as_bytes(),
+                offer.end_key.as_bytes(),
+            ])
+            .map_err(|err| format!("record pending projection match: {err}"))
         })
     }
 }
@@ -3301,31 +3302,37 @@ fn insert_pending_owner_with_options_in_tx(
     mode: ProjectionMode,
     priority: i64,
 ) -> rusqlite::Result<usize> {
-    let inserted = store.conn().execute(
-        "INSERT OR IGNORE INTO pending_projection (owner, queued_at, priority, replay)
-         VALUES (?1, ?2, ?3, ?4)",
-        params![
+    let inserted = store
+        .conn()
+        .prepare_cached(
+            "INSERT OR IGNORE INTO pending_projection (owner, queued_at, priority, replay)
+             VALUES (?1, ?2, ?3, ?4)",
+        )?
+        .execute(params![
             owner.as_slice(),
             queue_now_ms()?,
             priority,
             replay_flag_for_projection_mode(mode)
-        ],
-    )?;
+        ])?;
     if inserted == 0 && mode.is_replay() {
-        store.conn().execute(
-            "UPDATE pending_projection
-             SET replay = 1,
-                 priority = MIN(priority, ?2)
-             WHERE owner = ?1",
-            params![owner.as_slice(), priority],
-        )?;
+        store
+            .conn()
+            .prepare_cached(
+                "UPDATE pending_projection
+                 SET replay = 1,
+                     priority = MIN(priority, ?2)
+                 WHERE owner = ?1",
+            )?
+            .execute(params![owner.as_slice(), priority])?;
     } else if inserted == 0 && priority < NORMAL_PROJECTION_PRIORITY {
-        store.conn().execute(
-            "UPDATE pending_projection
-             SET priority = MIN(priority, ?2)
-             WHERE owner = ?1",
-            params![owner.as_slice(), priority],
-        )?;
+        store
+            .conn()
+            .prepare_cached(
+                "UPDATE pending_projection
+                 SET priority = MIN(priority, ?2)
+                 WHERE owner = ?1",
+            )?
+            .execute(params![owner.as_slice(), priority])?;
     }
     Ok(inserted)
 }
@@ -3738,7 +3745,7 @@ fn enqueue_due_time_wakes_in_tx(
 fn pending_time_ranges_for_owner(store: &Db, owner: FactId) -> Result<Vec<TimeRange>, String> {
     let mut stmt = store
         .conn()
-        .prepare(
+        .prepare_cached(
             "SELECT timeline, has_start, start_exclusive, end_inclusive
              FROM pending_time_ranges
              WHERE owner = ?1
@@ -3786,7 +3793,7 @@ fn due_time_wake_owners(
             "due time wake limit exceeds SQLite integer range".to_string(),
         )
     })?;
-    let mut stmt = store.conn().prepare(
+    let mut stmt = store.conn().prepare_cached(
         r#"
         SELECT owner
         FROM time_wakes
