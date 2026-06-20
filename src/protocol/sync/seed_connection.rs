@@ -159,6 +159,8 @@ fn append_live_tail_send(
     )
 }
 
+// Tests.
+// Most-central-first: the root-compare advertise and handler happy paths lead, then range/live-tail behavior, then gates and the intent codec.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,64 +178,6 @@ mod tests {
     use crate::protocol::registry::FACTS_SCHEMA_SOURCE;
     use crate::protocol::sync::share_fact_with_sync::{ShareFactWithSync, SyncShareState};
     use crate::protocol::sync::shared_fact;
-
-    #[test]
-    fn seed_connection_sync_intent_round_trips() {
-        let input = SeedConnectionSync {
-            connection_id: [7; 32],
-        };
-        let intent = seed_connection_sync_intent(input.clone());
-
-        assert_eq!(decode_seed_connection_sync(&intent).unwrap(), input);
-    }
-
-    #[test]
-    fn seed_connection_sync_handler_depends_on_connection_row_not_response_fact() {
-        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
-            .expect("store");
-        let connection_id = [8; 32];
-        let row = connection::connection::connection_row(
-            connection::connection::ConnectionRowFields::without_addresses(
-                connection_id,
-                [1; 32],
-                [2; 32],
-                [3; 32],
-                [7; 32],
-                [8; 32],
-                [9; 32],
-            ),
-        )
-        .expect("connection row");
-        store
-            .write_transaction(|tx| tx.insert_values_in_tx(&row).map(|_| ()))
-            .expect("insert row");
-        let intent = seed_connection_sync_intent(SeedConnectionSync { connection_id });
-        let handler = SeedConnectionSyncHandler::new();
-
-        assert!(intent.context_fact_ids.is_empty());
-        let output = handler
-            .handle(&intent, &HandlerContext::new(&store))
-            .expect("handle seed");
-
-        assert_eq!(output.facts.len(), 1);
-        assert_eq!(output.intents.len(), 1);
-    }
-
-    #[test]
-    fn seed_connection_sync_handler_waits_until_connection_row_exists() {
-        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
-            .expect("store");
-        let intent = seed_connection_sync_intent(SeedConnectionSync {
-            connection_id: [8; 32],
-        });
-
-        let output = SeedConnectionSyncHandler::new()
-            .handle(&intent, &HandlerContext::new(&store))
-            .expect("handle seed without row");
-
-        assert!(output.facts.is_empty());
-        assert!(output.intents.is_empty());
-    }
 
     #[test]
     fn advertise_connection_shareable_facts_emits_root_compare_and_send_intent() {
@@ -286,11 +230,10 @@ mod tests {
     }
 
     #[test]
-    fn advertise_connection_shareable_facts_uses_local_sync_range_setting() {
+    fn seed_connection_sync_handler_depends_on_connection_row_not_response_fact() {
         let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
             .expect("store");
         let connection_id = [8; 32];
-        let range = sync::compare::fact::TimestampRange { start: 10, end: 20 };
         let row = connection::connection::connection_row(
             connection::connection::ConnectionRowFields::without_addresses(
                 connection_id,
@@ -306,16 +249,16 @@ mod tests {
         store
             .write_transaction(|tx| tx.insert_values_in_tx(&row).map(|_| ()))
             .expect("insert row");
-        project_sync_range_setting(&store, 500, range);
+        let intent = seed_connection_sync_intent(SeedConnectionSync { connection_id });
+        let handler = SeedConnectionSyncHandler::new();
 
-        let output = advertise_connection_shareable_facts(&store, connection_id).expect("seed");
+        assert!(intent.context_fact_ids.is_empty());
+        let output = handler
+            .handle(&intent, &HandlerContext::new(&store))
+            .expect("handle seed");
 
         assert_eq!(output.facts.len(), 1);
-        let compare = sync::compare::project::decode::decode_fact(&output.facts[0].bytes)
-            .expect("compare fact");
-        assert_eq!(compare.connection_id, connection_id);
-        assert_eq!(compare.range, range);
-        assert!(compare.response_requested);
+        assert_eq!(output.intents.len(), 1);
     }
 
     #[test]
@@ -409,6 +352,65 @@ mod tests {
             append_live_tail_send(RuntimeEffects::new(), &store, connection_id, &owner_fact)
                 .expect("tail out of range");
         assert!(out_of_range.intents.is_empty());
+    }
+
+    #[test]
+    fn advertise_connection_shareable_facts_uses_local_sync_range_setting() {
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+            .expect("store");
+        let connection_id = [8; 32];
+        let range = sync::compare::fact::TimestampRange { start: 10, end: 20 };
+        let row = connection::connection::connection_row(
+            connection::connection::ConnectionRowFields::without_addresses(
+                connection_id,
+                [1; 32],
+                [2; 32],
+                [3; 32],
+                [7; 32],
+                [8; 32],
+                [9; 32],
+            ),
+        )
+        .expect("connection row");
+        store
+            .write_transaction(|tx| tx.insert_values_in_tx(&row).map(|_| ()))
+            .expect("insert row");
+        project_sync_range_setting(&store, 500, range);
+
+        let output = advertise_connection_shareable_facts(&store, connection_id).expect("seed");
+
+        assert_eq!(output.facts.len(), 1);
+        let compare = sync::compare::project::decode::decode_fact(&output.facts[0].bytes)
+            .expect("compare fact");
+        assert_eq!(compare.connection_id, connection_id);
+        assert_eq!(compare.range, range);
+        assert!(compare.response_requested);
+    }
+
+    #[test]
+    fn seed_connection_sync_handler_waits_until_connection_row_exists() {
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+            .expect("store");
+        let intent = seed_connection_sync_intent(SeedConnectionSync {
+            connection_id: [8; 32],
+        });
+
+        let output = SeedConnectionSyncHandler::new()
+            .handle(&intent, &HandlerContext::new(&store))
+            .expect("handle seed without row");
+
+        assert!(output.facts.is_empty());
+        assert!(output.intents.is_empty());
+    }
+
+    #[test]
+    fn seed_connection_sync_intent_round_trips() {
+        let input = SeedConnectionSync {
+            connection_id: [7; 32],
+        };
+        let intent = seed_connection_sync_intent(input.clone());
+
+        assert_eq!(decode_seed_connection_sync(&intent).unwrap(), input);
     }
 
     fn workspace_scope(workspace_id: FactId) -> FactScope {

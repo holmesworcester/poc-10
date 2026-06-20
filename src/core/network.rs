@@ -996,46 +996,14 @@ fn is_stream_closed(err: &std::io::Error) -> bool {
     )
 }
 
+// =============================================================================
+// Tests
+// =============================================================================
+// Ordered most-central-first: listener/framing roundtrips before edge guards.
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::thread;
-
-    #[test]
-    fn write_frame_sends_length_prefixed_bytes_within_budget() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
-        let addr = listener.local_addr().expect("listener addr");
-        let reader = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept");
-            let mut len = [0; 4];
-            stream.read_exact(&mut len).expect("read len");
-            let mut body = vec![0; u32::from_be_bytes(len) as usize];
-            stream.read_exact(&mut body).expect("read body");
-            body
-        });
-
-        let mut stream = TcpStream::connect(addr).expect("connect");
-        write_frame_with_budget(&mut stream, b"abc", Duration::from_secs(1)).expect("write frame");
-
-        assert_eq!(reader.join().expect("reader thread"), b"abc");
-    }
-
-    #[test]
-    fn write_frame_zero_budget_times_out_before_blocking() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
-        let addr = listener.local_addr().expect("listener addr");
-        let reader = thread::spawn(move || {
-            let (_stream, _) = listener.accept().expect("accept");
-            thread::sleep(Duration::from_millis(20));
-        });
-
-        let mut stream = TcpStream::connect(addr).expect("connect");
-        let err = write_frame_with_budget(&mut stream, b"abc", Duration::ZERO)
-            .expect_err("zero budget should time out");
-
-        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
-        reader.join().expect("reader thread");
-    }
 
     #[test]
     fn accept_available_drains_ready_streams_up_to_limit() {
@@ -1083,6 +1051,25 @@ mod tests {
     }
 
     #[test]
+    fn write_frame_sends_length_prefixed_bytes_within_budget() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let reader = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut len = [0; 4];
+            stream.read_exact(&mut len).expect("read len");
+            let mut body = vec![0; u32::from_be_bytes(len) as usize];
+            stream.read_exact(&mut body).expect("read body");
+            body
+        });
+
+        let mut stream = TcpStream::connect(addr).expect("connect");
+        write_frame_with_budget(&mut stream, b"abc", Duration::from_secs(1)).expect("write frame");
+
+        assert_eq!(reader.join().expect("reader thread"), b"abc");
+    }
+
+    #[test]
     fn empty_frame_is_tcp_heartbeat_not_protocol_input() {
         let listener = listen("127.0.0.1:0".parse().expect("listen addr")).expect("listen");
         let addr = listener.local_addr();
@@ -1106,5 +1093,22 @@ mod tests {
         assert_eq!(report.accepted_connections, 1);
         assert_eq!(report.value.received_frames, 0);
         assert!(frames.is_empty());
+    }
+
+    #[test]
+    fn write_frame_zero_budget_times_out_before_blocking() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let reader = thread::spawn(move || {
+            let (_stream, _) = listener.accept().expect("accept");
+            thread::sleep(Duration::from_millis(20));
+        });
+
+        let mut stream = TcpStream::connect(addr).expect("connect");
+        let err = write_frame_with_budget(&mut stream, b"abc", Duration::ZERO)
+            .expect_err("zero budget should time out");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        reader.join().expect("reader thread");
     }
 }

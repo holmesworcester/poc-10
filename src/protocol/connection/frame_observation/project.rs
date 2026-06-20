@@ -40,6 +40,7 @@ pub mod decode {
         format!("{err:?}")
     }
 
+    // Tests. Ordered most-central-first: full roundtrip leads, then origin-addr normalization.
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -110,6 +111,7 @@ pub mod authenticate {
         Ok(observed)
     }
 
+    // Tests. Ordered most-central-first: canonical happy path leads, then rejection guards.
     #[cfg(test)]
     mod tests {
         use crate::core::facts::Fact;

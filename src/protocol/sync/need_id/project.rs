@@ -28,6 +28,8 @@ pub mod decode {
         format!("{err:?}")
     }
 
+    // Tests.
+    // Most-central-first: the round-trip leads, then the tag/length guard.
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -89,6 +91,8 @@ pub mod authenticate {
         Ok(need)
     }
 
+    // Tests.
+    // Most-central-first: the happy path then the id check, then decode-layer guards.
     #[cfg(test)]
     mod tests {
         use crate::core::facts::Fact;
@@ -122,6 +126,18 @@ pub mod authenticate {
         }
 
         #[test]
+        fn rejects_id_not_matching_bytes() {
+            let canonical = canonical_fact();
+            let forged = Fact {
+                id: [0; 32],
+                scope: canonical.scope.clone(),
+                timestamp: canonical.timestamp,
+                bytes: canonical.bytes.clone(),
+            };
+            assert!(is_invalid(&forged));
+        }
+
+        #[test]
         fn rejects_wrong_tag() {
             let canonical = canonical_fact();
             let mut bytes = canonical.bytes.clone();
@@ -143,18 +159,6 @@ pub mod authenticate {
                 canonical.timestamp,
                 bytes
             )));
-        }
-
-        #[test]
-        fn rejects_id_not_matching_bytes() {
-            let canonical = canonical_fact();
-            let forged = Fact {
-                id: [0; 32],
-                scope: canonical.scope.clone(),
-                timestamp: canonical.timestamp,
-                bytes: canonical.bytes.clone(),
-            };
-            assert!(is_invalid(&forged));
         }
     }
 }
@@ -242,6 +246,8 @@ impl SyncNeedIdProjector {
     }
 }
 
+// Tests.
+// Replay keeps this negotiation fact as evidence without rebuilding need/have state.
 #[cfg(test)]
 mod tests {
     use super::*;

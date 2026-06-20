@@ -225,6 +225,8 @@ pub fn create(
     create_membership(input)
 }
 
+// Tests.
+// Ordered most-central-first: bootstrap build (superset) before membership build.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,28 +240,6 @@ mod tests {
             signing_public_key: crypto::ed25519_public_key(&signing_secret),
             signing_secret,
         }
-    }
-
-    #[test]
-    fn membership_create_builds_ephemeral_and_endpoint_signed_request() {
-        let local = endpoint();
-        let output = create_membership(CreateMembershipConnectionRequest {
-            created_at_ms: 10,
-            local_endpoint: local,
-            remote_endpoint: [9; 32],
-            initiator_endpoint_shared_id: [2; 32],
-            dialed_addr: "127.0.0.1:41001".parse().unwrap(),
-            initiator_addr: Some("127.0.0.1:41000".parse().unwrap()),
-        })
-        .expect("create request");
-
-        assert_eq!(output.facts.len(), 2);
-        assert_eq!(
-            output.receipt.initiator_ephemeral_secret_id,
-            output.facts[0].id
-        );
-        assert_eq!(output.receipt.request_id, output.facts[1].id);
-        assert_eq!(output.facts[1].body()[0], encode::TYPE_CONNECTION_REQUEST);
     }
 
     #[test]
@@ -284,5 +264,27 @@ mod tests {
             output.facts[1].id
         );
         assert_eq!(output.receipt.request_id, output.facts[2].id);
+    }
+
+    #[test]
+    fn membership_create_builds_ephemeral_and_endpoint_signed_request() {
+        let local = endpoint();
+        let output = create_membership(CreateMembershipConnectionRequest {
+            created_at_ms: 10,
+            local_endpoint: local,
+            remote_endpoint: [9; 32],
+            initiator_endpoint_shared_id: [2; 32],
+            dialed_addr: "127.0.0.1:41001".parse().unwrap(),
+            initiator_addr: Some("127.0.0.1:41000".parse().unwrap()),
+        })
+        .expect("create request");
+
+        assert_eq!(output.facts.len(), 2);
+        assert_eq!(
+            output.receipt.initiator_ephemeral_secret_id,
+            output.facts[0].id
+        );
+        assert_eq!(output.receipt.request_id, output.facts[1].id);
+        assert_eq!(output.facts[1].body()[0], encode::TYPE_CONNECTION_REQUEST);
     }
 }

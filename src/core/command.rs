@@ -104,17 +104,12 @@ impl<T> AuthoredFacts<T> {
     }
 }
 
+// Tests.
+// Ordered most-central-first: the authored-facts bundle before the clock helper.
 #[cfg(test)]
 mod tests {
     use super::{AuthoredFacts, CommandClock, FnClock};
     use crate::core::facts::{Fact, FactScope};
-
-    #[test]
-    fn fn_clock_delegates_to_injected_time_source() {
-        let clock = FnClock(|| 123_456u64);
-
-        assert_eq!(clock.next_timestamp(), 123_456);
-    }
 
     #[test]
     fn authored_facts_preserves_receipt_and_fact_list() {
@@ -129,5 +124,12 @@ mod tests {
 
         assert_eq!(receipt, "receipt");
         assert_eq!(emitted, facts);
+    }
+
+    #[test]
+    fn fn_clock_delegates_to_injected_time_source() {
+        let clock = FnClock(|| 123_456u64);
+
+        assert_eq!(clock.next_timestamp(), 123_456);
     }
 }

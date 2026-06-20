@@ -50,6 +50,8 @@ pub mod decode {
         format!("{err:?}")
     }
 
+    // Tests.
+    // Ordered most-central-first: the full byte round-trip leads, then narrower decode guards.
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -127,6 +129,8 @@ pub mod authenticate {
         Ok(workspace)
     }
 
+    // Tests.
+    // Ordered most-central-first: the happy authentication leads, then the id-binding and layout guards.
     #[cfg(test)]
     mod tests {
         use crate::core::facts::Fact;
@@ -155,6 +159,18 @@ pub mod authenticate {
         }
 
         #[test]
+        fn rejects_id_not_matching_bytes() {
+            let canonical = canonical_fact();
+            let forged = Fact {
+                id: [0; 32],
+                scope: canonical.scope.clone(),
+                timestamp: canonical.timestamp,
+                bytes: canonical.bytes.clone(),
+            };
+            assert!(is_invalid(&forged));
+        }
+
+        #[test]
         fn rejects_wrong_tag() {
             let canonical = canonical_fact();
             let mut bytes = canonical.bytes.clone();
@@ -176,18 +192,6 @@ pub mod authenticate {
                 canonical.timestamp,
                 bytes
             )));
-        }
-
-        #[test]
-        fn rejects_id_not_matching_bytes() {
-            let canonical = canonical_fact();
-            let forged = Fact {
-                id: [0; 32],
-                scope: canonical.scope.clone(),
-                timestamp: canonical.timestamp,
-                bytes: canonical.bytes.clone(),
-            };
-            assert!(is_invalid(&forged));
         }
     }
 }
@@ -315,6 +319,8 @@ impl WorkspaceProjector {
     }
 }
 
+// Tests.
+// Ordered most-central-first: the full materialize-after-acceptance path leads, then the context-wait gate, then the mismatch guard.
 #[cfg(test)]
 mod projector_tests {
     use super::*;
@@ -324,25 +330,6 @@ mod projector_tests {
     use crate::protocol::auth::workspace::author;
     use crate::protocol::auth::{invite_accepted, invite_secret};
     use std::collections::BTreeSet;
-
-    #[test]
-    fn workspace_projector_waits_for_accepted_workspace_context() {
-        let fact = author::create_workspace(123_000, [9; 32], "Runtime").expect("workspace fact");
-        let projected = WorkspaceProjector::new()
-            .project(&fact, &ProjectionContext::default())
-            .expect("project workspace without context");
-
-        assert!(projected.effects.row_mutations.is_empty());
-        assert!(projected.offers.is_empty());
-        assert_eq!(projected.needs.len(), 2);
-        assert!(projected
-            .needs
-            .contains(&invite_accepted::workspace_accepted_need(fact.id, fact.id)));
-        assert!(projected
-            .needs
-            .iter()
-            .any(|need| need.role.as_str() == "signature_proof"));
-    }
 
     #[test]
     fn workspace_projector_emits_sync_share_contribution_after_acceptance() {
@@ -363,6 +350,25 @@ mod projector_tests {
             .offers
             .iter()
             .any(|offer| offer.role.as_str() == "auth_workspace"));
+    }
+
+    #[test]
+    fn workspace_projector_waits_for_accepted_workspace_context() {
+        let fact = author::create_workspace(123_000, [9; 32], "Runtime").expect("workspace fact");
+        let projected = WorkspaceProjector::new()
+            .project(&fact, &ProjectionContext::default())
+            .expect("project workspace without context");
+
+        assert!(projected.effects.row_mutations.is_empty());
+        assert!(projected.offers.is_empty());
+        assert_eq!(projected.needs.len(), 2);
+        assert!(projected
+            .needs
+            .contains(&invite_accepted::workspace_accepted_need(fact.id, fact.id)));
+        assert!(projected
+            .needs
+            .iter()
+            .any(|need| need.role.as_str() == "signature_proof"));
     }
 
     #[test]

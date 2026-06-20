@@ -716,6 +716,13 @@ fn placeholders(count: usize) -> String {
         .join(", ")
 }
 
+// =============================================================================
+// Tests
+// =============================================================================
+//
+// Ordered most-central-first: the full insert/delete/replace plus rollback proof
+// of the typed row-mutation path leads; narrow guards and config checks follow.
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -733,21 +740,6 @@ CREATE TABLE IF NOT EXISTS test_rows (
         storage_version: None,
         replay: ReplayTables::EMPTY,
     };
-
-    #[test]
-    fn db_connections_keep_temp_storage_in_memory() {
-        let store = Db::open_memory().expect("open memory db");
-
-        let temp_store = store
-            .conn()
-            .query_row("PRAGMA temp_store", [], |row| row.get::<_, i64>(0))
-            .expect("query temp_store pragma");
-
-        assert_eq!(
-            temp_store, 2,
-            "SQLite temp_store MEMORY has numeric value 2"
-        );
-    }
 
     #[test]
     fn row_mutations_insert_delete_and_roll_back_as_one_transaction() {
@@ -813,6 +805,21 @@ CREATE TABLE IF NOT EXISTS test_rows (
             store.table_row_count(TEST_ROWS).expect("count rows"),
             0,
             "failed mutation batch should roll back earlier row writes"
+        );
+    }
+
+    #[test]
+    fn db_connections_keep_temp_storage_in_memory() {
+        let store = Db::open_memory().expect("open memory db");
+
+        let temp_store = store
+            .conn()
+            .query_row("PRAGMA temp_store", [], |row| row.get::<_, i64>(0))
+            .expect("query temp_store pragma");
+
+        assert_eq!(
+            temp_store, 2,
+            "SQLite temp_store MEMORY has numeric value 2"
         );
     }
 

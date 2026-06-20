@@ -1405,6 +1405,8 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
     ),
 ];
 
+// Tests. Ordered most-central-first: the registry's core dispatch invariant
+// (globally unique fact tags) leads, then narrower routing-policy guards.
 #[cfg(test)]
 mod tests {
     use super::*;

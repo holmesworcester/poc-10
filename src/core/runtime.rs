@@ -917,6 +917,13 @@ fn drain_bounded_work(
     Ok(progressed)
 }
 
+// =============================================================================
+// Tests
+// =============================================================================
+//
+// Ordered most-central-first: whole-turn proofs of host-mode behavior and queue
+// drain ordering lead; single-path admission and guard cases follow.
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1205,297 +1212,6 @@ mod tests {
     };
 
     #[test]
-    fn db_handle_reads_store_backed_fact_counts_from_sqlite() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp.path().join("runtime.db");
-        let runtime = Runtime::open_disk(&TEST_RUNTIME, &path).expect("runtime");
-
-        let external_fact = Fact::new(FactScope::Global, 7, b"external".to_vec());
-        let mut writer = Runtime::open_disk(&TEST_RUNTIME, &path).expect("writer runtime");
-        assert!(writer.submit_fact(external_fact.clone()));
-
-        assert_eq!(
-            runtime
-                .db()
-                .table_row_count(crate::core::schema::FACTS)
-                .expect("fact count"),
-            1,
-            "fact counts should read externally committed facts from SQLite"
-        );
-    }
-
-    #[test]
-    fn pending_projection_count_reports_durable_queue_and_incoming_intake() {
-        let mut runtime = Runtime::open_memory(&TEST_RUNTIME).expect("runtime");
-        let durable = Fact::new(FactScope::Global, 7, b"durable queued".to_vec());
-        let incoming = Fact::new(FactScope::Local, 8, b"incoming queued".to_vec());
-
-        assert!(runtime.submit_fact(durable));
-        runtime
-            .submit_runtime_effects(
-                RuntimeEffects::new().incoming_fact(incoming),
-                "stage incoming test fact",
-            )
-            .expect("stage incoming fact");
-
-        assert_eq!(
-            runtime.pending_projection_count(),
-            2,
-            "pending projection count should include durable queue rows and volatile incoming intake"
-        );
-    }
-
-    #[test]
-    fn authored_facts_retain_facts_and_queue_projection_without_incoming() {
-        let mut runtime = Runtime::open_memory(&TEST_RUNTIME).expect("runtime");
-        let fact = Fact::new(FactScope::Global, 7, b"command-produced-fact".to_vec());
-
-        runtime
-            .submit_authored_facts(AuthoredFacts::new(()).with_facts(vec![fact.clone()]))
-            .expect("submit authored facts");
-
-        assert_eq!(
-            runtime
-                .db()
-                .table_row_count(crate::core::schema::FACTS)
-                .expect("fact count"),
-            1,
-            "command-authored fact should be retained immediately"
-        );
-        assert_eq!(
-            runtime.pending_projection_count(),
-            1,
-            "command-authored fact should be queued for projection"
-        );
-        assert_eq!(
-            runtime
-                .db()
-                .table_row_count(crate::core::schema::INCOMING_FACTS)
-                .expect("incoming count"),
-            0,
-            "command-authored facts should not pass through incoming intake"
-        );
-    }
-
-    #[test]
-    fn runtime_queue_drains_respect_one_batch_limit_each() {
-        HANDLER_CALLS.store(0, Ordering::SeqCst);
-        let mut projection_runtime = Runtime::open_memory(&TEST_RUNTIME).expect("runtime");
-        projection_runtime
-            .submit_facts([
-                Fact::new(FactScope::Global, 7, b"first".to_vec()),
-                Fact::new(FactScope::Global, 7, b"second".to_vec()),
-            ])
-            .expect("submit facts");
-
-        projection_runtime
-            .drain_durable_projection(1)
-            .expect("drain one projection");
-        assert_eq!(
-            projection_runtime.pending_projection_count(),
-            1,
-            "one projection batch should process at most its limit"
-        );
-
-        let mut intent_runtime = Runtime::open_memory(&HANDLER_RUNTIME).expect("runtime");
-        for key in [b"one".to_vec(), b"two".to_vec()] {
-            intent_runtime
-                .submit_intent(Intent::new(
-                    IntentKind::new("counting").expect("intent kind"),
-                    key,
-                    Vec::new(),
-                ))
-                .expect("submit intent");
-        }
-
-        intent_runtime
-            .drain_durable_intents(1)
-            .expect("drain one intent");
-        assert_eq!(
-            HANDLER_CALLS.load(Ordering::SeqCst),
-            1,
-            "one intent batch should handle at most its limit"
-        );
-        assert_eq!(intent_runtime.pending_intent_count(), 1);
-    }
-
-    #[test]
-    fn runtime_rejects_intents_without_registered_handlers() {
-        let mut runtime = Runtime::open_memory(&HANDLER_RUNTIME).expect("runtime");
-        let durable = runtime
-            .submit_intent(Intent::new(
-                IntentKind::new("missing").expect("intent kind"),
-                b"one".to_vec(),
-                Vec::new(),
-            ))
-            .expect_err("unknown durable intent should reject");
-        let local = runtime
-            .submit_local_intent(Intent::new(
-                IntentKind::new("missing").expect("intent kind"),
-                b"two".to_vec(),
-                Vec::new(),
-            ))
-            .expect_err("unknown local intent should reject");
-
-        assert!(
-            durable.contains("intent kind missing is not registered"),
-            "{durable}"
-        );
-        assert!(
-            local.contains("intent kind missing is not registered"),
-            "{local}"
-        );
-        assert_eq!(runtime.pending_intent_count(), 0);
-    }
-
-    #[test]
-    fn intent_drain_leaves_handler_emitted_facts_for_later_projection() {
-        let mut runtime = Runtime::open_memory(&EMIT_FACT_RUNTIME).expect("runtime");
-        runtime
-            .submit_intent(Intent::new(
-                IntentKind::new("emit_fact").expect("intent kind"),
-                b"one".to_vec(),
-                Vec::new(),
-            ))
-            .expect("submit intent");
-
-        let first = runtime
-            .drain_durable_intents(8)
-            .expect("drain durable intent batch");
-
-        assert!(first);
-        assert_eq!(
-            runtime.pending_intent_count(),
-            0,
-            "the intent should be consumed when its handler output commits"
-        );
-        assert_eq!(
-            runtime.pending_projection_count(),
-            1,
-            "handler-emitted facts should stay queued for a later projection pass"
-        );
-
-        let second = runtime
-            .drain_durable_projection(8)
-            .expect("drain later durable projection batch");
-
-        assert!(second);
-        assert_eq!(
-            runtime.pending_projection_count(),
-            0,
-            "the later projection batch should project the previously emitted fact"
-        );
-    }
-
-    #[test]
-    fn authored_facts_reject_facts_that_fail_runtime_admission() {
-        let mut runtime = Runtime::open_memory(&ADMISSION_RUNTIME).expect("runtime");
-        let rejected = Fact::new(FactScope::Global, 7, b"!bad".to_vec());
-
-        let err = runtime
-            .submit_authored_facts(AuthoredFacts::new(()).with_facts(vec![rejected.clone()]))
-            .expect_err("admission should reject command fact");
-
-        assert!(err.contains("bad test fact rejected by admission"), "{err}");
-        assert!(
-            runtime
-                .db()
-                .table_row_count(crate::core::schema::FACTS)
-                .expect("fact count")
-                == 0,
-            "rejected fact must not be persisted"
-        );
-    }
-
-    #[test]
-    fn runtime_turn_profile_formats_recorded_stage_timings() {
-        let local_addr = "127.0.0.1:4242".parse().expect("addr");
-        let mut profile = RuntimeTurnProfile::enabled_for_test(Some(local_addr), false);
-
-        let result = profile
-            .measure_bool("stage", || Ok(true))
-            .expect("stage result");
-
-        assert!(result);
-        let line = profile.finish_line(true).expect("profile line");
-        assert!(line.contains("runtime_turn_profile addr=127.0.0.1:4242 active=true"));
-        assert!(line.contains("stage_ms="));
-        assert!(line.contains("stage_result=1"));
-    }
-
-    #[test]
-    fn runtime_turn_pumps_queued_outgoing_rows_after_runtime_work() {
-        let peer = TcpListener::bind("127.0.0.1:0").expect("bind outgoing peer");
-        let peer_addr = peer.local_addr().expect("peer addr");
-        let reader = thread::spawn(move || {
-            let (mut stream, _) = peer.accept().expect("accept outgoing pump");
-            read_length_prefixed_frame(&mut stream)
-        });
-        let listener =
-            network::listen("127.0.0.1:0".parse().expect("listen addr")).expect("daemon listener");
-        let mut runtime = Runtime::open_memory(&NETWORK_RUNTIME).expect("runtime");
-        network::queue_outgoing(
-            runtime.db(),
-            NetworkTarget::new(peer_addr),
-            OutgoingFrame {
-                bytes: b"tick queued frame".to_vec(),
-            },
-        )
-        .expect("queue outgoing frame");
-        let mut scheduler = RecurringScheduler::install(NETWORK_RUNTIME.handlers);
-
-        let active = runtime
-            .run_turn(
-                RuntimeTurnDescription {
-                    inbound_network_intake: None,
-                    time_wakes: &[],
-                },
-                RuntimeTurnHost::daemon(&listener),
-                &mut scheduler,
-                16,
-            )
-            .expect("daemon runtime turn");
-
-        assert!(active);
-        assert_eq!(reader.join().expect("reader thread"), b"tick queued frame");
-        assert!(network::claim_outgoing_for_target(
-            runtime.db(),
-            NetworkTarget::new(peer_addr),
-            16
-        )
-        .expect("claim after tick")
-        .is_empty());
-    }
-
-    #[test]
-    fn runtime_turn_uses_high_local_derivation_budget_for_projection() {
-        let listener =
-            network::listen("127.0.0.1:0".parse().expect("listen addr")).expect("daemon listener");
-        let mut runtime = Runtime::open_memory(&NETWORK_RUNTIME).expect("runtime");
-        let mut scheduler = RecurringScheduler::install(NETWORK_RUNTIME.handlers);
-        runtime.submit_fact(Fact::new(FactScope::Global, 7, b"one".to_vec()));
-        runtime.submit_fact(Fact::new(FactScope::Global, 7, b"two".to_vec()));
-
-        runtime
-            .run_turn(
-                RuntimeTurnDescription {
-                    inbound_network_intake: None,
-                    time_wakes: &[],
-                },
-                RuntimeTurnHost::daemon(&listener),
-                &mut scheduler,
-                1,
-            )
-            .expect("daemon runtime turn");
-
-        assert_eq!(
-            runtime.pending_projection_count(),
-            0,
-            "projection should use the high local-derivation budget, not the base side-effect limit"
-        );
-    }
-
-    #[test]
     fn local_runtime_turn_leaves_durable_intents_for_daemon_host() {
         DURABLE_HANDLER_CALLS.store(0, Ordering::SeqCst);
         let listener =
@@ -1577,6 +1293,131 @@ mod tests {
     }
 
     #[test]
+    fn runtime_turn_pumps_queued_outgoing_rows_after_runtime_work() {
+        let peer = TcpListener::bind("127.0.0.1:0").expect("bind outgoing peer");
+        let peer_addr = peer.local_addr().expect("peer addr");
+        let reader = thread::spawn(move || {
+            let (mut stream, _) = peer.accept().expect("accept outgoing pump");
+            read_length_prefixed_frame(&mut stream)
+        });
+        let listener =
+            network::listen("127.0.0.1:0".parse().expect("listen addr")).expect("daemon listener");
+        let mut runtime = Runtime::open_memory(&NETWORK_RUNTIME).expect("runtime");
+        network::queue_outgoing(
+            runtime.db(),
+            NetworkTarget::new(peer_addr),
+            OutgoingFrame {
+                bytes: b"tick queued frame".to_vec(),
+            },
+        )
+        .expect("queue outgoing frame");
+        let mut scheduler = RecurringScheduler::install(NETWORK_RUNTIME.handlers);
+
+        let active = runtime
+            .run_turn(
+                RuntimeTurnDescription {
+                    inbound_network_intake: None,
+                    time_wakes: &[],
+                },
+                RuntimeTurnHost::daemon(&listener),
+                &mut scheduler,
+                16,
+            )
+            .expect("daemon runtime turn");
+
+        assert!(active);
+        assert_eq!(reader.join().expect("reader thread"), b"tick queued frame");
+        assert!(network::claim_outgoing_for_target(
+            runtime.db(),
+            NetworkTarget::new(peer_addr),
+            16
+        )
+        .expect("claim after tick")
+        .is_empty());
+    }
+
+    #[test]
+    fn runtime_queue_drains_respect_one_batch_limit_each() {
+        HANDLER_CALLS.store(0, Ordering::SeqCst);
+        let mut projection_runtime = Runtime::open_memory(&TEST_RUNTIME).expect("runtime");
+        projection_runtime
+            .submit_facts([
+                Fact::new(FactScope::Global, 7, b"first".to_vec()),
+                Fact::new(FactScope::Global, 7, b"second".to_vec()),
+            ])
+            .expect("submit facts");
+
+        projection_runtime
+            .drain_durable_projection(1)
+            .expect("drain one projection");
+        assert_eq!(
+            projection_runtime.pending_projection_count(),
+            1,
+            "one projection batch should process at most its limit"
+        );
+
+        let mut intent_runtime = Runtime::open_memory(&HANDLER_RUNTIME).expect("runtime");
+        for key in [b"one".to_vec(), b"two".to_vec()] {
+            intent_runtime
+                .submit_intent(Intent::new(
+                    IntentKind::new("counting").expect("intent kind"),
+                    key,
+                    Vec::new(),
+                ))
+                .expect("submit intent");
+        }
+
+        intent_runtime
+            .drain_durable_intents(1)
+            .expect("drain one intent");
+        assert_eq!(
+            HANDLER_CALLS.load(Ordering::SeqCst),
+            1,
+            "one intent batch should handle at most its limit"
+        );
+        assert_eq!(intent_runtime.pending_intent_count(), 1);
+    }
+
+    #[test]
+    fn intent_drain_leaves_handler_emitted_facts_for_later_projection() {
+        let mut runtime = Runtime::open_memory(&EMIT_FACT_RUNTIME).expect("runtime");
+        runtime
+            .submit_intent(Intent::new(
+                IntentKind::new("emit_fact").expect("intent kind"),
+                b"one".to_vec(),
+                Vec::new(),
+            ))
+            .expect("submit intent");
+
+        let first = runtime
+            .drain_durable_intents(8)
+            .expect("drain durable intent batch");
+
+        assert!(first);
+        assert_eq!(
+            runtime.pending_intent_count(),
+            0,
+            "the intent should be consumed when its handler output commits"
+        );
+        assert_eq!(
+            runtime.pending_projection_count(),
+            1,
+            "handler-emitted facts should stay queued for a later projection pass"
+        );
+
+        let second = runtime
+            .drain_durable_projection(8)
+            .expect("drain later durable projection batch");
+
+        assert!(second);
+        assert_eq!(
+            runtime.pending_projection_count(),
+            0,
+            "the later projection batch should project the previously emitted fact"
+        );
+    }
+
+    #[test]
     fn runtime_turn_does_not_duplicate_pending_recurring_local_work() {
         RECURRING_HANDLER_CALLS.store(0, Ordering::SeqCst);
         let listener =
@@ -1644,6 +1485,156 @@ mod tests {
     }
 
     #[test]
+    fn runtime_turn_uses_high_local_derivation_budget_for_projection() {
+        let listener =
+            network::listen("127.0.0.1:0".parse().expect("listen addr")).expect("daemon listener");
+        let mut runtime = Runtime::open_memory(&NETWORK_RUNTIME).expect("runtime");
+        let mut scheduler = RecurringScheduler::install(NETWORK_RUNTIME.handlers);
+        runtime.submit_fact(Fact::new(FactScope::Global, 7, b"one".to_vec()));
+        runtime.submit_fact(Fact::new(FactScope::Global, 7, b"two".to_vec()));
+
+        runtime
+            .run_turn(
+                RuntimeTurnDescription {
+                    inbound_network_intake: None,
+                    time_wakes: &[],
+                },
+                RuntimeTurnHost::daemon(&listener),
+                &mut scheduler,
+                1,
+            )
+            .expect("daemon runtime turn");
+
+        assert_eq!(
+            runtime.pending_projection_count(),
+            0,
+            "projection should use the high local-derivation budget, not the base side-effect limit"
+        );
+    }
+
+    #[test]
+    fn pending_projection_count_reports_durable_queue_and_incoming_intake() {
+        let mut runtime = Runtime::open_memory(&TEST_RUNTIME).expect("runtime");
+        let durable = Fact::new(FactScope::Global, 7, b"durable queued".to_vec());
+        let incoming = Fact::new(FactScope::Local, 8, b"incoming queued".to_vec());
+
+        assert!(runtime.submit_fact(durable));
+        runtime
+            .submit_runtime_effects(
+                RuntimeEffects::new().incoming_fact(incoming),
+                "stage incoming test fact",
+            )
+            .expect("stage incoming fact");
+
+        assert_eq!(
+            runtime.pending_projection_count(),
+            2,
+            "pending projection count should include durable queue rows and volatile incoming intake"
+        );
+    }
+
+    #[test]
+    fn authored_facts_retain_facts_and_queue_projection_without_incoming() {
+        let mut runtime = Runtime::open_memory(&TEST_RUNTIME).expect("runtime");
+        let fact = Fact::new(FactScope::Global, 7, b"command-produced-fact".to_vec());
+
+        runtime
+            .submit_authored_facts(AuthoredFacts::new(()).with_facts(vec![fact.clone()]))
+            .expect("submit authored facts");
+
+        assert_eq!(
+            runtime
+                .db()
+                .table_row_count(crate::core::schema::FACTS)
+                .expect("fact count"),
+            1,
+            "command-authored fact should be retained immediately"
+        );
+        assert_eq!(
+            runtime.pending_projection_count(),
+            1,
+            "command-authored fact should be queued for projection"
+        );
+        assert_eq!(
+            runtime
+                .db()
+                .table_row_count(crate::core::schema::INCOMING_FACTS)
+                .expect("incoming count"),
+            0,
+            "command-authored facts should not pass through incoming intake"
+        );
+    }
+
+    #[test]
+    fn runtime_rejects_intents_without_registered_handlers() {
+        let mut runtime = Runtime::open_memory(&HANDLER_RUNTIME).expect("runtime");
+        let durable = runtime
+            .submit_intent(Intent::new(
+                IntentKind::new("missing").expect("intent kind"),
+                b"one".to_vec(),
+                Vec::new(),
+            ))
+            .expect_err("unknown durable intent should reject");
+        let local = runtime
+            .submit_local_intent(Intent::new(
+                IntentKind::new("missing").expect("intent kind"),
+                b"two".to_vec(),
+                Vec::new(),
+            ))
+            .expect_err("unknown local intent should reject");
+
+        assert!(
+            durable.contains("intent kind missing is not registered"),
+            "{durable}"
+        );
+        assert!(
+            local.contains("intent kind missing is not registered"),
+            "{local}"
+        );
+        assert_eq!(runtime.pending_intent_count(), 0);
+    }
+
+    #[test]
+    fn authored_facts_reject_facts_that_fail_runtime_admission() {
+        let mut runtime = Runtime::open_memory(&ADMISSION_RUNTIME).expect("runtime");
+        let rejected = Fact::new(FactScope::Global, 7, b"!bad".to_vec());
+
+        let err = runtime
+            .submit_authored_facts(AuthoredFacts::new(()).with_facts(vec![rejected.clone()]))
+            .expect_err("admission should reject command fact");
+
+        assert!(err.contains("bad test fact rejected by admission"), "{err}");
+        assert!(
+            runtime
+                .db()
+                .table_row_count(crate::core::schema::FACTS)
+                .expect("fact count")
+                == 0,
+            "rejected fact must not be persisted"
+        );
+    }
+
+    #[test]
+    fn db_handle_reads_store_backed_fact_counts_from_sqlite() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("runtime.db");
+        let runtime = Runtime::open_disk(&TEST_RUNTIME, &path).expect("runtime");
+
+        let external_fact = Fact::new(FactScope::Global, 7, b"external".to_vec());
+        let mut writer = Runtime::open_disk(&TEST_RUNTIME, &path).expect("writer runtime");
+        assert!(writer.submit_fact(external_fact.clone()));
+
+        assert_eq!(
+            runtime
+                .db()
+                .table_row_count(crate::core::schema::FACTS)
+                .expect("fact count"),
+            1,
+            "fact counts should read externally committed facts from SQLite"
+        );
+    }
+
+    #[test]
     fn process_due_time_range_rejects_oversized_time_without_panicking() {
         let mut runtime = Runtime::open_memory(&TEST_RUNTIME).expect("runtime");
 
@@ -1660,6 +1651,22 @@ mod tests {
             err.contains("SQL value exceeds SQLite integer range"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn runtime_turn_profile_formats_recorded_stage_timings() {
+        let local_addr = "127.0.0.1:4242".parse().expect("addr");
+        let mut profile = RuntimeTurnProfile::enabled_for_test(Some(local_addr), false);
+
+        let result = profile
+            .measure_bool("stage", || Ok(true))
+            .expect("stage result");
+
+        assert!(result);
+        let line = profile.finish_line(true).expect("profile line");
+        assert!(line.contains("runtime_turn_profile addr=127.0.0.1:4242 active=true"));
+        assert!(line.contains("stage_ms="));
+        assert!(line.contains("stage_result=1"));
     }
 
     fn read_length_prefixed_frame(stream: &mut TcpStream) -> Vec<u8> {

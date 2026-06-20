@@ -45,6 +45,8 @@ pub mod decode {
         format!("{err:?}")
     }
 
+    // Tests.
+    // Single round-trip test: encode then decode recovers the fact.
     #[cfg(test)]
     mod tests {
         use super::*;

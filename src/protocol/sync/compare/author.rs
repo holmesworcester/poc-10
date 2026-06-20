@@ -267,23 +267,11 @@ fn summarize_range(facts: &[&Fact]) -> RangeSummary {
     }
 }
 
+// Tests.
+// Most-central-first: response planning (split, then batch, then empty answer) leads, then the initiating summary.
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn start_compare_fact_summarizes_root_range() {
-        let facts = [plain_fact(10, 1), plain_fact(20, 2)];
-
-        let compare_fact = start_compare_fact([7; 32], facts.iter()).expect("start compare");
-        let compare =
-            super::super::project::decode::decode_fact(&compare_fact.bytes).expect("decode");
-
-        assert_eq!(compare.connection_id, [7; 32]);
-        assert_eq!(compare.range, TimestampRange::ROOT);
-        assert_eq!(compare.summary.count, 2);
-        assert!(compare.response_requested);
-    }
 
     #[test]
     fn response_facts_split_large_mismatched_range() {
@@ -344,6 +332,20 @@ mod tests {
             super::super::project::decode::decode_fact(&output[0].bytes).expect("decode compare");
         assert_eq!(compare.summary, RangeSummary::default());
         assert!(!compare.response_requested);
+    }
+
+    #[test]
+    fn start_compare_fact_summarizes_root_range() {
+        let facts = [plain_fact(10, 1), plain_fact(20, 2)];
+
+        let compare_fact = start_compare_fact([7; 32], facts.iter()).expect("start compare");
+        let compare =
+            super::super::project::decode::decode_fact(&compare_fact.bytes).expect("decode");
+
+        assert_eq!(compare.connection_id, [7; 32]);
+        assert_eq!(compare.range, TimestampRange::ROOT);
+        assert_eq!(compare.summary.count, 2);
+        assert!(compare.response_requested);
     }
 
     fn plain_fact(timestamp: u64, byte: u8) -> Fact {

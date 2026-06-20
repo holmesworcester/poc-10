@@ -260,6 +260,8 @@ pub trait IntentHandler {
     fn handle(&self, intent: &Intent, context: &HandlerContext<'_>) -> HandlerResult;
 }
 
+// === Tests ===
+// Ordered most-central-first: effect/intent separation before value-encoding guards.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,22 +269,6 @@ mod tests {
     use rusqlite::types::Value as SqliteValue;
 
     const TEST_TABLE: TableName = TableName::new("test.rows");
-
-    #[test]
-    fn intent_kind_uses_registry_safe_vocabulary() {
-        assert!(IntentKind::new("put_row").is_ok());
-        assert!(IntentKind::new("PutRow").is_err());
-    }
-
-    #[test]
-    fn intent_carries_handler_key() {
-        let intent = Intent::new(
-            IntentKind::new("materialize").unwrap(),
-            b"same-work",
-            b"payload",
-        );
-        assert_eq!(intent.handler_key, b"same-work");
-    }
 
     #[test]
     fn runtime_effects_track_row_mutations_separately_from_intents() {
@@ -318,6 +304,22 @@ mod tests {
         );
         assert_eq!(output.intents.len(), 1);
         assert!(output.local_intents.is_empty());
+    }
+
+    #[test]
+    fn intent_carries_handler_key() {
+        let intent = Intent::new(
+            IntentKind::new("materialize").unwrap(),
+            b"same-work",
+            b"payload",
+        );
+        assert_eq!(intent.handler_key, b"same-work");
+    }
+
+    #[test]
+    fn intent_kind_uses_registry_safe_vocabulary() {
+        assert!(IntentKind::new("put_row").is_ok());
+        assert!(IntentKind::new("PutRow").is_err());
     }
 
     #[test]

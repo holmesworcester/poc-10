@@ -484,6 +484,10 @@ fn print_line_now(line: &str) -> Result<(), String> {
         .map_err(|err| format!("flush daemon status: {err}"))
 }
 
+// =============================================================================
+// Tests
+// =============================================================================
+// Ordered most-central-first: start-option parsing before narrow defaults.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,20 +507,6 @@ mod tests {
 
         assert_eq!(parsed.listen, "127.0.0.1:41000".parse().unwrap());
         assert_eq!(parsed.quiet_ms, 200);
-    }
-
-    #[test]
-    fn quiet_ms_defaults_to_tick_ms() {
-        let args = vec![
-            "--listen".to_string(),
-            "127.0.0.1".to_string(),
-            "41000".to_string(),
-            "--sync-ms".to_string(),
-            "125".to_string(),
-        ];
-        let parsed = parse_start_options(CliArgs::new(&args)).expect("parse");
-
-        assert_eq!(parsed.quiet_ms, 125);
     }
 
     #[test]
@@ -551,5 +541,19 @@ mod tests {
             sleep_after_tick(&options, false),
             Some(Duration::from_millis(200))
         );
+    }
+
+    #[test]
+    fn quiet_ms_defaults_to_tick_ms() {
+        let args = vec![
+            "--listen".to_string(),
+            "127.0.0.1".to_string(),
+            "41000".to_string(),
+            "--sync-ms".to_string(),
+            "125".to_string(),
+        ];
+        let parsed = parse_start_options(CliArgs::new(&args)).expect("parse");
+
+        assert_eq!(parsed.quiet_ms, 125);
     }
 }

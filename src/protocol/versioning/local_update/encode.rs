@@ -37,6 +37,7 @@ fn wire_err(err: wire::WireError) -> String {
     format!("{err:?}")
 }
 
+// Tests. Ordered most-central-first: the broadest exercise of this file's core logic leads.
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -98,6 +98,8 @@ impl IntentHandler for CheckVersionHandler {
     }
 }
 
+// Tests. Ordered most-central-first: the full recurring-builder-plus-handler
+// pipeline leads, then the handler-only stale-version check.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,25 +134,6 @@ mod tests {
     }
 
     #[test]
-    fn check_version_handler_emits_priority_update_fact() {
-        let runtime = Runtime::open_memory(&CONTEXT_RUNTIME).expect("runtime");
-        replace_stored_version_for_test(runtime.db(), CURRENT_PROTOCOL_VERSION - 1);
-        let intent = check_version_intent(55);
-        let context = HandlerContext::new(runtime.db());
-        let output = CheckVersionHandler::new()
-            .handle(&intent, &context)
-            .expect("handle check_version");
-        assert!(output.facts.is_empty());
-        assert_eq!(output.priority_facts.len(), 1);
-        assert_eq!(
-            decode_update_fact(output.priority_facts[0].body())
-                .expect("decode update")
-                .protocol_version,
-            CURRENT_PROTOCOL_VERSION
-        );
-    }
-
-    #[test]
     fn missing_storage_marker_queues_and_emits_update_fact() {
         let runtime = Runtime::open_memory(&CONTEXT_RUNTIME).expect("runtime");
         delete_stored_version_for_test(runtime.db());
@@ -171,6 +154,25 @@ mod tests {
             .handle(&intent, &context)
             .expect("handle missing marker");
 
+        assert_eq!(output.priority_facts.len(), 1);
+        assert_eq!(
+            decode_update_fact(output.priority_facts[0].body())
+                .expect("decode update")
+                .protocol_version,
+            CURRENT_PROTOCOL_VERSION
+        );
+    }
+
+    #[test]
+    fn check_version_handler_emits_priority_update_fact() {
+        let runtime = Runtime::open_memory(&CONTEXT_RUNTIME).expect("runtime");
+        replace_stored_version_for_test(runtime.db(), CURRENT_PROTOCOL_VERSION - 1);
+        let intent = check_version_intent(55);
+        let context = HandlerContext::new(runtime.db());
+        let output = CheckVersionHandler::new()
+            .handle(&intent, &context)
+            .expect("handle check_version");
+        assert!(output.facts.is_empty());
         assert_eq!(output.priority_facts.len(), 1);
         assert_eq!(
             decode_update_fact(output.priority_facts[0].body())

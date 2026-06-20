@@ -771,52 +771,13 @@ impl<'a> Reader<'a> {
     }
 }
 
+// Tests.
+// Ordered most-central-first; an in-module test helper splits these into two
+// runs, each led by its broadest round-trip and length-invariant proof.
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn fixed_bytes_reject_wrong_lengths() {
-        assert_eq!(
-            FixedBytes::<32>::decode(&[0; 31]).unwrap_err(),
-            WireError::WrongLength {
-                expected: 32,
-                actual: 31
-            }
-        );
-        assert_eq!(
-            FixedBytes::<32>::decode(&[0; 33]).unwrap_err(),
-            WireError::WrongLength {
-                expected: 32,
-                actual: 33
-            }
-        );
-        assert!(FixedBytes::<32>::decode(&[0; 32]).is_ok());
-    }
-
-    #[test]
-    fn fixed_layout_types_reject_wrong_lengths() {
-        assert!(take_u8(&[]).is_err());
-        assert!(take_u16be(&[0]).is_err());
-        assert!(take_u32be(&[0; 3]).is_err());
-        assert!(take_u64be(&[0; 7]).is_err());
-        assert!(take_bool8(&[0, 0]).is_err());
-
-        let slot = FixedSlot::<3>::new(b"abc").unwrap();
-        let mut short = [0; FixedSlot::<3>::LEN - 1];
-        assert!(slot.encode(&mut short).is_err());
-        assert!(FixedSlot::<3>::decode(&[0; FixedSlot::<3>::LEN + 1]).is_err());
-    }
-
-    #[test]
-    fn fixed_slot_encode_preserves_valid_padded_bytes() {
-        let slot = FixedSlot::<5>::from_padded(3, [b'a', b'b', b'c', 0, 0]).unwrap();
-        let mut out = [0xff; FixedSlot::<5>::LEN];
-
-        slot.encode(&mut out).unwrap();
-
-        assert_eq!(&out, &[0, 0, 0, 3, b'a', b'b', b'c', 0, 0]);
-    }
 
     #[test]
     fn big_endian_values_round_trip() {
@@ -836,6 +797,39 @@ mod tests {
 
         put_u64be(42, &mut out).unwrap();
         assert_eq!(take_u64be(&out).unwrap(), 42);
+    }
+
+    #[test]
+    fn fixed_layout_types_reject_wrong_lengths() {
+        assert!(take_u8(&[]).is_err());
+        assert!(take_u16be(&[0]).is_err());
+        assert!(take_u32be(&[0; 3]).is_err());
+        assert!(take_u64be(&[0; 7]).is_err());
+        assert!(take_bool8(&[0, 0]).is_err());
+
+        let slot = FixedSlot::<3>::new(b"abc").unwrap();
+        let mut short = [0; FixedSlot::<3>::LEN - 1];
+        assert!(slot.encode(&mut short).is_err());
+        assert!(FixedSlot::<3>::decode(&[0; FixedSlot::<3>::LEN + 1]).is_err());
+    }
+
+    #[test]
+    fn fixed_bytes_reject_wrong_lengths() {
+        assert_eq!(
+            FixedBytes::<32>::decode(&[0; 31]).unwrap_err(),
+            WireError::WrongLength {
+                expected: 32,
+                actual: 31
+            }
+        );
+        assert_eq!(
+            FixedBytes::<32>::decode(&[0; 33]).unwrap_err(),
+            WireError::WrongLength {
+                expected: 32,
+                actual: 33
+            }
+        );
+        assert!(FixedBytes::<32>::decode(&[0; 32]).is_ok());
     }
 
     #[test]
@@ -859,36 +853,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fixed_slot_encode_preserves_valid_padded_bytes() {
+        let slot = FixedSlot::<5>::from_padded(3, [b'a', b'b', b'c', 0, 0]).unwrap();
+        let mut out = [0xff; FixedSlot::<5>::LEN];
+
+        slot.encode(&mut out).unwrap();
+
+        assert_eq!(&out, &[0, 0, 0, 3, b'a', b'b', b'c', 0, 0]);
+    }
+
     fn encode_test_bytes(value: &[u8; 5]) -> Result<Vec<u8>, String> {
         Ok(value.to_vec())
-    }
-
-    #[test]
-    fn encoded_zeroing_helpers_zero_caller_selected_fields() {
-        let value = [1, 2, 3, 4, 5];
-
-        assert_eq!(
-            encode_with_zeroed_fields(&value, encode_test_bytes, [1..3, 4..5]).unwrap(),
-            vec![1, 0, 0, 4, 0]
-        );
-        assert_eq!(
-            encode_with_zeroed_trailing_field(&value, encode_test_bytes, 2).unwrap(),
-            vec![1, 2, 3, 0, 0]
-        );
-    }
-
-    #[test]
-    fn encoded_zeroing_helpers_reject_impossible_ranges() {
-        let value = [1, 2, 3, 4, 5];
-
-        assert_eq!(
-            encode_with_zeroed_fields(&value, encode_test_bytes, [4..6]).unwrap_err(),
-            "canonical zeroed field range is outside encoded bytes"
-        );
-        assert_eq!(
-            encode_with_zeroed_trailing_field(&value, encode_test_bytes, 6).unwrap_err(),
-            "canonical bytes are shorter than trailing zeroed field"
-        );
     }
 
     #[test]
@@ -924,6 +900,34 @@ mod tests {
         assert_eq!(
             FixedSlot::<4>::decode(&out).unwrap_err(),
             WireError::ValueTooLarge { max: 4, actual: 5 }
+        );
+    }
+
+    #[test]
+    fn encoded_zeroing_helpers_zero_caller_selected_fields() {
+        let value = [1, 2, 3, 4, 5];
+
+        assert_eq!(
+            encode_with_zeroed_fields(&value, encode_test_bytes, [1..3, 4..5]).unwrap(),
+            vec![1, 0, 0, 4, 0]
+        );
+        assert_eq!(
+            encode_with_zeroed_trailing_field(&value, encode_test_bytes, 2).unwrap(),
+            vec![1, 2, 3, 0, 0]
+        );
+    }
+
+    #[test]
+    fn encoded_zeroing_helpers_reject_impossible_ranges() {
+        let value = [1, 2, 3, 4, 5];
+
+        assert_eq!(
+            encode_with_zeroed_fields(&value, encode_test_bytes, [4..6]).unwrap_err(),
+            "canonical zeroed field range is outside encoded bytes"
+        );
+        assert_eq!(
+            encode_with_zeroed_trailing_field(&value, encode_test_bytes, 6).unwrap_err(),
+            "canonical bytes are shorter than trailing zeroed field"
         );
     }
 

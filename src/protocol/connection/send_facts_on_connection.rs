@@ -466,6 +466,8 @@ fn inner_bundle_packed_len(payloads: &[Vec<u8>]) -> Result<usize, String> {
     Ok(len)
 }
 
+// Tests.
+// Ordered most-central-first: batching policy before intent-identity guard.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -473,20 +475,6 @@ mod tests {
     use crate::protocol::content::file_slice::encode::{
         CONTENT_FILE_SLICE_BYTES, TYPE_CONTENT_FILE_SLICE,
     };
-
-    #[test]
-    fn shareable_bucket_intent_identity_includes_trigger_fact() {
-        let connection_id = [7; 32];
-        let timestamp_ms = SHAREABLE_BUCKET_TIMESTAMPS + 42;
-
-        let first =
-            send_shareable_bucket_on_connection_intent(connection_id, timestamp_ms, [1; 32]);
-        let second =
-            send_shareable_bucket_on_connection_intent(connection_id, timestamp_ms, [2; 32]);
-
-        assert_ne!(first.handler_key, second.handler_key);
-        assert_eq!(first.kind, second.kind);
-    }
 
     #[test]
     fn fact_batches_keep_file_slices_in_dedicated_frames() {
@@ -508,6 +496,20 @@ mod tests {
         assert_eq!(batches[1].payloads, vec![file_slice.bytes]);
         assert_eq!(batches[2].fact_ids, vec![small_after.id]);
         assert_eq!(batches[2].payloads, vec![small_after.bytes]);
+    }
+
+    #[test]
+    fn shareable_bucket_intent_identity_includes_trigger_fact() {
+        let connection_id = [7; 32];
+        let timestamp_ms = SHAREABLE_BUCKET_TIMESTAMPS + 42;
+
+        let first =
+            send_shareable_bucket_on_connection_intent(connection_id, timestamp_ms, [1; 32]);
+        let second =
+            send_shareable_bucket_on_connection_intent(connection_id, timestamp_ms, [2; 32]);
+
+        assert_ne!(first.handler_key, second.handler_key);
+        assert_eq!(first.kind, second.kind);
     }
 
     fn global_fact(len: usize, tag: u8) -> Fact {

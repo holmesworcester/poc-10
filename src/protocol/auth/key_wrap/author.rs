@@ -447,6 +447,8 @@ fn associated_data(wrap: &KeyWrapFact) -> Vec<u8> {
     out
 }
 
+// Tests.
+// Ordered most-central-first: admitting a valid key wrap, then the non-wrap rejection guard.
 #[cfg(test)]
 mod tests {
     use super::*;

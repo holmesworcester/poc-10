@@ -47,6 +47,8 @@ pub mod decode {
         format!("{err:?}")
     }
 
+    // Tests.
+    // Ordered most-central-first: the full round-trips lead, then the hash/scope consistency guards, then the tag guard.
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -70,17 +72,6 @@ pub mod decode {
         }
 
         #[test]
-        fn decode_rejects_incomplete_scope() {
-            let fact = InviteSecretFact {
-                workspace_id: Some([1; 32]),
-                ..InviteSecretFact::new([7; 32])
-            };
-            let encoded = encode_fact(&fact).expect("encode");
-            let err = decode_fact(&encoded).expect_err("incomplete scope must fail");
-            assert_eq!(err, "invite secret scope is incomplete");
-        }
-
-        #[test]
         fn decode_rejects_hash_secret_mismatch() {
             let fact = InviteSecretFact {
                 bootstrap_hash: [9; 32],
@@ -91,6 +82,17 @@ pub mod decode {
             let encoded = encode_fact(&fact).expect("encode");
             let err = decode_fact(&encoded).expect_err("mismatched hash must fail");
             assert_eq!(err, "invite secret hash does not match secret");
+        }
+
+        #[test]
+        fn decode_rejects_incomplete_scope() {
+            let fact = InviteSecretFact {
+                workspace_id: Some([1; 32]),
+                ..InviteSecretFact::new([7; 32])
+            };
+            let encoded = encode_fact(&fact).expect("encode");
+            let err = decode_fact(&encoded).expect_err("incomplete scope must fail");
+            assert_eq!(err, "invite secret scope is incomplete");
         }
 
         #[test]
@@ -135,6 +137,8 @@ pub mod authenticate {
         Ok(invite_secret)
     }
 
+    // Tests.
+    // Ordered most-central-first: the happy authentication leads, then the id-binding and layout guards.
     #[cfg(test)]
     mod tests {
         use crate::core::facts::{Fact, FactScope};
@@ -163,6 +167,18 @@ pub mod authenticate {
         }
 
         #[test]
+        fn rejects_id_not_matching_bytes() {
+            let canonical = canonical_fact();
+            let forged = Fact {
+                id: [0; 32],
+                scope: canonical.scope.clone(),
+                timestamp: canonical.timestamp,
+                bytes: canonical.bytes.clone(),
+            };
+            assert!(is_invalid(&forged));
+        }
+
+        #[test]
         fn rejects_wrong_tag() {
             let canonical = canonical_fact();
             let mut bytes = canonical.bytes.clone();
@@ -184,18 +200,6 @@ pub mod authenticate {
                 canonical.timestamp,
                 bytes
             )));
-        }
-
-        #[test]
-        fn rejects_id_not_matching_bytes() {
-            let canonical = canonical_fact();
-            let forged = Fact {
-                id: [0; 32],
-                scope: canonical.scope.clone(),
-                timestamp: canonical.timestamp,
-                bytes: canonical.bytes.clone(),
-            };
-            assert!(is_invalid(&forged));
         }
     }
 }

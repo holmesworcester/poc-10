@@ -152,6 +152,8 @@ impl RuntimeEffects {
     }
 }
 
+// Tests.
+// Ordered most-central-first: this module has one emptiness invariant test.
 #[cfg(test)]
 mod tests {
     use super::*;

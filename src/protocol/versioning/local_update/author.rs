@@ -13,6 +13,7 @@ pub fn update_fact(update: UpdateFact) -> Result<Fact, String> {
     ))
 }
 
+// Tests. Ordered most-central-first: the broadest exercise of this file's core logic leads.
 #[cfg(test)]
 mod tests {
     use super::*;

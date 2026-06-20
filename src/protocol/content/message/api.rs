@@ -346,6 +346,8 @@ fn content_message_retention(
     })
 }
 
+// Tests. The single end-to-end check that generated messages reuse one
+// store-queried authoring snapshot across the batch.
 #[cfg(test)]
 mod tests {
     use super::*;

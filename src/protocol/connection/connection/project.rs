@@ -206,6 +206,7 @@ pub mod decode {
         format!("{err:?}")
     }
 
+    // Tests. Ordered most-central-first: full roundtrip leads, then tag/length guards.
     #[cfg(test)]
     mod tests {
         use crate::protocol::connection::connection::encode::{
@@ -636,6 +637,7 @@ pub mod authenticate {
         })
     }
 
+    // Tests. Ordered most-central-first: canonical happy path, then context-park gates, then rejection guards.
     #[cfg(test)]
     mod tests {
         use crate::core::context::{ContextNeed, ContextOffer};
@@ -1309,6 +1311,7 @@ impl ConnectionNeeds {
     }
 }
 
+// Tests. Ordered most-central-first: full materialize paths lead, then context-park gates, then replay/edge guards.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1367,99 +1370,6 @@ mod tests {
             ),
             payload: observation,
         }
-    }
-
-    #[test]
-    fn responder_projection_sends_response_and_seeds_sync() {
-        let fact = Fact::new(FactScope::Local, 10, vec![49, 1, 2, 3]);
-        let connection = connection_fact();
-        let request_need = request::project::connection_request_need(fact.id, [3; 32]);
-        let request_opener_need =
-            authenticate::local_endpoint_need(fact.id, connection.from_endpoint);
-        let responder_secret_need = authenticate::ephemeral_secret_public_key_need(
-            fact.id,
-            connection.responder_ephemeral_public_key,
-        );
-        let invite_need = authenticate::exact_need(
-            fact.id,
-            "connection_invite_secret",
-            FactScope::Local,
-            [9; 32],
-        );
-
-        let output = ConnectionProjector::new()
-            .project_semantic(
-                &fact,
-                AuthenticatedConnection::Responder {
-                    connection,
-                    request_need,
-                    request_opener_need,
-                    responder_secret_need,
-                    invite_need: Some(invite_need),
-                },
-                &ProjectionContext::default(),
-            )
-            .expect("project responder connection");
-
-        assert!(output
-            .needs
-            .iter()
-            .any(|need| need.role.as_str() == "connection_invite_secret"));
-        assert!(output
-            .effects
-            .intents
-            .iter()
-            .any(|intent| intent.kind.as_str() == SEED_CONNECTION_SYNC));
-        assert!(output
-            .effects
-            .local_intents
-            .iter()
-            .any(|intent| intent.kind.as_str() == QUEUE_OUTGOING_FRAME));
-    }
-
-    #[test]
-    fn replay_projection_does_not_rebuild_live_connection_state() {
-        let fact = Fact::new(FactScope::Local, 10, vec![49, 1, 2, 3]);
-        let output = ConnectionProjector::new()
-            .project_semantic(
-                &fact,
-                AuthenticatedConnection::Responder {
-                    connection: connection_fact(),
-                    request_need: request::project::connection_request_need(fact.id, [3; 32]),
-                    request_opener_need: authenticate::local_endpoint_need(fact.id, [1; 32]),
-                    responder_secret_need: authenticate::ephemeral_secret_public_key_need(
-                        fact.id, [6; 32],
-                    ),
-                    invite_need: None,
-                },
-                &ProjectionContext::default().with_mode(ProjectionMode::Replay),
-            )
-            .expect("replay connection");
-
-        assert!(output.offers.is_empty());
-        assert!(output.needs.is_empty());
-        assert!(output.effects.row_mutations.is_empty());
-        assert!(output.effects.intents.is_empty());
-        assert!(output.effects.local_intents.is_empty());
-    }
-
-    #[test]
-    fn initiator_projection_parks_without_origin_observation() {
-        let fact = Fact::new(FactScope::Local, 10, vec![49, 1, 2, 3]);
-        let output = ConnectionProjector::new()
-            .project_semantic(
-                &fact,
-                initiator_semantic(fact.id, connection_fact()),
-                &ProjectionContext::default(),
-            )
-            .expect("project initiator connection");
-
-        assert!(output
-            .needs
-            .iter()
-            .any(|need| need.role.as_str() == "connection_frame_observation"));
-        assert!(output.offers.is_empty());
-        assert!(output.effects.is_empty());
     }
 
     #[test]
@@ -1538,5 +1448,98 @@ mod tests {
                 })
                 .unwrap_or(false)
         }));
+    }
+
+    #[test]
+    fn responder_projection_sends_response_and_seeds_sync() {
+        let fact = Fact::new(FactScope::Local, 10, vec![49, 1, 2, 3]);
+        let connection = connection_fact();
+        let request_need = request::project::connection_request_need(fact.id, [3; 32]);
+        let request_opener_need =
+            authenticate::local_endpoint_need(fact.id, connection.from_endpoint);
+        let responder_secret_need = authenticate::ephemeral_secret_public_key_need(
+            fact.id,
+            connection.responder_ephemeral_public_key,
+        );
+        let invite_need = authenticate::exact_need(
+            fact.id,
+            "connection_invite_secret",
+            FactScope::Local,
+            [9; 32],
+        );
+
+        let output = ConnectionProjector::new()
+            .project_semantic(
+                &fact,
+                AuthenticatedConnection::Responder {
+                    connection,
+                    request_need,
+                    request_opener_need,
+                    responder_secret_need,
+                    invite_need: Some(invite_need),
+                },
+                &ProjectionContext::default(),
+            )
+            .expect("project responder connection");
+
+        assert!(output
+            .needs
+            .iter()
+            .any(|need| need.role.as_str() == "connection_invite_secret"));
+        assert!(output
+            .effects
+            .intents
+            .iter()
+            .any(|intent| intent.kind.as_str() == SEED_CONNECTION_SYNC));
+        assert!(output
+            .effects
+            .local_intents
+            .iter()
+            .any(|intent| intent.kind.as_str() == QUEUE_OUTGOING_FRAME));
+    }
+
+    #[test]
+    fn initiator_projection_parks_without_origin_observation() {
+        let fact = Fact::new(FactScope::Local, 10, vec![49, 1, 2, 3]);
+        let output = ConnectionProjector::new()
+            .project_semantic(
+                &fact,
+                initiator_semantic(fact.id, connection_fact()),
+                &ProjectionContext::default(),
+            )
+            .expect("project initiator connection");
+
+        assert!(output
+            .needs
+            .iter()
+            .any(|need| need.role.as_str() == "connection_frame_observation"));
+        assert!(output.offers.is_empty());
+        assert!(output.effects.is_empty());
+    }
+
+    #[test]
+    fn replay_projection_does_not_rebuild_live_connection_state() {
+        let fact = Fact::new(FactScope::Local, 10, vec![49, 1, 2, 3]);
+        let output = ConnectionProjector::new()
+            .project_semantic(
+                &fact,
+                AuthenticatedConnection::Responder {
+                    connection: connection_fact(),
+                    request_need: request::project::connection_request_need(fact.id, [3; 32]),
+                    request_opener_need: authenticate::local_endpoint_need(fact.id, [1; 32]),
+                    responder_secret_need: authenticate::ephemeral_secret_public_key_need(
+                        fact.id, [6; 32],
+                    ),
+                    invite_need: None,
+                },
+                &ProjectionContext::default().with_mode(ProjectionMode::Replay),
+            )
+            .expect("replay connection");
+
+        assert!(output.offers.is_empty());
+        assert!(output.needs.is_empty());
+        assert!(output.effects.row_mutations.is_empty());
+        assert!(output.effects.intents.is_empty());
+        assert!(output.effects.local_intents.is_empty());
     }
 }

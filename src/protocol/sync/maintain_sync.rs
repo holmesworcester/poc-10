@@ -140,6 +140,8 @@ impl IntentHandler for MaintainSyncHandler {
     }
 }
 
+// Tests.
+// Most-central-first: the positive queue path and retry-window/marker behavior lead, then the skip gates and intent codec.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,29 +152,6 @@ mod tests {
     use crate::core::runtime::{HandlerRoute, Runtime, RuntimeDescription};
     use crate::core::schema::CORE_SCHEMA_SOURCE;
     use crate::protocol::registry::FACTS_SCHEMA_SOURCE;
-
-    #[test]
-    fn recurring_builder_skips_when_no_connections_exist() {
-        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
-            .expect("store");
-
-        assert_eq!(
-            build_maintain_sync_intent(&store, RecurringIntentContext::default()).expect("build"),
-            None
-        );
-    }
-
-    #[test]
-    fn recurring_builder_skips_without_daemon_host_context() {
-        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
-            .expect("store");
-        seed_connection_row(&store, [8; 32]);
-
-        assert_eq!(
-            build_maintain_sync_intent(&store, RecurringIntentContext::default()).expect("build"),
-            None
-        );
-    }
 
     #[test]
     fn recurring_builder_queues_with_connection_in_daemon_host_context() {
@@ -215,17 +194,6 @@ mod tests {
     }
 
     #[test]
-    fn maintain_sync_intent_round_trips() {
-        let intent = maintain_sync_intent(123);
-
-        assert_eq!(
-            decode_maintain_sync(&intent).expect("decode"),
-            MaintainSync { run_at_ms: 123 }
-        );
-        assert_eq!(intent.kind.as_str(), MAINTAIN_SYNC);
-    }
-
-    #[test]
     fn maintenance_marker_write_participates_in_handler_transaction() {
         let mut runtime = Runtime::open_memory(&MAINTAIN_SYNC_RUNTIME).expect("runtime");
         runtime
@@ -243,6 +211,40 @@ mod tests {
             !maintenance_due(runtime.db(), 1_050).expect("read marker"),
             "handler should record its marker inside the dispatch transaction"
         );
+    }
+
+    #[test]
+    fn recurring_builder_skips_when_no_connections_exist() {
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+            .expect("store");
+
+        assert_eq!(
+            build_maintain_sync_intent(&store, RecurringIntentContext::default()).expect("build"),
+            None
+        );
+    }
+
+    #[test]
+    fn recurring_builder_skips_without_daemon_host_context() {
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+            .expect("store");
+        seed_connection_row(&store, [8; 32]);
+
+        assert_eq!(
+            build_maintain_sync_intent(&store, RecurringIntentContext::default()).expect("build"),
+            None
+        );
+    }
+
+    #[test]
+    fn maintain_sync_intent_round_trips() {
+        let intent = maintain_sync_intent(123);
+
+        assert_eq!(
+            decode_maintain_sync(&intent).expect("decode"),
+            MaintainSync { run_at_ms: 123 }
+        );
+        assert_eq!(intent.kind.as_str(), MAINTAIN_SYNC);
     }
 
     fn seed_connection_row(store: &Db, connection_id: crate::core::facts::FactId) {

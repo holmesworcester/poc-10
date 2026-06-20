@@ -59,6 +59,8 @@ pub mod decode {
         format!("{err:?}")
     }
 
+    // Tests.
+    // Ordered most-central-first: the full round-trip leads, then the type, role, padding, and name guards.
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -96,10 +98,12 @@ pub mod decode {
         }
 
         #[test]
-        fn rejects_nul_device_name() {
+        fn rejects_unknown_role() {
+            let mut encoded = encode_fact(&fact()).expect("encode");
+            encoded[137] = 99;
             assert_eq!(
-                EndpointDeviceName::new("bad\0name").expect_err("NUL name must fail"),
-                wire::WireError::InteriorNul { index: 3 }
+                decode_fact(&encoded).expect_err("bad role must fail"),
+                "unknown endpoint role"
             );
         }
 
@@ -115,12 +119,10 @@ pub mod decode {
         }
 
         #[test]
-        fn rejects_unknown_role() {
-            let mut encoded = encode_fact(&fact()).expect("encode");
-            encoded[137] = 99;
+        fn rejects_nul_device_name() {
             assert_eq!(
-                decode_fact(&encoded).expect_err("bad role must fail"),
-                "unknown endpoint role"
+                EndpointDeviceName::new("bad\0name").expect_err("NUL name must fail"),
+                wire::WireError::InteriorNul { index: 3 }
             );
         }
     }
@@ -177,6 +179,8 @@ pub mod authenticate {
         Ok(shared)
     }
 
+    // Tests.
+    // Ordered most-central-first: the happy authentication leads, then the id-binding and layout guards.
     #[cfg(test)]
     mod tests {
         use crate::core::facts::Fact;
@@ -216,6 +220,18 @@ pub mod authenticate {
         }
 
         #[test]
+        fn rejects_id_not_matching_bytes() {
+            let canonical = canonical_fact();
+            let forged = Fact {
+                id: [0; 32],
+                scope: canonical.scope.clone(),
+                timestamp: canonical.timestamp,
+                bytes: canonical.bytes.clone(),
+            };
+            assert!(is_invalid(&forged));
+        }
+
+        #[test]
         fn rejects_wrong_tag() {
             let canonical = canonical_fact();
             let mut bytes = canonical.bytes.clone();
@@ -237,18 +253,6 @@ pub mod authenticate {
                 canonical.timestamp,
                 bytes
             )));
-        }
-
-        #[test]
-        fn rejects_id_not_matching_bytes() {
-            let canonical = canonical_fact();
-            let forged = Fact {
-                id: [0; 32],
-                scope: canonical.scope.clone(),
-                timestamp: canonical.timestamp,
-                bytes: canonical.bytes.clone(),
-            };
-            assert!(is_invalid(&forged));
         }
 
         // Admission scope is interpretation, checked by the projector, not the

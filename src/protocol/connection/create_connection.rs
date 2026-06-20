@@ -90,43 +90,6 @@ fn take_id(payload: &[u8], index: usize) -> FactId {
     out
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn sample() -> CreateConnection {
-        CreateConnection {
-            request_id: [1; 32],
-            initiator_endpoint_shared_id: [2; 32],
-            receive_id: [3; 32],
-        }
-    }
-
-    #[test]
-    fn intent_roundtrips() {
-        let intent = create_connection_intent(sample());
-        let decoded = decode_create_connection_intent(&intent).expect("decode");
-        assert_eq!(decoded, sample());
-    }
-
-    #[test]
-    fn rejects_tampered_payload() {
-        let mut intent = create_connection_intent(sample());
-        intent.payload[0] ^= 0xff;
-        assert!(decode_create_connection_intent(&intent).is_err());
-    }
-
-    #[test]
-    fn intent_key_is_request_scoped() {
-        let mut duplicate_receive = sample();
-        duplicate_receive.receive_id = [9; 32];
-        assert_eq!(
-            create_connection_intent(sample()).handler_key,
-            create_connection_intent(duplicate_receive).handler_key
-        );
-    }
-}
-
 // The handler proves the queued dependency ids still name the expected facts,
 // then delegates DH handshake construction to `connection::create`.
 
@@ -291,4 +254,43 @@ fn validate_fact_receipt(
         return Err("create_connection fact receipt names another request".into());
     }
     Ok(())
+}
+
+// Tests.
+// Ordered most-central-first: roundtrip, then key invariant, then tamper guard.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample() -> CreateConnection {
+        CreateConnection {
+            request_id: [1; 32],
+            initiator_endpoint_shared_id: [2; 32],
+            receive_id: [3; 32],
+        }
+    }
+
+    #[test]
+    fn intent_roundtrips() {
+        let intent = create_connection_intent(sample());
+        let decoded = decode_create_connection_intent(&intent).expect("decode");
+        assert_eq!(decoded, sample());
+    }
+
+    #[test]
+    fn intent_key_is_request_scoped() {
+        let mut duplicate_receive = sample();
+        duplicate_receive.receive_id = [9; 32];
+        assert_eq!(
+            create_connection_intent(sample()).handler_key,
+            create_connection_intent(duplicate_receive).handler_key
+        );
+    }
+
+    #[test]
+    fn rejects_tampered_payload() {
+        let mut intent = create_connection_intent(sample());
+        intent.payload[0] ^= 0xff;
+        assert!(decode_create_connection_intent(&intent).is_err());
+    }
 }

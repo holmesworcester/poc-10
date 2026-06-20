@@ -187,6 +187,8 @@ pub fn status_report(
     })
 }
 
+// Tests. The single central check that the active policy follows the supersedes
+// chain rather than created-at order.
 #[cfg(test)]
 mod tests {
     use crate::core::db::Db;

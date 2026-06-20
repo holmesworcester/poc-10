@@ -88,6 +88,7 @@ pub mod decode {
         format!("{err:?}")
     }
 
+    // Tests. Ordered most-central-first: full roundtrips lead, then origin-addr canonicalization, then rejection guards.
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -117,6 +118,18 @@ pub mod decode {
         }
 
         #[test]
+        fn fact_receipt_roundtrips_without_connection() {
+            let fact = ConnectionFactReceipt {
+                receive_path: RECEIVE_PATH_CONNECTION_REQUEST,
+                connection_id: None,
+                request_id: None,
+                ..fact()
+            };
+            let encoded = encode_fact(&fact).expect("encode");
+            assert_eq!(decode_fact(&encoded).expect("decode"), fact);
+        }
+
+        #[test]
         fn fact_receipt_encode_normalizes_friendly_origin_addr() {
             let mut fact = fact();
             fact.origin_addr = OriginAddr::new(b"127.0.0.1_41001").expect("origin");
@@ -140,29 +153,6 @@ pub mod decode {
         }
 
         #[test]
-        fn fact_receipt_roundtrips_without_connection() {
-            let fact = ConnectionFactReceipt {
-                receive_path: RECEIVE_PATH_CONNECTION_REQUEST,
-                connection_id: None,
-                request_id: None,
-                ..fact()
-            };
-            let encoded = encode_fact(&fact).expect("encode");
-            assert_eq!(decode_fact(&encoded).expect("decode"), fact);
-        }
-
-        #[test]
-        fn rejects_wrong_tag_or_length() {
-            let mut encoded = encode_fact(&fact()).expect("encode");
-            encoded[0] = TYPE_CONNECTION_FACT_RECEIPT.wrapping_add(1);
-            assert!(decode_fact(&encoded).is_err());
-
-            let mut short = encode_fact(&fact()).expect("encode");
-            short.pop();
-            assert!(decode_fact(&short).is_err());
-        }
-
-        #[test]
         fn rejects_unknown_receive_path() {
             let fact = ConnectionFactReceipt {
                 receive_path: 99,
@@ -178,6 +168,17 @@ pub mod decode {
                 ..fact()
             };
             assert!(encode_fact(&fact).is_err());
+        }
+
+        #[test]
+        fn rejects_wrong_tag_or_length() {
+            let mut encoded = encode_fact(&fact()).expect("encode");
+            encoded[0] = TYPE_CONNECTION_FACT_RECEIPT.wrapping_add(1);
+            assert!(decode_fact(&encoded).is_err());
+
+            let mut short = encode_fact(&fact()).expect("encode");
+            short.pop();
+            assert!(decode_fact(&short).is_err());
         }
     }
 }
@@ -216,6 +217,7 @@ pub mod authenticate {
         Ok(received)
     }
 
+    // Tests. Ordered most-central-first: canonical happy path leads, then rejection guards.
     #[cfg(test)]
     mod tests {
         use crate::core::facts::{Fact, FactScope};

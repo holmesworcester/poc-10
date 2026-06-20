@@ -34,6 +34,8 @@ pub mod decode {
         format!("{err:?}")
     }
 
+    // Tests. Ordered most-central first: the fixed-width roundtrip proves the
+    // whole codec, then the tag/length rejections guard the layout.
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -104,6 +106,8 @@ pub mod authenticate {
         Ok(deletion)
     }
 
+    // Tests. Ordered most-central first: a canonical fact authenticates, then
+    // the id-binding invariant (id == hash(bytes)), then the layout rejections.
     #[cfg(test)]
     mod tests {
         use crate::core::command::LocalSigningCapability;
@@ -145,6 +149,18 @@ pub mod authenticate {
         }
 
         #[test]
+        fn rejects_id_not_matching_bytes() {
+            let canonical = canonical_fact();
+            let forged = Fact {
+                id: [0; 32],
+                scope: canonical.scope.clone(),
+                timestamp: canonical.timestamp,
+                bytes: canonical.bytes.clone(),
+            };
+            assert!(is_invalid(&forged));
+        }
+
+        #[test]
         fn rejects_wrong_tag() {
             let canonical = canonical_fact();
             let mut bytes = canonical.bytes.clone();
@@ -166,18 +182,6 @@ pub mod authenticate {
                 canonical.timestamp,
                 bytes
             )));
-        }
-
-        #[test]
-        fn rejects_id_not_matching_bytes() {
-            let canonical = canonical_fact();
-            let forged = Fact {
-                id: [0; 32],
-                scope: canonical.scope.clone(),
-                timestamp: canonical.timestamp,
-                bytes: canonical.bytes.clone(),
-            };
-            assert!(is_invalid(&forged));
         }
     }
 }
@@ -411,6 +415,11 @@ fn require_fact_scope(fact: &Fact, expected: &crate::core::facts::FactScope) -> 
     }
 }
 
+// Tests.
+//
+// The semantic projector is the heart of this file; these are ordered
+// most-central first: the materialize-signed-claim happy path leads, then the
+// context-wait gate, then the narrow row-builder check.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -430,25 +439,6 @@ mod tests {
     const CONTENT_SIGNING_KEY: [u8; 32] = [17; 32];
     const ENDPOINT_AUTHORITY_KEY: [u8; 32] = [19; 32];
     const CONTENT_SIGNER_ID: FactId = [8; 32];
-
-    #[test]
-    fn file_deletion_row_round_trips() {
-        let input = FileDeletionRow {
-            workspace_id: [1; 32],
-            target_file_id: [2; 32],
-            deletion_id: [3; 32],
-            created_at_ms: 4_242,
-            author_user_id: [4; 32],
-        };
-        let row = file_deletion_row(input);
-        assert_eq!(row.table, FILE_DELETION_ROWS);
-        assert_eq!(row.columns, FILE_DELETION_COLUMNS);
-        assert_eq!(row.values[0], Value::Bytes(vec![1; 32]));
-        assert_eq!(row.values[1], Value::Bytes(vec![2; 32]));
-        assert_eq!(row.values[2], Value::Bytes(vec![3; 32]));
-        assert_eq!(row.values[3], Value::U64(4_242));
-        assert_eq!(row.values[4], Value::Bytes(vec![4; 32]));
-    }
 
     #[test]
     fn file_deletion_projector_materializes_signed_claim_without_target_context() {
@@ -528,6 +518,25 @@ mod tests {
             .needs
             .iter()
             .any(|need| need.role.as_str() == "content_message"));
+    }
+
+    #[test]
+    fn file_deletion_row_round_trips() {
+        let input = FileDeletionRow {
+            workspace_id: [1; 32],
+            target_file_id: [2; 32],
+            deletion_id: [3; 32],
+            created_at_ms: 4_242,
+            author_user_id: [4; 32],
+        };
+        let row = file_deletion_row(input);
+        assert_eq!(row.table, FILE_DELETION_ROWS);
+        assert_eq!(row.columns, FILE_DELETION_COLUMNS);
+        assert_eq!(row.values[0], Value::Bytes(vec![1; 32]));
+        assert_eq!(row.values[1], Value::Bytes(vec![2; 32]));
+        assert_eq!(row.values[2], Value::Bytes(vec![3; 32]));
+        assert_eq!(row.values[3], Value::U64(4_242));
+        assert_eq!(row.values[4], Value::Bytes(vec![4; 32]));
     }
 
     fn deletion_fact(

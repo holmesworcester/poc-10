@@ -43,6 +43,8 @@ pub mod decode {
         format!("{err:?}")
     }
 
+    // Tests.
+    // Most-central-first: the byte-layout round-trip leads, then the decode-validation and structural guards.
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -135,6 +137,8 @@ pub mod authenticate {
         Ok(compare)
     }
 
+    // Tests.
+    // Most-central-first: the happy path then the id check (the authenticator's one job), then decode-layer guards.
     #[cfg(test)]
     mod tests {
         use crate::core::facts::Fact;
@@ -168,6 +172,18 @@ pub mod authenticate {
         }
 
         #[test]
+        fn rejects_id_not_matching_bytes() {
+            let canonical = canonical_fact();
+            let forged = Fact {
+                id: [0; 32],
+                scope: canonical.scope.clone(),
+                timestamp: canonical.timestamp,
+                bytes: canonical.bytes.clone(),
+            };
+            assert!(is_invalid(&forged));
+        }
+
+        #[test]
         fn rejects_wrong_tag() {
             let canonical = canonical_fact();
             let mut bytes = canonical.bytes.clone();
@@ -189,18 +205,6 @@ pub mod authenticate {
                 canonical.timestamp,
                 bytes
             )));
-        }
-
-        #[test]
-        fn rejects_id_not_matching_bytes() {
-            let canonical = canonical_fact();
-            let forged = Fact {
-                id: [0; 32],
-                scope: canonical.scope.clone(),
-                timestamp: canonical.timestamp,
-                bytes: canonical.bytes.clone(),
-            };
-            assert!(is_invalid(&forged));
         }
 
         // Admission scope is interpretation, checked by the projector, not the

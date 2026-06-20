@@ -54,6 +54,8 @@ pub mod decode {
         format!("{err:?}")
     }
 
+    // Tests. Ordered most-central first: the fixed-width roundtrip proves the
+    // whole codec, then the sentinel and tag/length rejections guard the layout.
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -155,6 +157,8 @@ pub mod authenticate {
         Ok(policy)
     }
 
+    // Tests. Ordered most-central first: a canonical fact authenticates, then
+    // the id-binding invariant (id == hash(bytes)), then the layout rejections.
     #[cfg(test)]
     mod tests {
         use crate::core::facts::Fact;
@@ -198,6 +202,18 @@ pub mod authenticate {
         }
 
         #[test]
+        fn rejects_id_not_matching_bytes() {
+            let canonical = canonical_fact();
+            let forged = Fact {
+                id: [0; 32],
+                scope: canonical.scope.clone(),
+                timestamp: canonical.timestamp,
+                bytes: canonical.bytes.clone(),
+            };
+            assert!(is_invalid(&forged));
+        }
+
+        #[test]
         fn rejects_wrong_tag() {
             let canonical = canonical_fact();
             let mut bytes = canonical.bytes.clone();
@@ -219,18 +235,6 @@ pub mod authenticate {
                 canonical.timestamp,
                 bytes
             )));
-        }
-
-        #[test]
-        fn rejects_id_not_matching_bytes() {
-            let canonical = canonical_fact();
-            let forged = Fact {
-                id: [0; 32],
-                scope: canonical.scope.clone(),
-                timestamp: canonical.timestamp,
-                bytes: canonical.bytes.clone(),
-            };
-            assert!(is_invalid(&forged));
         }
     }
 }
@@ -512,6 +516,12 @@ fn validate_previous(previous_fact: &Fact, policy: &RetentionPolicyFact) -> Resu
     Ok(())
 }
 
+// Tests.
+//
+// The retention-policy projector is the heart of this file; these are ordered
+// most-central first: the authority-wait-then-materialize happy path leads, then
+// the supersession/monotonic-retire-minute path, then field and malformed-bytes
+// guards.
 #[cfg(test)]
 mod projector_tests {
     use crate as topo;

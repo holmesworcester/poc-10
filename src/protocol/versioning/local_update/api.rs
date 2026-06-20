@@ -31,6 +31,7 @@ pub fn author_update(clock: &dyn CommandClock) -> Result<AuthoredFacts<UpdateRec
     .with_facts(vec![fact]))
 }
 
+// Tests. Ordered most-central-first: the broadest exercise of this file's core logic leads.
 #[cfg(test)]
 mod tests {
     use super::*;

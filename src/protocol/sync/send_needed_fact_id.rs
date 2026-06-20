@@ -95,6 +95,8 @@ impl IntentHandler for SendNeededFactIdHandler {
     }
 }
 
+// Tests.
+// The need-id emission for a fact the local store lacks.
 #[cfg(test)]
 mod tests {
     use super::*;

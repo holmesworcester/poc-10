@@ -93,6 +93,8 @@ fn parse_origin_addr(value: &str) -> Result<SocketAddr, String> {
         .map_err(|_| "connection receive origin addr is invalid".to_string())
 }
 
+// Tests.
+// Ordered most-central-first: canonical normalize, friendly parse, then reject guard.
 #[cfg(test)]
 mod tests {
     use super::*;

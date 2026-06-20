@@ -31,6 +31,8 @@ pub mod decode {
         format!("{err:?}")
     }
 
+    // Tests.
+    // Single round-trip test: encode then decode recovers the fact.
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -97,6 +99,8 @@ pub mod authenticate {
         Ok(secret)
     }
 
+    // Tests.
+    // Ordered most-central-first: happy-path authentication, then the id guard, then layout guards.
     #[cfg(test)]
     mod tests {
         use crate::core::facts::{Fact, FactScope};
@@ -131,6 +135,18 @@ pub mod authenticate {
         }
 
         #[test]
+        fn rejects_id_not_matching_bytes() {
+            let canonical = canonical_fact();
+            let forged = Fact {
+                id: [0; 32],
+                scope: canonical.scope.clone(),
+                timestamp: canonical.timestamp,
+                bytes: canonical.bytes.clone(),
+            };
+            assert!(is_invalid(&forged));
+        }
+
+        #[test]
         fn rejects_wrong_tag() {
             let canonical = canonical_fact();
             let mut bytes = canonical.bytes.clone();
@@ -152,18 +168,6 @@ pub mod authenticate {
                 canonical.timestamp,
                 bytes
             )));
-        }
-
-        #[test]
-        fn rejects_id_not_matching_bytes() {
-            let canonical = canonical_fact();
-            let forged = Fact {
-                id: [0; 32],
-                scope: canonical.scope.clone(),
-                timestamp: canonical.timestamp,
-                bytes: canonical.bytes.clone(),
-            };
-            assert!(is_invalid(&forged));
         }
     }
 }

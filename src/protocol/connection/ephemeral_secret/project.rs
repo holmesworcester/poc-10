@@ -35,6 +35,7 @@ pub mod decode {
         format!("{err:?}")
     }
 
+    // Tests. Ordered most-central-first: full roundtrip leads, then tag/length guards.
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -109,6 +110,7 @@ pub mod authenticate {
         Ok(secret)
     }
 
+    // Tests. Ordered most-central-first: canonical happy path leads, then rejection guards.
     #[cfg(test)]
     mod tests {
         use crate::core::crypto;
@@ -252,58 +254,6 @@ impl ConnectionEphemeralSecretProjector {
     }
 }
 
-#[cfg(test)]
-mod project_tests {
-    use super::*;
-    use crate::core::crypto;
-    use crate::core::facts::FactId;
-    use crate::protocol::connection::ephemeral_secret::encode;
-    use crate::protocol::connection::ephemeral_secret::fact::ConnectionEphemeralSecretFact;
-
-    fn secret_fact() -> (Fact, ConnectionEphemeralSecretFact) {
-        let ephemeral_private_key = [2; 32];
-        let secret = ConnectionEphemeralSecretFact {
-            owner_endpoint: [1; 32],
-            ephemeral_private_key,
-            ephemeral_public_key: crypto::x25519_public_key(&ephemeral_private_key),
-            created_at_ms: 3,
-        };
-        (
-            Fact::new(
-                FactScope::Local,
-                3,
-                encode::encode_fact(&secret).expect("ephemeral secret"),
-            ),
-            secret,
-        )
-    }
-
-    fn assert_exact_offer(output: &ProjectionOutput, role: &str, key: FactId) {
-        let offer = output
-            .offers
-            .iter()
-            .find(|offer| offer.role.as_str() == role)
-            .expect("offer role");
-        assert_eq!(offer.start_key.as_bytes(), key);
-        assert_eq!(offer.end_key.as_bytes(), key);
-    }
-
-    #[test]
-    fn live_secret_offers_fact_id_and_public_key_context() {
-        let (fact, secret) = secret_fact();
-        let output = ConnectionEphemeralSecretProjector::new()
-            .project(&fact, &ProjectionContext::default())
-            .expect("project ephemeral secret");
-
-        assert_exact_offer(&output, CONNECTION_EPHEMERAL_SECRET_ROLE, fact.id);
-        assert_exact_offer(
-            &output,
-            CONNECTION_EPHEMERAL_SECRET_PUBLIC_KEY_ROLE,
-            secret.ephemeral_public_key,
-        );
-    }
-}
-
 impl Projector for ConnectionEphemeralSecretProjector {
     fn project(
         &self,
@@ -369,5 +319,58 @@ impl ConnectionEphemeralSecretProjector {
             .row_mutation(RowMutation::InsertValues(connection_ephemeral_secret_row(
                 fact.id, &secret,
             ))))
+    }
+}
+
+// Tests. Ordered most-central-first: the live-secret offer path is the projector's core behavior.
+#[cfg(test)]
+mod project_tests {
+    use super::*;
+    use crate::core::crypto;
+    use crate::core::facts::FactId;
+    use crate::protocol::connection::ephemeral_secret::encode;
+    use crate::protocol::connection::ephemeral_secret::fact::ConnectionEphemeralSecretFact;
+
+    fn secret_fact() -> (Fact, ConnectionEphemeralSecretFact) {
+        let ephemeral_private_key = [2; 32];
+        let secret = ConnectionEphemeralSecretFact {
+            owner_endpoint: [1; 32],
+            ephemeral_private_key,
+            ephemeral_public_key: crypto::x25519_public_key(&ephemeral_private_key),
+            created_at_ms: 3,
+        };
+        (
+            Fact::new(
+                FactScope::Local,
+                3,
+                encode::encode_fact(&secret).expect("ephemeral secret"),
+            ),
+            secret,
+        )
+    }
+
+    fn assert_exact_offer(output: &ProjectionOutput, role: &str, key: FactId) {
+        let offer = output
+            .offers
+            .iter()
+            .find(|offer| offer.role.as_str() == role)
+            .expect("offer role");
+        assert_eq!(offer.start_key.as_bytes(), key);
+        assert_eq!(offer.end_key.as_bytes(), key);
+    }
+
+    #[test]
+    fn live_secret_offers_fact_id_and_public_key_context() {
+        let (fact, secret) = secret_fact();
+        let output = ConnectionEphemeralSecretProjector::new()
+            .project(&fact, &ProjectionContext::default())
+            .expect("project ephemeral secret");
+
+        assert_exact_offer(&output, CONNECTION_EPHEMERAL_SECRET_ROLE, fact.id);
+        assert_exact_offer(
+            &output,
+            CONNECTION_EPHEMERAL_SECRET_PUBLIC_KEY_ROLE,
+            secret.ephemeral_public_key,
+        );
     }
 }

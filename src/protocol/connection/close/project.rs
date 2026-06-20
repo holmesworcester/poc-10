@@ -28,6 +28,7 @@ pub mod decode {
         format!("{err:?}")
     }
 
+    // Tests. Ordered most-central-first: full roundtrip leads, then tag/length guards.
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -99,6 +100,7 @@ pub mod authenticate {
         Ok(close)
     }
 
+    // Tests. Ordered most-central-first: canonical happy path leads, then rejection guards.
     #[cfg(test)]
     mod tests {
         use crate::core::facts::{Fact, FactScope};

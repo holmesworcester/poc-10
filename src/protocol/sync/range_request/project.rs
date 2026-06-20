@@ -30,6 +30,8 @@ pub mod decode {
         format!("{err:?}")
     }
 
+    // Tests.
+    // The fixed-width round-trip for the range request.
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -88,6 +90,8 @@ pub mod authenticate {
         Ok(request)
     }
 
+    // Tests.
+    // Most-central-first: the happy path then the id check, then decode-layer guards.
     #[cfg(test)]
     mod tests {
         use crate::core::facts::{Fact, FactScope};
@@ -124,6 +128,18 @@ pub mod authenticate {
         }
 
         #[test]
+        fn rejects_id_not_matching_bytes() {
+            let canonical = canonical_fact();
+            let forged = Fact {
+                id: [0; 32],
+                scope: canonical.scope.clone(),
+                timestamp: canonical.timestamp,
+                bytes: canonical.bytes.clone(),
+            };
+            assert!(is_invalid(&forged));
+        }
+
+        #[test]
         fn rejects_wrong_tag() {
             let canonical = canonical_fact();
             let mut bytes = canonical.bytes.clone();
@@ -145,18 +161,6 @@ pub mod authenticate {
                 canonical.timestamp,
                 bytes
             )));
-        }
-
-        #[test]
-        fn rejects_id_not_matching_bytes() {
-            let canonical = canonical_fact();
-            let forged = Fact {
-                id: [0; 32],
-                scope: canonical.scope.clone(),
-                timestamp: canonical.timestamp,
-                bytes: canonical.bytes.clone(),
-            };
-            assert!(is_invalid(&forged));
         }
 
         // Admission scope is interpretation, checked by the projector, not the

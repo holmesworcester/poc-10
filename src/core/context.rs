@@ -523,122 +523,14 @@ fn encode_scope(out: &mut Writer, scope: &FactScope) {
     }
 }
 
+// =============================================================================
+// Tests
+// =============================================================================
+// Ordered most-central-first: core context-delta proofs before narrow guards.
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::facts::FactScope;
-
-    #[test]
-    fn role_rejects_broad_free_text() {
-        assert!(Role::new("exact_fact").is_ok());
-        assert!(Role::new("ExactFact").is_err());
-        assert!(Role::new("exact-fact").is_err());
-    }
-
-    #[test]
-    fn context_key_parts_encode_canonical_bounded_bytes() {
-        let id = [1; 32];
-        let key = ContextKey::from_parts([
-            ContextKeyPart::from(&id),
-            ContextKeyPart::u64(42),
-            ContextKeyPart::bytes(b"constant".as_slice()),
-        ])
-        .expect("canonical key");
-        let same = ContextKey::from_parts([
-            ContextKeyPart::from(&id),
-            ContextKeyPart::from(42u64),
-            ContextKeyPart::from(b"constant".as_slice()),
-        ])
-        .expect("canonical key");
-
-        assert_eq!(key, same);
-        assert!(key.as_bytes().len() <= CONTEXT_KEY_MAX_BYTES);
-        assert_eq!(key.as_bytes()[0], CONTEXT_KEY_TUPLE_V1);
-    }
-
-    #[test]
-    fn context_key_parts_reject_empty_oversized_and_too_many_parts() {
-        assert!(ContextKey::from_parts(Vec::<ContextKeyPart<'_>>::new()).is_err());
-        let oversized = vec![0; CONTEXT_KEY_MAX_BYTES];
-        assert!(ContextKey::from_parts([ContextKeyPart::bytes(&oversized)]).is_err());
-        let parts = [[0u8; 1]; CONTEXT_KEY_MAX_PARTS + 1];
-        assert!(ContextKey::from_parts(parts.iter()).is_err());
-    }
-
-    #[test]
-    fn key_part_need_and_offer_use_identical_endpoints() {
-        let owner = [1; 32];
-        let scope = FactScope::Global;
-        let first = [2; 32];
-        let second = [3; 32];
-        let need = ContextNeed::for_key_parts(owner, "composite", scope.clone(), [&first, &second])
-            .expect("need");
-        let offer = ContextOffer::for_key_parts(owner, "composite", scope, [&first, &second])
-            .expect("offer");
-
-        assert_eq!(need.start_key, need.end_key);
-        assert_eq!(offer.start_key, offer.end_key);
-        assert_eq!(need.start_key, offer.start_key);
-    }
-
-    #[test]
-    fn exact_key_need_and_offer_use_identical_endpoints() {
-        let owner = [1; 32];
-        let scope = FactScope::Global;
-        let key = [2; 32];
-        let need = ContextNeed::for_key(owner, "exact", scope.clone(), key);
-        let offer = ContextOffer::for_key(owner, "exact", scope, key);
-
-        assert_eq!(need.start_key, ContextKey::from_bytes(key));
-        assert_eq!(need.start_key, need.end_key);
-        assert_eq!(offer.start_key, offer.end_key);
-        assert_eq!(need.start_key, offer.start_key);
-    }
-
-    #[test]
-    fn context_set_builder_keeps_needs_and_offers_explicit() {
-        let id = [1; 32];
-        let role = Role::new("exact").unwrap();
-        let key = ContextKey::from_bytes([2; 32]);
-        let set = ContextSet::new()
-            .need(ContextNeed {
-                owner: id,
-                role: role.clone(),
-                scope: FactScope::Global,
-                start_key: key.clone(),
-                end_key: key.clone(),
-            })
-            .offer(ContextOffer {
-                owner: id,
-                role,
-                scope: FactScope::Global,
-                start_key: key.clone(),
-                end_key: key,
-            });
-
-        assert_eq!(set.needs.len(), 1);
-        assert_eq!(set.offers.len(), 1);
-    }
-
-    #[test]
-    fn normalized_context_set_sorts_and_deduplicates() {
-        let id = [1; 32];
-        let role = Role::new("exact").unwrap();
-        let need = ContextNeed {
-            owner: id,
-            role,
-            scope: FactScope::Global,
-            start_key: ContextKey::from_bytes([2; 32]),
-            end_key: ContextKey::from_bytes([2; 32]),
-        };
-
-        let set = ContextSet::new()
-            .need(need.clone())
-            .need(need.clone())
-            .normalized();
-
-        assert_eq!(set.needs, vec![need]);
-    }
 
     #[test]
     fn context_set_additions_reports_only_new_relationships() {
@@ -693,5 +585,117 @@ mod tests {
             .normalized();
 
         assert!(context_set_additions(&set, &set).is_empty());
+    }
+
+    #[test]
+    fn context_key_parts_encode_canonical_bounded_bytes() {
+        let id = [1; 32];
+        let key = ContextKey::from_parts([
+            ContextKeyPart::from(&id),
+            ContextKeyPart::u64(42),
+            ContextKeyPart::bytes(b"constant".as_slice()),
+        ])
+        .expect("canonical key");
+        let same = ContextKey::from_parts([
+            ContextKeyPart::from(&id),
+            ContextKeyPart::from(42u64),
+            ContextKeyPart::from(b"constant".as_slice()),
+        ])
+        .expect("canonical key");
+
+        assert_eq!(key, same);
+        assert!(key.as_bytes().len() <= CONTEXT_KEY_MAX_BYTES);
+        assert_eq!(key.as_bytes()[0], CONTEXT_KEY_TUPLE_V1);
+    }
+
+    #[test]
+    fn key_part_need_and_offer_use_identical_endpoints() {
+        let owner = [1; 32];
+        let scope = FactScope::Global;
+        let first = [2; 32];
+        let second = [3; 32];
+        let need = ContextNeed::for_key_parts(owner, "composite", scope.clone(), [&first, &second])
+            .expect("need");
+        let offer = ContextOffer::for_key_parts(owner, "composite", scope, [&first, &second])
+            .expect("offer");
+
+        assert_eq!(need.start_key, need.end_key);
+        assert_eq!(offer.start_key, offer.end_key);
+        assert_eq!(need.start_key, offer.start_key);
+    }
+
+    #[test]
+    fn exact_key_need_and_offer_use_identical_endpoints() {
+        let owner = [1; 32];
+        let scope = FactScope::Global;
+        let key = [2; 32];
+        let need = ContextNeed::for_key(owner, "exact", scope.clone(), key);
+        let offer = ContextOffer::for_key(owner, "exact", scope, key);
+
+        assert_eq!(need.start_key, ContextKey::from_bytes(key));
+        assert_eq!(need.start_key, need.end_key);
+        assert_eq!(offer.start_key, offer.end_key);
+        assert_eq!(need.start_key, offer.start_key);
+    }
+
+    #[test]
+    fn normalized_context_set_sorts_and_deduplicates() {
+        let id = [1; 32];
+        let role = Role::new("exact").unwrap();
+        let need = ContextNeed {
+            owner: id,
+            role,
+            scope: FactScope::Global,
+            start_key: ContextKey::from_bytes([2; 32]),
+            end_key: ContextKey::from_bytes([2; 32]),
+        };
+
+        let set = ContextSet::new()
+            .need(need.clone())
+            .need(need.clone())
+            .normalized();
+
+        assert_eq!(set.needs, vec![need]);
+    }
+
+    #[test]
+    fn context_set_builder_keeps_needs_and_offers_explicit() {
+        let id = [1; 32];
+        let role = Role::new("exact").unwrap();
+        let key = ContextKey::from_bytes([2; 32]);
+        let set = ContextSet::new()
+            .need(ContextNeed {
+                owner: id,
+                role: role.clone(),
+                scope: FactScope::Global,
+                start_key: key.clone(),
+                end_key: key.clone(),
+            })
+            .offer(ContextOffer {
+                owner: id,
+                role,
+                scope: FactScope::Global,
+                start_key: key.clone(),
+                end_key: key,
+            });
+
+        assert_eq!(set.needs.len(), 1);
+        assert_eq!(set.offers.len(), 1);
+    }
+
+    #[test]
+    fn context_key_parts_reject_empty_oversized_and_too_many_parts() {
+        assert!(ContextKey::from_parts(Vec::<ContextKeyPart<'_>>::new()).is_err());
+        let oversized = vec![0; CONTEXT_KEY_MAX_BYTES];
+        assert!(ContextKey::from_parts([ContextKeyPart::bytes(&oversized)]).is_err());
+        let parts = [[0u8; 1]; CONTEXT_KEY_MAX_PARTS + 1];
+        assert!(ContextKey::from_parts(parts.iter()).is_err());
+    }
+
+    #[test]
+    fn role_rejects_broad_free_text() {
+        assert!(Role::new("exact_fact").is_ok());
+        assert!(Role::new("ExactFact").is_err());
+        assert!(Role::new("exact-fact").is_err());
     }
 }

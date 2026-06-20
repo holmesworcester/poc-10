@@ -217,6 +217,7 @@ pub mod decode {
         format!("{err:?}")
     }
 
+    // Tests. Ordered most-central-first: full roundtrip leads, then tag/length guards.
     #[cfg(test)]
     mod tests {
         use crate::core::crypto::ED25519_SIGNATURE_BYTES;
@@ -684,6 +685,7 @@ pub mod authenticate {
         ContextNeed::for_key(owner, role, scope, key)
     }
 
+    // Tests. Ordered most-central-first: canonical happy path leads, then rejection guards.
     #[cfg(test)]
     mod tests {
         use crate::core::crypto::{self, ED25519_SIGNATURE_BYTES};
@@ -1223,6 +1225,7 @@ fn content_signer_need(owner: FactId, workspace_id: FactId, endpoint_id: FactId)
     )
 }
 
+// Tests. Ordered most-central-first: full materialize paths lead, then context-park gates.
 #[cfg(test)]
 mod tests {
     use crate::core::crypto;
@@ -1379,21 +1382,50 @@ mod tests {
     }
 
     #[test]
-    fn missing_request_context_needs_exact_header_keys() {
-        let local = endpoint([1; 32], [2; 32]);
-        let remote = endpoint([3; 32], [4; 32]);
-        let (_, _, request_fact) = bootstrap_facts(local, remote.endpoint);
-        let projected = ConnectionRequestProjector::new()
-            .project(&request_fact, &ProjectionContext::default())
-            .expect("project request without context");
+    fn receiver_request_projection_emits_receipt_and_create_connection_intent() {
+        let initiator = endpoint([1; 32], [2; 32]);
+        let responder = endpoint([3; 32], [4; 32]);
+        let (invite_fact, _, request_fact) = bootstrap_facts(initiator, responder.endpoint);
+        let metadata = IncomingMetadata {
+            origin_addr: b"127.0.0.1:41010".to_vec(),
+            received_at_local_ms: 12,
+        };
 
-        assert_exact_need(
-            &projected.needs,
-            ephemeral_secret::project::CONNECTION_EPHEMERAL_SECRET_PUBLIC_KEY_ROLE,
-            decode::request_header_ephemeral_public_key(request_fact.body())
-                .expect("request public key"),
+        let context = ProjectionContext::from_matches(receiver_context_matches(
+            &request_fact,
+            &invite_fact,
+            responder,
+        ))
+        .with_incoming_metadata(metadata.clone());
+
+        let projected = ConnectionRequestProjector::new()
+            .project(&request_fact, &context)
+            .expect("project request");
+
+        assert_eq!(projected.effects.facts.len(), 2);
+        assert_eq!(projected.effects.intents.len(), 1);
+        let observation = projected
+            .effects
+            .facts
+            .iter()
+            .find_map(|fact| frame_observation::project::decode::decode_fact(fact.body()).ok())
+            .expect("decode observation");
+        assert_eq!(observation.frame_fact_id, request_fact.id);
+        assert_eq!(
+            observation.origin_addr.bytes(),
+            metadata.origin_addr.as_slice()
         );
-        assert_exact_need(&projected.needs, "auth_local_endpoint", remote.endpoint);
+        let receipt = projected
+            .effects
+            .facts
+            .iter()
+            .find_map(|fact| {
+                crate::protocol::connection::fact_receipt::project::decode::decode_fact(fact.body())
+                    .ok()
+            })
+            .expect("decode receipt");
+        assert_eq!(receipt.origin_addr.bytes(), metadata.origin_addr.as_slice());
+        assert_eq!(receipt.received_at_local_ms, metadata.received_at_local_ms);
     }
 
     #[test]
@@ -1461,48 +1493,29 @@ mod tests {
     }
 
     #[test]
-    fn receiver_request_projection_emits_receipt_and_create_connection_intent() {
+    fn receiver_request_projection_uses_durable_observation_for_receipt() {
         let initiator = endpoint([1; 32], [2; 32]);
         let responder = endpoint([3; 32], [4; 32]);
         let (invite_fact, _, request_fact) = bootstrap_facts(initiator, responder.endpoint);
         let metadata = IncomingMetadata {
-            origin_addr: b"127.0.0.1:41010".to_vec(),
-            received_at_local_ms: 12,
+            origin_addr: b"127.0.0.1:41020".to_vec(),
+            received_at_local_ms: 20,
         };
-
-        let context = ProjectionContext::from_matches(receiver_context_matches(
-            &request_fact,
-            &invite_fact,
-            responder,
-        ))
-        .with_incoming_metadata(metadata.clone());
+        let mut matches = receiver_context_matches(&request_fact, &invite_fact, responder);
+        matches.push(request_observation_match(&request_fact, &metadata));
+        let context = ProjectionContext::from_matches(matches);
 
         let projected = ConnectionRequestProjector::new()
             .project(&request_fact, &context)
             .expect("project request");
 
-        assert_eq!(projected.effects.facts.len(), 2);
+        assert_eq!(projected.effects.facts.len(), 1);
         assert_eq!(projected.effects.intents.len(), 1);
-        let observation = projected
-            .effects
-            .facts
-            .iter()
-            .find_map(|fact| frame_observation::project::decode::decode_fact(fact.body()).ok())
-            .expect("decode observation");
-        assert_eq!(observation.frame_fact_id, request_fact.id);
-        assert_eq!(
-            observation.origin_addr.bytes(),
-            metadata.origin_addr.as_slice()
-        );
-        let receipt = projected
-            .effects
-            .facts
-            .iter()
-            .find_map(|fact| {
-                crate::protocol::connection::fact_receipt::project::decode::decode_fact(fact.body())
-                    .ok()
-            })
-            .expect("decode receipt");
+        let receipt = crate::protocol::connection::fact_receipt::project::decode::decode_fact(
+            projected.effects.facts[0].body(),
+        )
+        .expect("decode receipt");
+        assert_eq!(receipt.received_fact_id, request_fact.id);
         assert_eq!(receipt.origin_addr.bytes(), metadata.origin_addr.as_slice());
         assert_eq!(receipt.received_at_local_ms, metadata.received_at_local_ms);
     }
@@ -1571,30 +1584,20 @@ mod tests {
     }
 
     #[test]
-    fn receiver_request_projection_uses_durable_observation_for_receipt() {
-        let initiator = endpoint([1; 32], [2; 32]);
-        let responder = endpoint([3; 32], [4; 32]);
-        let (invite_fact, _, request_fact) = bootstrap_facts(initiator, responder.endpoint);
-        let metadata = IncomingMetadata {
-            origin_addr: b"127.0.0.1:41020".to_vec(),
-            received_at_local_ms: 20,
-        };
-        let mut matches = receiver_context_matches(&request_fact, &invite_fact, responder);
-        matches.push(request_observation_match(&request_fact, &metadata));
-        let context = ProjectionContext::from_matches(matches);
-
+    fn missing_request_context_needs_exact_header_keys() {
+        let local = endpoint([1; 32], [2; 32]);
+        let remote = endpoint([3; 32], [4; 32]);
+        let (_, _, request_fact) = bootstrap_facts(local, remote.endpoint);
         let projected = ConnectionRequestProjector::new()
-            .project(&request_fact, &context)
-            .expect("project request");
+            .project(&request_fact, &ProjectionContext::default())
+            .expect("project request without context");
 
-        assert_eq!(projected.effects.facts.len(), 1);
-        assert_eq!(projected.effects.intents.len(), 1);
-        let receipt = crate::protocol::connection::fact_receipt::project::decode::decode_fact(
-            projected.effects.facts[0].body(),
-        )
-        .expect("decode receipt");
-        assert_eq!(receipt.received_fact_id, request_fact.id);
-        assert_eq!(receipt.origin_addr.bytes(), metadata.origin_addr.as_slice());
-        assert_eq!(receipt.received_at_local_ms, metadata.received_at_local_ms);
+        assert_exact_need(
+            &projected.needs,
+            ephemeral_secret::project::CONNECTION_EPHEMERAL_SECRET_PUBLIC_KEY_ROLE,
+            decode::request_header_ephemeral_public_key(request_fact.body())
+                .expect("request public key"),
+        );
+        assert_exact_need(&projected.needs, "auth_local_endpoint", remote.endpoint);
     }
 }

@@ -284,6 +284,8 @@ fn payload_error(err: PayloadError) -> String {
     format!("invalid maintain_connections payload: {err}")
 }
 
+// Tests.
+// Ordered most-central-first: full handler paths, then builder gates.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,141 +303,6 @@ mod tests {
     use crate::protocol::auth::{endpoint, invite_accepted};
     use crate::protocol::connection::{ephemeral_secret, request};
     use crate::protocol::registry::FACTS_SCHEMA_SOURCE;
-
-    #[test]
-    fn pending_request_rows_are_queued_directly_to_outgoing_network() {
-        let store = Db::open_memory_with_schema_sources(&[
-            CORE_SCHEMA_SOURCE,
-            network::SCHEMA_SOURCE,
-            FACTS_SCHEMA_SOURCE,
-        ])
-        .expect("store");
-        let peer_addr = "127.0.0.1:41000".parse().unwrap();
-        let sealed = vec![7; request::encode::SEALED_FACT_BYTES];
-        let row =
-            request::connection_request_row([1; 32], [2; 32], [3; 32], Some(peer_addr), &sealed)
-                .expect("connection request row");
-        store
-            .write_transaction(|tx| tx.insert_values_in_tx(&row).map(|_| ()))
-            .expect("seed pending request row");
-
-        let intent = build_maintain_connections_intent(
-            &store,
-            RecurringIntentContext {
-                now_ms: 123,
-                local_addr: Some("127.0.0.1:41001".parse().unwrap()),
-            },
-        )
-        .expect("build")
-        .expect("maintenance intent");
-        let effects = MaintainConnectionsHandler::new()
-            .handle(&intent, &HandlerContext::new(&store))
-            .expect("handle");
-
-        assert!(effects.local_intents.is_empty());
-        assert_eq!(
-            network::claim_outgoing_for_target(&store, NetworkTarget::new(peer_addr), 16)
-                .expect("claim queued request")
-                .into_iter()
-                .map(|row| row.bytes)
-                .collect::<Vec<_>>(),
-            vec![sealed]
-        );
-    }
-
-    #[test]
-    fn recurring_builder_skips_without_host_listener_address() {
-        let store = Db::open_memory_with_schema_sources(&[
-            CORE_SCHEMA_SOURCE,
-            network::SCHEMA_SOURCE,
-            FACTS_SCHEMA_SOURCE,
-        ])
-        .expect("store");
-        let peer_addr = "127.0.0.1:41000".parse().unwrap();
-        let sealed = vec![7; request::encode::SEALED_FACT_BYTES];
-        let row =
-            request::connection_request_row([1; 32], [2; 32], [3; 32], Some(peer_addr), &sealed)
-                .expect("connection request row");
-        store
-            .write_transaction(|tx| tx.insert_values_in_tx(&row).map(|_| ()))
-            .expect("seed pending request row");
-
-        let intent = build_maintain_connections_intent(
-            &store,
-            RecurringIntentContext {
-                now_ms: 123,
-                local_addr: None,
-            },
-        )
-        .expect("build");
-
-        assert!(intent.is_none());
-    }
-
-    #[test]
-    fn recurring_builder_waits_for_retry_window() {
-        let store = Db::open_memory_with_schema_sources(&[
-            CORE_SCHEMA_SOURCE,
-            network::SCHEMA_SOURCE,
-            FACTS_SCHEMA_SOURCE,
-        ])
-        .expect("store");
-        let peer_addr = "127.0.0.1:41000".parse().unwrap();
-        let sealed = vec![7; request::encode::SEALED_FACT_BYTES];
-        let row =
-            request::connection_request_row([1; 32], [2; 32], [3; 32], Some(peer_addr), &sealed)
-                .expect("connection request row");
-        store
-            .write_transaction(|tx| tx.insert_values_in_tx(&row).map(|_| ()))
-            .expect("seed pending request row");
-        record_maintenance_run(&store, 1_000).expect("record marker");
-
-        assert_eq!(
-            build_maintain_connections_intent(
-                &store,
-                RecurringIntentContext {
-                    now_ms: 1_050,
-                    local_addr: Some("127.0.0.1:41001".parse().unwrap()),
-                }
-            )
-            .expect("build"),
-            None
-        );
-        assert!(build_maintain_connections_intent(
-            &store,
-            RecurringIntentContext {
-                now_ms: 1_100,
-                local_addr: Some("127.0.0.1:41001".parse().unwrap()),
-            }
-        )
-        .expect("build")
-        .is_some());
-    }
-
-    #[test]
-    fn maintenance_marker_write_participates_in_handler_transaction() {
-        let mut runtime = Runtime::open_memory(&MAINTAIN_CONNECTIONS_RUNTIME).expect("runtime");
-        let intent = maintain_connections_intent(MaintainConnections {
-            created_at_ms: 1_000,
-            local_addr: Some("127.0.0.1:41001".parse().unwrap()),
-        })
-        .expect("maintenance intent");
-        runtime
-            .submit_local_intent(intent)
-            .expect("queue maintenance intent");
-
-        assert!(
-            runtime
-                .drain_local_intents(1)
-                .expect("dispatch maintenance intent"),
-            "queued maintenance intent should dispatch"
-        );
-        assert_eq!(runtime.pending_intent_count(), 0);
-        assert!(
-            !maintenance_due(runtime.db(), 1_050).expect("read marker"),
-            "handler should record its marker inside the dispatch transaction"
-        );
-    }
 
     #[test]
     fn accepted_invite_row_replays_enough_state_to_create_bootstrap_attempt() {
@@ -514,6 +381,141 @@ mod tests {
             )
         }));
         assert!(effects.local_intents.is_empty());
+    }
+
+    #[test]
+    fn pending_request_rows_are_queued_directly_to_outgoing_network() {
+        let store = Db::open_memory_with_schema_sources(&[
+            CORE_SCHEMA_SOURCE,
+            network::SCHEMA_SOURCE,
+            FACTS_SCHEMA_SOURCE,
+        ])
+        .expect("store");
+        let peer_addr = "127.0.0.1:41000".parse().unwrap();
+        let sealed = vec![7; request::encode::SEALED_FACT_BYTES];
+        let row =
+            request::connection_request_row([1; 32], [2; 32], [3; 32], Some(peer_addr), &sealed)
+                .expect("connection request row");
+        store
+            .write_transaction(|tx| tx.insert_values_in_tx(&row).map(|_| ()))
+            .expect("seed pending request row");
+
+        let intent = build_maintain_connections_intent(
+            &store,
+            RecurringIntentContext {
+                now_ms: 123,
+                local_addr: Some("127.0.0.1:41001".parse().unwrap()),
+            },
+        )
+        .expect("build")
+        .expect("maintenance intent");
+        let effects = MaintainConnectionsHandler::new()
+            .handle(&intent, &HandlerContext::new(&store))
+            .expect("handle");
+
+        assert!(effects.local_intents.is_empty());
+        assert_eq!(
+            network::claim_outgoing_for_target(&store, NetworkTarget::new(peer_addr), 16)
+                .expect("claim queued request")
+                .into_iter()
+                .map(|row| row.bytes)
+                .collect::<Vec<_>>(),
+            vec![sealed]
+        );
+    }
+
+    #[test]
+    fn maintenance_marker_write_participates_in_handler_transaction() {
+        let mut runtime = Runtime::open_memory(&MAINTAIN_CONNECTIONS_RUNTIME).expect("runtime");
+        let intent = maintain_connections_intent(MaintainConnections {
+            created_at_ms: 1_000,
+            local_addr: Some("127.0.0.1:41001".parse().unwrap()),
+        })
+        .expect("maintenance intent");
+        runtime
+            .submit_local_intent(intent)
+            .expect("queue maintenance intent");
+
+        assert!(
+            runtime
+                .drain_local_intents(1)
+                .expect("dispatch maintenance intent"),
+            "queued maintenance intent should dispatch"
+        );
+        assert_eq!(runtime.pending_intent_count(), 0);
+        assert!(
+            !maintenance_due(runtime.db(), 1_050).expect("read marker"),
+            "handler should record its marker inside the dispatch transaction"
+        );
+    }
+
+    #[test]
+    fn recurring_builder_waits_for_retry_window() {
+        let store = Db::open_memory_with_schema_sources(&[
+            CORE_SCHEMA_SOURCE,
+            network::SCHEMA_SOURCE,
+            FACTS_SCHEMA_SOURCE,
+        ])
+        .expect("store");
+        let peer_addr = "127.0.0.1:41000".parse().unwrap();
+        let sealed = vec![7; request::encode::SEALED_FACT_BYTES];
+        let row =
+            request::connection_request_row([1; 32], [2; 32], [3; 32], Some(peer_addr), &sealed)
+                .expect("connection request row");
+        store
+            .write_transaction(|tx| tx.insert_values_in_tx(&row).map(|_| ()))
+            .expect("seed pending request row");
+        record_maintenance_run(&store, 1_000).expect("record marker");
+
+        assert_eq!(
+            build_maintain_connections_intent(
+                &store,
+                RecurringIntentContext {
+                    now_ms: 1_050,
+                    local_addr: Some("127.0.0.1:41001".parse().unwrap()),
+                }
+            )
+            .expect("build"),
+            None
+        );
+        assert!(build_maintain_connections_intent(
+            &store,
+            RecurringIntentContext {
+                now_ms: 1_100,
+                local_addr: Some("127.0.0.1:41001".parse().unwrap()),
+            }
+        )
+        .expect("build")
+        .is_some());
+    }
+
+    #[test]
+    fn recurring_builder_skips_without_host_listener_address() {
+        let store = Db::open_memory_with_schema_sources(&[
+            CORE_SCHEMA_SOURCE,
+            network::SCHEMA_SOURCE,
+            FACTS_SCHEMA_SOURCE,
+        ])
+        .expect("store");
+        let peer_addr = "127.0.0.1:41000".parse().unwrap();
+        let sealed = vec![7; request::encode::SEALED_FACT_BYTES];
+        let row =
+            request::connection_request_row([1; 32], [2; 32], [3; 32], Some(peer_addr), &sealed)
+                .expect("connection request row");
+        store
+            .write_transaction(|tx| tx.insert_values_in_tx(&row).map(|_| ()))
+            .expect("seed pending request row");
+
+        let intent = build_maintain_connections_intent(
+            &store,
+            RecurringIntentContext {
+                now_ms: 123,
+                local_addr: None,
+            },
+        )
+        .expect("build");
+
+        assert!(intent.is_none());
     }
 
     struct NoopProjector;

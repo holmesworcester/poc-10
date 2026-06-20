@@ -244,6 +244,8 @@ impl IntentHandler for ShareFactWithSyncHandler {
     }
 }
 
+// Tests.
+// The live-tail suppression to the origin connection.
 #[cfg(test)]
 mod tests {
     use super::*;

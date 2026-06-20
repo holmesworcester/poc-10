@@ -60,6 +60,8 @@ pub fn local_signing_capability(
     })
 }
 
+// Tests.
+// Ordered most-central-first: creating the endpoint fact when missing, then reusing projected rows.
 #[cfg(test)]
 mod tests {
     use crate::core::db::Db;

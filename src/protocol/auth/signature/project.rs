@@ -28,6 +28,8 @@ pub mod decode {
         format!("{err:?}")
     }
 
+    // Tests.
+    // Ordered most-central-first: the full byte round-trip leads, then narrower decode guards.
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -103,6 +105,8 @@ pub mod authenticate {
         )
     }
 
+    // Tests.
+    // Ordered most-central-first: the happy authentication leads, then signature-evidence, id, and layout guards.
     #[cfg(test)]
     mod tests {
         use crate::core::facts::Fact;
@@ -130,10 +134,11 @@ pub mod authenticate {
         }
 
         #[test]
-        fn rejects_wrong_tag() {
+        fn rejects_tampered_signature() {
             let canonical = canonical_fact();
             let mut bytes = canonical.bytes.clone();
-            bytes[0] ^= 0xff;
+            let last = bytes.len() - 1;
+            bytes[last] ^= 0x01;
             assert!(is_invalid(&Fact::new(
                 canonical.scope,
                 canonical.timestamp,
@@ -154,19 +159,6 @@ pub mod authenticate {
         }
 
         #[test]
-        fn rejects_tampered_signature() {
-            let canonical = canonical_fact();
-            let mut bytes = canonical.bytes.clone();
-            let last = bytes.len() - 1;
-            bytes[last] ^= 0x01;
-            assert!(is_invalid(&Fact::new(
-                canonical.scope,
-                canonical.timestamp,
-                bytes
-            )));
-        }
-
-        #[test]
         fn rejects_id_not_matching_bytes() {
             let canonical = canonical_fact();
             let forged = Fact {
@@ -176,6 +168,18 @@ pub mod authenticate {
                 bytes: canonical.bytes.clone(),
             };
             assert!(is_invalid(&forged));
+        }
+
+        #[test]
+        fn rejects_wrong_tag() {
+            let canonical = canonical_fact();
+            let mut bytes = canonical.bytes.clone();
+            bytes[0] ^= 0xff;
+            assert!(is_invalid(&Fact::new(
+                canonical.scope,
+                canonical.timestamp,
+                bytes
+            )));
         }
     }
 }
@@ -360,6 +364,8 @@ pub fn signature_proof_ready(
     Ok(true)
 }
 
+// Tests.
+// Ordered most-central-first: the full proof-offer projection leads, then the need/offer key-symmetry guard.
 #[cfg(test)]
 mod tests {
     use crate::core::facts::FactScope;

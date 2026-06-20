@@ -259,26 +259,11 @@ fn millis(duration: Duration) -> u128 {
     duration.as_micros() / 1000
 }
 
+// Tests.
+// Ordered most-central-first: full profile-line formatting before no-op guards.
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn generate_profile_measure_is_noop_without_active_profile() {
-        let value = measure("phase", || 42);
-        assert_eq!(value, 42);
-        assert!(!is_generate_profile_active());
-    }
-
-    #[test]
-    fn generate_profile_measure_result_preserves_inactive_output() {
-        assert_eq!(measure_result("phase", || Ok::<_, &str>(42)), Ok(42));
-        assert_eq!(
-            measure_result("phase", || Err::<u8, _>("failed")),
-            Err("failed")
-        );
-        assert!(!is_generate_profile_active());
-    }
 
     #[test]
     fn runtime_profile_line_reports_phase_stats() {
@@ -307,5 +292,22 @@ mod tests {
         assert!(line.starts_with("runtime_profile label=daemon_addr total_ms="));
         assert!(line.contains(" phase_a_ms=7 phase_a_calls=2"));
         assert!(line.contains(" phase_b_ms=3 phase_b_calls=1"));
+    }
+
+    #[test]
+    fn generate_profile_measure_is_noop_without_active_profile() {
+        let value = measure("phase", || 42);
+        assert_eq!(value, 42);
+        assert!(!is_generate_profile_active());
+    }
+
+    #[test]
+    fn generate_profile_measure_result_preserves_inactive_output() {
+        assert_eq!(measure_result("phase", || Ok::<_, &str>(42)), Ok(42));
+        assert_eq!(
+            measure_result("phase", || Err::<u8, _>("failed")),
+            Err("failed")
+        );
+        assert!(!is_generate_profile_active());
     }
 }

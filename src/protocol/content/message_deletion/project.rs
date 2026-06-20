@@ -36,6 +36,8 @@ pub mod decode {
         format!("{err:?}")
     }
 
+    // Tests. Ordered most-central first: the fixed-width roundtrip proves the
+    // whole codec, then the tag/length rejections guard the layout.
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -108,6 +110,8 @@ pub mod authenticate {
         Ok(deletion)
     }
 
+    // Tests. Ordered most-central first: a canonical fact authenticates, then
+    // the id-binding invariant (id == hash(bytes)), then the layout rejections.
     #[cfg(test)]
     mod tests {
         use crate::core::command::LocalSigningCapability;
@@ -157,6 +161,18 @@ pub mod authenticate {
         }
 
         #[test]
+        fn rejects_id_not_matching_bytes() {
+            let canonical = canonical_fact();
+            let forged = Fact {
+                id: [0; 32],
+                scope: canonical.scope.clone(),
+                timestamp: canonical.timestamp,
+                bytes: canonical.bytes.clone(),
+            };
+            assert!(is_invalid(&forged));
+        }
+
+        #[test]
         fn rejects_wrong_tag() {
             let canonical = canonical_fact();
             let mut bytes = canonical.bytes.clone();
@@ -178,18 +194,6 @@ pub mod authenticate {
                 canonical.timestamp,
                 bytes
             )));
-        }
-
-        #[test]
-        fn rejects_id_not_matching_bytes() {
-            let canonical = canonical_fact();
-            let forged = Fact {
-                id: [0; 32],
-                scope: canonical.scope.clone(),
-                timestamp: canonical.timestamp,
-                bytes: canonical.bytes.clone(),
-            };
-            assert!(is_invalid(&forged));
         }
     }
 }
@@ -419,6 +423,8 @@ fn require_fact_scope(fact: &Fact, expected: &crate::core::facts::FactScope) -> 
     }
 }
 
+// Tests. The single row-builder check that the deletion row maps fields to
+// the registry column order.
 #[cfg(test)]
 mod row_tests {
     use super::*;
@@ -447,6 +453,12 @@ mod row_tests {
     }
 }
 
+// Tests.
+//
+// The semantic projector is the heart of this file; these are ordered
+// most-central first: the authorized-author materialize and the published
+// signed claim lead, then the context-wait gates, then the rejection and
+// malformed-bytes guards.
 #[cfg(test)]
 mod projector_tests {
     use crate as topo;
@@ -542,6 +554,22 @@ mod projector_tests {
     }
 
     #[test]
+    fn content_message_deletion_projector_publishes_non_target_author_claim() {
+        let workspace_id = [9; 32];
+        let message_author = user_fact(workspace_id, [22; 32], "alice");
+        let deleter = user_fact(workspace_id, [44; 32], "mallory");
+        let message_fact = message_fact(workspace_id, message_author.id);
+        let (_deletion, fact) = deletion_fact(workspace_id, message_fact.id, deleter.id, 12_345);
+
+        let output = project::ContentMessageDeletionProjector::new()
+            .project(&fact, &authorized_context(&fact, &message_fact, &deleter))
+            .expect("deletion projector publishes signed claim");
+
+        assert_eq!(output.offers.len(), 1);
+        assert_eq!(output.offers[0].role, "fact_purged");
+    }
+
+    #[test]
     fn content_message_deletion_projector_waits_for_signature_signer_and_author_context() {
         let workspace_id = [9; 32];
         let author_user_id = [22; 32];
@@ -608,22 +636,6 @@ mod projector_tests {
                 deletion.author_user_id,
                 deletion.author_user_id
             )));
-    }
-
-    #[test]
-    fn content_message_deletion_projector_publishes_non_target_author_claim() {
-        let workspace_id = [9; 32];
-        let message_author = user_fact(workspace_id, [22; 32], "alice");
-        let deleter = user_fact(workspace_id, [44; 32], "mallory");
-        let message_fact = message_fact(workspace_id, message_author.id);
-        let (_deletion, fact) = deletion_fact(workspace_id, message_fact.id, deleter.id, 12_345);
-
-        let output = project::ContentMessageDeletionProjector::new()
-            .project(&fact, &authorized_context(&fact, &message_fact, &deleter))
-            .expect("deletion projector publishes signed claim");
-
-        assert_eq!(output.offers.len(), 1);
-        assert_eq!(output.offers[0].role, "fact_purged");
     }
 
     #[test]

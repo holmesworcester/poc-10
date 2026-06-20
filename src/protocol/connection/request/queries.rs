@@ -213,6 +213,8 @@ pub fn request_route_by_id(store: &Db, request_id: &FactId) -> Result<Option<Soc
     Ok(request_by_id(store, request_id)?.and_then(|row| row.peer_addr))
 }
 
+// Tests.
+// One guard: no local endpoint yields no membership connection.
 #[cfg(test)]
 mod tests {
     use super::*;

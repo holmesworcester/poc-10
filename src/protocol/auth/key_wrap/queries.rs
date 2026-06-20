@@ -523,6 +523,8 @@ fn recipient_key_is_superseded(
         .map_err(|err| format!("load recipient key supersession row: {err}"))
 }
 
+// Tests.
+// Single test: a key-wrap row round-trips through projection by coordinate.
 #[cfg(test)]
 mod tests {
     use super::*;

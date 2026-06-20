@@ -362,28 +362,14 @@ fn mode_name(mode: SyncSettingMode) -> &'static str {
     }
 }
 
+// Tests.
+// Most-central-first: projection plus the latest-row read model leads, then the fixed-width round-trip and author path.
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::command::FnClock;
     use crate::core::schema::CORE_SCHEMA_SOURCE;
     use crate::protocol::registry::FACTS_SCHEMA_SOURCE;
-
-    #[test]
-    fn setting_fact_round_trips_fixed_width() {
-        let mode = SyncSettingMode::Range(TimestampRange { start: 10, end: 20 });
-        let fact = setting_fact(123, mode).expect("setting fact");
-
-        assert_eq!(fact.scope, FactScope::Local);
-        assert_eq!(fact.bytes.len(), FACT_BYTES);
-        assert_eq!(
-            decode_fact(&fact.bytes).expect("decode setting"),
-            SyncLocalSettingFact {
-                effective_at_ms: 123,
-                mode,
-            }
-        );
-    }
 
     #[test]
     fn current_setting_uses_most_recent_row_then_fact_id() {
@@ -430,6 +416,22 @@ mod tests {
             newer.id
         );
         assert_eq!(active_range(&store).expect("active"), TimestampRange::ROOT);
+    }
+
+    #[test]
+    fn setting_fact_round_trips_fixed_width() {
+        let mode = SyncSettingMode::Range(TimestampRange { start: 10, end: 20 });
+        let fact = setting_fact(123, mode).expect("setting fact");
+
+        assert_eq!(fact.scope, FactScope::Local);
+        assert_eq!(fact.bytes.len(), FACT_BYTES);
+        assert_eq!(
+            decode_fact(&fact.bytes).expect("decode setting"),
+            SyncLocalSettingFact {
+                effective_at_ms: 123,
+                mode,
+            }
+        );
     }
 
     #[test]

@@ -68,6 +68,8 @@ pub mod decode {
         format!("{err:?}")
     }
 
+    // Tests.
+    // Ordered most-central-first: the full byte round-trip leads, then narrower decode guards.
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -157,6 +159,8 @@ pub mod authenticate {
         Ok(accepted)
     }
 
+    // Tests.
+    // Ordered most-central-first: the happy authentication leads, then the id-binding and layout guards.
     #[cfg(test)]
     mod tests {
         use crate::core::facts::{Fact, FactScope};
@@ -198,6 +202,18 @@ pub mod authenticate {
         }
 
         #[test]
+        fn rejects_id_not_matching_bytes() {
+            let canonical = canonical_fact();
+            let forged = Fact {
+                id: [0; 32],
+                scope: canonical.scope.clone(),
+                timestamp: canonical.timestamp,
+                bytes: canonical.bytes.clone(),
+            };
+            assert!(is_invalid(&forged));
+        }
+
+        #[test]
         fn rejects_wrong_tag() {
             let canonical = canonical_fact();
             let mut bytes = canonical.bytes.clone();
@@ -219,18 +235,6 @@ pub mod authenticate {
                 canonical.timestamp,
                 bytes
             )));
-        }
-
-        #[test]
-        fn rejects_id_not_matching_bytes() {
-            let canonical = canonical_fact();
-            let forged = Fact {
-                id: [0; 32],
-                scope: canonical.scope.clone(),
-                timestamp: canonical.timestamp,
-                bytes: canonical.bytes.clone(),
-            };
-            assert!(is_invalid(&forged));
         }
     }
 }
@@ -333,6 +337,8 @@ impl InviteAcceptedProjector {
     }
 }
 
+// Tests.
+// Ordered most-central-first: the identity-scoped materialize path leads, then the non-identity gate.
 #[cfg(test)]
 mod tests {
     use super::*;

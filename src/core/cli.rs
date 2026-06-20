@@ -192,6 +192,10 @@ fn hex_nibble(byte: u8, label: &str) -> Result<u8, String> {
     }
 }
 
+// =============================================================================
+// Tests
+// =============================================================================
+// Ordered most-central-first: registry dispatch before hex codec guards.
 #[cfg(test)]
 mod tests {
     use super::{decode_hex_32, encode_hex, encode_hex_32, run, CliArgs, CliCommand, CliOutput};
@@ -201,47 +205,18 @@ mod tests {
     }
 
     #[test]
-    fn decode_hex_32_accepts_lowercase_and_uppercase() {
-        let parsed =
-            decode_hex_32("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
-                .expect("valid hex");
+    fn run_reports_unknown_commands_with_registry_usage() {
+        let commands = [CliCommand {
+            name: "known",
+            usage: "known ARG",
+            help: "",
+            run: ok_command,
+        }];
+        let err = run("test", &commands, &mut 0, &[String::from("missing")])
+            .expect_err("unknown command fails centrally");
 
-        assert_eq!(
-            parsed,
-            [
-                0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
-                23, 24, 25, 26, 27, 28, 29, 30, 31,
-            ]
-        );
-        assert_eq!(
-            decode_hex_32(&"A".repeat(64)).expect("valid hex"),
-            [0xaa; 32]
-        );
-    }
-
-    #[test]
-    fn decode_hex_32_rejects_wrong_length() {
-        assert_eq!(
-            decode_hex_32("00").expect_err("too short"),
-            "hex id must be 64 hex characters"
-        );
-    }
-
-    #[test]
-    fn decode_hex_32_rejects_non_hex() {
-        let mut value = "0".repeat(64);
-        value.replace_range(12..13, "x");
-
-        assert_eq!(
-            decode_hex_32(&value).expect_err("not hex"),
-            "hex id contains a non-hex character"
-        );
-    }
-
-    #[test]
-    fn encode_hex_uses_lowercase() {
-        assert_eq!(encode_hex(&[0, 1, 10, 15, 16, 255]), "00010a0f10ff");
-        assert_eq!(encode_hex_32(&[0xab; 32]), "ab".repeat(32));
+        assert!(err.contains("unknown command `missing`"), "{err}");
+        assert!(err.contains("test --db PATH known ARG"), "{err}");
     }
 
     #[test]
@@ -267,17 +242,46 @@ mod tests {
     }
 
     #[test]
-    fn run_reports_unknown_commands_with_registry_usage() {
-        let commands = [CliCommand {
-            name: "known",
-            usage: "known ARG",
-            help: "",
-            run: ok_command,
-        }];
-        let err = run("test", &commands, &mut 0, &[String::from("missing")])
-            .expect_err("unknown command fails centrally");
+    fn decode_hex_32_accepts_lowercase_and_uppercase() {
+        let parsed =
+            decode_hex_32("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
+                .expect("valid hex");
 
-        assert!(err.contains("unknown command `missing`"), "{err}");
-        assert!(err.contains("test --db PATH known ARG"), "{err}");
+        assert_eq!(
+            parsed,
+            [
+                0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+                23, 24, 25, 26, 27, 28, 29, 30, 31,
+            ]
+        );
+        assert_eq!(
+            decode_hex_32(&"A".repeat(64)).expect("valid hex"),
+            [0xaa; 32]
+        );
+    }
+
+    #[test]
+    fn encode_hex_uses_lowercase() {
+        assert_eq!(encode_hex(&[0, 1, 10, 15, 16, 255]), "00010a0f10ff");
+        assert_eq!(encode_hex_32(&[0xab; 32]), "ab".repeat(32));
+    }
+
+    #[test]
+    fn decode_hex_32_rejects_wrong_length() {
+        assert_eq!(
+            decode_hex_32("00").expect_err("too short"),
+            "hex id must be 64 hex characters"
+        );
+    }
+
+    #[test]
+    fn decode_hex_32_rejects_non_hex() {
+        let mut value = "0".repeat(64);
+        value.replace_range(12..13, "x");
+
+        assert_eq!(
+            decode_hex_32(&value).expect_err("not hex"),
+            "hex id contains a non-hex character"
+        );
     }
 }

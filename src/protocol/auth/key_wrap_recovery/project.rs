@@ -24,6 +24,8 @@ pub mod decode {
         Ok(fact)
     }
 
+    // Tests.
+    // Single round-trip test: encode then decode recovers the fact.
     #[cfg(test)]
     mod tests {
         use super::*;

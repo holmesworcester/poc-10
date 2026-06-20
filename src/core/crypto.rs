@@ -364,110 +364,11 @@ pub fn bao_verify_slice(
     Ok(output)
 }
 
+// Tests.
+// Ordered most-central-first: broad multi-primitive proofs before narrow guards.
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn hash_is_deterministic_and_input_sensitive() {
-        let left = hash(b"topo auth graph");
-        assert_eq!(left, hash(b"topo auth graph"));
-        assert_ne!(left, hash(b"topo auth graph."));
-    }
-
-    #[test]
-    fn ed25519_signatures_verify_with_matching_key_and_bytes() {
-        let private_key = [7; ED25519_PRIVATE_KEY_BYTES];
-        let public_key = ed25519_public_key(&private_key);
-        let bytes = b"canonical signed fact bytes";
-
-        let signature = ed25519_sign(&private_key, bytes);
-
-        assert!(ed25519_verify(&public_key, bytes, &signature));
-        assert!(!ed25519_verify(&public_key, b"changed bytes", &signature));
-        assert!(!ed25519_verify(
-            &ed25519_public_key(&[8; ED25519_PRIVATE_KEY_BYTES]),
-            bytes,
-            &signature
-        ));
-    }
-
-    #[test]
-    fn ed25519_signatures_are_deterministic_for_the_same_key_and_bytes() {
-        let private_key = [11; ED25519_PRIVATE_KEY_BYTES];
-        let bytes = b"fixed canonical bytes";
-
-        assert_eq!(
-            ed25519_sign(&private_key, bytes),
-            ed25519_sign(&private_key, bytes)
-        );
-    }
-
-    #[test]
-    fn xchacha20poly1305_roundtrips_and_rejects_tamper() {
-        let key = random_xchacha20poly1305_key();
-        let nonce = random_xchacha20poly1305_nonce();
-        let aad = b"topo test symmetric aad";
-        let plaintext = b"phase-one local epoch secret bytes";
-
-        let ciphertext = xchacha20poly1305_encrypt(&key, aad, &nonce, plaintext).expect("encrypt");
-
-        assert_eq!(
-            xchacha20poly1305_decrypt(&key, aad, &nonce, &ciphertext).expect("decrypt"),
-            plaintext
-        );
-        assert!(xchacha20poly1305_decrypt(
-            &random_xchacha20poly1305_key(),
-            aad,
-            &nonce,
-            &ciphertext
-        )
-        .is_err());
-        assert!(xchacha20poly1305_decrypt(&key, b"wrong aad", &nonce, &ciphertext).is_err());
-
-        let mut tampered_nonce = nonce;
-        tampered_nonce[0] ^= 1;
-        assert!(xchacha20poly1305_decrypt(&key, aad, &tampered_nonce, &ciphertext).is_err());
-
-        let mut tampered_ciphertext = ciphertext;
-        tampered_ciphertext[0] ^= 1;
-        assert!(xchacha20poly1305_decrypt(&key, aad, &nonce, &tampered_ciphertext).is_err());
-    }
-
-    #[test]
-    fn blake3_keyed_hash_is_deterministic_and_context_bound() {
-        let key = [3; HASH_BYTES];
-        let domain = b"topo test domain v1";
-        let info = b"some+associated+data";
-
-        let left = blake3_keyed_hash(&key, domain, info);
-        let right = blake3_keyed_hash(&key, domain, info);
-        let other_key = blake3_keyed_hash(&[4; HASH_BYTES], domain, info);
-        let other_domain = blake3_keyed_hash(&key, b"topo test domain v2", info);
-        let other_info = blake3_keyed_hash(&key, domain, b"different info");
-
-        assert_eq!(left, right);
-        assert_ne!(left, other_key);
-        assert_ne!(left, other_domain);
-        assert_ne!(left, other_info);
-    }
-
-    #[test]
-    fn hkdf_sha256_key_is_deterministic_and_context_bound() {
-        let input = [7; 32];
-        let purpose = b"test-purpose";
-        let associated_data = b"test-associated-data";
-
-        let left = hkdf_sha256_key(&input, purpose, associated_data).expect("derive");
-        let right = hkdf_sha256_key(&input, purpose, associated_data).expect("derive");
-        let wrong_purpose =
-            hkdf_sha256_key(&input, b"other-purpose", associated_data).expect("derive");
-        let wrong_data = hkdf_sha256_key(&input, purpose, b"other-data").expect("derive");
-
-        assert_eq!(left, right);
-        assert_ne!(left, wrong_purpose);
-        assert_ne!(left, wrong_data);
-    }
 
     #[test]
     fn x25519_xchacha20poly1305_roundtrips_with_matching_context() {
@@ -533,6 +434,54 @@ mod tests {
     }
 
     #[test]
+    fn xchacha20poly1305_roundtrips_and_rejects_tamper() {
+        let key = random_xchacha20poly1305_key();
+        let nonce = random_xchacha20poly1305_nonce();
+        let aad = b"topo test symmetric aad";
+        let plaintext = b"phase-one local epoch secret bytes";
+
+        let ciphertext = xchacha20poly1305_encrypt(&key, aad, &nonce, plaintext).expect("encrypt");
+
+        assert_eq!(
+            xchacha20poly1305_decrypt(&key, aad, &nonce, &ciphertext).expect("decrypt"),
+            plaintext
+        );
+        assert!(xchacha20poly1305_decrypt(
+            &random_xchacha20poly1305_key(),
+            aad,
+            &nonce,
+            &ciphertext
+        )
+        .is_err());
+        assert!(xchacha20poly1305_decrypt(&key, b"wrong aad", &nonce, &ciphertext).is_err());
+
+        let mut tampered_nonce = nonce;
+        tampered_nonce[0] ^= 1;
+        assert!(xchacha20poly1305_decrypt(&key, aad, &tampered_nonce, &ciphertext).is_err());
+
+        let mut tampered_ciphertext = ciphertext;
+        tampered_ciphertext[0] ^= 1;
+        assert!(xchacha20poly1305_decrypt(&key, aad, &nonce, &tampered_ciphertext).is_err());
+    }
+
+    #[test]
+    fn ed25519_signatures_verify_with_matching_key_and_bytes() {
+        let private_key = [7; ED25519_PRIVATE_KEY_BYTES];
+        let public_key = ed25519_public_key(&private_key);
+        let bytes = b"canonical signed fact bytes";
+
+        let signature = ed25519_sign(&private_key, bytes);
+
+        assert!(ed25519_verify(&public_key, bytes, &signature));
+        assert!(!ed25519_verify(&public_key, b"changed bytes", &signature));
+        assert!(!ed25519_verify(
+            &ed25519_public_key(&[8; ED25519_PRIVATE_KEY_BYTES]),
+            bytes,
+            &signature
+        ));
+    }
+
+    #[test]
     fn bao_round_trips_each_slice_against_root_hash() {
         let plaintext: Vec<u8> = (0..600_000u32).map(|byte| byte as u8).collect();
         let (root_hash, outboard) = bao_outboard(&plaintext).expect("outboard");
@@ -566,5 +515,58 @@ mod tests {
         proof[last] ^= 1;
         let wrong_hash = [0xff; HASH_BYTES];
         assert!(bao_verify_slice(&wrong_hash, &proof, 0, plaintext.len() as u64).is_err());
+    }
+
+    #[test]
+    fn blake3_keyed_hash_is_deterministic_and_context_bound() {
+        let key = [3; HASH_BYTES];
+        let domain = b"topo test domain v1";
+        let info = b"some+associated+data";
+
+        let left = blake3_keyed_hash(&key, domain, info);
+        let right = blake3_keyed_hash(&key, domain, info);
+        let other_key = blake3_keyed_hash(&[4; HASH_BYTES], domain, info);
+        let other_domain = blake3_keyed_hash(&key, b"topo test domain v2", info);
+        let other_info = blake3_keyed_hash(&key, domain, b"different info");
+
+        assert_eq!(left, right);
+        assert_ne!(left, other_key);
+        assert_ne!(left, other_domain);
+        assert_ne!(left, other_info);
+    }
+
+    #[test]
+    fn hkdf_sha256_key_is_deterministic_and_context_bound() {
+        let input = [7; 32];
+        let purpose = b"test-purpose";
+        let associated_data = b"test-associated-data";
+
+        let left = hkdf_sha256_key(&input, purpose, associated_data).expect("derive");
+        let right = hkdf_sha256_key(&input, purpose, associated_data).expect("derive");
+        let wrong_purpose =
+            hkdf_sha256_key(&input, b"other-purpose", associated_data).expect("derive");
+        let wrong_data = hkdf_sha256_key(&input, purpose, b"other-data").expect("derive");
+
+        assert_eq!(left, right);
+        assert_ne!(left, wrong_purpose);
+        assert_ne!(left, wrong_data);
+    }
+
+    #[test]
+    fn hash_is_deterministic_and_input_sensitive() {
+        let left = hash(b"topo auth graph");
+        assert_eq!(left, hash(b"topo auth graph"));
+        assert_ne!(left, hash(b"topo auth graph."));
+    }
+
+    #[test]
+    fn ed25519_signatures_are_deterministic_for_the_same_key_and_bytes() {
+        let private_key = [11; ED25519_PRIVATE_KEY_BYTES];
+        let bytes = b"fixed canonical bytes";
+
+        assert_eq!(
+            ed25519_sign(&private_key, bytes),
+            ed25519_sign(&private_key, bytes)
+        );
     }
 }

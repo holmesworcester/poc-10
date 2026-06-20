@@ -71,6 +71,8 @@ fn validate_id(name: &str, id: &[u8; 32]) -> Result<(), String> {
     Ok(())
 }
 
+// Tests.
+// Single test: invite acceptance produces exactly one acceptance fact.
 #[cfg(test)]
 mod tests {
     use super::*;

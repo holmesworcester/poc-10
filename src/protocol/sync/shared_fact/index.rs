@@ -438,520 +438,6 @@ fn xor_fingerprint(dst: &mut [u8; 32], src: [u8; 32]) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::core::crypto;
-    use crate::core::facts::ScopeKind;
-    use crate::core::schema::CORE_SCHEMA_SOURCE;
-    use crate::protocol::auth::endpoint::{self as endpoint_rows, fact::EndpointFact};
-    use crate::protocol::auth::endpoint_shared::{
-        self as endpoint_shared_rows,
-        fact::{EndpointDeviceName, EndpointRole, EndpointSharedFact},
-    };
-    use crate::protocol::registry::FACTS_SCHEMA_SOURCE;
-    use std::sync::{Arc, Barrier};
-    use std::thread;
-
-    fn store() -> Db {
-        Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
-            .expect("store")
-    }
-
-    fn fact(workspace_id: FactId, timestamp_ms: u64, seed: u8) -> Fact {
-        Fact::new(
-            FactScope::Scoped {
-                kind: ScopeKind::new("workspace").unwrap(),
-                id: workspace_id,
-            },
-            timestamp_ms,
-            vec![seed],
-        )
-    }
-
-    fn upsert(
-        workspace_id: FactId,
-        fact: &Fact,
-        context_have: Vec<FactId>,
-    ) -> share_fact_with_sync::ShareFactWithSync {
-        share_fact_with_sync::ShareFactWithSync {
-            workspace_id,
-            owner_fact_id: fact.id,
-            timestamp_ms: fact.timestamp,
-            state: share_fact_with_sync::SyncShareState::Upsert,
-            context_have,
-        }
-    }
-
-    #[test]
-    fn sync_contribution_upsert_records_leaf_and_lazy_range_summary() {
-        let store = store();
-        let workspace_id = [9; 32];
-        let fact = fact(workspace_id, 42, 1);
-
-        assert!(record_sync_contribution(
-            &store,
-            &upsert(workspace_id, &fact, Vec::new()),
-            Some(&fact)
-        )
-        .expect("upsert contribution"));
-
-        assert_eq!(
-            shareable_fact_rows(&store).expect("shareable rows").len(),
-            1
-        );
-        assert_eq!(negentropy_leaf_rows(&store).expect("leaf rows").len(), 1);
-        assert!(negentropy_node_rows(&store).expect("node rows").is_empty());
-        let root = range_summary_for_workspace(&store, workspace_id, TimestampRange::ROOT)
-            .expect("root summary");
-        assert_eq!(root.count, 1);
-        assert_ne!(root.fingerprint, [0; 32]);
-        let exact = range_summary_for_workspace(
-            &store,
-            workspace_id,
-            TimestampRange { start: 42, end: 42 },
-        )
-        .expect("exact summary");
-        assert_eq!(exact, root);
-        let empty = range_summary_for_workspace(
-            &store,
-            workspace_id,
-            TimestampRange { start: 43, end: 43 },
-        )
-        .expect("empty summary");
-        assert_eq!(empty, RangeSummary::default());
-    }
-
-    #[test]
-    fn sync_contribution_is_idempotent_and_monotonically_adds_context() {
-        let store = store();
-        let workspace_id = [9; 32];
-        let fact = fact(workspace_id, 42, 1);
-        let empty = upsert(workspace_id, &fact, Vec::new());
-
-        assert!(record_sync_contribution(&store, &empty, Some(&fact)).expect("first upsert"));
-        let first_root = range_summary_for_workspace(&store, workspace_id, TimestampRange::ROOT)
-            .expect("first root");
-        assert!(!record_sync_contribution(&store, &empty, Some(&fact)).expect("repeat upsert"));
-        assert_eq!(
-            range_summary_for_workspace(&store, workspace_id, TimestampRange::ROOT)
-                .expect("repeat root"),
-            first_root
-        );
-
-        let richer = upsert(workspace_id, &fact, vec![[7; 32]]);
-        assert!(record_sync_contribution(&store, &richer, Some(&fact)).expect("richer upsert"));
-        let richer_root = range_summary_for_workspace(&store, workspace_id, TimestampRange::ROOT)
-            .expect("richer root");
-        assert_eq!(richer_root.count, 1);
-        assert_ne!(richer_root.fingerprint, first_root.fingerprint);
-
-        assert!(!record_sync_contribution(&store, &empty, Some(&fact)).expect("older upsert"));
-        assert_eq!(
-            negentropy_context_have_for_leaf(&store, workspace_id, fact.id).expect("context rows"),
-            vec![[7; 32]]
-        );
-        assert_eq!(
-            negentropy_context_closure_for_leaf(&store, workspace_id, fact.id)
-                .expect("closure rows"),
-            vec![[7; 32]]
-        );
-        assert_eq!(
-            range_summary_for_workspace(&store, workspace_id, TimestampRange::ROOT)
-                .expect("final root"),
-            richer_root
-        );
-    }
-
-    #[test]
-    fn concurrent_duplicate_upserts_do_not_double_count_leaf_summary() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp.path().join("sync.db");
-        let workspace_id = [9; 32];
-        let fact = fact(workspace_id, 42, 1);
-        let input = upsert(workspace_id, &fact, Vec::new());
-        let barrier = Arc::new(Barrier::new(2));
-        drop(
-            Db::open_disk_with_schema_sources(&path, &[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
-                .expect("seed store schema"),
-        );
-
-        let handles = (0..2)
-            .map(|_| {
-                let path = path.clone();
-                let fact = fact.clone();
-                let input = input.clone();
-                let barrier = Arc::clone(&barrier);
-                thread::spawn(move || {
-                    let store = Db::open_disk_with_schema_sources(
-                        &path,
-                        &[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE],
-                    )
-                    .expect("open db");
-                    barrier.wait();
-                    record_sync_contribution(&store, &input, Some(&fact))
-                        .expect("record contribution")
-                })
-            })
-            .collect::<Vec<_>>();
-
-        let changed = handles
-            .into_iter()
-            .map(|handle| handle.join().expect("join"))
-            .filter(|changed| *changed)
-            .count();
-        assert_eq!(changed, 1);
-
-        let store =
-            Db::open_disk_with_schema_sources(&path, &[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
-                .expect("reopen db");
-        assert_eq!(negentropy_leaf_rows(&store).expect("leaf rows").len(), 1);
-        let root = range_summary_for_workspace(&store, workspace_id, TimestampRange::ROOT)
-            .expect("root summary");
-        assert_eq!(root.count, 1);
-    }
-
-    #[test]
-    fn sync_contribution_retract_removes_leaf_context_closure_and_shareable() {
-        let store = store();
-        let workspace_id = [9; 32];
-        let fact = fact(workspace_id, 42, 1);
-        let input = upsert(workspace_id, &fact, vec![[7; 32]]);
-        record_sync_contribution(&store, &input, Some(&fact)).expect("upsert");
-
-        let retract = share_fact_with_sync::ShareFactWithSync {
-            workspace_id,
-            owner_fact_id: fact.id,
-            timestamp_ms: fact.timestamp,
-            state: share_fact_with_sync::SyncShareState::Retract,
-            context_have: Vec::new(),
-        };
-        assert!(record_sync_contribution(&store, &retract, None).expect("retract"));
-
-        assert!(shareable_fact_rows(&store)
-            .expect("shareable rows")
-            .is_empty());
-        assert!(negentropy_leaf_rows(&store).expect("leaf rows").is_empty());
-        assert!(negentropy_context_have_rows(&store)
-            .expect("context rows")
-            .is_empty());
-        assert!(negentropy_context_closure_rows(&store)
-            .expect("closure rows")
-            .is_empty());
-        assert!(negentropy_node_rows(&store).expect("node rows").is_empty());
-        assert_eq!(
-            range_summary_for_workspace(&store, workspace_id, TimestampRange::ROOT).expect("root"),
-            RangeSummary::default()
-        );
-    }
-
-    #[test]
-    fn range_query_includes_context_only_when_requested() {
-        let store = store();
-        let workspace_id = [9; 32];
-        let other_workspace_id = [10; 32];
-        let connection_id = seed_authorized_connection(&store, workspace_id);
-        let context = fact(workspace_id, 10, 1);
-        let owner = fact(workspace_id, 20, 2);
-        let same_range_unauthorized = fact(other_workspace_id, 20, 3);
-        let later = fact(workspace_id, 30, 4);
-        store
-            .write_transaction(|tx| {
-                crate::core::project_fact::insert_fact_and_pending_in_tx(tx, &context)?;
-                crate::core::project_fact::insert_fact_and_pending_in_tx(tx, &owner)?;
-                crate::core::project_fact::insert_fact_and_pending_in_tx(
-                    tx,
-                    &same_range_unauthorized,
-                )?;
-                crate::core::project_fact::insert_fact_and_pending_in_tx(tx, &later)?;
-                Ok(())
-            })
-            .expect("persist facts");
-        record_sync_contribution(
-            &store,
-            &upsert(workspace_id, &context, Vec::new()),
-            Some(&context),
-        )
-        .expect("context contribution");
-        record_sync_contribution(
-            &store,
-            &upsert(workspace_id, &owner, vec![context.id]),
-            Some(&owner),
-        )
-        .expect("owner contribution");
-        record_sync_contribution(
-            &store,
-            &upsert(other_workspace_id, &same_range_unauthorized, Vec::new()),
-            Some(&same_range_unauthorized),
-        )
-        .expect("unauthorized contribution");
-        record_sync_contribution(
-            &store,
-            &upsert(workspace_id, &later, Vec::new()),
-            Some(&later),
-        )
-        .expect("later contribution");
-
-        let without = shareable_facts_for_connection_range(&store, connection_id, 20, 20, false)
-            .expect("without deps");
-        let with = shareable_facts_for_connection_range(&store, connection_id, 20, 20, true)
-            .expect("with deps");
-
-        assert_eq!(
-            without.iter().map(|fact| fact.id).collect::<Vec<_>>(),
-            vec![owner.id]
-        );
-        assert_eq!(
-            with.iter().map(|fact| fact.id).collect::<Vec<_>>(),
-            vec![context.id, owner.id]
-        );
-    }
-
-    #[test]
-    fn range_query_includes_retained_transitive_context_closure() {
-        let store = store();
-        let workspace_id = [9; 32];
-        let connection_id = seed_authorized_connection(&store, workspace_id);
-        let root = fact(workspace_id, 10, 1);
-        let mid = fact(workspace_id, 20, 2);
-        let owner = fact(workspace_id, 30, 3);
-        store
-            .write_transaction(|tx| {
-                crate::core::project_fact::insert_fact_and_pending_in_tx(tx, &root)?;
-                crate::core::project_fact::insert_fact_and_pending_in_tx(tx, &mid)?;
-                crate::core::project_fact::insert_fact_and_pending_in_tx(tx, &owner)?;
-                Ok(())
-            })
-            .expect("persist facts");
-        record_sync_contribution(
-            &store,
-            &upsert(workspace_id, &root, Vec::new()),
-            Some(&root),
-        )
-        .expect("root contribution");
-        record_sync_contribution(
-            &store,
-            &upsert(workspace_id, &mid, vec![root.id]),
-            Some(&mid),
-        )
-        .expect("mid contribution");
-        record_sync_contribution(
-            &store,
-            &upsert(workspace_id, &owner, vec![mid.id]),
-            Some(&owner),
-        )
-        .expect("owner contribution");
-
-        assert_eq!(
-            negentropy_context_have_for_leaf(&store, workspace_id, owner.id)
-                .expect("owner direct context"),
-            vec![mid.id]
-        );
-        assert_eq!(
-            negentropy_context_closure_for_leaf(&store, workspace_id, owner.id)
-                .expect("owner retained closure")
-                .into_iter()
-                .collect::<BTreeSet<_>>(),
-            BTreeSet::from([root.id, mid.id])
-        );
-
-        let with = shareable_facts_for_connection_range(&store, connection_id, 30, 30, true)
-            .expect("with retained closure");
-
-        assert_eq!(
-            with.iter().map(|fact| fact.id).collect::<Vec<_>>(),
-            vec![root.id, mid.id, owner.id]
-        );
-    }
-
-    #[test]
-    fn exact_id_expansion_does_not_widen_to_same_timestamp_siblings() {
-        let store = store();
-        let workspace_id = [9; 32];
-        let connection_id = seed_authorized_connection(&store, workspace_id);
-        let context = fact(workspace_id, 10, 1);
-        let owner = fact(workspace_id, 30, 2);
-        let sibling = fact(workspace_id, 30, 3);
-        store
-            .write_transaction(|tx| {
-                crate::core::project_fact::insert_fact_and_pending_in_tx(tx, &context)?;
-                crate::core::project_fact::insert_fact_and_pending_in_tx(tx, &owner)?;
-                crate::core::project_fact::insert_fact_and_pending_in_tx(tx, &sibling)?;
-                Ok(())
-            })
-            .expect("persist facts");
-        record_sync_contribution(
-            &store,
-            &upsert(workspace_id, &context, Vec::new()),
-            Some(&context),
-        )
-        .expect("context contribution");
-        record_sync_contribution(
-            &store,
-            &upsert(workspace_id, &owner, vec![context.id]),
-            Some(&owner),
-        )
-        .expect("owner contribution");
-        record_sync_contribution(
-            &store,
-            &upsert(workspace_id, &sibling, Vec::new()),
-            Some(&sibling),
-        )
-        .expect("sibling contribution");
-
-        let expanded =
-            expand_fact_ids_with_context_for_connection(&store, connection_id, &[owner.id])
-                .expect("expand exact owner");
-
-        assert_eq!(expanded, vec![context.id, owner.id]);
-    }
-
-    #[test]
-    fn received_bootstrap_request_invite_authorizes_responder_connection_sync() {
-        let store = store();
-        let workspace_id = [9; 32];
-        let connection_id = [8; 32];
-        let local_secret = [11; 32];
-        let local_endpoint = crypto::x25519_public_key(&local_secret);
-        let remote_endpoint = [2; 32];
-        let invite =
-            auth::invite_secret::fact::InviteSecretFact::scoped([21; 32], workspace_id, [22; 32]);
-        let invite_fact = Fact::new(
-            FactScope::Local,
-            1,
-            auth::invite_secret::encode::encode_fact(&invite).expect("encode invite"),
-        );
-        let initiator_ephemeral_private_key = [31; 32];
-        let mut request = connection::request::fact::ConnectionRequestFact {
-            mode: connection::request::fact::REQUEST_MODE_BOOTSTRAP,
-            from_endpoint: remote_endpoint,
-            to_endpoint: local_endpoint,
-            nonce: [23; 32],
-            dialed_addr: None,
-            initiator_addr: None,
-            invite_fact_id: invite.invite_fact_id.expect("invite fact id"),
-            bootstrap_hash: invite.bootstrap_hash,
-            invite_secret_fact_id: invite_fact.id,
-            invite_signature: [0; crypto::ED25519_SIGNATURE_BYTES],
-            initiator_endpoint_shared_id: [0; 32],
-            endpoint_signature: [0; crypto::ED25519_SIGNATURE_BYTES],
-            initiator_ephemeral_secret_fact_id: [25; 32],
-            initiator_ephemeral_public_key: crypto::x25519_public_key(
-                &initiator_ephemeral_private_key,
-            ),
-        };
-        connection::request::author::sign_bootstrap_request(&mut request, &invite)
-            .expect("sign request");
-        let request_fact = Fact::new(
-            FactScope::Global,
-            2,
-            connection::request::encode::seal_fact(&request, &initiator_ephemeral_private_key)
-                .expect("seal request"),
-        );
-        let shareable = fact(workspace_id, 42, 1);
-
-        store
-            .write_transaction(|tx| {
-                crate::core::project_fact::insert_fact_and_pending_in_tx(tx, &invite_fact)?;
-                crate::core::project_fact::insert_fact_and_pending_in_tx(tx, &request_fact)?;
-                crate::core::project_fact::insert_fact_and_pending_in_tx(tx, &shareable)?;
-                Ok(())
-            })
-            .expect("persist facts");
-        let row = endpoint_rows::local_endpoint_insert(&EndpointFact {
-            endpoint: local_endpoint,
-            secret: local_secret,
-            signing_public_key: crypto::ed25519_public_key(&[13; 32]),
-            signing_secret: [13; 32],
-        });
-        store
-            .insert_table_values(vec![row])
-            .expect("seed endpoint row");
-        let row = connection::connection::connection_row(
-            connection::connection::ConnectionRowFields::without_addresses(
-                connection_id,
-                local_endpoint,
-                remote_endpoint,
-                request_fact.id,
-                [28; 32],
-                [29; 32],
-                [30; 32],
-            ),
-        )
-        .expect("connection row");
-        store
-            .write_transaction(|tx| tx.insert_values_in_tx(&row).map(|_| ()))
-            .expect("seed connection row");
-        record_sync_contribution(
-            &store,
-            &upsert(workspace_id, &shareable, Vec::new()),
-            Some(&shareable),
-        )
-        .expect("share fact");
-
-        let summary = range_summary_for_connection(&store, connection_id, TimestampRange::ROOT)
-            .expect("connection summary");
-        let visible = shareable_facts_for_connection(&store, connection_id)
-            .expect("visible connection facts");
-
-        assert_eq!(summary.count, 1);
-        assert_eq!(
-            visible.iter().map(|fact| fact.id).collect::<Vec<_>>(),
-            vec![shareable.id]
-        );
-    }
-
-    fn seed_authorized_connection(store: &Db, workspace_id: FactId) -> FactId {
-        let connection_id = [8; 32];
-        let local_secret = [11; 32];
-        let local_endpoint = crypto::x25519_public_key(&local_secret);
-        let remote_endpoint = [2; 32];
-        let row = endpoint_rows::local_endpoint_insert(&EndpointFact {
-            endpoint: local_endpoint,
-            secret: local_secret,
-            signing_public_key: crypto::ed25519_public_key(&[13; 32]),
-            signing_secret: [13; 32],
-        });
-        store
-            .insert_table_values(vec![row])
-            .expect("seed endpoint row");
-        let connection_row = connection::connection::connection_row(
-            connection::connection::ConnectionRowFields::without_addresses(
-                connection_id,
-                local_endpoint,
-                remote_endpoint,
-                [3; 32],
-                [7; 32],
-                [8; 32],
-                [9; 32],
-            ),
-        )
-        .expect("connection row");
-        let endpoint_shared_row = endpoint_shared_rows::endpoint_shared_row(
-            [5; 32],
-            &EndpointSharedFact {
-                created_at_ms: 1,
-                workspace_id,
-                user_authority_fact_id: [6; 32],
-                endpoint_id: remote_endpoint,
-                signing_public_key: [7; 32],
-                endpoint_role: EndpointRole::Device,
-                device_name: EndpointDeviceName::new("remote").expect("device name"),
-                signer_id: [6; 32],
-                signer_public_key: crypto::ed25519_public_key(&[17; 32]),
-            },
-        );
-        store
-            .write_transaction(|tx| {
-                tx.insert_values_in_tx(&connection_row)?;
-                tx.insert_values_in_tx(&endpoint_shared_row)?;
-                Ok(())
-            })
-            .expect("seed typed rows");
-        connection_id
-    }
-}
-
 pub fn sync_status(store: &Db) -> Result<SyncStatus, String> {
     let mut count = 0u64;
     let mut fingerprint = [0u8; 32];
@@ -1794,5 +1280,521 @@ fn remote_endpoint_for_connection(
         Some(row.from_endpoint)
     } else {
         None
+    }
+}
+
+// Tests.
+// Most-central-first: contribution upsert/idempotency and connection range reads lead, then retract, transitive closure, bootstrap auth, and edge guards.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::crypto;
+    use crate::core::facts::ScopeKind;
+    use crate::core::schema::CORE_SCHEMA_SOURCE;
+    use crate::protocol::auth::endpoint::{self as endpoint_rows, fact::EndpointFact};
+    use crate::protocol::auth::endpoint_shared::{
+        self as endpoint_shared_rows,
+        fact::{EndpointDeviceName, EndpointRole, EndpointSharedFact},
+    };
+    use crate::protocol::registry::FACTS_SCHEMA_SOURCE;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    fn store() -> Db {
+        Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+            .expect("store")
+    }
+
+    fn fact(workspace_id: FactId, timestamp_ms: u64, seed: u8) -> Fact {
+        Fact::new(
+            FactScope::Scoped {
+                kind: ScopeKind::new("workspace").unwrap(),
+                id: workspace_id,
+            },
+            timestamp_ms,
+            vec![seed],
+        )
+    }
+
+    fn upsert(
+        workspace_id: FactId,
+        fact: &Fact,
+        context_have: Vec<FactId>,
+    ) -> share_fact_with_sync::ShareFactWithSync {
+        share_fact_with_sync::ShareFactWithSync {
+            workspace_id,
+            owner_fact_id: fact.id,
+            timestamp_ms: fact.timestamp,
+            state: share_fact_with_sync::SyncShareState::Upsert,
+            context_have,
+        }
+    }
+
+    #[test]
+    fn sync_contribution_upsert_records_leaf_and_lazy_range_summary() {
+        let store = store();
+        let workspace_id = [9; 32];
+        let fact = fact(workspace_id, 42, 1);
+
+        assert!(record_sync_contribution(
+            &store,
+            &upsert(workspace_id, &fact, Vec::new()),
+            Some(&fact)
+        )
+        .expect("upsert contribution"));
+
+        assert_eq!(
+            shareable_fact_rows(&store).expect("shareable rows").len(),
+            1
+        );
+        assert_eq!(negentropy_leaf_rows(&store).expect("leaf rows").len(), 1);
+        assert!(negentropy_node_rows(&store).expect("node rows").is_empty());
+        let root = range_summary_for_workspace(&store, workspace_id, TimestampRange::ROOT)
+            .expect("root summary");
+        assert_eq!(root.count, 1);
+        assert_ne!(root.fingerprint, [0; 32]);
+        let exact = range_summary_for_workspace(
+            &store,
+            workspace_id,
+            TimestampRange { start: 42, end: 42 },
+        )
+        .expect("exact summary");
+        assert_eq!(exact, root);
+        let empty = range_summary_for_workspace(
+            &store,
+            workspace_id,
+            TimestampRange { start: 43, end: 43 },
+        )
+        .expect("empty summary");
+        assert_eq!(empty, RangeSummary::default());
+    }
+
+    #[test]
+    fn sync_contribution_is_idempotent_and_monotonically_adds_context() {
+        let store = store();
+        let workspace_id = [9; 32];
+        let fact = fact(workspace_id, 42, 1);
+        let empty = upsert(workspace_id, &fact, Vec::new());
+
+        assert!(record_sync_contribution(&store, &empty, Some(&fact)).expect("first upsert"));
+        let first_root = range_summary_for_workspace(&store, workspace_id, TimestampRange::ROOT)
+            .expect("first root");
+        assert!(!record_sync_contribution(&store, &empty, Some(&fact)).expect("repeat upsert"));
+        assert_eq!(
+            range_summary_for_workspace(&store, workspace_id, TimestampRange::ROOT)
+                .expect("repeat root"),
+            first_root
+        );
+
+        let richer = upsert(workspace_id, &fact, vec![[7; 32]]);
+        assert!(record_sync_contribution(&store, &richer, Some(&fact)).expect("richer upsert"));
+        let richer_root = range_summary_for_workspace(&store, workspace_id, TimestampRange::ROOT)
+            .expect("richer root");
+        assert_eq!(richer_root.count, 1);
+        assert_ne!(richer_root.fingerprint, first_root.fingerprint);
+
+        assert!(!record_sync_contribution(&store, &empty, Some(&fact)).expect("older upsert"));
+        assert_eq!(
+            negentropy_context_have_for_leaf(&store, workspace_id, fact.id).expect("context rows"),
+            vec![[7; 32]]
+        );
+        assert_eq!(
+            negentropy_context_closure_for_leaf(&store, workspace_id, fact.id)
+                .expect("closure rows"),
+            vec![[7; 32]]
+        );
+        assert_eq!(
+            range_summary_for_workspace(&store, workspace_id, TimestampRange::ROOT)
+                .expect("final root"),
+            richer_root
+        );
+    }
+
+    #[test]
+    fn range_query_includes_context_only_when_requested() {
+        let store = store();
+        let workspace_id = [9; 32];
+        let other_workspace_id = [10; 32];
+        let connection_id = seed_authorized_connection(&store, workspace_id);
+        let context = fact(workspace_id, 10, 1);
+        let owner = fact(workspace_id, 20, 2);
+        let same_range_unauthorized = fact(other_workspace_id, 20, 3);
+        let later = fact(workspace_id, 30, 4);
+        store
+            .write_transaction(|tx| {
+                crate::core::project_fact::insert_fact_and_pending_in_tx(tx, &context)?;
+                crate::core::project_fact::insert_fact_and_pending_in_tx(tx, &owner)?;
+                crate::core::project_fact::insert_fact_and_pending_in_tx(
+                    tx,
+                    &same_range_unauthorized,
+                )?;
+                crate::core::project_fact::insert_fact_and_pending_in_tx(tx, &later)?;
+                Ok(())
+            })
+            .expect("persist facts");
+        record_sync_contribution(
+            &store,
+            &upsert(workspace_id, &context, Vec::new()),
+            Some(&context),
+        )
+        .expect("context contribution");
+        record_sync_contribution(
+            &store,
+            &upsert(workspace_id, &owner, vec![context.id]),
+            Some(&owner),
+        )
+        .expect("owner contribution");
+        record_sync_contribution(
+            &store,
+            &upsert(other_workspace_id, &same_range_unauthorized, Vec::new()),
+            Some(&same_range_unauthorized),
+        )
+        .expect("unauthorized contribution");
+        record_sync_contribution(
+            &store,
+            &upsert(workspace_id, &later, Vec::new()),
+            Some(&later),
+        )
+        .expect("later contribution");
+
+        let without = shareable_facts_for_connection_range(&store, connection_id, 20, 20, false)
+            .expect("without deps");
+        let with = shareable_facts_for_connection_range(&store, connection_id, 20, 20, true)
+            .expect("with deps");
+
+        assert_eq!(
+            without.iter().map(|fact| fact.id).collect::<Vec<_>>(),
+            vec![owner.id]
+        );
+        assert_eq!(
+            with.iter().map(|fact| fact.id).collect::<Vec<_>>(),
+            vec![context.id, owner.id]
+        );
+    }
+
+    #[test]
+    fn range_query_includes_retained_transitive_context_closure() {
+        let store = store();
+        let workspace_id = [9; 32];
+        let connection_id = seed_authorized_connection(&store, workspace_id);
+        let root = fact(workspace_id, 10, 1);
+        let mid = fact(workspace_id, 20, 2);
+        let owner = fact(workspace_id, 30, 3);
+        store
+            .write_transaction(|tx| {
+                crate::core::project_fact::insert_fact_and_pending_in_tx(tx, &root)?;
+                crate::core::project_fact::insert_fact_and_pending_in_tx(tx, &mid)?;
+                crate::core::project_fact::insert_fact_and_pending_in_tx(tx, &owner)?;
+                Ok(())
+            })
+            .expect("persist facts");
+        record_sync_contribution(
+            &store,
+            &upsert(workspace_id, &root, Vec::new()),
+            Some(&root),
+        )
+        .expect("root contribution");
+        record_sync_contribution(
+            &store,
+            &upsert(workspace_id, &mid, vec![root.id]),
+            Some(&mid),
+        )
+        .expect("mid contribution");
+        record_sync_contribution(
+            &store,
+            &upsert(workspace_id, &owner, vec![mid.id]),
+            Some(&owner),
+        )
+        .expect("owner contribution");
+
+        assert_eq!(
+            negentropy_context_have_for_leaf(&store, workspace_id, owner.id)
+                .expect("owner direct context"),
+            vec![mid.id]
+        );
+        assert_eq!(
+            negentropy_context_closure_for_leaf(&store, workspace_id, owner.id)
+                .expect("owner retained closure")
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([root.id, mid.id])
+        );
+
+        let with = shareable_facts_for_connection_range(&store, connection_id, 30, 30, true)
+            .expect("with retained closure");
+
+        assert_eq!(
+            with.iter().map(|fact| fact.id).collect::<Vec<_>>(),
+            vec![root.id, mid.id, owner.id]
+        );
+    }
+
+    #[test]
+    fn sync_contribution_retract_removes_leaf_context_closure_and_shareable() {
+        let store = store();
+        let workspace_id = [9; 32];
+        let fact = fact(workspace_id, 42, 1);
+        let input = upsert(workspace_id, &fact, vec![[7; 32]]);
+        record_sync_contribution(&store, &input, Some(&fact)).expect("upsert");
+
+        let retract = share_fact_with_sync::ShareFactWithSync {
+            workspace_id,
+            owner_fact_id: fact.id,
+            timestamp_ms: fact.timestamp,
+            state: share_fact_with_sync::SyncShareState::Retract,
+            context_have: Vec::new(),
+        };
+        assert!(record_sync_contribution(&store, &retract, None).expect("retract"));
+
+        assert!(shareable_fact_rows(&store)
+            .expect("shareable rows")
+            .is_empty());
+        assert!(negentropy_leaf_rows(&store).expect("leaf rows").is_empty());
+        assert!(negentropy_context_have_rows(&store)
+            .expect("context rows")
+            .is_empty());
+        assert!(negentropy_context_closure_rows(&store)
+            .expect("closure rows")
+            .is_empty());
+        assert!(negentropy_node_rows(&store).expect("node rows").is_empty());
+        assert_eq!(
+            range_summary_for_workspace(&store, workspace_id, TimestampRange::ROOT).expect("root"),
+            RangeSummary::default()
+        );
+    }
+
+    #[test]
+    fn received_bootstrap_request_invite_authorizes_responder_connection_sync() {
+        let store = store();
+        let workspace_id = [9; 32];
+        let connection_id = [8; 32];
+        let local_secret = [11; 32];
+        let local_endpoint = crypto::x25519_public_key(&local_secret);
+        let remote_endpoint = [2; 32];
+        let invite =
+            auth::invite_secret::fact::InviteSecretFact::scoped([21; 32], workspace_id, [22; 32]);
+        let invite_fact = Fact::new(
+            FactScope::Local,
+            1,
+            auth::invite_secret::encode::encode_fact(&invite).expect("encode invite"),
+        );
+        let initiator_ephemeral_private_key = [31; 32];
+        let mut request = connection::request::fact::ConnectionRequestFact {
+            mode: connection::request::fact::REQUEST_MODE_BOOTSTRAP,
+            from_endpoint: remote_endpoint,
+            to_endpoint: local_endpoint,
+            nonce: [23; 32],
+            dialed_addr: None,
+            initiator_addr: None,
+            invite_fact_id: invite.invite_fact_id.expect("invite fact id"),
+            bootstrap_hash: invite.bootstrap_hash,
+            invite_secret_fact_id: invite_fact.id,
+            invite_signature: [0; crypto::ED25519_SIGNATURE_BYTES],
+            initiator_endpoint_shared_id: [0; 32],
+            endpoint_signature: [0; crypto::ED25519_SIGNATURE_BYTES],
+            initiator_ephemeral_secret_fact_id: [25; 32],
+            initiator_ephemeral_public_key: crypto::x25519_public_key(
+                &initiator_ephemeral_private_key,
+            ),
+        };
+        connection::request::author::sign_bootstrap_request(&mut request, &invite)
+            .expect("sign request");
+        let request_fact = Fact::new(
+            FactScope::Global,
+            2,
+            connection::request::encode::seal_fact(&request, &initiator_ephemeral_private_key)
+                .expect("seal request"),
+        );
+        let shareable = fact(workspace_id, 42, 1);
+
+        store
+            .write_transaction(|tx| {
+                crate::core::project_fact::insert_fact_and_pending_in_tx(tx, &invite_fact)?;
+                crate::core::project_fact::insert_fact_and_pending_in_tx(tx, &request_fact)?;
+                crate::core::project_fact::insert_fact_and_pending_in_tx(tx, &shareable)?;
+                Ok(())
+            })
+            .expect("persist facts");
+        let row = endpoint_rows::local_endpoint_insert(&EndpointFact {
+            endpoint: local_endpoint,
+            secret: local_secret,
+            signing_public_key: crypto::ed25519_public_key(&[13; 32]),
+            signing_secret: [13; 32],
+        });
+        store
+            .insert_table_values(vec![row])
+            .expect("seed endpoint row");
+        let row = connection::connection::connection_row(
+            connection::connection::ConnectionRowFields::without_addresses(
+                connection_id,
+                local_endpoint,
+                remote_endpoint,
+                request_fact.id,
+                [28; 32],
+                [29; 32],
+                [30; 32],
+            ),
+        )
+        .expect("connection row");
+        store
+            .write_transaction(|tx| tx.insert_values_in_tx(&row).map(|_| ()))
+            .expect("seed connection row");
+        record_sync_contribution(
+            &store,
+            &upsert(workspace_id, &shareable, Vec::new()),
+            Some(&shareable),
+        )
+        .expect("share fact");
+
+        let summary = range_summary_for_connection(&store, connection_id, TimestampRange::ROOT)
+            .expect("connection summary");
+        let visible = shareable_facts_for_connection(&store, connection_id)
+            .expect("visible connection facts");
+
+        assert_eq!(summary.count, 1);
+        assert_eq!(
+            visible.iter().map(|fact| fact.id).collect::<Vec<_>>(),
+            vec![shareable.id]
+        );
+    }
+
+    #[test]
+    fn exact_id_expansion_does_not_widen_to_same_timestamp_siblings() {
+        let store = store();
+        let workspace_id = [9; 32];
+        let connection_id = seed_authorized_connection(&store, workspace_id);
+        let context = fact(workspace_id, 10, 1);
+        let owner = fact(workspace_id, 30, 2);
+        let sibling = fact(workspace_id, 30, 3);
+        store
+            .write_transaction(|tx| {
+                crate::core::project_fact::insert_fact_and_pending_in_tx(tx, &context)?;
+                crate::core::project_fact::insert_fact_and_pending_in_tx(tx, &owner)?;
+                crate::core::project_fact::insert_fact_and_pending_in_tx(tx, &sibling)?;
+                Ok(())
+            })
+            .expect("persist facts");
+        record_sync_contribution(
+            &store,
+            &upsert(workspace_id, &context, Vec::new()),
+            Some(&context),
+        )
+        .expect("context contribution");
+        record_sync_contribution(
+            &store,
+            &upsert(workspace_id, &owner, vec![context.id]),
+            Some(&owner),
+        )
+        .expect("owner contribution");
+        record_sync_contribution(
+            &store,
+            &upsert(workspace_id, &sibling, Vec::new()),
+            Some(&sibling),
+        )
+        .expect("sibling contribution");
+
+        let expanded =
+            expand_fact_ids_with_context_for_connection(&store, connection_id, &[owner.id])
+                .expect("expand exact owner");
+
+        assert_eq!(expanded, vec![context.id, owner.id]);
+    }
+
+    #[test]
+    fn concurrent_duplicate_upserts_do_not_double_count_leaf_summary() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("sync.db");
+        let workspace_id = [9; 32];
+        let fact = fact(workspace_id, 42, 1);
+        let input = upsert(workspace_id, &fact, Vec::new());
+        let barrier = Arc::new(Barrier::new(2));
+        drop(
+            Db::open_disk_with_schema_sources(&path, &[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("seed store schema"),
+        );
+
+        let handles = (0..2)
+            .map(|_| {
+                let path = path.clone();
+                let fact = fact.clone();
+                let input = input.clone();
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    let store = Db::open_disk_with_schema_sources(
+                        &path,
+                        &[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE],
+                    )
+                    .expect("open db");
+                    barrier.wait();
+                    record_sync_contribution(&store, &input, Some(&fact))
+                        .expect("record contribution")
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let changed = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("join"))
+            .filter(|changed| *changed)
+            .count();
+        assert_eq!(changed, 1);
+
+        let store =
+            Db::open_disk_with_schema_sources(&path, &[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("reopen db");
+        assert_eq!(negentropy_leaf_rows(&store).expect("leaf rows").len(), 1);
+        let root = range_summary_for_workspace(&store, workspace_id, TimestampRange::ROOT)
+            .expect("root summary");
+        assert_eq!(root.count, 1);
+    }
+
+    fn seed_authorized_connection(store: &Db, workspace_id: FactId) -> FactId {
+        let connection_id = [8; 32];
+        let local_secret = [11; 32];
+        let local_endpoint = crypto::x25519_public_key(&local_secret);
+        let remote_endpoint = [2; 32];
+        let row = endpoint_rows::local_endpoint_insert(&EndpointFact {
+            endpoint: local_endpoint,
+            secret: local_secret,
+            signing_public_key: crypto::ed25519_public_key(&[13; 32]),
+            signing_secret: [13; 32],
+        });
+        store
+            .insert_table_values(vec![row])
+            .expect("seed endpoint row");
+        let connection_row = connection::connection::connection_row(
+            connection::connection::ConnectionRowFields::without_addresses(
+                connection_id,
+                local_endpoint,
+                remote_endpoint,
+                [3; 32],
+                [7; 32],
+                [8; 32],
+                [9; 32],
+            ),
+        )
+        .expect("connection row");
+        let endpoint_shared_row = endpoint_shared_rows::endpoint_shared_row(
+            [5; 32],
+            &EndpointSharedFact {
+                created_at_ms: 1,
+                workspace_id,
+                user_authority_fact_id: [6; 32],
+                endpoint_id: remote_endpoint,
+                signing_public_key: [7; 32],
+                endpoint_role: EndpointRole::Device,
+                device_name: EndpointDeviceName::new("remote").expect("device name"),
+                signer_id: [6; 32],
+                signer_public_key: crypto::ed25519_public_key(&[17; 32]),
+            },
+        );
+        store
+            .write_transaction(|tx| {
+                tx.insert_values_in_tx(&connection_row)?;
+                tx.insert_values_in_tx(&endpoint_shared_row)?;
+                Ok(())
+            })
+            .expect("seed typed rows");
+        connection_id
     }
 }

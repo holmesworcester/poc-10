@@ -82,6 +82,9 @@ pub struct ContentFileSliceFact {
     pub proof: FileSliceProof,
 }
 
+// Tests. Ordered most-central first: the proof slot covers every real
+// encrypted-slice alignment, then the slot bound is derived from the max file
+// tree.
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -38,6 +38,8 @@ pub mod decode {
         format!("{err:?}")
     }
 
+    // Tests. Ordered most-central first: the fixed-width roundtrip proves the
+    // whole codec, then the tag/length rejections guard the layout.
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -114,6 +116,8 @@ pub mod authenticate {
         Ok(reaction)
     }
 
+    // Tests. Ordered most-central first: a canonical fact authenticates, then
+    // the id-binding invariant (id == hash(bytes)), then the layout rejections.
     #[cfg(test)]
     mod tests {
         use crate::core::facts::Fact;
@@ -154,6 +158,18 @@ pub mod authenticate {
         }
 
         #[test]
+        fn rejects_id_not_matching_bytes() {
+            let canonical = canonical_fact();
+            let forged = Fact {
+                id: [0; 32],
+                scope: canonical.scope.clone(),
+                timestamp: canonical.timestamp,
+                bytes: canonical.bytes.clone(),
+            };
+            assert!(is_invalid(&forged));
+        }
+
+        #[test]
         fn rejects_wrong_tag() {
             let canonical = canonical_fact();
             let mut bytes = canonical.bytes.clone();
@@ -175,18 +191,6 @@ pub mod authenticate {
                 canonical.timestamp,
                 bytes
             )));
-        }
-
-        #[test]
-        fn rejects_id_not_matching_bytes() {
-            let canonical = canonical_fact();
-            let forged = Fact {
-                id: [0; 32],
-                scope: canonical.scope.clone(),
-                timestamp: canonical.timestamp,
-                bytes: canonical.bytes.clone(),
-            };
-            assert!(is_invalid(&forged));
         }
     }
 }
@@ -573,6 +577,8 @@ fn require_fact_scope(fact: &Fact, expected: &crate::core::facts::FactScope) -> 
     }
 }
 
+// Tests. The single row-builder check that the reaction row maps fields to the
+// registry column order and stays within the fixed ciphertext slot.
 #[cfg(test)]
 mod tests {
     use super::*;

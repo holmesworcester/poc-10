@@ -125,6 +125,7 @@ pub mod decode {
         })
     }
 
+    // Tests. Ordered most-central-first: the fixed-width roundtrip is the layout's core proof.
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -183,6 +184,7 @@ pub mod authenticate {
         Ok(input)
     }
 
+    // Tests. Ordered most-central-first: canonical happy path leads, then rejection guards.
     #[cfg(test)]
     mod tests {
         use crate::core::facts::{Fact, FactScope};
@@ -629,69 +631,6 @@ fn material_from_connection_fact(
     }
 }
 
-#[cfg(test)]
-mod material_tests {
-    use super::*;
-
-    fn sealed_connection_fact() -> Fact {
-        let responder_ephemeral_private_key = [10; 32];
-        let connection = connection::connection::fact::ConnectionFact {
-            from_endpoint: [1; 32],
-            to_endpoint: [2; 32],
-            request_id: [3; 32],
-            responder_addr: None,
-            initiator_addr: None,
-            initiator_ephemeral_secret_fact_id: [4; 32],
-            responder_ephemeral_secret_fact_id: [5; 32],
-            responder_ephemeral_public_key: crypto::x25519_public_key(
-                &responder_ephemeral_private_key,
-            ),
-            handshake_hash: [7; 32],
-            connection_secret: [8; 32],
-        };
-        Fact::new(
-            FactScope::Local,
-            100,
-            connection::connection::encode::seal_fact(
-                &connection,
-                &responder_ephemeral_private_key,
-            )
-            .expect("seal connection"),
-        )
-    }
-
-    #[test]
-    fn missing_material_needs_are_exact_from_connection_header() {
-        let connection_fact = sealed_connection_fact();
-
-        let ConnectionMaterialContext::Needs(needs) = connection_material_from_context(
-            &connection_fact,
-            &ProjectionContext::default(),
-            [9; 32],
-        ) else {
-            panic!("connection material should park on exact context");
-        };
-
-        let endpoint_need = needs
-            .iter()
-            .find(|need| need.role.as_str() == "auth_local_endpoint")
-            .expect("endpoint need");
-        assert_eq!(endpoint_need.start_key.as_bytes(), [2; 32]);
-        assert_eq!(endpoint_need.end_key.as_bytes(), [2; 32]);
-
-        let public_key = crypto::x25519_public_key(&[10; 32]);
-        let secret_need = needs
-            .iter()
-            .find(|need| {
-                need.role.as_str()
-                    == connection::ephemeral_secret::project::CONNECTION_EPHEMERAL_SECRET_PUBLIC_KEY_ROLE
-            })
-            .expect("ephemeral public-key need");
-        assert_eq!(secret_need.start_key.as_bytes(), public_key);
-        assert_eq!(secret_need.end_key.as_bytes(), public_key);
-    }
-}
-
 fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
     let tag = bytes
         .first()
@@ -1000,5 +939,69 @@ impl<'a> Reader<'a> {
         } else {
             Err("connection::frame inner bundle has nonzero padding".to_string())
         }
+    }
+}
+
+// Tests. Ordered most-central-first: connection-material context resolution is the projector's core gate.
+#[cfg(test)]
+mod material_tests {
+    use super::*;
+
+    fn sealed_connection_fact() -> Fact {
+        let responder_ephemeral_private_key = [10; 32];
+        let connection = connection::connection::fact::ConnectionFact {
+            from_endpoint: [1; 32],
+            to_endpoint: [2; 32],
+            request_id: [3; 32],
+            responder_addr: None,
+            initiator_addr: None,
+            initiator_ephemeral_secret_fact_id: [4; 32],
+            responder_ephemeral_secret_fact_id: [5; 32],
+            responder_ephemeral_public_key: crypto::x25519_public_key(
+                &responder_ephemeral_private_key,
+            ),
+            handshake_hash: [7; 32],
+            connection_secret: [8; 32],
+        };
+        Fact::new(
+            FactScope::Local,
+            100,
+            connection::connection::encode::seal_fact(
+                &connection,
+                &responder_ephemeral_private_key,
+            )
+            .expect("seal connection"),
+        )
+    }
+
+    #[test]
+    fn missing_material_needs_are_exact_from_connection_header() {
+        let connection_fact = sealed_connection_fact();
+
+        let ConnectionMaterialContext::Needs(needs) = connection_material_from_context(
+            &connection_fact,
+            &ProjectionContext::default(),
+            [9; 32],
+        ) else {
+            panic!("connection material should park on exact context");
+        };
+
+        let endpoint_need = needs
+            .iter()
+            .find(|need| need.role.as_str() == "auth_local_endpoint")
+            .expect("endpoint need");
+        assert_eq!(endpoint_need.start_key.as_bytes(), [2; 32]);
+        assert_eq!(endpoint_need.end_key.as_bytes(), [2; 32]);
+
+        let public_key = crypto::x25519_public_key(&[10; 32]);
+        let secret_need = needs
+            .iter()
+            .find(|need| {
+                need.role.as_str()
+                    == connection::ephemeral_secret::project::CONNECTION_EPHEMERAL_SECRET_PUBLIC_KEY_ROLE
+            })
+            .expect("ephemeral public-key need");
+        assert_eq!(secret_need.start_key.as_bytes(), public_key);
+        assert_eq!(secret_need.end_key.as_bytes(), public_key);
     }
 }

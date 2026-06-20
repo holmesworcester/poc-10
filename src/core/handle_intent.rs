@@ -797,6 +797,14 @@ pub(crate) fn submit_intent_to_queue(
         .map_err(|err| format!("submit intent: {err}"))
 }
 
+// =============================================================================
+// Tests
+// =============================================================================
+//
+// Ordered most-central-first: the success and rollback contracts of the
+// load/classify/commit lifecycle lead; terminal drops and queue-ordering guards
+// follow.
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -840,141 +848,6 @@ mod tests {
             store.table_row_count(LOCAL_INTENTS).expect("local count"),
             1,
             "durable success should not collapse a distinct local row"
-        );
-    }
-
-    #[test]
-    fn local_empty_handler_output_consumes_rows_and_continues() {
-        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
-        let first = test_intent("handled", b"first");
-        let second = test_intent("handled", b"second");
-        submit_intent_to_queue(&store, IntentQueue::Local, first.clone())
-            .expect("submit first local");
-        submit_intent_to_queue(&store, IntentQueue::Local, second).expect("submit second local");
-
-        let handled = handle_intents_for_test(
-            &store,
-            &HandlerSet::new(NOOP_ROUTES),
-            IntentQueue::Local,
-            &[],
-            None,
-            8,
-        )
-        .expect("handle local intents");
-
-        assert_eq!(handled, 2);
-        assert_eq!(
-            store.table_row_count(LOCAL_INTENTS).expect("local count"),
-            0,
-            "empty successful output should still consume local work"
-        );
-    }
-
-    #[test]
-    fn handler_error_drops_row_without_output() {
-        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
-        submit_intent_to_queue(&store, IntentQueue::Durable, test_intent("fatal", b"first"))
-            .expect("submit fatal intent");
-
-        let consumed = handle_one_intent(
-            &store,
-            &HandlerSet::new(FATAL_ROUTES),
-            IntentQueue::Durable,
-            &[],
-            None,
-        )
-        .expect("invalid intent should be dropped");
-
-        assert!(consumed);
-        assert_eq!(store.table_row_count(INTENTS).expect("durable count"), 0);
-    }
-
-    #[test]
-    fn unregistered_queued_intent_drops_row() {
-        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
-        submit_intent_to_queue(
-            &store,
-            IntentQueue::Durable,
-            test_intent("unregistered", b"first"),
-        )
-        .expect("submit unregistered intent row");
-
-        let consumed = handle_one_intent(
-            &store,
-            &HandlerSet::new(NOOP_ROUTES),
-            IntentQueue::Durable,
-            &[],
-            None,
-        )
-        .expect("unregistered queued intent should be dropped");
-
-        assert!(consumed);
-        assert_eq!(store.table_row_count(INTENTS).expect("durable count"), 0);
-    }
-
-    #[test]
-    fn invalid_queued_intent_kind_drops_row() {
-        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
-        store
-            .write_transaction(|tx| {
-                tx.conn().execute(
-                    "INSERT INTO intents (intent_id, kind, intent_key, payload, replay)
-                     VALUES (?1, 'InvalidKind', ?2, ?3, 0)",
-                    params![
-                        random_intent_id().as_slice(),
-                        b"key".as_slice(),
-                        b"payload".as_slice()
-                    ],
-                )?;
-                Ok(())
-            })
-            .expect("insert invalid intent row");
-
-        let consumed = handle_one_intent(
-            &store,
-            &HandlerSet::new(NOOP_ROUTES),
-            IntentQueue::Durable,
-            &[],
-            None,
-        )
-        .expect("invalid kind should be dropped");
-
-        assert!(consumed);
-        assert_eq!(store.table_row_count(INTENTS).expect("durable count"), 0);
-    }
-
-    #[test]
-    fn validation_error_leaves_row_queued_without_committing_effects() {
-        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
-        submit_intent_to_queue(
-            &store,
-            IntentQueue::Durable,
-            test_intent("invalid_output", b"first"),
-        )
-        .expect("submit invalid-output intent");
-
-        let err = handle_one_intent(
-            &store,
-            &HandlerSet::new(INVALID_OUTPUT_ROUTES),
-            IntentQueue::Durable,
-            &[],
-            None,
-        )
-        .expect_err("invalid handler output should fail before commit");
-
-        assert!(
-            err.contains("row mutation table test.rows is not registered"),
-            "{err}"
-        );
-        assert_eq!(store.table_row_count(INTENTS).expect("durable count"), 1);
-        assert_eq!(
-            next_queued_intent_in_queue(&store, IntentQueue::Durable)
-                .expect("next durable intent")
-                .expect("queued durable intent")
-                .intent
-                .handler_key,
-            b"first".to_vec(),
-            "validation errors should not consume the row"
         );
     }
 
@@ -1025,33 +898,42 @@ mod tests {
     }
 
     #[test]
-    fn handler_output_with_unregistered_followup_intent_errors_before_commit() {
+    fn handler_error_rolls_back_handler_owned_sql_before_dropping_row() {
         let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
+        store
+            .conn()
+            .execute(
+                &format!(
+                    "CREATE TABLE {TEST_HANDLER_STATE_TABLE} (
+                         intent_key BLOB NOT NULL
+                     )"
+                ),
+                [],
+            )
+            .expect("create handler state table");
         submit_intent_to_queue(
             &store,
             IntentQueue::Durable,
-            test_intent("emit_unknown", b"first"),
+            test_intent("write_then_fatal", b"first"),
         )
-        .expect("submit emitting intent");
+        .expect("submit invalid intent");
 
-        let err = handle_one_intent(
+        let consumed = handle_one_intent(
             &store,
-            &HandlerSet::new(EMIT_UNKNOWN_ROUTES),
+            &HandlerSet::new(WRITE_THEN_FATAL_ROUTES),
             IntentQueue::Durable,
             &[],
             None,
         )
-        .expect_err("unregistered follow-up intent should fail validation");
+        .expect("handler rejection should drop row");
 
-        assert!(
-            err.contains("intent kind unknown_followup is not registered"),
-            "{err}"
-        );
+        assert!(consumed);
         assert_eq!(
-            store.table_row_count(INTENTS).expect("durable count"),
-            1,
-            "handler output validation errors should not consume the source row"
+            handler_state_row_count(&store),
+            0,
+            "handler-owned sql should roll back before invalid intent deletion commits"
         );
+        assert_eq!(store.table_row_count(INTENTS).expect("durable count"), 0);
     }
 
     #[test]
@@ -1149,6 +1031,117 @@ mod tests {
     }
 
     #[test]
+    fn validation_error_leaves_row_queued_without_committing_effects() {
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
+        submit_intent_to_queue(
+            &store,
+            IntentQueue::Durable,
+            test_intent("invalid_output", b"first"),
+        )
+        .expect("submit invalid-output intent");
+
+        let err = handle_one_intent(
+            &store,
+            &HandlerSet::new(INVALID_OUTPUT_ROUTES),
+            IntentQueue::Durable,
+            &[],
+            None,
+        )
+        .expect_err("invalid handler output should fail before commit");
+
+        assert!(
+            err.contains("row mutation table test.rows is not registered"),
+            "{err}"
+        );
+        assert_eq!(store.table_row_count(INTENTS).expect("durable count"), 1);
+        assert_eq!(
+            next_queued_intent_in_queue(&store, IntentQueue::Durable)
+                .expect("next durable intent")
+                .expect("queued durable intent")
+                .intent
+                .handler_key,
+            b"first".to_vec(),
+            "validation errors should not consume the row"
+        );
+    }
+
+    #[test]
+    fn handler_output_with_unregistered_followup_intent_errors_before_commit() {
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
+        submit_intent_to_queue(
+            &store,
+            IntentQueue::Durable,
+            test_intent("emit_unknown", b"first"),
+        )
+        .expect("submit emitting intent");
+
+        let err = handle_one_intent(
+            &store,
+            &HandlerSet::new(EMIT_UNKNOWN_ROUTES),
+            IntentQueue::Durable,
+            &[],
+            None,
+        )
+        .expect_err("unregistered follow-up intent should fail validation");
+
+        assert!(
+            err.contains("intent kind unknown_followup is not registered"),
+            "{err}"
+        );
+        assert_eq!(
+            store.table_row_count(INTENTS).expect("durable count"),
+            1,
+            "handler output validation errors should not consume the source row"
+        );
+    }
+
+    #[test]
+    fn local_empty_handler_output_consumes_rows_and_continues() {
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
+        let first = test_intent("handled", b"first");
+        let second = test_intent("handled", b"second");
+        submit_intent_to_queue(&store, IntentQueue::Local, first.clone())
+            .expect("submit first local");
+        submit_intent_to_queue(&store, IntentQueue::Local, second).expect("submit second local");
+
+        let handled = handle_intents_for_test(
+            &store,
+            &HandlerSet::new(NOOP_ROUTES),
+            IntentQueue::Local,
+            &[],
+            None,
+            8,
+        )
+        .expect("handle local intents");
+
+        assert_eq!(handled, 2);
+        assert_eq!(
+            store.table_row_count(LOCAL_INTENTS).expect("local count"),
+            0,
+            "empty successful output should still consume local work"
+        );
+    }
+
+    #[test]
+    fn handler_error_drops_row_without_output() {
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
+        submit_intent_to_queue(&store, IntentQueue::Durable, test_intent("fatal", b"first"))
+            .expect("submit fatal intent");
+
+        let consumed = handle_one_intent(
+            &store,
+            &HandlerSet::new(FATAL_ROUTES),
+            IntentQueue::Durable,
+            &[],
+            None,
+        )
+        .expect("invalid intent should be dropped");
+
+        assert!(consumed);
+        assert_eq!(store.table_row_count(INTENTS).expect("durable count"), 0);
+    }
+
+    #[test]
     fn intent_context_rows_drop_with_queue_row_on_handler_error() {
         let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
         let fact = Fact::new(FactScope::Global, 42, b"handler-context".to_vec());
@@ -1204,41 +1197,56 @@ mod tests {
     }
 
     #[test]
-    fn handler_error_rolls_back_handler_owned_sql_before_dropping_row() {
+    fn unregistered_queued_intent_drops_row() {
         let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
-        store
-            .conn()
-            .execute(
-                &format!(
-                    "CREATE TABLE {TEST_HANDLER_STATE_TABLE} (
-                         intent_key BLOB NOT NULL
-                     )"
-                ),
-                [],
-            )
-            .expect("create handler state table");
         submit_intent_to_queue(
             &store,
             IntentQueue::Durable,
-            test_intent("write_then_fatal", b"first"),
+            test_intent("unregistered", b"first"),
         )
-        .expect("submit invalid intent");
+        .expect("submit unregistered intent row");
 
         let consumed = handle_one_intent(
             &store,
-            &HandlerSet::new(WRITE_THEN_FATAL_ROUTES),
+            &HandlerSet::new(NOOP_ROUTES),
             IntentQueue::Durable,
             &[],
             None,
         )
-        .expect("handler rejection should drop row");
+        .expect("unregistered queued intent should be dropped");
 
         assert!(consumed);
-        assert_eq!(
-            handler_state_row_count(&store),
-            0,
-            "handler-owned sql should roll back before invalid intent deletion commits"
-        );
+        assert_eq!(store.table_row_count(INTENTS).expect("durable count"), 0);
+    }
+
+    #[test]
+    fn invalid_queued_intent_kind_drops_row() {
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
+        store
+            .write_transaction(|tx| {
+                tx.conn().execute(
+                    "INSERT INTO intents (intent_id, kind, intent_key, payload, replay)
+                     VALUES (?1, 'InvalidKind', ?2, ?3, 0)",
+                    params![
+                        random_intent_id().as_slice(),
+                        b"key".as_slice(),
+                        b"payload".as_slice()
+                    ],
+                )?;
+                Ok(())
+            })
+            .expect("insert invalid intent row");
+
+        let consumed = handle_one_intent(
+            &store,
+            &HandlerSet::new(NOOP_ROUTES),
+            IntentQueue::Durable,
+            &[],
+            None,
+        )
+        .expect("invalid kind should be dropped");
+
+        assert!(consumed);
         assert_eq!(store.table_row_count(INTENTS).expect("durable count"), 0);
     }
 

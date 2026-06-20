@@ -191,6 +191,8 @@ fn fact_storage_error(message: impl Into<String>) -> rusqlite::Error {
     rusqlite::Error::InvalidParameterName(message.into())
 }
 
+// Tests.
+// Ordered most-central-first: content-id identity before scope vocabulary guards.
 #[cfg(test)]
 mod tests {
     use super::*;

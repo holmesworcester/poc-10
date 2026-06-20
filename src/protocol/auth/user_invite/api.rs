@@ -88,6 +88,8 @@ pub fn authored_user_invite_fact(
     )
 }
 
+// Tests.
+// Single test: signed creation derives the public key and fact id.
 #[cfg(test)]
 mod tests {
     use super::*;
