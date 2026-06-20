@@ -2,10 +2,16 @@ use std::fs;
 use std::path::Path;
 
 const VERUS_TODO_PATH: &str = "docs/todo-add-verus-proofs.md";
+const VERUS_STRATEGY_PATH: &str = "docs/verus_proof_strategy.md";
 
 fn verus_plan() -> String {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     fs::read_to_string(root.join(VERUS_TODO_PATH)).expect("read Verus TODO doc")
+}
+
+fn verus_strategy() -> String {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    fs::read_to_string(root.join(VERUS_STRATEGY_PATH)).expect("read Verus strategy doc")
 }
 
 #[test]
@@ -112,5 +118,53 @@ fn verus_plan_names_meaningful_security_proof_targets() {
         missing.is_empty(),
         "{VERUS_TODO_PATH} is missing meaningful security proof targets:\n{}",
         missing.join("\n")
+    );
+}
+
+#[test]
+fn verus_strategy_centralizes_assumed_core_theorems() {
+    let strategy = verus_strategy();
+    let required = [
+        "Core proof bodies are out of scope for this phase.",
+        "src/core/assumed_proof.rs",
+        "protocol-neutral plumbing properties",
+        "Projector proof modules may import theorem functions from this module.",
+        "must not call `assume(...)` directly",
+        "projection_context_sound(ctx, graph)",
+        "matched_payloads_are_offer_owner_facts(ctx, graph)",
+        "matcher_preserves_role_scope_selector(need, matched)",
+        "context_replacement_preserves_owner_boundaries(before, after, owner)",
+        "purges_are_self_only(output, current_fact_id)",
+        "atomic_projection_commit_sound(before, output, after)",
+        "#[verifier::external_body]",
+        "Every trusted theorem stub must have a name beginning with `theorem_`",
+        "core theorems establish plumbing soundness, and projector theorems",
+        "establish protocol meaning",
+        "receipt remains only a receipt",
+        "Replacing a trusted core",
+    ];
+    let missing = required
+        .into_iter()
+        .filter(|needle| !strategy.contains(needle))
+        .collect::<Vec<_>>();
+    assert!(
+        missing.is_empty(),
+        "{VERUS_STRATEGY_PATH} is missing assumed-core theorem strategy terms:\n{}",
+        missing.join("\n")
+    );
+
+    let forbidden = [
+        "Core assumptions prove admin validity",
+        "Core assumptions prove deletion authority",
+        "projectors may call assume(...) directly",
+    ];
+    let present = forbidden
+        .into_iter()
+        .filter(|needle| strategy.contains(needle))
+        .collect::<Vec<_>>();
+    assert!(
+        present.is_empty(),
+        "{VERUS_STRATEGY_PATH} contains forbidden proof-strategy claims:\n{}",
+        present.join("\n")
     );
 }
