@@ -13,9 +13,9 @@
 //!
 //! The outgoing queue key is intentionally deterministic: the same route and
 //! same bytes map to the same row. That gives the boundary a cheap idempotence
-//! property while callers are still free to retry after crashes. If this module starts
-//! parsing payloads, naming protocol concepts, or deciding when a row should be
-//! produced, it has crossed out of core and into a fact module.
+//! property while callers are still free to retry after crashes. If this module
+//! starts parsing payloads, naming protocol concepts, or deciding when a row
+//! should be produced, it has crossed out of core and into a fact module.
 //!
 //! Outgoing rows are produced by protocol handlers and consumed by the
 //! TCP pump. Inbound rows are produced by the TCP listener and consumed by the
@@ -27,6 +27,17 @@
 //! length-prefix framing, queue idempotence, local row cleanup, or bounded IO.
 //! Change connection-frame protocol helpers or connection network intents when
 //! the bytes inside a frame need new protocol meaning.
+//!
+//! The exported surface is split by responsibility:
+//!
+//! - `SCHEMA_SOURCE` and the table constants declare process-local queue
+//!   storage.
+//! - `NetworkTarget`, `NetworkSource`, `OutgoingFrame`, `OutgoingNetworkRow`,
+//!   and `IncomingNetworkRow` are opaque endpoint and byte-carrier vocabulary.
+//! - `queue_outgoing`, `enqueue_*`, `claim_*`, and `delete_*` own queue row
+//!   lifecycle.
+//! - `pump_outgoing`, `listen`, `Listener`, and the report structs own TCP
+//!   mechanics without interpreting frame payloads.
 
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -35,6 +46,10 @@ use std::time::{Duration, Instant};
 
 use crate::core::db::{Db, ReplayTables, SchemaSource, TableName};
 use rusqlite::{params, OptionalExtension};
+
+// =============================================================================
+// Schema And Queue Tables
+// =============================================================================
 
 /// Ephemeral outgoing network frame queue table.
 pub const OUTGOING_TABLE: TableName = TableName::new("network_outgoing");
@@ -79,6 +94,10 @@ CREATE INDEX IF NOT EXISTS network_incoming_by_received_at
         summary: &[],
     },
 };
+
+// =============================================================================
+// Opaque Network Vocabulary
+// =============================================================================
 
 /// Destination for opaque outgoing frame bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -165,6 +184,45 @@ impl OutgoingNetworkRow {
     }
 }
 
+/// Counts observed while draining the queued outgoing network rows.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OutgoingPumpReport {
+    /// Distinct queued targets considered in this pass.
+    pub target_count: usize,
+    /// Frames successfully written and removed from the queue.
+    pub sent_frames: usize,
+    /// Targets that still have queued rows after a TCP connect or write failed.
+    pub deferred_targets: usize,
+}
+
+/// Counts observed while pumping one TCP stream.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StreamReport {
+    /// Frames written to a stream.
+    pub sent_frames: usize,
+    /// Non-empty frames read from a stream and delivered to the intake callback.
+    pub received_frames: usize,
+}
+
+/// Result of polling a reusable listener once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptReport<T> {
+    /// Number of streams accepted during this poll.
+    pub accepted_connections: usize,
+    /// Caller-selected report value for accepted streams.
+    pub value: T,
+}
+
+/// Bound TCP listener that can be polled by a caller-owned loop.
+pub struct Listener {
+    listener: TcpListener,
+    local_addr: SocketAddr,
+}
+
+// =============================================================================
+// Central Procedures
+// =============================================================================
+
 /// Queue one outgoing frame for the daemon TCP pump.
 pub fn queue_outgoing(
     store: &Db,
@@ -186,6 +244,106 @@ pub fn queue_outgoing_in_tx(
     let row = OutgoingNetworkRow::new(target, bytes);
     enqueue_outgoing_in_tx(tx, std::slice::from_ref(&row)).map(|_| ())
 }
+
+/// Drain queued outgoing frames to TCP targets.
+///
+/// This is the daemon-side outgoing pump. It discovers address-keyed queued
+/// rows, opens a bounded TCP stream per target, and deletes each row only after
+/// its length-prefixed frame has been written. TCP failures are backpressure or
+/// reachability signals: they defer that target for a later pass instead of
+/// turning opaque transport state into durable protocol truth.
+pub fn pump_outgoing(
+    store: &Db,
+    max_targets: usize,
+    max_frames_per_target: usize,
+) -> Result<OutgoingPumpReport, String> {
+    let targets = queued_outgoing_targets(store, max_targets)?;
+    let mut report = OutgoingPumpReport {
+        target_count: targets.len(),
+        ..OutgoingPumpReport::default()
+    };
+    if max_frames_per_target == 0 {
+        return Ok(report);
+    }
+    for target in targets {
+        match pump_outgoing_target(store, target, max_frames_per_target)? {
+            TargetPumpOutcome::Drained { sent_frames } => {
+                report.sent_frames += sent_frames;
+            }
+            TargetPumpOutcome::Deferred { sent_frames } => {
+                report.sent_frames += sent_frames;
+                report.deferred_targets += 1;
+            }
+        }
+    }
+    Ok(report)
+}
+
+/// Bind a reusable TCP listener for caller-owned scheduling loops.
+pub fn listen(listen: SocketAddr) -> Result<Listener, String> {
+    let listener = TcpListener::bind(listen).map_err(|err| format!("listen: {err}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|err| format!("set listener nonblocking: {err}"))?;
+    let local_addr = listener
+        .local_addr()
+        .map_err(|err| format!("listener local addr: {err}"))?;
+    Ok(Listener {
+        listener,
+        local_addr,
+    })
+}
+
+impl Listener {
+    /// Return the address actually bound by the listener.
+    pub fn local_addr(&self) -> SocketAddr {
+        self.local_addr
+    }
+
+    /// Accept and pump available inbound streams up to `max_streams`.
+    ///
+    /// If no stream is ready, the returned report has zero accepted
+    /// connections. This gives higher-level schedulers a nonblocking accept
+    /// step without moving any byte interpretation into core. The callback is
+    /// called once per non-empty decoded frame, before the next frame is read.
+    /// Draining more than one stream matters because higher layers may
+    /// intentionally send many short streams as independent idempotent work
+    /// items.
+    pub fn accept_available(
+        &self,
+        max_streams: usize,
+        mut on_frame: impl FnMut(NetworkSource, Vec<u8>) -> Result<(), String>,
+    ) -> Result<AcceptReport<StreamReport>, String> {
+        let mut accepted_connections = 0;
+        let mut value = StreamReport::default();
+        for _ in 0..max_streams {
+            let (mut stream, source_addr) = match self.listener.accept() {
+                Ok(accepted) => accepted,
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(err) => return Err(format!("accept tcp stream: {err}")),
+            };
+            stream
+                .set_nonblocking(false)
+                .map_err(|err| format!("set stream blocking: {err}"))?;
+            stream
+                .set_nodelay(true)
+                .map_err(|err| format!("set stream nodelay: {err}"))?;
+            let report =
+                read_inbound_frames(&mut stream, NetworkSource::new(source_addr), &mut on_frame)?;
+            accepted_connections += 1;
+            value.sent_frames += report.sent_frames;
+            value.received_frames += report.received_frames;
+        }
+        Ok(AcceptReport {
+            accepted_connections,
+            value,
+        })
+    }
+}
+
+// =============================================================================
+// Queue Storage Stages
+// =============================================================================
 
 /// Insert outgoing rows idempotently.
 ///
@@ -262,6 +420,39 @@ pub fn delete_incoming(store: &Db, rows: &[IncomingNetworkRow]) -> Result<(), St
         .map_err(|err| format!("delete incoming network rows: {err}"))
 }
 
+/// Discover targets with queued outgoing rows.
+///
+/// Core keeps this as a separate target index so a blocked peer with many
+/// queued frames does not make the scheduler scan frame rows to find the next
+/// address.
+pub fn queued_outgoing_targets(store: &Db, limit: usize) -> Result<Vec<NetworkTarget>, String> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    let mut stmt = store
+        .conn()
+        .prepare(
+            "SELECT target_addr
+             FROM network_outgoing_targets
+             ORDER BY target_addr
+             LIMIT ?1",
+        )
+        .map_err(|err| format!("discover outgoing network targets: {err}"))?;
+    let rows = stmt
+        .query_map(params![limit], |row| row.get::<_, String>(0))
+        .map_err(|err| format!("discover outgoing network targets: {err}"))?;
+    rows.map(|row| {
+        row.map_err(|err| format!("discover outgoing network targets: {err}"))
+            .and_then(|addr| {
+                SocketAddr::from_str(&addr)
+                    .map(NetworkTarget::new)
+                    .map_err(|_| "network target address is invalid".to_string())
+            })
+    })
+    .collect()
+}
+
 /// Claim at most `limit` outgoing rows for one concrete target.
 ///
 /// The target prefix in the row key is the performance property that matters:
@@ -300,84 +491,6 @@ pub fn claim_outgoing_for_target(
     .collect()
 }
 
-/// Discover targets with queued outgoing rows.
-///
-/// Core keeps this as a separate target index so a blocked peer with many
-/// queued frames does not make the scheduler scan frame rows to find the next
-/// address.
-pub fn queued_outgoing_targets(store: &Db, limit: usize) -> Result<Vec<NetworkTarget>, String> {
-    if limit == 0 {
-        return Ok(Vec::new());
-    }
-    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-    let mut stmt = store
-        .conn()
-        .prepare(
-            "SELECT target_addr
-             FROM network_outgoing_targets
-             ORDER BY target_addr
-             LIMIT ?1",
-        )
-        .map_err(|err| format!("discover outgoing network targets: {err}"))?;
-    let rows = stmt
-        .query_map(params![limit], |row| row.get::<_, String>(0))
-        .map_err(|err| format!("discover outgoing network targets: {err}"))?;
-    rows.map(|row| {
-        row.map_err(|err| format!("discover outgoing network targets: {err}"))
-            .and_then(|addr| {
-                SocketAddr::from_str(&addr)
-                    .map(NetworkTarget::new)
-                    .map_err(|_| "network target address is invalid".to_string())
-            })
-    })
-    .collect()
-}
-
-/// Counts observed while draining the queued outgoing network rows.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct OutgoingPumpReport {
-    /// Distinct queued targets considered in this pass.
-    pub target_count: usize,
-    /// Frames successfully written and removed from the queue.
-    pub sent_frames: usize,
-    /// Targets that still have queued rows after a TCP connect or write failed.
-    pub deferred_targets: usize,
-}
-
-/// Drain queued outgoing frames to TCP targets.
-///
-/// This is the daemon-side outgoing pump. It discovers address-keyed queued
-/// rows, opens a bounded TCP stream per target, and deletes each row only after
-/// its length-prefixed frame has been written. TCP failures are backpressure or
-/// reachability signals: they defer that target for a later pass instead of
-/// turning opaque transport state into durable protocol truth.
-pub fn pump_outgoing(
-    store: &Db,
-    max_targets: usize,
-    max_frames_per_target: usize,
-) -> Result<OutgoingPumpReport, String> {
-    let targets = queued_outgoing_targets(store, max_targets)?;
-    let mut report = OutgoingPumpReport {
-        target_count: targets.len(),
-        ..OutgoingPumpReport::default()
-    };
-    if max_frames_per_target == 0 {
-        return Ok(report);
-    }
-    for target in targets {
-        match pump_outgoing_target(store, target, max_frames_per_target)? {
-            TargetPumpOutcome::Drained { sent_frames } => {
-                report.sent_frames += sent_frames;
-            }
-            TargetPumpOutcome::Deferred { sent_frames } => {
-                report.sent_frames += sent_frames;
-                report.deferred_targets += 1;
-            }
-        }
-    }
-    Ok(report)
-}
-
 /// Remove outgoing rows that have been successfully handed off by the caller.
 pub fn delete_outgoing(store: &Db, rows: &[OutgoingNetworkRow]) -> Result<(), String> {
     store
@@ -389,6 +502,111 @@ pub fn delete_outgoing(store: &Db, rows: &[OutgoingNetworkRow]) -> Result<(), St
         .map(|_| ())
         .map_err(|err| format!("delete outgoing network rows: {err}"))
 }
+
+// =============================================================================
+// Outgoing Pump Stages
+// =============================================================================
+
+enum TargetPumpOutcome {
+    Drained { sent_frames: usize },
+    Deferred { sent_frames: usize },
+}
+
+fn pump_outgoing_target(
+    store: &Db,
+    target: NetworkTarget,
+    limit: usize,
+) -> Result<TargetPumpOutcome, String> {
+    let rows = claim_outgoing_for_target(store, target, limit)?;
+    if rows.is_empty() {
+        delete_outgoing_target_if_empty(store, target)?;
+        return Ok(TargetPumpOutcome::Drained { sent_frames: 0 });
+    }
+    let mut stream = match connect(target.addr()) {
+        Ok(stream) => stream,
+        Err(_) => return Ok(TargetPumpOutcome::Deferred { sent_frames: 0 }),
+    };
+    let mut sent_rows = Vec::with_capacity(rows.len());
+    for row in rows {
+        ensure_target(target, std::slice::from_ref(&row))?;
+        if write_frame(&mut stream, &row.bytes).is_err() {
+            let sent_frames = sent_rows.len();
+            if !sent_rows.is_empty() {
+                delete_outgoing(store, &sent_rows)?;
+            }
+            return Ok(TargetPumpOutcome::Deferred { sent_frames });
+        }
+        sent_rows.push(row);
+    }
+    let sent_frames = sent_rows.len();
+    delete_outgoing(store, &sent_rows)?;
+    let _ = stream.shutdown(Shutdown::Both);
+    Ok(TargetPumpOutcome::Drained { sent_frames })
+}
+
+fn delete_outgoing_target_if_empty(store: &Db, target: NetworkTarget) -> Result<(), String> {
+    store
+        .write_transaction(|tx| {
+            let target_addr = target_addr(target);
+            let has_rows = tx
+                .conn()
+                .query_row(
+                    "SELECT 1
+                     FROM network_outgoing
+                     WHERE target_addr = ?1
+                     LIMIT 1",
+                    params![target_addr.as_str()],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if !has_rows {
+                tx.conn().execute(
+                    "DELETE FROM network_outgoing_targets WHERE target_addr = ?1",
+                    params![target_addr.as_str()],
+                )?;
+            }
+            Ok(())
+        })
+        .map_err(|err| format!("delete empty outgoing target: {err}"))
+}
+
+fn ensure_target(target: NetworkTarget, rows: &[OutgoingNetworkRow]) -> Result<(), String> {
+    if rows.iter().all(|row| row.target == target) {
+        return Ok(());
+    }
+    Err("outgoing network row target does not match stream target".to_string())
+}
+
+// =============================================================================
+// Listener And Inbound Stages
+// =============================================================================
+
+fn read_inbound_frames(
+    stream: &mut TcpStream,
+    source: NetworkSource,
+    on_frame: &mut impl FnMut(NetworkSource, Vec<u8>) -> Result<(), String>,
+) -> Result<StreamReport, String> {
+    let mut report = StreamReport::default();
+    loop {
+        let bytes = match read_frame(stream) {
+            Ok(bytes) => bytes,
+            Err(err) if is_stream_closed(&err) => break,
+            Err(err) => return Err(format!("read frame: {err}")),
+        };
+        if bytes.is_empty() {
+            continue;
+        }
+        on_frame(source, bytes)?;
+        report.received_frames += 1;
+    }
+
+    Ok(report)
+}
+
+// =============================================================================
+// Queue Storage SQL Helpers
+// =============================================================================
 
 fn insert_outgoing_rows_in_tx(store: &Db, rows: &[OutgoingNetworkRow]) -> rusqlite::Result<usize> {
     let mut inserted = 0usize;
@@ -440,92 +658,6 @@ fn insert_incoming_rows_in_tx(store: &Db, rows: &[IncomingNetworkRow]) -> rusqli
     Ok(inserted)
 }
 
-fn incoming_row_matches(
-    store: &Db,
-    row: &IncomingNetworkRow,
-    source_addr: &str,
-    received_at: i64,
-) -> rusqlite::Result<bool> {
-    store
-        .conn()
-        .query_row(
-            "SELECT source_addr, received_at, frame_bytes
-             FROM network_incoming
-             WHERE queue_key = ?1
-             LIMIT 1",
-            params![row.key.as_slice()],
-            |existing| {
-                Ok((
-                    existing.get::<_, String>(0)?,
-                    existing.get::<_, i64>(1)?,
-                    existing.get::<_, Vec<u8>>(2)?,
-                ))
-            },
-        )
-        .optional()
-        .map(|existing| {
-            existing
-                .map(|(existing_source, existing_received_at, bytes)| {
-                    existing_source == source_addr
-                        && existing_received_at == received_at
-                        && bytes.as_slice() == row.bytes.as_slice()
-                })
-                .unwrap_or(false)
-        })
-}
-
-fn decode_incoming(
-    key: Vec<u8>,
-    source_addr: &str,
-    received_at: i64,
-    bytes: Vec<u8>,
-) -> Result<IncomingNetworkRow, String> {
-    let source_addr = SocketAddr::from_str(source_addr)
-        .map_err(|_| "incoming network source address is invalid".to_string())?;
-    let received_at_ms =
-        u64::try_from(received_at).map_err(|_| "incoming network received_at is negative")?;
-    let expected = incoming_queue_key(source_addr, received_at_ms, &bytes);
-    if key != expected {
-        return Err("incoming network row key does not match row contents".to_string());
-    }
-    Ok(IncomingNetworkRow {
-        key,
-        source: NetworkSource::new(source_addr),
-        received_at_ms,
-        bytes,
-    })
-}
-
-fn outgoing_row_matches(
-    store: &Db,
-    row: &OutgoingNetworkRow,
-    target_addr: &str,
-) -> rusqlite::Result<bool> {
-    store
-        .conn()
-        .query_row(
-            "SELECT target_addr, frame_bytes
-             FROM network_outgoing
-             WHERE queue_key = ?1
-             LIMIT 1",
-            params![row.key.as_slice()],
-            |existing| {
-                Ok((
-                    existing.get::<_, String>(0)?,
-                    existing.get::<_, Vec<u8>>(1)?,
-                ))
-            },
-        )
-        .optional()
-        .map(|existing| {
-            existing
-                .map(|(existing_target, bytes)| {
-                    existing_target == target_addr && bytes.as_slice() == row.bytes.as_slice()
-                })
-                .unwrap_or(false)
-        })
-}
-
 fn insert_outgoing_targets_in_tx(store: &Db, rows: &[OutgoingNetworkRow]) -> rusqlite::Result<()> {
     for target in unique_targets(rows) {
         store.conn().execute(
@@ -573,6 +705,80 @@ fn prune_outgoing_targets_in_tx(store: &Db, rows: &[OutgoingNetworkRow]) -> rusq
     Ok(())
 }
 
+fn incoming_row_matches(
+    store: &Db,
+    row: &IncomingNetworkRow,
+    source_addr: &str,
+    received_at: i64,
+) -> rusqlite::Result<bool> {
+    store
+        .conn()
+        .query_row(
+            "SELECT source_addr, received_at, frame_bytes
+             FROM network_incoming
+             WHERE queue_key = ?1
+             LIMIT 1",
+            params![row.key.as_slice()],
+            |existing| {
+                Ok((
+                    existing.get::<_, String>(0)?,
+                    existing.get::<_, i64>(1)?,
+                    existing.get::<_, Vec<u8>>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map(|existing| {
+            existing
+                .map(|(existing_source, existing_received_at, bytes)| {
+                    existing_source == source_addr
+                        && existing_received_at == received_at
+                        && bytes.as_slice() == row.bytes.as_slice()
+                })
+                .unwrap_or(false)
+        })
+}
+
+fn outgoing_row_matches(
+    store: &Db,
+    row: &OutgoingNetworkRow,
+    target_addr: &str,
+) -> rusqlite::Result<bool> {
+    store
+        .conn()
+        .query_row(
+            "SELECT target_addr, frame_bytes
+             FROM network_outgoing
+             WHERE queue_key = ?1
+             LIMIT 1",
+            params![row.key.as_slice()],
+            |existing| {
+                Ok((
+                    existing.get::<_, String>(0)?,
+                    existing.get::<_, Vec<u8>>(1)?,
+                ))
+            },
+        )
+        .optional()
+        .map(|existing| {
+            existing
+                .map(|(existing_target, bytes)| {
+                    existing_target == target_addr && bytes.as_slice() == row.bytes.as_slice()
+                })
+                .unwrap_or(false)
+        })
+}
+
+fn sqlite_u64(value: u64, name: &str) -> rusqlite::Result<i64> {
+    i64::try_from(value).map_err(|_| {
+        rusqlite::Error::InvalidParameterName(format!("{name}: SQL value exceeds SQLite integer"))
+    })
+}
+
+// =============================================================================
+// Queue Row Key And Decode Helpers
+// =============================================================================
+
 fn unique_targets(rows: &[OutgoingNetworkRow]) -> Vec<NetworkTarget> {
     let mut targets = Vec::new();
     for row in rows {
@@ -586,6 +792,28 @@ fn unique_targets(rows: &[OutgoingNetworkRow]) -> Vec<NetworkTarget> {
 
 fn target_addr(target: NetworkTarget) -> String {
     target.addr().to_string()
+}
+
+fn decode_incoming(
+    key: Vec<u8>,
+    source_addr: &str,
+    received_at: i64,
+    bytes: Vec<u8>,
+) -> Result<IncomingNetworkRow, String> {
+    let source_addr = SocketAddr::from_str(source_addr)
+        .map_err(|_| "incoming network source address is invalid".to_string())?;
+    let received_at_ms =
+        u64::try_from(received_at).map_err(|_| "incoming network received_at is negative")?;
+    let expected = incoming_queue_key(source_addr, received_at_ms, &bytes);
+    if key != expected {
+        return Err("incoming network row key does not match row contents".to_string());
+    }
+    Ok(IncomingNetworkRow {
+        key,
+        source: NetworkSource::new(source_addr),
+        received_at_ms,
+        bytes,
+    })
 }
 
 fn decode_outgoing_for_target(
@@ -677,190 +905,9 @@ fn incoming_queue_key(addr: SocketAddr, received_at_ms: u64, bytes: &[u8]) -> Ve
     key
 }
 
-fn sqlite_u64(value: u64, name: &str) -> rusqlite::Result<i64> {
-    i64::try_from(value).map_err(|_| {
-        rusqlite::Error::InvalidParameterName(format!("{name}: SQL value exceeds SQLite integer"))
-    })
-}
-
-/// Counts observed while pumping one TCP stream.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct StreamReport {
-    /// Frames written to a stream.
-    pub sent_frames: usize,
-    /// Non-empty frames read from a stream and delivered to the intake callback.
-    pub received_frames: usize,
-}
-
-/// Result of polling a reusable listener once.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AcceptReport<T> {
-    /// Number of streams accepted during this poll.
-    pub accepted_connections: usize,
-    /// Caller-selected report value for accepted streams.
-    pub value: T,
-}
-
-/// Bound TCP listener that can be polled by a caller-owned loop.
-pub struct Listener {
-    listener: TcpListener,
-    local_addr: SocketAddr,
-}
-
-impl Listener {
-    /// Return the address actually bound by the listener.
-    pub fn local_addr(&self) -> SocketAddr {
-        self.local_addr
-    }
-
-    /// Accept and pump available inbound streams up to `max_streams`.
-    ///
-    /// If no stream is ready, the returned report has zero accepted
-    /// connections. This gives higher-level schedulers a nonblocking accept
-    /// step without moving any byte interpretation into core. The callback is
-    /// called once per non-empty decoded frame, before the next frame is read.
-    /// Draining more than one stream matters because higher layers may
-    /// intentionally send many short streams as independent idempotent work
-    /// items.
-    pub fn accept_available(
-        &self,
-        max_streams: usize,
-        mut on_frame: impl FnMut(NetworkSource, Vec<u8>) -> Result<(), String>,
-    ) -> Result<AcceptReport<StreamReport>, String> {
-        let mut accepted_connections = 0;
-        let mut value = StreamReport::default();
-        for _ in 0..max_streams {
-            let (mut stream, source_addr) = match self.listener.accept() {
-                Ok(accepted) => accepted,
-                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(err) => return Err(format!("accept tcp stream: {err}")),
-            };
-            stream
-                .set_nonblocking(false)
-                .map_err(|err| format!("set stream blocking: {err}"))?;
-            stream
-                .set_nodelay(true)
-                .map_err(|err| format!("set stream nodelay: {err}"))?;
-            let report =
-                read_inbound_frames(&mut stream, NetworkSource::new(source_addr), &mut on_frame)?;
-            accepted_connections += 1;
-            value.sent_frames += report.sent_frames;
-            value.received_frames += report.received_frames;
-        }
-        Ok(AcceptReport {
-            accepted_connections,
-            value,
-        })
-    }
-}
-
-/// Bind a reusable TCP listener for caller-owned scheduling loops.
-pub fn listen(listen: SocketAddr) -> Result<Listener, String> {
-    let listener = TcpListener::bind(listen).map_err(|err| format!("listen: {err}"))?;
-    listener
-        .set_nonblocking(true)
-        .map_err(|err| format!("set listener nonblocking: {err}"))?;
-    let local_addr = listener
-        .local_addr()
-        .map_err(|err| format!("listener local addr: {err}"))?;
-    Ok(Listener {
-        listener,
-        local_addr,
-    })
-}
-
-fn read_inbound_frames(
-    stream: &mut TcpStream,
-    source: NetworkSource,
-    on_frame: &mut impl FnMut(NetworkSource, Vec<u8>) -> Result<(), String>,
-) -> Result<StreamReport, String> {
-    let mut report = StreamReport::default();
-    loop {
-        let bytes = match read_frame(stream) {
-            Ok(bytes) => bytes,
-            Err(err) if is_stream_closed(&err) => break,
-            Err(err) => return Err(format!("read frame: {err}")),
-        };
-        if bytes.is_empty() {
-            continue;
-        }
-        on_frame(source, bytes)?;
-        report.received_frames += 1;
-    }
-
-    Ok(report)
-}
-
-enum TargetPumpOutcome {
-    Drained { sent_frames: usize },
-    Deferred { sent_frames: usize },
-}
-
-fn pump_outgoing_target(
-    store: &Db,
-    target: NetworkTarget,
-    limit: usize,
-) -> Result<TargetPumpOutcome, String> {
-    let rows = claim_outgoing_for_target(store, target, limit)?;
-    if rows.is_empty() {
-        delete_outgoing_target_if_empty(store, target)?;
-        return Ok(TargetPumpOutcome::Drained { sent_frames: 0 });
-    }
-    let mut stream = match connect(target.addr()) {
-        Ok(stream) => stream,
-        Err(_) => return Ok(TargetPumpOutcome::Deferred { sent_frames: 0 }),
-    };
-    let mut sent_rows = Vec::with_capacity(rows.len());
-    for row in rows {
-        ensure_target(target, std::slice::from_ref(&row))?;
-        if write_frame(&mut stream, &row.bytes).is_err() {
-            let sent_frames = sent_rows.len();
-            if !sent_rows.is_empty() {
-                delete_outgoing(store, &sent_rows)?;
-            }
-            return Ok(TargetPumpOutcome::Deferred { sent_frames });
-        }
-        sent_rows.push(row);
-    }
-    let sent_frames = sent_rows.len();
-    delete_outgoing(store, &sent_rows)?;
-    let _ = stream.shutdown(Shutdown::Both);
-    Ok(TargetPumpOutcome::Drained { sent_frames })
-}
-
-fn delete_outgoing_target_if_empty(store: &Db, target: NetworkTarget) -> Result<(), String> {
-    store
-        .write_transaction(|tx| {
-            let target_addr = target_addr(target);
-            let has_rows = tx
-                .conn()
-                .query_row(
-                    "SELECT 1
-                     FROM network_outgoing
-                     WHERE target_addr = ?1
-                     LIMIT 1",
-                    params![target_addr.as_str()],
-                    |_| Ok(()),
-                )
-                .optional()?
-                .is_some();
-            if !has_rows {
-                tx.conn().execute(
-                    "DELETE FROM network_outgoing_targets WHERE target_addr = ?1",
-                    params![target_addr.as_str()],
-                )?;
-            }
-            Ok(())
-        })
-        .map_err(|err| format!("delete empty outgoing target: {err}"))
-}
-
-fn ensure_target(target: NetworkTarget, rows: &[OutgoingNetworkRow]) -> Result<(), String> {
-    if rows.iter().all(|row| row.target == target) {
-        return Ok(());
-    }
-    Err("outgoing network row target does not match stream target".to_string())
-}
+// =============================================================================
+// TCP Framing Helpers
+// =============================================================================
 
 fn connect(addr: SocketAddr) -> std::io::Result<TcpStream> {
     let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))?;

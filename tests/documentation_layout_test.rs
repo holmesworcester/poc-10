@@ -941,6 +941,74 @@ fn db_module_layout_presents_exports_before_stages_and_helpers() {
 }
 
 #[test]
+fn network_module_docs_and_layout_explain_exported_io_boundary() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let network_path = root.join("src/core/network.rs");
+    let network = source_text(&network_path);
+    let module_doc = rust_module_doc_text(&network_path);
+    let normalized_doc = normalize_whitespace(&module_doc);
+
+    for required in [
+        "The exported surface is split by responsibility",
+        "`SCHEMA_SOURCE` and the table constants declare process-local queue storage",
+        "`NetworkTarget`, `NetworkSource`, `OutgoingFrame`, `OutgoingNetworkRow`, and `IncomingNetworkRow` are opaque endpoint and byte-carrier vocabulary",
+        "`queue_outgoing`, `enqueue_*`, `claim_*`, and `delete_*` own queue row lifecycle",
+        "`pump_outgoing`, `listen`, `Listener`, and the report structs own TCP mechanics without interpreting frame payloads",
+    ] {
+        assert!(
+            normalized_doc.contains(required),
+            "src/core/network.rs module docs should explain exported IO boundary detail {required:?}"
+        );
+    }
+
+    let mut previous = 0usize;
+    for section in [
+        "Schema And Queue Tables",
+        "Opaque Network Vocabulary",
+        "Central Procedures",
+        "Queue Storage Stages",
+        "Outgoing Pump Stages",
+        "Listener And Inbound Stages",
+        "Queue Storage SQL Helpers",
+        "Queue Row Key And Decode Helpers",
+        "TCP Framing Helpers",
+    ] {
+        let offset = network
+            .find(section)
+            .unwrap_or_else(|| panic!("src/core/network.rs is missing section {section:?}"));
+        assert!(
+            previous < offset,
+            "src/core/network.rs section {section:?} should appear after the previous section"
+        );
+        previous = offset;
+    }
+
+    for exported in [
+        "pub const OUTGOING_TABLE",
+        "pub const OUTGOING_TARGETS_TABLE",
+        "pub const INCOMING_TABLE",
+        "pub const SCHEMA_SOURCE",
+        "pub struct NetworkTarget",
+        "pub struct NetworkSource",
+        "pub struct OutgoingFrame",
+        "pub struct OutgoingNetworkRow",
+        "pub struct IncomingNetworkRow",
+        "pub struct OutgoingPumpReport",
+        "pub struct StreamReport",
+        "pub struct AcceptReport<T>",
+        "pub struct Listener",
+        "pub fn queue_outgoing",
+        "pub fn pump_outgoing",
+        "pub fn listen",
+    ] {
+        assert!(
+            network.contains(exported),
+            "src/core/network.rs should make exported network surface visible: {exported:?}"
+        );
+    }
+}
+
+#[test]
 fn architecture_docs_match_current_module_and_context_names() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
 
