@@ -1,10 +1,15 @@
 # Core
 
 Core is the protocol-neutral runtime substrate. A different protocol should be
-able to reuse it unchanged: core persists immutable facts, matches context ranges,
+able to reuse it unchanged: all commands, wire formats, transit layer security,
+connection bootstrapping, sync, fact relationships, data, storage, and
+materialization logic depend on protocol, not core.
+
+Core persists immutable facts, matches context ranges,
 runs projectors, dispatches queued intents, commits effect batches, hosts CLI
-and daemon loops, and moves opaque network bytes. It must not know what a
-workspace, message, invite, key wrap, sync range, or connection fact means.
+and daemon loops, and moves opaque network bytes. In the case of a messaging
+app, for example, core must not know what a workspace, message, invite, key
+wrap, sync range, or connection fact means.
 
 ## How Core Works
 
