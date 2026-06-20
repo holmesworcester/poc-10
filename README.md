@@ -43,6 +43,24 @@ Understanding these source files should be enough to grasp the design:
    on auth/local endpoint/ephemeral/receive context, and the handoff from
    deterministic projection into `create_connection` handler work.
 
+```mermaid
+flowchart LR
+    Facts["facts"]
+    Projectors["projectors"]
+    Context["needs/offers"]
+    Intents["intents"]
+    Handlers["handlers"]
+    Rows["rows and queues"]
+
+    Facts --> Projectors
+    Projectors --> Context
+    Context --> Projectors
+    Projectors --> Rows
+    Projectors --> Intents
+    Intents --> Handlers
+    Handlers --> Facts
+```
+
 ## Approach
 
 In Context, a central idea is that facts offer context to other facts. Context

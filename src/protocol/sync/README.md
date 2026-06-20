@@ -13,6 +13,25 @@ in the range. The scope owns shareability rows, projector-owned range
 summaries, compare/have/need facts, local sync-setting facts, and sync handler
 work.
 
+```mermaid
+flowchart LR
+    Projector["owning projector"]
+    Share["share_fact_with_sync"]
+    Index["visible index + closure"]
+    Compare["compare ranges"]
+    HaveNeed["have_id / need_id"]
+    Send["send selected ids"]
+    Connection["connection frames"]
+
+    Projector --> Share
+    Share --> Index
+    Index --> Compare
+    Compare --> HaveNeed
+    HaveNeed --> Send
+    Send --> Connection
+    Connection --> Projector
+```
+
 ## Interface To Core
 
 Data enters sync as ordinary sync facts from connection receive paths, as

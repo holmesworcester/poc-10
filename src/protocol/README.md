@@ -56,14 +56,24 @@ interpret the payloads it transfers.
 
 ## Data Flow
 
-```text
-command / incoming connection frame / sync request / recurring work
-  -> protocol-authored fact bytes or opaque intent payload
-  -> core admission, projection, context matching, and intent dispatch
-  -> protocol projector validates semantic proof and emits rows/context/intents
-  -> sync indexes admitted shareable facts and chooses ids for peers
-  -> connection seals selected ids into frames and core pumps opaque bytes
-  -> remote core admits opened bytes and the owning projector validates them
+```mermaid
+flowchart LR
+    Input["command / frame / sync / recurring work"]
+    Facts["protocol facts or intents"]
+    Core["core admission and dispatch"]
+    Projector["owning projector"]
+    State["rows / context / intents"]
+    Sync["sync chooses ids"]
+    Connection["connection frame facts"]
+    Remote["remote core + projectors"]
+
+    Input --> Facts
+    Facts --> Core
+    Core --> Projector
+    Projector --> State
+    Projector --> Sync
+    Sync --> Connection
+    Connection --> Remote
 ```
 
 Protocol owns every semantic arrow in that graph: what the fact means, which

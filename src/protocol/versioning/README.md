@@ -47,6 +47,25 @@ The update loop is protocol responsibility. It answers one question: has this
 database already projected retained facts into the materialized shape expected
 by this checkout?
 
+```mermaid
+flowchart TD
+    Turn["runtime turn"]
+    Check["check_version"]
+    Update["local_update fact"]
+    Rebuild["clear derived state"]
+    Replay["replay retained facts"]
+    Marker["current marker row"]
+    Guarded["normal guarded work"]
+
+    Turn --> Check
+    Check --> Update
+    Update --> Rebuild
+    Rebuild --> Replay
+    Replay --> Marker
+    Marker --> Guarded
+    Guarded --> Turn
+```
+
 `CURRENT_PROTOCOL_VERSION` is the compile-time release constant in
 `src/protocol/versioning.rs`. It is the target version for the materialized
 storage shape this binary expects. It is not read from the database.

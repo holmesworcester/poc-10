@@ -115,6 +115,23 @@ workspace and what this store is allowed to open or share for that authority.
 Content retention and deletion live in `protocol::content`; they interact with
 auth keys by emitting purge context that auth projectors can range-match.
 
+```mermaid
+flowchart LR
+    AuthFacts["workspace / user / endpoint / key facts"]
+    LocalSecrets["local secret facts"]
+    Projectors["auth projectors"]
+    Context["authority + key context"]
+    Consumers["content / connection projectors"]
+    Sync["share admitted auth facts"]
+
+    AuthFacts --> Projectors
+    LocalSecrets --> Projectors
+    Projectors --> Context
+    Context --> Consumers
+    Projectors --> Sync
+    Sync --> AuthFacts
+```
+
 ### Signature Evidence
 
 Signer-bearing shared facts store signer identity fields, not embedded

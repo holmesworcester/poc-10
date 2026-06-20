@@ -5,6 +5,27 @@ invite-backed or membership-backed request into a local connection id, receive
 opaque network bytes, open sealed frames, record local receive receipts, close
 sessions, and ask core networking to move bytes.
 
+```mermaid
+flowchart LR
+    Request["request fact"]
+    Create["create_connection"]
+    Connection["connection fact"]
+    Session["live connection"]
+    Frame["connection frame fact"]
+    Child["opened child facts"]
+    Projectors["owning projectors"]
+    Sync["sync selects ids"]
+
+    Request --> Create
+    Create --> Connection
+    Connection --> Session
+    Session --> Frame
+    Frame --> Child
+    Child --> Projectors
+    Projectors --> Sync
+    Sync --> Frame
+```
+
 ## Bootstrap And Membership
 
 There is one `request` fact family. Its fixed-width fields are always present;

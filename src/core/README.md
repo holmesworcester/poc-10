@@ -135,15 +135,26 @@ opaque outgoing rows from `network`.
 
 ## Data Flow
 
-```text
-CLI command / daemon / handler
-  -> authored facts or RuntimeEffects
-  -> durable fact admission or incoming_facts staging
-  -> projector
-  -> context needs/offers, time wakes, rows, intents
-  -> intent queue
-  -> handler
-  -> RuntimeEffects
+```mermaid
+flowchart TD
+    Host["CLI command / daemon / handler"]
+    Admission["fact admission / incoming staging"]
+    Projector["project_fact"]
+    Context["context match + wake"]
+    Rows["rows / time wakes"]
+    Queue["intent queue"]
+    Handler["handle_intent"]
+    Effects["RuntimeEffects"]
+
+    Host --> Admission
+    Admission --> Projector
+    Projector --> Context
+    Context --> Projector
+    Projector --> Rows
+    Projector --> Queue
+    Queue --> Handler
+    Handler --> Effects
+    Effects --> Admission
 ```
 
 Facts can enter through commands, handlers, sync, or incoming daemon-host input.

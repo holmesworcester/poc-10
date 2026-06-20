@@ -13,6 +13,26 @@ Data enters core through content commands (`send`, `react`, `send-file`,
 connection receive paths, or through sync replay. Core stores the immutable
 fact bytes and invokes the registered projector for each type tag.
 
+```mermaid
+flowchart TD
+    Fact["content fact"]
+    Context["auth / key / parent context"]
+    Projector["content projector"]
+    Rows["content read rows"]
+    Sync["share with sync"]
+    Removal["deletion / expiry / retention"]
+    Purge["fact_purged context"]
+    SelfPurge["self-purge"]
+
+    Fact --> Projector
+    Context --> Projector
+    Projector --> Rows
+    Projector --> Sync
+    Removal --> Purge
+    Purge --> Projector
+    Projector --> SelfPurge
+```
+
 Data leaves content projection as:
 
 - context offers such as `content_message`, `content_file`, generic core
