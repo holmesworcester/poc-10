@@ -28,7 +28,14 @@ pub mod decode {
         format!("{err:?}")
     }
 
-    // Tests. Ordered most-central-first: full roundtrip leads, then tag/length guards.
+    // Tests.
+    //
+    // Invariants:
+    // - Close bytes have one fixed-width representation.
+    // - Decode preserves the target connection id and close timestamp.
+    // - Tag and length guards reject malformed close facts.
+    //
+    // The tests read from the complete layout proof to layout guards.
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -100,7 +107,15 @@ pub mod authenticate {
         Ok(close)
     }
 
-    // Tests. Ordered most-central-first: canonical happy path leads, then rejection guards.
+    // Tests.
+    //
+    // Invariants:
+    // - Authentication admits a canonical close fact naming a non-empty connection.
+    // - The fact id is bound to the canonical bytes.
+    // - Decode-owned tag and length failures still reject at the authentication
+    //   boundary.
+    //
+    // The tests read from canonical admission to layout and id guards.
     #[cfg(test)]
     mod tests {
         use crate::core::facts::{Fact, FactScope};
@@ -257,6 +272,129 @@ pub struct ConnectionCloseProjector;
 impl ConnectionCloseProjector {
     pub fn new() -> Self {
         Self
+    }
+}
+
+// Tests.
+//
+// Invariants:
+// - Close projection accepts only Local close facts.
+// - A close fact parks on exact local connection context before it can publish
+//   connection_closed context.
+// - Once local connection context exists, projection retains the need and emits
+//   the close offer without rows, intents, time wakes, or purges.
+// - Non-local connection context is rejected rather than materialized.
+//
+// The tests read from the wait-then-offer contract to scope/context guards.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::project_fact::MatchedContext;
+    use crate::protocol::connection::close::encode;
+    use crate::protocol::connection::close::fact::ConnectionCloseFact;
+
+    fn close_fact() -> (Fact, ConnectionCloseFact) {
+        let close = ConnectionCloseFact {
+            connection_id: [8; 32],
+            closed_at_ms: 500,
+        };
+        let fact = Fact::new(
+            FactScope::Local,
+            close.closed_at_ms,
+            encode::encode_fact(&close).expect("encode close"),
+        );
+        (fact, close)
+    }
+
+    fn matched_connection(
+        close_fact_id: FactId,
+        connection_id: FactId,
+        scope: FactScope,
+    ) -> MatchedContext {
+        let payload = Fact {
+            id: connection_id,
+            scope,
+            timestamp: 100,
+            bytes: b"connection-context".to_vec(),
+        };
+        MatchedContext {
+            need: connection::project::connection_need(close_fact_id, connection_id),
+            offer: connection::project::connection_offer(connection_id, connection_id),
+            payload,
+        }
+    }
+
+    #[test]
+    fn close_parks_until_target_connection_context_exists() {
+        let (fact, close) = close_fact();
+        let expected_need = connection::project::connection_need(fact.id, close.connection_id);
+
+        let output = ConnectionCloseProjector::new()
+            .project(&fact, &ProjectionContext::default())
+            .expect("project close without connection context");
+
+        assert_eq!(output.needs, vec![expected_need]);
+        assert!(output.offers.is_empty());
+        assert!(output.effects.row_mutations.is_empty());
+        assert!(output.effects.intents.is_empty());
+        assert!(output.effects.purged_facts.is_empty());
+        assert!(output.time_wakes.is_empty());
+    }
+
+    #[test]
+    fn close_with_local_connection_context_emits_connection_closed_offer_only() {
+        let (fact, close) = close_fact();
+        let expected_need = connection::project::connection_need(fact.id, close.connection_id);
+        let context = ProjectionContext::from_matches(vec![matched_connection(
+            fact.id,
+            close.connection_id,
+            FactScope::Local,
+        )]);
+
+        let output = ConnectionCloseProjector::new()
+            .project(&fact, &context)
+            .expect("project close with connection context");
+
+        assert_eq!(output.needs, vec![expected_need]);
+        assert_eq!(
+            output.offers,
+            vec![connection_closed_offer(fact.id, close.connection_id)]
+        );
+        assert!(output.effects.row_mutations.is_empty());
+        assert!(output.effects.intents.is_empty());
+        assert!(output.effects.purged_facts.is_empty());
+        assert!(output.time_wakes.is_empty());
+    }
+
+    #[test]
+    fn close_projection_rejects_non_local_close_fact() {
+        let (canonical, _) = close_fact();
+        let non_local = Fact {
+            scope: FactScope::Global,
+            ..canonical
+        };
+
+        let err = ConnectionCloseProjector::new()
+            .project(&non_local, &ProjectionContext::default())
+            .expect_err("non-local close should reject");
+
+        assert_eq!(err, "connection close fact must have local scope");
+    }
+
+    #[test]
+    fn close_projection_rejects_non_local_connection_context() {
+        let (fact, close) = close_fact();
+        let context = ProjectionContext::from_matches(vec![matched_connection(
+            fact.id,
+            close.connection_id,
+            FactScope::Global,
+        )]);
+
+        let err = ConnectionCloseProjector::new()
+            .project(&fact, &context)
+            .expect_err("non-local connection context should reject");
+
+        assert_eq!(err, "connection close context must be local");
     }
 }
 

@@ -26,7 +26,12 @@ pub mod decode {
     }
 
     // Tests.
-    // The fixed-width round-trip for the shared-fact declaration.
+    //
+    // Invariants:
+    // - A shared-fact declaration has one fixed-width representation.
+    // - Decode preserves the workspace id and advertised fact id exactly.
+    //
+    // The single test is the full layout proof for this small payload.
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -77,7 +82,16 @@ pub mod authenticate {
     }
 
     // Tests.
-    // Most-central-first: the happy path then the id check, then decode-layer guards.
+    //
+    // Invariants:
+    // - Authentication admits canonical shared-fact declarations.
+    // - The fact id is bound to the canonical bytes.
+    // - Decode-owned tag and length failures still reject at the authentication
+    //   boundary.
+    // - Admission scope is unsigned metadata and is checked by projection, not
+    //   authentication.
+    //
+    // The tests read from canonical admission to id and layout guards.
     #[cfg(test)]
     mod tests {
         use crate::core::facts::{Fact, FactScope};
@@ -276,6 +290,77 @@ pub fn context_have_from_needs<'a>(
         }
     }
     ids.into_iter().collect()
+}
+
+// Tests.
+//
+// Invariants:
+// - Shared-fact projection accepts only the workspace scope named in the body.
+// - Projection publishes exactly one sync_exact_fact offer keyed by the advertised
+//   fact id.
+// - Projection emits no rows, intents, time wakes, or purges.
+//
+// The tests prove the offer contract first, then the unsigned-scope boundary.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::context::ContextOffer;
+    use crate::protocol::sync::shared_fact::encode;
+    use crate::protocol::sync::shared_fact::fact::SharedFact;
+
+    fn shared_fact() -> (Fact, SharedFact) {
+        let shared = SharedFact {
+            workspace_id: [1; 32],
+            fact_id: [2; 32],
+        };
+        let fact = Fact::new(
+            crate::protocol::auth::workspace::scope(shared.workspace_id),
+            100,
+            encode::encode_fact(&shared).expect("encode shared fact"),
+        );
+        (fact, shared)
+    }
+
+    #[test]
+    fn shared_fact_projects_exact_fact_offer() {
+        let (fact, shared) = shared_fact();
+        let scope = crate::protocol::auth::workspace::scope(shared.workspace_id);
+
+        let output = SyncSharedFactProjector::new()
+            .project(&fact, &ProjectionContext::default())
+            .expect("project shared fact");
+
+        assert!(output.needs.is_empty());
+        assert_eq!(
+            output.offers,
+            vec![ContextOffer::range(
+                fact.id,
+                "sync_exact_fact",
+                scope,
+                shared.fact_id,
+                shared.fact_id,
+            )]
+        );
+        assert!(output.effects.row_mutations.is_empty());
+        assert!(output.effects.intents.is_empty());
+        assert!(output.effects.purged_facts.is_empty());
+        assert!(output.time_wakes.is_empty());
+    }
+
+    #[test]
+    fn shared_fact_projection_rejects_scope_that_does_not_match_workspace() {
+        let (canonical, _) = shared_fact();
+        let wrong_scope = Fact {
+            scope: FactScope::Global,
+            ..canonical
+        };
+
+        let err = SyncSharedFactProjector::new()
+            .project(&wrong_scope, &ProjectionContext::default())
+            .expect_err("wrong scope should reject");
+
+        assert_eq!(err, "sync context fact scope does not match body workspace");
+    }
 }
 
 pub fn context_have_from_optional_needs<'a>(

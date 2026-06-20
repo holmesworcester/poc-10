@@ -235,3 +235,90 @@ fn matching_signer_secret_fact<'a>(
         .map(|(_, payload)| payload)
         .find(|payload| payload.id == creation.signer_secret_fact_id)
 }
+
+// Tests.
+//
+// Invariants:
+// - key_wrap_creation is local work and must never be admitted as synced
+//   protocol evidence;
+// - projection waits on the exact recipient key, local source secret, and local
+//   signer secret named by the work fact;
+// - before all three dependencies exist, projection emits no child key-wrap
+//   fact.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::project_fact::Projector;
+    use crate::protocol::auth::key_wrap::fact::WrapSourceKind;
+
+    #[test]
+    fn key_wrap_creation_waits_for_exact_recipient_source_and_signer_context() {
+        let fact = local_creation_fact(sample_creation());
+        let creation = decode::decode_fact(fact.body()).expect("decode creation");
+
+        let output = KeyWrapCreationProjector::new()
+            .project(&fact, &ProjectionContext::default())
+            .expect("project without context");
+
+        assert!(output.effects.facts.is_empty());
+        assert_eq!(output.needs.len(), 3);
+        assert!(output.needs.contains(&ContextNeed::range(
+            fact.id,
+            "recipient_key",
+            crate::protocol::auth::workspace::scope(creation.workspace_id),
+            creation.recipient_key_id,
+            creation.recipient_key_id,
+        )));
+        assert!(output.needs.contains(&ContextNeed::range(
+            fact.id,
+            "local_secret_source",
+            FactScope::Local,
+            creation.source_fact_id,
+            creation.source_fact_id,
+        )));
+        assert!(output.needs.contains(&ContextNeed::range(
+            fact.id,
+            "local_signer_secret",
+            crate::protocol::auth::workspace::scope(creation.workspace_id),
+            creation.owner_endpoint_id,
+            creation.owner_endpoint_id,
+        )));
+    }
+
+    #[test]
+    fn key_wrap_creation_projection_rejects_non_local_scope() {
+        let creation = sample_creation();
+        let non_local = Fact::new(
+            crate::protocol::auth::workspace::scope(creation.workspace_id),
+            10,
+            super::super::encode::encode_fact(&creation).expect("encode creation"),
+        );
+
+        let err = KeyWrapCreationProjector::new()
+            .project(&non_local, &ProjectionContext::default())
+            .expect_err("non-local creation should reject");
+
+        assert!(err.contains("local scope"), "{err}");
+    }
+
+    fn sample_creation() -> KeyWrapCreationFact {
+        KeyWrapCreationFact {
+            workspace_id: [1; 32],
+            frontier_id: [2; 32],
+            recipient_key_id: [3; 32],
+            source_fact_id: [4; 32],
+            signer_secret_fact_id: [5; 32],
+            owner_endpoint_id: [6; 32],
+            frontier_created_at_ms: 123,
+            source: WrapSourceKind::FrontierRoot,
+        }
+    }
+
+    fn local_creation_fact(creation: KeyWrapCreationFact) -> Fact {
+        Fact::new(
+            FactScope::Local,
+            10,
+            super::super::encode::encode_fact(&creation).expect("encode creation"),
+        )
+    }
+}

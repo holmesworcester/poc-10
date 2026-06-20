@@ -56,9 +56,10 @@ scope and tag sendability through the owning helpers.
 
 ## Managed Row State
 
-Sync owns shareable-fact rows, negentropy leaf rows, negentropy context-have
-rows, negentropy node rows, compare rows, have-id rows, need-id rows, and local
-sync-setting rows. The share/negentropy rows are the durable visibility index:
+Sync owns shareable-fact rows, [negentropy](https://github.com/hoytech/negentropy)-style
+[range-based set reconciliation](https://arxiv.org/abs/2212.13567) leaf rows,
+context-have rows, node rows, compare rows, have-id rows, need-id rows, and
+local sync-setting rows. The share/negentropy rows are the durable visibility index:
 shareable and leaf rows record which owner facts are eligible to send in a sync
 scope, context-have rows record direct validated dependency facts supplied by
 the owner projector, node rows store deterministic range counts and

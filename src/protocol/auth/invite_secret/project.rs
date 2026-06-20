@@ -48,7 +48,14 @@ pub mod decode {
     }
 
     // Tests.
-    // Ordered most-central-first: the full round-trips lead, then the hash/scope consistency guards, then the tag guard.
+    //
+    // Invariants:
+    // - Invite-secret bytes have one fixed-width representation.
+    // - Unscoped and scoped secrets preserve their hash, secret, workspace id, and
+    //   invite id fields.
+    // - Decode rejects internally inconsistent secret/hash or partial-scope shapes.
+    //
+    // The tests read from complete layouts to increasingly narrow layout guards.
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -138,7 +145,14 @@ pub mod authenticate {
     }
 
     // Tests.
-    // Ordered most-central-first: the happy authentication leads, then the id-binding and layout guards.
+    //
+    // Invariants:
+    // - Authentication admits a canonical local bootstrap secret fact.
+    // - The fact id is bound to the canonical bytes.
+    // - Layout failures stay delegated to the decode layer and still reject at the
+    //   authentication boundary.
+    //
+    // The tests read from the canonical admission proof to id and layout guards.
     #[cfg(test)]
     mod tests {
         use crate::core::facts::{Fact, FactScope};
@@ -249,6 +263,103 @@ pub struct InviteSecretProjector;
 impl InviteSecretProjector {
     pub fn new() -> Self {
         Self
+    }
+}
+
+// Tests.
+//
+// Invariants:
+// - Invite-secret projection is local bootstrap material: it accepts only Local
+//   scope and does not wait on remote context.
+// - A projected secret publishes both auth and connection invite-secret context
+//   keyed by its own fact id.
+// - Projection writes the invite-secret row without emitting intents, time wakes,
+//   or purges.
+//
+// The tests prove the local-only materialization contract, then the scope guard.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::context::ContextOffer;
+    use crate::core::intents::RowMutation;
+    use crate::protocol::auth::invite_secret::encode;
+    use crate::protocol::auth::invite_secret::fact::InviteSecretFact;
+    use crate::protocol::auth::invite_secret::INVITE_SECRET_ROWS;
+
+    fn scoped_secret_fact() -> (Fact, InviteSecretFact) {
+        let secret = InviteSecretFact::scoped([7; 32], [1; 32], [2; 32]);
+        let fact = Fact::new(
+            FactScope::Local,
+            100,
+            encode::encode_fact(&secret).expect("encode invite secret"),
+        );
+        (fact, secret)
+    }
+
+    #[test]
+    fn local_invite_secret_projects_two_context_offers_and_row() {
+        let (fact, secret) = scoped_secret_fact();
+
+        let output = InviteSecretProjector::new()
+            .project(&fact, &ProjectionContext::default())
+            .expect("project invite secret");
+
+        assert!(output.needs.is_empty());
+        assert_eq!(
+            output.offers,
+            vec![
+                ContextOffer::range(
+                    fact.id,
+                    "auth_invite_secret",
+                    FactScope::Global,
+                    fact.id,
+                    fact.id,
+                ),
+                ContextOffer::range(
+                    fact.id,
+                    "connection_invite_secret",
+                    FactScope::Local,
+                    fact.id,
+                    fact.id,
+                ),
+            ]
+        );
+        assert_eq!(
+            output.effects.row_mutations,
+            vec![RowMutation::InsertValues(invite_secret_row(&secret))]
+        );
+        assert_eq!(output.effects.row_mutations[0].table(), INVITE_SECRET_ROWS);
+        assert!(output.effects.intents.is_empty());
+        assert!(output.effects.purged_facts.is_empty());
+        assert!(output.time_wakes.is_empty());
+    }
+
+    #[test]
+    fn invite_secret_projection_rejects_non_local_scope() {
+        let (canonical, _) = scoped_secret_fact();
+        let non_local = Fact {
+            scope: FactScope::Global,
+            ..canonical
+        };
+
+        let err = InviteSecretProjector::new()
+            .project(&non_local, &ProjectionContext::default())
+            .expect_err("non-local invite secret should reject");
+
+        assert_eq!(err, "invite_secret fact must have local scope");
+    }
+
+    trait RowMutationTable {
+        fn table(&self) -> crate::core::db::TableName;
+    }
+
+    impl RowMutationTable for RowMutation {
+        fn table(&self) -> crate::core::db::TableName {
+            match self {
+                RowMutation::InsertValues(insert) => insert.table,
+                RowMutation::DeleteWhere(delete) => delete.table,
+            }
+        }
     }
 }
 

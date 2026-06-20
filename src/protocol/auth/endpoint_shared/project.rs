@@ -467,3 +467,178 @@ fn has_valid_authority(
     }
     Ok(true)
 }
+
+// Tests.
+//
+// Invariants:
+// - endpoint_shared facts are global claims about a workspace endpoint;
+// - projection waits for both the endpoint signature proof and the role-specific
+//   invite authority;
+// - device endpoints must be backed by a matching device_invite payload;
+// - materialization writes one endpoint row, publishes signer/exact endpoint
+//   offers, and shares only the validated proof and authority facts.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::context::ContextOffer;
+    use crate::core::facts::FactScope;
+    use crate::core::intents::RowMutation;
+    use crate::core::project_fact::{MatchedContext, Projector};
+    use crate::protocol::auth::endpoint_shared::fact::EndpointRole;
+    use crate::protocol::sync::share_fact_with_sync::decode_share_fact_with_sync;
+
+    const WORKSPACE_ID: [u8; 32] = [3; 32];
+    const USER_AUTHORITY_ID: [u8; 32] = [4; 32];
+    const DEVICE_INVITE_KEY: [u8; 32] = [8; 32];
+    const ENDPOINT_ID: [u8; 32] = [5; 32];
+    const ENDPOINT_SIGNING_KEY: [u8; 32] = [6; 32];
+
+    #[test]
+    fn device_endpoint_shared_waits_for_signature_and_device_invite_authority() {
+        let (_authority, shared, _signature) = device_fixture();
+
+        let output = EndpointSharedProjector::new()
+            .project(&shared, &ProjectionContext::default())
+            .expect("project without context");
+
+        let shared_body = decode::decode_fact(shared.body()).expect("decode shared endpoint");
+        assert_eq!(output.needs.len(), 2);
+        assert!(output.needs.contains(
+            &signature::project::signature_proof_need(
+                shared.id,
+                crate::protocol::auth::workspace::scope(shared_body.workspace_id),
+                shared.id,
+                shared_body.signer_public_key,
+            )
+            .expect("signature need")
+        ));
+        assert!(output.needs.contains(&authority_need(
+            &shared,
+            &shared_body,
+            shared_body.signer_id
+        )));
+        assert!(output.offers.is_empty());
+        assert!(output.effects.row_mutations.is_empty());
+    }
+
+    #[test]
+    fn device_endpoint_shared_materializes_row_offers_and_sync_context() {
+        let (authority, shared, signature) = device_fixture();
+
+        let output = EndpointSharedProjector::new()
+            .project(&shared, &device_context(&authority, &shared, &signature))
+            .expect("project with device authority");
+
+        assert!(output.needs.is_empty());
+        assert_eq!(output.offers.len(), 2);
+        assert!(output.offers.iter().any(|offer| {
+            offer.role.as_str() == "content_signer"
+                && offer.scope == crate::protocol::auth::workspace::scope(WORKSPACE_ID)
+        }));
+        assert!(output.offers.iter().any(|offer| {
+            offer.role.as_str() == "auth_endpoint_shared" && offer.scope == FactScope::Global
+        }));
+        assert_eq!(output.effects.row_mutations.len(), 1);
+        assert!(matches!(
+            &output.effects.row_mutations[0],
+            RowMutation::InsertValues(insert) if insert.table == super::super::ENDPOINT_SHARED_ROWS
+        ));
+        let share = decode_share_fact_with_sync(&output.effects.intents[0]).expect("share intent");
+        assert_eq!(share.workspace_id, WORKSPACE_ID);
+        assert_eq!(share.owner_fact_id, shared.id);
+        assert_eq!(share.context_have, sorted_ids([signature.id, authority.id]));
+    }
+
+    #[test]
+    fn endpoint_shared_projection_rejects_non_global_scope() {
+        let (_authority, shared, _signature) = device_fixture();
+        let non_global = Fact {
+            scope: FactScope::Local,
+            ..shared
+        };
+
+        let err = EndpointSharedProjector::new()
+            .project(&non_global, &ProjectionContext::default())
+            .expect_err("local endpoint_shared should reject");
+
+        assert!(err.contains("must have global scope"), "{err}");
+    }
+
+    fn device_fixture() -> (Fact, Fact, Fact) {
+        let device_signer_public_key = crate::core::crypto::ed25519_public_key(&DEVICE_INVITE_KEY);
+        let authority = crate::protocol::auth::device_invite::author::authored_device_invite_fact(
+            100,
+            WORKSPACE_ID,
+            USER_AUTHORITY_ID,
+            None,
+            device_signer_public_key,
+            USER_AUTHORITY_ID,
+            DEVICE_INVITE_KEY,
+        )
+        .expect("device invite");
+        let endpoint_signing_public_key =
+            crate::core::crypto::ed25519_public_key(&ENDPOINT_SIGNING_KEY);
+        let shared = crate::protocol::auth::endpoint_shared::author::authored_endpoint_shared_fact(
+            101,
+            WORKSPACE_ID,
+            USER_AUTHORITY_ID,
+            ENDPOINT_ID,
+            endpoint_signing_public_key,
+            EndpointRole::Device,
+            "laptop",
+            authority.id,
+            DEVICE_INVITE_KEY,
+        )
+        .expect("endpoint shared");
+        let signature =
+            signature::author::create_signature(WORKSPACE_ID, shared.id, &DEVICE_INVITE_KEY, 102)
+                .expect("signature");
+        (authority, shared, signature)
+    }
+
+    fn device_context(
+        authority_fact: &Fact,
+        shared_fact: &Fact,
+        signature_fact: &Fact,
+    ) -> ProjectionContext {
+        let shared_body = decode::decode_fact(shared_fact.body()).expect("decode shared endpoint");
+        let signature_need = signature::project::signature_proof_need(
+            shared_fact.id,
+            crate::protocol::auth::workspace::scope(shared_body.workspace_id),
+            shared_fact.id,
+            shared_body.signer_public_key,
+        )
+        .expect("signature need");
+        let authority_need = authority_need(shared_fact, &shared_body, shared_body.signer_id);
+        ProjectionContext::from_matches(vec![
+            MatchedContext {
+                need: signature_need,
+                offer: signature::project::signature_proof_offer(
+                    signature_fact.id,
+                    crate::protocol::auth::workspace::scope(shared_body.workspace_id),
+                    shared_fact.id,
+                    shared_body.signer_public_key,
+                )
+                .expect("signature offer"),
+                payload: signature_fact.clone(),
+            },
+            MatchedContext {
+                need: authority_need,
+                offer: ContextOffer::range(
+                    authority_fact.id,
+                    "auth_device_invite",
+                    FactScope::Global,
+                    authority_fact.id,
+                    authority_fact.id,
+                ),
+                payload: authority_fact.clone(),
+            },
+        ])
+    }
+
+    fn sorted_ids(ids: impl IntoIterator<Item = crate::core::facts::FactId>) -> Vec<[u8; 32]> {
+        let mut ids = ids.into_iter().collect::<Vec<_>>();
+        ids.sort();
+        ids
+    }
+}

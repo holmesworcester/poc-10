@@ -219,3 +219,95 @@ fn matching_local_recipient_fact<'a>(
         .map(|(_, payload)| payload)
         .find(|payload| payload.id == recovery.local_recipient_key_id)
 }
+
+// Tests.
+//
+// Invariants:
+// - key_wrap_recovery is local work and must not be admitted as shareable
+//   protocol evidence;
+// - projection waits on the exact accepted wrap, recipient key, removal
+//   frontier, and local recipient secret named by the work fact;
+// - before all four dependencies exist, projection emits no recovered local
+//   secret fact.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::facts::FactScope;
+    use crate::core::project_fact::Projector;
+
+    #[test]
+    fn key_wrap_recovery_waits_for_exact_wrap_recipient_frontier_and_local_key() {
+        let fact = local_recovery_fact(sample_recovery());
+        let recovery = decode::decode_fact(fact.body()).expect("decode recovery");
+        let scope = crate::protocol::auth::workspace::scope(recovery.workspace_id);
+
+        let output = KeyWrapRecoveryProjector::new()
+            .project(&fact, &ProjectionContext::default())
+            .expect("project without context");
+
+        assert!(output.effects.facts.is_empty());
+        assert_eq!(output.needs.len(), 4);
+        assert!(output.needs.contains(&ContextNeed::range(
+            fact.id,
+            "sync_key_wrap",
+            scope.clone(),
+            recovery.key_wrap_id,
+            recovery.key_wrap_id,
+        )));
+        assert!(output.needs.contains(&ContextNeed::range(
+            fact.id,
+            "recipient_key",
+            scope.clone(),
+            recovery.recipient_key_id,
+            recovery.recipient_key_id,
+        )));
+        assert!(output.needs.contains(&ContextNeed::range(
+            fact.id,
+            "auth_removal_frontier",
+            scope.clone(),
+            recovery.frontier_id,
+            recovery.frontier_id,
+        )));
+        assert!(output.needs.contains(&ContextNeed::range(
+            fact.id,
+            "local_recipient_key",
+            scope,
+            recovery.recipient_key_id,
+            recovery.recipient_key_id,
+        )));
+    }
+
+    #[test]
+    fn key_wrap_recovery_projection_rejects_non_local_scope() {
+        let recovery = sample_recovery();
+        let non_local = Fact::new(
+            crate::protocol::auth::workspace::scope(recovery.workspace_id),
+            10,
+            super::super::encode::encode_fact(&recovery).expect("encode recovery"),
+        );
+
+        let err = KeyWrapRecoveryProjector::new()
+            .project(&non_local, &ProjectionContext::default())
+            .expect_err("non-local recovery should reject");
+
+        assert!(err.contains("local scope"), "{err}");
+    }
+
+    fn sample_recovery() -> KeyWrapRecoveryFact {
+        KeyWrapRecoveryFact {
+            workspace_id: [1; 32],
+            frontier_id: [2; 32],
+            recipient_key_id: [3; 32],
+            key_wrap_id: [4; 32],
+            local_recipient_key_id: [5; 32],
+        }
+    }
+
+    fn local_recovery_fact(recovery: KeyWrapRecoveryFact) -> Fact {
+        Fact::new(
+            FactScope::Local,
+            10,
+            super::super::encode::encode_fact(&recovery).expect("encode recovery"),
+        )
+    }
+}

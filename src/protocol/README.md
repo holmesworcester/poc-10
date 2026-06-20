@@ -2,7 +2,7 @@
 
 Protocol is the concrete messaging protocol that runs on the reusable core
 runtime. Core owns fact storage, projection scheduling, context matching, intent
-dispatch, SQLite transaction boundaries, daemon turns, and opaque network byte
+dispatch, [SQLite](https://www.sqlite.org/index.html) transaction boundaries, daemon turns, and opaque network byte
 pumping; see [core/README.md](../core/README.md) for that machinery. Protocol
 owns the meaning of bytes: fact layouts, authority checks, encryption domains,
 read-model rows, sync visibility, connection handshakes, CLI commands, and
@@ -19,16 +19,16 @@ core by tag, handler kind, row allowlist, schema source, and recurring work.
 
 Read these files after the core README:
 
-1. `registry.rs`: the protocol integration table. It declares fact routes,
+1. [`registry.rs`](registry.rs): the protocol integration table. It declares fact routes,
    handler routes, recurring work, schema sources, row mutation allowlists, and
    command registration.
-2. `auth/README.md`: workspace authority, endpoint identity, signatures,
+2. [`auth/README.md`](auth/README.md): workspace authority, endpoint identity, signatures,
    recipient keys, key wraps, and local key material.
-3. `connection/README.md`: invite or membership handshakes, sealed connection
+3. [`connection/README.md`](connection/README.md): invite or membership handshakes, sealed connection
    facts, receive observations, established frames, and network-facing intents.
-4. `sync/README.md`: shareable fact indexing, dependency closure,
+4. [`sync/README.md`](sync/README.md): shareable fact indexing, dependency closure,
    compare/have/need convergence, live-tail sends, and recurring catch-up.
-5. `content/README.md`: encrypted messages, reactions, files, file slices,
+5. [`content/README.md`](content/README.md): encrypted messages, reactions, files, file slices,
    deletion, expiry, retention, and content read models.
 
 ## Interface To Core
@@ -208,7 +208,7 @@ Connection families:
 - `connection` is the local sealed response/session fact. It materializes live
   connection rows, offers connection context, and starts sync or response-send
   work after transcript validation.
-- `ephemeral_secret` stores local X25519 handshake material and offers it by
+- `ephemeral_secret` stores local [X25519](https://www.rfc-editor.org/rfc/rfc7748) handshake material and offers it by
   secret id and public key until close context retires it.
 - `close` publishes close context for one connection id. Target connection and
   ephemeral-secret projectors own their own row deletion or purge.

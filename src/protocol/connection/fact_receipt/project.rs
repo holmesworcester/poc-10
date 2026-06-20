@@ -88,7 +88,17 @@ pub mod decode {
         format!("{err:?}")
     }
 
-    // Tests. Ordered most-central-first: full roundtrips lead, then origin-addr canonicalization, then rejection guards.
+    // Tests.
+    //
+    // Invariants:
+    // - Fact-receipt bytes have one fixed-width representation for every receive
+    //   path shape.
+    // - Optional connection/request ids preserve absence without shifting fields.
+    // - Origin addresses decode only in canonical socket-address form.
+    // - Tag, length, and receive-path guards reject malformed receipts.
+    //
+    // The tests read from complete layouts to optional fields, normalization, and
+    // narrow layout rejections.
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -217,7 +227,15 @@ pub mod authenticate {
         Ok(received)
     }
 
-    // Tests. Ordered most-central-first: canonical happy path leads, then rejection guards.
+    // Tests.
+    //
+    // Invariants:
+    // - Authentication admits canonical local receive receipts.
+    // - The fact id is bound to the canonical bytes.
+    // - Decode-owned tag and length failures still reject at the authentication
+    //   boundary.
+    //
+    // The tests read from canonical admission to id and layout guards.
     #[cfg(test)]
     mod tests {
         use crate::core::facts::{Fact, FactScope};
@@ -400,6 +418,97 @@ pub struct ConnectionFactReceiptProjector;
 impl ConnectionFactReceiptProjector {
     pub fn new() -> Self {
         Self
+    }
+}
+
+// Tests.
+//
+// Invariants:
+// - Fact-receipt projection accepts only Local scope and waits on no authority
+//   context.
+// - Projection publishes local connection_fact_receipt context keyed by the
+//   received fact id.
+// - Projection writes the receipt-origin row and emits no intents, time wakes, or
+//   purges.
+//
+// The tests prove receipt materialization before the local-scope guard.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::intents::RowMutation;
+    use crate::protocol::connection::fact_receipt::connection_fact_receipt_row;
+    use crate::protocol::connection::fact_receipt::encode;
+    use crate::protocol::connection::fact_receipt::fact::{
+        ConnectionFactReceipt, OriginAddr, RECEIVE_PATH_CONNECTION_FRAME,
+    };
+    use crate::protocol::connection::fact_receipt::CONNECTION_FACT_RECEIPT_ROWS;
+
+    fn receipt_fact() -> (Fact, ConnectionFactReceipt) {
+        let receipt = ConnectionFactReceipt {
+            received_fact_id: [9; 32],
+            origin_addr: OriginAddr::new(b"127.0.0.1:41001").expect("origin addr"),
+            local_endpoint_id: [1; 32],
+            sender_endpoint_id: [2; 32],
+            receive_path: RECEIVE_PATH_CONNECTION_FRAME,
+            connection_id: Some([3; 32]),
+            request_id: None,
+            frame_hash: [4; 32],
+            received_at_local_ms: 500,
+        };
+        let fact = Fact::new(
+            FactScope::Local,
+            receipt.received_at_local_ms,
+            encode::encode_fact(&receipt).expect("encode receipt"),
+        );
+        (fact, receipt)
+    }
+
+    #[test]
+    fn local_fact_receipt_projects_receipt_context_and_row() {
+        let (fact, receipt) = receipt_fact();
+
+        let output = ConnectionFactReceiptProjector::new()
+            .project(&fact, &ProjectionContext::default())
+            .expect("project receipt");
+
+        assert!(output.needs.is_empty());
+        assert_eq!(
+            output.offers,
+            vec![connection_fact_receipt_offer(
+                fact.id,
+                receipt.received_fact_id,
+            )]
+        );
+        assert_eq!(
+            output.effects.row_mutations,
+            vec![RowMutation::InsertValues(
+                connection_fact_receipt_row(fact.id, &receipt).expect("receipt row")
+            )]
+        );
+        match &output.effects.row_mutations[0] {
+            RowMutation::InsertValues(insert) => {
+                assert_eq!(insert.table, CONNECTION_FACT_RECEIPT_ROWS)
+            }
+            RowMutation::DeleteWhere(_) => panic!("receipt projection should insert a row"),
+        }
+        assert!(output.effects.intents.is_empty());
+        assert!(output.effects.purged_facts.is_empty());
+        assert!(output.time_wakes.is_empty());
+    }
+
+    #[test]
+    fn fact_receipt_projection_rejects_non_local_scope() {
+        let (canonical, _) = receipt_fact();
+        let non_local = Fact {
+            scope: FactScope::Global,
+            ..canonical
+        };
+
+        let err = ConnectionFactReceiptProjector::new()
+            .project(&non_local, &ProjectionContext::default())
+            .expect_err("non-local receipt should reject");
+
+        assert_eq!(err, "connection fact receipt must have local scope");
     }
 }
 

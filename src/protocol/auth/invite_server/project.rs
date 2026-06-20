@@ -487,3 +487,159 @@ fn decode_admin_payload(
     let admin = admin::decode_fact_payload(fact.body())?;
     Ok(admin)
 }
+
+// Tests.
+//
+// Invariants:
+// - invite_server facts are global evidence for workspace invite-service
+//   authority;
+// - projection parks first on the exact signature proof for this server grant;
+// - bootstrap grants require the workspace-root signature and matching
+//   workspace payload;
+// - materialization writes one server row, publishes id and public-key offers,
+//   and shares only the validated signature/workspace context.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::context::ContextOffer;
+    use crate::core::facts::FactScope;
+    use crate::core::intents::RowMutation;
+    use crate::core::project_fact::{MatchedContext, Projector};
+    use crate::protocol::auth::workspace::author::create_workspace;
+    use crate::protocol::sync::share_fact_with_sync::decode_share_fact_with_sync;
+
+    const WORKSPACE_KEY: [u8; 32] = [9; 32];
+    const SERVER_PUBLIC_KEY: [u8; 32] = [4; 32];
+
+    #[test]
+    fn bootstrap_invite_server_waits_for_signature_before_authority_context() {
+        let (_workspace, server, _signature) = bootstrap_fixture();
+
+        let output = InviteServerProjector::new()
+            .project(&server, &ProjectionContext::default())
+            .expect("project without context");
+
+        let server_body = decode::decode_fact(server.body()).expect("decode server");
+        assert_eq!(output.needs.len(), 1);
+        assert_eq!(
+            output.needs[0],
+            signature::project::signature_proof_need(
+                server.id,
+                workspace::scope(server_body.workspace_id),
+                server.id,
+                server_body.signer_public_key,
+            )
+            .expect("signature need")
+        );
+        assert!(output.offers.is_empty());
+        assert!(output.effects.row_mutations.is_empty());
+    }
+
+    #[test]
+    fn bootstrap_invite_server_materializes_row_offers_and_sync_context() {
+        let (workspace, server, signature) = bootstrap_fixture();
+
+        let output = InviteServerProjector::new()
+            .project(&server, &bootstrap_context(&workspace, &server, &signature))
+            .expect("project with bootstrap context");
+
+        assert!(output.needs.is_empty());
+        assert_eq!(output.offers.len(), 2);
+        assert!(output.offers.iter().any(|offer| {
+            offer.role.as_str() == "auth_invite_server" && offer.scope == FactScope::Global
+        }));
+        assert!(output.offers.iter().any(|offer| {
+            offer.role.as_str() == "auth_invite_server_key"
+                && offer.scope == workspace::scope(workspace.id)
+        }));
+        assert_eq!(output.effects.row_mutations.len(), 1);
+        assert!(matches!(
+            &output.effects.row_mutations[0],
+            RowMutation::InsertValues(insert) if insert.table == super::super::INVITE_SERVER_ROWS
+        ));
+        let share = decode_share_fact_with_sync(&output.effects.intents[0]).expect("share intent");
+        assert_eq!(share.workspace_id, workspace.id);
+        assert_eq!(share.owner_fact_id, server.id);
+        assert_eq!(share.context_have, sorted_ids([workspace.id, signature.id]));
+    }
+
+    #[test]
+    fn invite_server_projection_rejects_non_global_scope() {
+        let (_workspace, server, _signature) = bootstrap_fixture();
+        let non_global = Fact {
+            scope: FactScope::Local,
+            ..server
+        };
+
+        let err = InviteServerProjector::new()
+            .project(&non_global, &ProjectionContext::default())
+            .expect_err("local server grant should reject");
+
+        assert!(err.contains("must have global scope"), "{err}");
+    }
+
+    fn bootstrap_fixture() -> (Fact, Fact, Fact) {
+        let workspace = create_workspace(100, WORKSPACE_KEY, "Essay").expect("workspace");
+        let signer_public_key = crate::core::crypto::ed25519_public_key(&WORKSPACE_KEY);
+        let server = crate::protocol::auth::invite_server::author::authored_invite_server_fact(
+            101,
+            SERVER_PUBLIC_KEY,
+            workspace.id,
+            workspace.id,
+            workspace.id,
+            signer_public_key,
+        )
+        .expect("invite server");
+        let signature =
+            signature::author::create_signature(workspace.id, server.id, &WORKSPACE_KEY, 102)
+                .expect("signature");
+        (workspace, server, signature)
+    }
+
+    fn bootstrap_context(
+        workspace_fact: &Fact,
+        server: &Fact,
+        signature_fact: &Fact,
+    ) -> ProjectionContext {
+        let server_body = decode::decode_fact(server.body()).expect("decode server");
+        let signature_need = signature::project::signature_proof_need(
+            server.id,
+            workspace::scope(server_body.workspace_id),
+            server.id,
+            server_body.signer_public_key,
+        )
+        .expect("signature need");
+        let workspace_need =
+            WorkspaceAuthorityNeeds::new(server.id, &server_body, signature_need.clone()).workspace;
+        ProjectionContext::from_matches(vec![
+            MatchedContext {
+                need: signature_need,
+                offer: signature::project::signature_proof_offer(
+                    signature_fact.id,
+                    workspace::scope(server_body.workspace_id),
+                    server.id,
+                    server_body.signer_public_key,
+                )
+                .expect("signature offer"),
+                payload: signature_fact.clone(),
+            },
+            MatchedContext {
+                need: workspace_need,
+                offer: ContextOffer::range(
+                    workspace_fact.id,
+                    "auth_workspace",
+                    FactScope::Global,
+                    workspace_fact.id,
+                    workspace_fact.id,
+                ),
+                payload: workspace_fact.clone(),
+            },
+        ])
+    }
+
+    fn sorted_ids(ids: impl IntoIterator<Item = FactId>) -> Vec<FactId> {
+        let mut ids = ids.into_iter().collect::<Vec<_>>();
+        ids.sort();
+        ids
+    }
+}

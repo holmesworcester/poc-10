@@ -577,12 +577,18 @@ fn require_fact_scope(fact: &Fact, expected: &crate::core::facts::FactScope) -> 
     }
 }
 
-// Tests. The single row-builder check that the reaction row maps fields to the
-// registry column order and stays within the fixed ciphertext slot.
+// Tests.
+//
+// Invariants:
+// - content_reaction facts must live in the workspace scope named by their body;
+// - projection waits for signature, signer, target message, and author context
+//   before it writes rows;
+// - reaction rows preserve the registry column order and fixed ciphertext slot.
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::content::reaction::fact::REACTION_NONCE_BYTES;
+    use crate::core::project_fact::Projector;
+    use crate::protocol::content::reaction::fact::{ReactionCiphertext, REACTION_NONCE_BYTES};
 
     const REACTION_COLUMNS: &[&str] = read_models::CONTENT_REACTIONS.columns;
 
@@ -607,5 +613,60 @@ mod tests {
         assert_eq!(row.values[5], Value::Bytes(vec![5; REACTION_NONCE_BYTES]));
         assert_eq!(row.values[6], Value::Bytes(b"r".to_vec()));
         assert_eq!(row.values[7], Value::Bool(false));
+    }
+
+    #[test]
+    fn content_reaction_projector_waits_for_signature_signer_target_and_author() {
+        let fact = authored_reaction();
+
+        let output = ContentReactionProjector::new()
+            .project(&fact, &ProjectionContext::default())
+            .expect("project without context");
+
+        let roles = output
+            .needs
+            .iter()
+            .map(|need| need.role.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            roles,
+            std::collections::BTreeSet::from([
+                "auth_user",
+                "content_message",
+                "content_signer",
+                "signature_proof",
+            ])
+        );
+        assert!(output.offers.is_empty());
+        assert!(output.effects.row_mutations.is_empty());
+    }
+
+    #[test]
+    fn content_reaction_projector_rejects_scope_that_does_not_match_workspace() {
+        let fact = authored_reaction();
+        let wrong_scope = crate::core::facts::Fact {
+            scope: crate::protocol::auth::workspace::scope([9; 32]),
+            ..fact
+        };
+
+        let err = ContentReactionProjector::new()
+            .project(&wrong_scope, &ProjectionContext::default())
+            .expect_err("wrong scope should reject");
+
+        assert!(err.contains("scope does not match"), "{err}");
+    }
+
+    fn authored_reaction() -> crate::core::facts::Fact {
+        crate::protocol::content::reaction::author::authored_reaction_fact(
+            100,
+            [1; 32],
+            [2; 32],
+            [3; 32],
+            [4; 32],
+            [5; REACTION_NONCE_BYTES],
+            ReactionCiphertext::new(b"thumbs-up").expect("ciphertext"),
+            [6; 32],
+        )
+        .expect("authored reaction")
     }
 }

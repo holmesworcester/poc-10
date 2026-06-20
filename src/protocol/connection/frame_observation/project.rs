@@ -40,7 +40,13 @@ pub mod decode {
         format!("{err:?}")
     }
 
-    // Tests. Ordered most-central-first: full roundtrip leads, then origin-addr normalization.
+    // Tests.
+    //
+    // Invariants:
+    // - Frame-observation bytes have one fixed-width representation.
+    // - Origin addresses normalize to canonical socket-address bytes.
+    //
+    // The tests read from the complete layout proof to the normalization guard.
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -111,7 +117,15 @@ pub mod authenticate {
         Ok(observed)
     }
 
-    // Tests. Ordered most-central-first: canonical happy path leads, then rejection guards.
+    // Tests.
+    //
+    // Invariants:
+    // - Authentication admits canonical local frame observations.
+    // - The fact id is bound to the canonical bytes.
+    // - Decode-owned tag and length failures still reject at the authentication
+    //   boundary.
+    //
+    // The tests read from canonical admission to layout and id guards.
     #[cfg(test)]
     mod tests {
         use crate::core::facts::Fact;
@@ -266,6 +280,64 @@ pub struct ConnectionFrameObservationProjector;
 impl ConnectionFrameObservationProjector {
     pub fn new() -> Self {
         Self
+    }
+}
+
+// Tests.
+//
+// Invariants:
+// - Frame-observation projection accepts only Local scope and waits on no context.
+// - Projection publishes local connection_frame_observation context keyed by the
+//   observed frame fact id.
+// - Projection emits no rows, intents, time wakes, or purges.
+//
+// The tests prove observation materialization before the local-scope guard.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn observation_fact() -> (Fact, ConnectionFrameObservationFact) {
+        let fact = connection_frame_observation_fact([9; 32], b"127.0.0.1:41001", 500)
+            .expect("observation fact");
+        let observed = decode::decode_fact(fact.body()).expect("decode observation");
+        (fact, observed)
+    }
+
+    #[test]
+    fn local_frame_observation_projects_observation_context() {
+        let (fact, observed) = observation_fact();
+
+        let output = ConnectionFrameObservationProjector::new()
+            .project(&fact, &ProjectionContext::default())
+            .expect("project observation");
+
+        assert!(output.needs.is_empty());
+        assert_eq!(
+            output.offers,
+            vec![connection_frame_observation_offer(
+                fact.id,
+                observed.frame_fact_id,
+            )]
+        );
+        assert!(output.effects.row_mutations.is_empty());
+        assert!(output.effects.intents.is_empty());
+        assert!(output.effects.purged_facts.is_empty());
+        assert!(output.time_wakes.is_empty());
+    }
+
+    #[test]
+    fn frame_observation_projection_rejects_non_local_scope() {
+        let (canonical, _) = observation_fact();
+        let non_local = Fact {
+            scope: FactScope::Global,
+            ..canonical
+        };
+
+        let err = ConnectionFrameObservationProjector::new()
+            .project(&non_local, &ProjectionContext::default())
+            .expect_err("non-local observation should reject");
+
+        assert_eq!(err, "connection frame observation must have local scope");
     }
 }
 

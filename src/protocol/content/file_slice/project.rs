@@ -601,12 +601,17 @@ fn require_fact_scope(fact: &Fact, expected: &crate::core::facts::FactScope) -> 
 
 // Tests.
 //
-// The BAO-proof slice verification is the heart of this file; these are ordered
-// most-central first: extracting the verified ciphertext leads, then rejecting a
-// wrong root, then the proof-slot sizing and the row-builder key check.
+// Invariants:
+// - content_file_slice facts must live in the workspace scope named by their
+//   body;
+// - projection waits for signature proof and parent file context before it can
+//   verify a BAO proof or write a slice row;
+// - BAO proof verification extracts only ciphertext proven by the parent root;
+// - slice rows preserve the registry column order and ordered key.
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::project_fact::Projector;
     use crate::protocol::content::file::fact::{ContentFileFact, SealedMetadata};
     use crate::protocol::content::file_slice::fact::{
         ContentFileSliceFact, FileSliceProof, FILE_SLICE_BAO_PROOF_BYTES,
@@ -713,5 +718,53 @@ mod tests {
         assert_eq!(row.values[2], Value::U64(5));
         assert_eq!(row.values[3], Value::Bytes(vec![9; 32]));
         assert_eq!(row.values[5], Value::Bytes(vec![0xcc; 16]));
+    }
+
+    #[test]
+    fn content_file_slice_projector_waits_for_signature_and_parent_file() {
+        let fact = authored_slice();
+
+        let output = ContentFileSliceProjector::new()
+            .project(&fact, &ProjectionContext::default())
+            .expect("project without context");
+
+        let roles = output
+            .needs
+            .iter()
+            .map(|need| need.role.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            roles,
+            std::collections::BTreeSet::from(["content_file", "signature_proof"])
+        );
+        assert!(output.effects.row_mutations.is_empty());
+    }
+
+    #[test]
+    fn content_file_slice_projector_rejects_scope_that_does_not_match_workspace() {
+        let fact = authored_slice();
+        let wrong_scope = crate::core::facts::Fact {
+            scope: crate::protocol::auth::workspace::scope([9; 32]),
+            ..fact
+        };
+
+        let err = ContentFileSliceProjector::new()
+            .project(&wrong_scope, &ProjectionContext::default())
+            .expect_err("wrong scope should reject");
+
+        assert!(err.contains("scope does not match"), "{err}");
+    }
+
+    fn authored_slice() -> crate::core::facts::Fact {
+        crate::protocol::content::file_slice::author::authored_file_slice_fact(
+            [1; 32],
+            100,
+            [2; 32],
+            0,
+            [3; 32],
+            FileSliceProof::new(&[0xdd; 16]).expect("proof"),
+            &[4; 32],
+        )
+        .expect("authored file slice")
     }
 }

@@ -13,20 +13,20 @@ a workspace, message, invite, key wrap, sync range, or connection fact means.
 
 If a reader understands these five files, they understand the core design:
 
-1. `project_fact.rs`: the central projection transaction. It shows how one fact
+1. [`project_fact.rs`](project_fact.rs): the central projection transaction. It shows how one fact
    becomes replacement needs, append-only offers, time wakes, row mutations,
    emitted facts, purges, and follow-up intents.
-2. `runtime.rs`: the bounded turn scheduler. It composes projection, intent
+2. [`runtime.rs`](runtime.rs): the bounded turn scheduler. It composes projection, intent
    dispatch, time wakes, incoming fact staging, network pumping, recurring work,
    and the runtime lock into the same host turn used by commands and daemons.
-3. `handle_intent.rs`: the queued stateful-work transaction. It shows how core
+3. [`handle_intent.rs`](handle_intent.rs): the queued stateful-work transaction. It shows how core
    claims one durable or local intent, loads exact fact inputs, runs a protocol
    handler, and commits successful output atomically with queue consumption.
-4. `../protocol/content/message/project.rs`: a representative protocol
+4. [`../protocol/content/message/project.rs`](../protocol/content/message/project.rs): a representative protocol
    projector for ordinary materialized content. It demonstrates the protocol
    side of decoding, context proof, semantic validation, row output, and
    follow-up work while core stays protocol-neutral.
-5. `../protocol/connection/request/project.rs`: a representative protocol
+5. [`../protocol/connection/request/project.rs`](../protocol/connection/request/project.rs): a representative protocol
    projector for connection intake. It demonstrates parked context, sealed
    payload opening, authority checks, local-versus-durable effects, and network
    follow-up around core's same projection contract.
@@ -34,7 +34,7 @@ If a reader understands these five files, they understand the core design:
 ## How Core Works
 
 Core is the reusable runtime loop around a protocol declaration. At startup the
-app hands core a `ProtocolDescription`; core opens the selected SQLite database,
+app hands core a `ProtocolDescription`; core opens the selected [SQLite](https://www.sqlite.org/index.html) database,
 applies core, network, and protocol schemas, builds the command registry, and
 constructs a `Runtime` from the declared projector, handler registry, row
 allowlist, schema sources, and runtime-turn hooks. From that point on, core does
@@ -187,7 +187,7 @@ context, and lets the owning projector decide whether that time proves anything.
 
 ## Invariants
 
-- Fact ids are deterministic BLAKE3 hashes of immutable fact bytes. Scope and
+- Fact ids are deterministic [BLAKE3](https://www.blake3.io/) hashes of immutable fact bytes. Scope and
   timestamp are local admission metadata, not part of content identity.
 - Context rows are standing state owned by one fact. A projection output
   replaces the previous needs and time wakes for that owner, while newly emitted

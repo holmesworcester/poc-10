@@ -856,11 +856,18 @@ fn validate_history_child_addressing(
 }
 
 // ---------------------------------------------------------------------------
-// Tests. Ordered most-central-first: the full coverage match leads, then the prefix and range guards.
+// Tests.
+//
+// Invariants:
+// - local_history_node_secret facts are local-only key material;
+// - projection waits on the exact removal frontier, source secret, optional
+//   tombstone source, and self-retirement context before materializing;
+// - coverage offers match only the promised time range and fact-id prefix.
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod coverage_tests {
     use super::*;
+    use crate::core::project_fact::Projector;
     use crate::protocol::auth::workspace::scope;
 
     #[test]
@@ -902,5 +909,82 @@ mod coverage_tests {
         let offer = secret_offer([4; 32], scope, workspace, frontier, 50, 40, 0, [0; 32]);
 
         assert!(!secret_coverage_offer_valid_for_need(&need, &offer));
+    }
+
+    #[test]
+    fn local_history_node_secret_waits_for_frontier_source_and_retirement_context() {
+        let (_node, fact) = node_secret_fact([0; 32]);
+
+        let output = LocalHistoryNodeSecretProjector::new()
+            .project(&fact, &ProjectionContext::default())
+            .expect("project without context");
+
+        let roles = output
+            .needs
+            .iter()
+            .map(|need| need.role.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            roles,
+            std::collections::BTreeSet::from([
+                "auth_removal_frontier",
+                "local_secret_source",
+                "local_secret_source_retired",
+            ])
+        );
+        assert!(output.offers.is_empty());
+        assert!(output.effects.row_mutations.is_empty());
+    }
+
+    #[test]
+    fn local_history_node_secret_waits_for_tombstone_source_when_named() {
+        let (_node, fact) = node_secret_fact([9; 32]);
+
+        let output = LocalHistoryNodeSecretProjector::new()
+            .project(&fact, &ProjectionContext::default())
+            .expect("project without context");
+
+        assert_eq!(
+            output
+                .needs
+                .iter()
+                .filter(|need| need.role.as_str() == "local_secret_source")
+                .count(),
+            2,
+            "source and tombstone source must be separate exact needs"
+        );
+    }
+
+    #[test]
+    fn local_history_node_secret_rejects_non_local_scope() {
+        let (node, _fact) = node_secret_fact([0; 32]);
+        let non_local = Fact::new(
+            scope(node.workspace_id),
+            100,
+            super::super::encode::encode_local_history_node_secret(&node).expect("encode node"),
+        );
+
+        let err = LocalHistoryNodeSecretProjector::new()
+            .project(&non_local, &ProjectionContext::default())
+            .expect_err("non-local history secret should reject");
+
+        assert!(err.contains("local scope"), "{err}");
+    }
+
+    fn node_secret_fact(tombstone_node_id: FactId) -> (LocalHistoryNodeSecretFact, Fact) {
+        crate::protocol::auth::local_history_node_secret::author::history_node_secret_fact(
+            [1; 32],
+            [2; 32],
+            [3; 32],
+            [4; 32],
+            40,
+            8,
+            0,
+            [0; 32],
+            tombstone_node_id,
+            [5; 32],
+            100,
+        )
+        .expect("local history node secret")
     }
 }

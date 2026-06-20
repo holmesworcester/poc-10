@@ -35,7 +35,14 @@ pub mod decode {
         format!("{err:?}")
     }
 
-    // Tests. Ordered most-central-first: full roundtrip leads, then tag/length guards.
+    // Tests.
+    //
+    // Invariants:
+    // - Ephemeral-secret bytes have one fixed-width representation.
+    // - Decode preserves owner endpoint, private/public key, and created time.
+    // - Tag and length guards reject malformed secret facts.
+    //
+    // The tests read from the complete layout proof to layout guards.
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -110,7 +117,16 @@ pub mod authenticate {
         Ok(secret)
     }
 
-    // Tests. Ordered most-central-first: canonical happy path leads, then rejection guards.
+    // Tests.
+    //
+    // Invariants:
+    // - Authentication admits canonical local ephemeral secrets whose public key
+    //   re-derives from the private key.
+    // - The fact id is bound to the canonical bytes.
+    // - Decode-owned tag and length failures still reject at the authentication
+    //   boundary.
+    //
+    // The tests read from canonical admission to layout and id guards.
     #[cfg(test)]
     mod tests {
         use crate::core::crypto;
@@ -322,12 +338,24 @@ impl ConnectionEphemeralSecretProjector {
     }
 }
 
-// Tests. Ordered most-central-first: the live-secret offer path is the projector's core behavior.
+// Tests.
+//
+// Invariants:
+// - Live ephemeral-secret projection accepts only Local scope.
+// - Live projection keeps a close-context need, publishes fact-id and public-key
+//   offers, and writes the local secret row.
+// - When matching close context appears, the target-owned projector deletes its
+//   own row and purges only its own fact id.
+// - Non-local close context is rejected rather than used for self-purge.
+//
+// The tests read from live materialization to close-gated deletion and guards.
 #[cfg(test)]
 mod project_tests {
     use super::*;
     use crate::core::crypto;
     use crate::core::facts::FactId;
+    use crate::core::project_fact::MatchedContext;
+    use crate::protocol::connection::close::fact::ConnectionCloseFact;
     use crate::protocol::connection::ephemeral_secret::encode;
     use crate::protocol::connection::ephemeral_secret::fact::ConnectionEphemeralSecretFact;
 
@@ -359,6 +387,23 @@ mod project_tests {
         assert_eq!(offer.end_key.as_bytes(), key);
     }
 
+    fn close_context(owner: FactId, secret_id: FactId, scope: FactScope) -> MatchedContext {
+        let close = ConnectionCloseFact {
+            connection_id: [9; 32],
+            closed_at_ms: 10,
+        };
+        let close_fact = Fact::new(
+            scope.clone(),
+            close.closed_at_ms,
+            close::encode::encode_fact(&close).expect("close fact"),
+        );
+        MatchedContext {
+            need: close::ephemeral_secret_closed_need(owner, secret_id),
+            offer: close::ephemeral_secret_closed_offer(close_fact.id, secret_id),
+            payload: close_fact,
+        }
+    }
+
     #[test]
     fn live_secret_offers_fact_id_and_public_key_context() {
         let (fact, secret) = secret_fact();
@@ -372,5 +417,80 @@ mod project_tests {
             CONNECTION_EPHEMERAL_SECRET_PUBLIC_KEY_ROLE,
             secret.ephemeral_public_key,
         );
+        assert_eq!(
+            output.needs,
+            vec![close::ephemeral_secret_closed_need(fact.id, fact.id)]
+        );
+        assert_eq!(
+            output.effects.row_mutations,
+            vec![RowMutation::InsertValues(connection_ephemeral_secret_row(
+                fact.id, &secret,
+            ))]
+        );
+        assert!(output.effects.intents.is_empty());
+        assert!(output.effects.purged_facts.is_empty());
+        assert!(output.time_wakes.is_empty());
+    }
+
+    #[test]
+    fn close_context_deletes_secret_row_and_purges_self() {
+        let (fact, _) = secret_fact();
+        let context = ProjectionContext::from_matches(vec![close_context(
+            fact.id,
+            fact.id,
+            FactScope::Local,
+        )]);
+
+        let output = ConnectionEphemeralSecretProjector::new()
+            .project(&fact, &context)
+            .expect("project closed secret");
+
+        assert!(output.needs.is_empty());
+        assert!(output.offers.is_empty());
+        assert_eq!(output.effects.purged_facts, vec![fact.id]);
+        assert_eq!(output.effects.row_mutations.len(), 1);
+        match &output.effects.row_mutations[0] {
+            RowMutation::DeleteWhere(delete) => {
+                assert_eq!(delete.table, CONNECTION_EPHEMERAL_SECRET_TABLE.table);
+                assert_eq!(delete.values, vec![Value::Bytes(fact.id.to_vec())]);
+            }
+            RowMutation::InsertValues(_) => panic!("closed secret should delete its row"),
+        }
+        assert!(output.effects.intents.is_empty());
+        assert!(output.time_wakes.is_empty());
+    }
+
+    #[test]
+    fn ephemeral_secret_projection_rejects_non_local_scope() {
+        let (canonical, _) = secret_fact();
+        let non_local = Fact {
+            scope: FactScope::Global,
+            ..canonical
+        };
+
+        let err = ConnectionEphemeralSecretProjector::new()
+            .project(&non_local, &ProjectionContext::default())
+            .expect_err("non-local secret should reject");
+
+        assert_eq!(
+            err,
+            "connection ephemeral secret fact must have local scope"
+        );
+    }
+
+    #[test]
+    fn close_context_for_ephemeral_secret_must_be_local() {
+        let (fact, _) = secret_fact();
+        let context = ProjectionContext::from_matches(vec![close_context(
+            fact.id,
+            fact.id,
+            FactScope::Global,
+        )]);
+
+        let err = ConnectionEphemeralSecretProjector::new()
+            .project(&fact, &context)
+            .expect_err("non-local close context should reject");
+
+        assert_eq!(err, "connection ephemeral close context must be local");
     }
 }

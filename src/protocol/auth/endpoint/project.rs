@@ -46,7 +46,13 @@ pub mod decode {
     }
 
     // Tests.
-    // Ordered most-central-first: the roundtrip proves the full layout; narrower guards follow.
+    //
+    // Invariants:
+    // - Endpoint bytes have one fixed-width representation.
+    // - Decode re-derives the transport endpoint from its secret.
+    // - Decode re-derives the signing public key from its signing secret.
+    //
+    // The tests read from the complete layout proof to the two key-pair guards.
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -125,7 +131,14 @@ pub mod authenticate {
     }
 
     // Tests.
-    // Ordered most-central-first: canonical admit, then the id check, then layout guards.
+    //
+    // Invariants:
+    // - Authentication admits canonical local endpoint private material.
+    // - The fact id is bound to the canonical bytes.
+    // - Decode-owned tag and length failures still reject at the authentication
+    //   boundary.
+    //
+    // The tests read from canonical admission to id and layout guards.
     #[cfg(test)]
     mod tests {
         use crate::core::facts::Fact;
@@ -262,6 +275,81 @@ pub struct EndpointProjector;
 impl EndpointProjector {
     pub fn new() -> Self {
         Self
+    }
+}
+
+// Tests.
+//
+// Invariants:
+// - Local endpoint projection accepts only Local scope and waits on no context.
+// - Projection publishes the local endpoint context and the daemon-endpoint
+//   marker needed by local command/runtime surfaces.
+// - Projection writes the private local-endpoint row and does not emit intents,
+//   time wakes, or purges.
+//
+// The tests prove the local materialization path first, then the scope boundary.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::context::ContextOffer;
+    use crate::core::intents::RowMutation;
+    use crate::protocol::auth::endpoint::author::{create_local_endpoint, endpoint_fact};
+    use crate::protocol::auth::endpoint::LOCAL_ENDPOINT_ROWS;
+
+    fn local_endpoint_fact() -> (Fact, super::super::fact::EndpointFact) {
+        let endpoint = create_local_endpoint();
+        let fact = endpoint_fact(100, endpoint.clone()).expect("endpoint fact");
+        (fact, endpoint)
+    }
+
+    #[test]
+    fn local_endpoint_projects_endpoint_context_daemon_marker_and_row() {
+        let (fact, endpoint) = local_endpoint_fact();
+
+        let output = EndpointProjector::new()
+            .project(&fact, &ProjectionContext::default())
+            .expect("project endpoint");
+
+        assert!(output.needs.is_empty());
+        assert_eq!(
+            output.offers,
+            vec![
+                ContextOffer::range(
+                    fact.id,
+                    "auth_local_endpoint",
+                    FactScope::Local,
+                    endpoint.endpoint,
+                    endpoint.endpoint,
+                ),
+                daemon_endpoint_offer(fact.id),
+            ]
+        );
+        assert_eq!(
+            output.effects.row_mutations,
+            vec![RowMutation::InsertValues(local_endpoint_insert(&endpoint))]
+        );
+        match &output.effects.row_mutations[0] {
+            RowMutation::InsertValues(insert) => assert_eq!(insert.table, LOCAL_ENDPOINT_ROWS),
+            RowMutation::DeleteWhere(_) => panic!("endpoint projection should insert a row"),
+        }
+        assert!(output.effects.intents.is_empty());
+        assert!(output.effects.purged_facts.is_empty());
+        assert!(output.time_wakes.is_empty());
+    }
+
+    #[test]
+    fn local_endpoint_projection_rejects_non_local_scope() {
+        let (canonical, _) = local_endpoint_fact();
+        let non_local = Fact {
+            scope: FactScope::Global,
+            ..canonical
+        };
+
+        let err = EndpointProjector::new()
+            .project(&non_local, &ProjectionContext::default())
+            .expect_err("non-local endpoint should reject");
+
+        assert_eq!(err, "local endpoint fact must have local scope");
     }
 }
 

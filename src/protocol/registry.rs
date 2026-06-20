@@ -1405,12 +1405,22 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
     ),
 ];
 
-// Tests. Ordered most-central-first: the registry's core dispatch invariant
-// (globally unique fact tags) leads, then narrower routing-policy guards.
+// Tests.
+//
+// Invariants:
+// - Every fact tag has at most one projector route.
+// - Every projected fact tag has an admission arm, and every admission arm has
+//   a projector route.
+// - Ordinary handlers require current storage; only version repair may bypass
+//   that gate.
+//
+// The tests read from fact dispatch integrity to admission completeness, then
+// handler storage policy.
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::effects::StorageRequirement;
+    use crate::core::facts::FactScope;
     use std::collections::BTreeSet;
 
     #[test]
@@ -1424,6 +1434,27 @@ mod tests {
         assert!(
             duplicates.is_empty(),
             "fact tags must be globally unique so runtime dispatch never guesses between fact types: {duplicates:?}"
+        );
+    }
+
+    #[test]
+    fn fact_routes_and_admission_arms_cover_the_same_tags() {
+        let routed = FACT_ROUTES
+            .iter()
+            .map(|route| route.tag)
+            .collect::<BTreeSet<_>>();
+        let admitted = (0u8..=u8::MAX)
+            .filter(|tag| {
+                let candidate = Fact::new(FactScope::Global, 0, vec![*tag]);
+                authenticate_fact_for_admission(&candidate)
+                    .expect_err("one-byte probe should not be a complete fact")
+                    != format!("no admission route registered for fact tag {tag}")
+            })
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(
+            admitted, routed,
+            "projector routes and write-admission arms must cover the same fact tags"
         );
     }
 
