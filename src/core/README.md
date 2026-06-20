@@ -9,6 +9,28 @@ fact relationships, data semantics, storage materialization, and read models
 belong to the protocol. In a messaging app, for example, core must not know what
 a workspace, message, invite, key wrap, sync range, or connection fact means.
 
+## Quickstart
+
+If a reader understands these five files, they understand the core design:
+
+1. `project_fact.rs`: the central projection transaction. It shows how one fact
+   becomes replacement needs, append-only offers, time wakes, row mutations,
+   emitted facts, purges, and follow-up intents.
+2. `runtime.rs`: the bounded turn scheduler. It composes projection, intent
+   dispatch, time wakes, incoming fact staging, network pumping, recurring work,
+   and the runtime lock into the same host turn used by commands and daemons.
+3. `handle_intent.rs`: the queued stateful-work transaction. It shows how core
+   claims one durable or local intent, loads exact fact inputs, runs a protocol
+   handler, and commits successful output atomically with queue consumption.
+4. `../protocol/content/message/project.rs`: a representative protocol
+   projector for ordinary materialized content. It demonstrates the protocol
+   side of decoding, context proof, semantic validation, row output, and
+   follow-up work while core stays protocol-neutral.
+5. `../protocol/connection/request/project.rs`: a representative protocol
+   projector for connection intake. It demonstrates parked context, sealed
+   payload opening, authority checks, local-versus-durable effects, and network
+   follow-up around core's same projection contract.
+
 ## How Core Works
 
 Core is the reusable runtime loop around a protocol declaration. At startup the
@@ -214,64 +236,9 @@ use core syntax and contracts, but core must not import their semantic rules.
 
 ### Top-Level Files
 
-- `app.rs`: generic process runner over a `ProtocolDescription`. It owns the
-  product-independent CLI shape: `--db`, daemon lifecycle commands, command
-  lookup, runtime opening, command dispatch, and the `assert eventually` helper.
-  Protocol code supplies declarations and command functions; core supplies the
-  stable host behavior.
-- `cli.rs`: tiny command registry and text-output boundary. It validates
-  duplicate command names, reports unknown commands with usage, carries
-  positional arguments, and returns display lines. It does not parse
-  protocol-specific options beyond handing arguments to the registered command.
-- `command.rs`: command authoring primitives. It defines the command clock,
-  local signing/encryption capability value types, workspace id alias, and
-  authored receipt-plus-facts output. Commands query `Db` directly and do
-  not get a runtime handle, handler dispatcher, network socket, or write
-  transaction.
-- `context.rs`: public vocabulary for standing context relationships. It
-  defines needs, offers, roles, opaque byte keys, canonical key construction,
-  replacement need subscriptions, append-only offer evidence, and the
-  protocol-blind overlap rule that lets core wake facts without understanding
-  their semantics.
-- `crypto.rs`: reusable primitive facade for hashes, signatures, key exchange,
-  authenticated encryption, and checked byte slices. It centralizes low-level
-  library calls. Protocol modules still own signing domains, associated data,
-  key lifetimes, authority checks, and semantic validation.
-- `daemon.rs`: long-running process lifecycle. It owns daemon start flag
-  parsing, the daemon process lock, listener setup, readiness output,
-  signal/stop/reset handling, idle sleep, and tick cadence. It receives a turn
-  closure from `app.rs` and repeats it with the live listener; it does not define
-  projection, intent, time-wake, or network queue order.
-- `effects.rs`: shared effect language for projectors and handlers.
-  `RuntimeEffects` names facts to admit, incoming facts, exact purges, row
-  mutations, durable intents, and local intents. The shared commit helper writes
-  this mechanical description atomically inside the caller's transaction and
-  rejects follow-up intent kinds that are not in the active handler registry.
-  Commands use `AuthoredFacts` facts plus a receipt instead.
-- `facts.rs`: protocol-neutral fact identity and visibility scope. It defines
-  fact ids as BLAKE3 hashes of immutable bytes, the `Fact` container, and the
-  `Global`, `Local`, and protocol-defined `Scoped` visibility model. It does
-  not interpret fact tags, signatures, messages, keys, or sync payloads.
-- `intents.rs`: queued work and handler contract types. It defines durable and
-  local intent identity, attached context fact ids, opaque payloads, row
-  mutation values, handler errors, and the rule that handlers return
-  `RuntimeEffects` instead of mutating runtime state directly.
-- `network.rs`: opaque network IO boundary. It owns listener setup, inbound
-  length-prefixed frame reading into memory-local `network_incoming`, memory-local
-  `network_outgoing` frame rows, the `network_outgoing_targets` active-peer
-  index, deterministic route+bytes row keys, bounded TCP writes, and sent-row
-  cleanup. It does not classify bootstrap frames, connection frames, auth facts,
-  sync facts, or content facts.
-- `handle_intent.rs`: one queued intent transaction. It claims one durable or
-  local intent, loads only the intent's attached fact inputs, calls the
-  registered handler, and commits successful handler output atomically with
-  queue-row deletion. It also drops terminal invalid intent rows, owns handler
-  route metadata, handler sets, recurring intent declarations, and dispatch
-  context.
-- `perf_profile.rs`: env-gated performance instrumentation. It records coarse
-  phase timings in thread-local state only when explicitly enabled, preserving
-  normal CLI output by default. It is for runtime profiling, not protocol
-  measurement semantics.
+The files are ordered by the path a maintainer should usually read first, not
+alphabetically.
+
 - `project_fact.rs`: one queued fact projection transaction plus fact lifecycle
   SQL. It admits retained and incoming facts, queues pending projection, loads
   matched context and due time ranges, runs the routed projector, applies source
@@ -283,19 +250,77 @@ use core syntax and contracts, but core must not import their semantic rules.
   due time wakes, stages inbound network bytes as incoming facts, pumps outgoing
   network rows when a daemon host supplies a listener, and composes
   `project_fact.rs` and `handle_intent.rs` into bounded runtime turns.
-- `schema.rs`: core-owned SQL table inventory. It declares facts, local
-  admissions, context edges, time wakes, pending projection, incoming facts,
-  pending projection matches, the `pending_time_ranges` work table, intent
-  queues, local network
-  tables, and rebuild reset groups. Protocol rows live in protocol schema sources.
+- `handle_intent.rs`: one queued intent transaction. It claims one durable or
+  local intent, loads only the intent's attached fact inputs, calls the
+  registered handler, and commits successful handler output atomically with
+  queue-row deletion. It also drops terminal invalid intent rows, owns handler
+  route metadata, handler sets, recurring intent declarations, and dispatch
+  context.
+- `daemon.rs`: long-running process lifecycle. It owns daemon start flag
+  parsing, the daemon process lock, listener setup, readiness output,
+  signal/stop/reset handling, idle sleep, and tick cadence. It receives a turn
+  closure from `app.rs` and repeats it with the live listener; it does not define
+  projection, intent, time-wake, or network queue order.
 - `db.rs`: SQLite substrate below runtime policy. It applies schema batches,
   opens transactions, quotes identifiers, reads schema-declared storage-version
   markers, and applies typed row mutations. It does not know what a fact tag,
   context role, network frame, or protocol row means.
+- `schema.rs`: core-owned SQL table inventory. It declares facts, local
+  admissions, context edges, time wakes, pending projection, incoming facts,
+  pending projection matches, the `pending_time_ranges` work table, intent
+  queues, local network tables, and rebuild reset groups. Protocol rows live in
+  protocol schema sources.
+- `effects.rs`: shared effect language for projectors and handlers.
+  `RuntimeEffects` names facts to admit, incoming facts, exact purges, row
+  mutations, durable intents, and local intents. The shared commit helper writes
+  this mechanical description atomically inside the caller's transaction and
+  rejects follow-up intent kinds that are not in the active handler registry.
+  Commands use `AuthoredFacts` facts plus a receipt instead.
+- `intents.rs`: queued work and handler contract types. It defines durable and
+  local intent identity, attached context fact ids, opaque payloads, row
+  mutation values, handler errors, and the rule that handlers return
+  `RuntimeEffects` instead of mutating runtime state directly.
+- `context.rs`: public vocabulary for standing context relationships. It
+  defines needs, offers, roles, opaque byte keys, canonical key construction,
+  replacement need subscriptions, append-only offer evidence, and the
+  protocol-blind overlap rule that lets core wake facts without understanding
+  their semantics.
+- `facts.rs`: protocol-neutral fact identity and visibility scope. It defines
+  fact ids as BLAKE3 hashes of immutable bytes, the `Fact` container, and the
+  `Global`, `Local`, and protocol-defined `Scoped` visibility model. It does
+  not interpret fact tags, signatures, messages, keys, or sync payloads.
+- `network.rs`: opaque network IO boundary. It owns listener setup, inbound
+  length-prefixed frame reading into memory-local `network_incoming`, memory-local
+  `network_outgoing` frame rows, the `network_outgoing_targets` active-peer
+  index, deterministic route+bytes row keys, bounded TCP writes, and sent-row
+  cleanup. It does not classify bootstrap frames, connection frames, auth facts,
+  sync facts, or content facts.
+- `app.rs`: generic process runner over a `ProtocolDescription`. It owns the
+  product-independent CLI shape: `--db`, daemon lifecycle commands, command
+  lookup, runtime opening, command dispatch, and the `assert eventually` helper.
+  Protocol code supplies declarations and command functions; core supplies the
+  stable host behavior.
+- `command.rs`: command authoring primitives. It defines the command clock,
+  local signing/encryption capability value types, workspace id alias, and
+  authored receipt-plus-facts output. Commands query `Db` directly and do
+  not get a runtime handle, handler dispatcher, network socket, or write
+  transaction.
+- `cli.rs`: tiny command registry and text-output boundary. It validates
+  duplicate command names, reports unknown commands with usage, carries
+  positional arguments, and returns display lines. It does not parse
+  protocol-specific options beyond handing arguments to the registered command.
 - `wire.rs`: fixed-layout byte primitive layer. It provides exact-length
   readers/writers, big-endian integers, one-byte booleans, bounded padded
   slots, and trailing-byte checks. Owning fact and intent modules layer tags,
   semantic validation, signatures, and test vectors on top.
+- `crypto.rs`: reusable primitive facade for hashes, signatures, key exchange,
+  authenticated encryption, and checked byte slices. It centralizes low-level
+  library calls. Protocol modules still own signing domains, associated data,
+  key lifetimes, authority checks, and semantic validation.
+- `perf_profile.rs`: env-gated performance instrumentation. It records coarse
+  phase timings in thread-local state only when explicitly enabled, preserving
+  normal CLI output by default. It is for runtime profiling, not protocol
+  measurement semantics.
 
 ### Runtime Work Sections
 
