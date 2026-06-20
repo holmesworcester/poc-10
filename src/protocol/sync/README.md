@@ -402,6 +402,24 @@ local_setting {
 
 ## Example Fact Graph
 
+```mermaid
+flowchart LR
+    Message["message_hello admitted"]
+    Share["share_fact_with_sync"]
+    Index["share rows + closure"]
+    Compare["seed compare"]
+    Have["have_id(message_hello)"]
+    Need["need_id(message_hello)"]
+    Send["send_requested_fact"]
+    Frame["connection frame fact with deps"]
+    Remote["remote projectors"]
+
+    Message --> Share --> Index
+    Index --> Compare
+    Compare --> Have --> Need --> Send
+    Send --> Frame --> Remote
+```
+
 ```text
 auth/content projector admits message_hello
   -> share_fact_with_sync(upsert message_hello, context_have=[endpoint, user, key])

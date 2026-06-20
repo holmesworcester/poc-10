@@ -730,6 +730,29 @@ local_secret_retirement {
 
 ## Example Fact Graph
 
+```mermaid
+flowchart LR
+    Workspace["workspace_acme"]
+    Invite["user_invite_alice"]
+    User["user_alice"]
+    Endpoint["endpoint_shared_alice_phone"]
+    Frontier["removal_frontier_alice"]
+    Root["local_key_secret_root"]
+    Wrap["key_wrap_for_phone"]
+    Recipient["recipient_key + local_recipient_key"]
+    Recovery["key_wrap_recovery"]
+    Secret["local_history_node_secret_phone"]
+
+    Workspace --> Invite --> User
+    Workspace --> Endpoint
+    Workspace --> Frontier --> Root
+    Root --> Wrap
+    Endpoint --> Recipient
+    Recipient --> Recovery
+    Wrap --> Recovery
+    Recovery --> Secret
+```
+
 ```text
 workspace_acme
   -> user_invite_alice -> user_alice

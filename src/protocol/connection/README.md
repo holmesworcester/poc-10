@@ -298,6 +298,27 @@ by `frame_fact_id`.
 
 ## Example Fact Graph
 
+```mermaid
+flowchart LR
+    Request["request fact"]
+    Retry["request row + maintain_connections"]
+    Network["network_outgoing bytes"]
+    Incoming["incoming request + metadata"]
+    Create["create_connection"]
+    Connection["connection fact"]
+    Session["connection row + offer"]
+    Frame["connection frame fact"]
+    Child["opened child facts"]
+    Projectors["owning projectors"]
+    Sync["sync selected ids"]
+
+    Request --> Retry --> Network --> Incoming
+    Incoming --> Create
+    Create --> Connection --> Session
+    Session --> Frame --> Child --> Projectors
+    Projectors --> Sync --> Frame
+```
+
 ```text
 outbound initiator:
   invite_secret or endpoint_shared + ephemeral_secret

@@ -307,6 +307,28 @@ retention_policy {
 
 ## Example Fact Graph
 
+```mermaid
+flowchart TD
+    Auth["auth/key context"]
+    Retention["retention_policy_workspace"]
+    Message["message_hello"]
+    Reaction["reaction_bob"]
+    File["file_descriptor_budget"]
+    Slices["file_slice_budget_*"]
+    Deletion["message_deletion_hello"]
+    Purge["fact_purged context"]
+
+    Auth --> Message
+    Retention --> Message
+    Message --> Reaction
+    Message --> File --> Slices
+    Deletion --> Purge
+    Purge --> Message
+    Purge --> Reaction
+    Purge --> File
+    Purge --> Slices
+```
+
 ```text
 auth workspace/user/endpoint/key context
   -> retention_policy_workspace
