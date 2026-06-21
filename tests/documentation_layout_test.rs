@@ -26,7 +26,6 @@ fn documentation_layout_keeps_current_docs_live_and_old_notes_archived() {
         "README.md",
         "ARCHITECTURE_DIAGRAMS.md",
         "docs/RULES.md",
-        "docs/verus_proof_strategy.md",
         "docs/todo-add-verus-proofs.md",
         "src/core/README.md",
         "src/protocol/auth/README.md",
