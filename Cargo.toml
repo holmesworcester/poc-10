@@ -22,3 +22,9 @@ x25519-dalek = { version = "2", features = ["static_secrets"] }
 
 [dev-dependencies]
 tempfile = "3"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+  'cfg(verus_keep_ghost)',
+  'cfg(verus_keep_ghost_body)',
+] }

@@ -37,18 +37,27 @@ src/core/proofs.rs
 
 For this phase, proof code lives only in `proofs.rs` files: the centralized
 core theorem surface is `src/core/proofs.rs`, and fact-family or producer
-certificates live in their existing `src/protocol/<scope>/<family>/proofs.rs`
-files. Do not add proof directories, static-analysis proof fixtures, or
-parallel source files for proof work in this phase.
+theorem modules live in their existing `src/protocol/<scope>/<family>/proofs.rs`
+files. Do not add proof directories, static-analysis proof fixtures, parallel
+source files, or normal Rust proof-certificate APIs for proof work in this
+phase.
 
-Normal Rust builds may compile executable proof predicates while the Verus
-runner is absent, but they must be ordinary checks over runtime values. Once
-Verus-only syntax lands, that syntax must be behind the same dedicated Verus
-gate used by the rest of the proof surface:
+Runtime predicates, certificate structs, unit tests, and static source analysis
+do not count as proof coverage. Do not add normal Rust `theorem_*` shims or
+certificate structs in `proofs.rs`; threat-model checklist coverage requires
+Verus proof functions that verify with the Verus runner.
+
+Verus-only proof code is gated with `cfg(verus_keep_ghost)` so normal Rust
+builds continue to compile without a Verus dependency:
 
 ```rust
-#[cfg(feature = "verus-proof")]
-pub mod proofs;
+#[cfg(verus_keep_ghost)]
+use vstd::prelude::*;
+
+#[cfg(verus_keep_ghost)]
+verus! {
+    // spec and proof declarations
+}
 ```
 
 Projector proof modules may import theorem functions from this module. They
@@ -75,17 +84,35 @@ The theorem names can be adjusted once the Verus runner lands, but the split
 must remain: core theorems establish plumbing soundness, and projector theorems
 establish protocol meaning.
 
+## Verification Command
+
+Proof modules must verify with Verus before a checklist item can move out of
+`Pending`. The test suite invokes the installed verifier with this shape:
+
+```text
+VERUS=/path/to/verus cargo test verus_projector_proof_modules_verify
+```
+
+The current workspace default is:
+
+```text
+/home/holmes/verus-install/verus-x86-linux/verus --crate-type=lib --cfg verus_keep_ghost src/protocol/auth/workspace/proofs.rs
+```
+
 ## Stub Shape
 
-The exact Verus attribute syntax should follow the runner when it is added, but
-the proof shape should look like this:
+Trusted core stubs use Verus `#[verifier::external_body]` theorem functions.
+They are the only place where this phase may assume unproved core mechanics:
 
 ```rust
-#[cfg(feature = "verus-proof")]
-pub mod proofs {
-    use vstd::prelude::*;
+#[cfg(verus_keep_ghost)]
+use vstd::prelude::*;
 
-    verus! {
+#[cfg(verus_keep_ghost)]
+verus! {
+    pub mod verus_model {
+        use vstd::prelude::*;
+
         pub struct SpecPipelineGraph { /* proof-only graph model */ }
         pub struct SpecProjectionContext { /* proof-only context model */ }
         pub struct SpecContextNeed { /* proof-only need model */ }
@@ -153,7 +180,7 @@ include protocol predicates.
 
 ## Projector Proof Contract
 
-Projector proofs should consume core theorems as certificates and then prove
+Projector proofs should consume core theorems as proof functions and then prove
 the fact-family predicate for each output.
 
 For a producer projector:
@@ -221,8 +248,9 @@ Use these rules when adding projector proofs under this strategy:
 4. Make missing-context and mismatched-context cases explicit: missing context
    parks with stable needs, and mismatched context rejects or emits no
    materialized output.
-5. Pair runtime changes with realistic Rust tests. Pure proof-only changes run
-   the Verus target once the runner exists.
+5. Pair runtime changes with realistic Rust tests, and pair proof changes with
+   a Verus verification run. A Rust test can prevent regressions, but it cannot
+   move a proof checklist item by itself.
 6. Document any additional assumptions, especially cryptographic primitive
    soundness and byte-canonicalization assumptions.
 7. Do not rely on static source analysis as proof. Tests that inspect source
@@ -245,7 +273,7 @@ Use these rules when adding projector proofs under this strategy:
 ## Threat Model Checklist
 
 Work through `THREAT_MODEL.md` in order. A checked item means this strategy has
-at least one executable projector proof slice for that invariant; it does not
+at least one Verus projector proof slice for that invariant; it does not
 mean the full cross-projector invariant is complete unless the note says so.
 
 - [x] TM-M1 root workspace slice: `auth::workspace` proves a workspace row,
