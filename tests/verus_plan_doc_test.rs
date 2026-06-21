@@ -126,8 +126,7 @@ fn verus_strategy_centralizes_assumed_core_theorems() {
     let strategy = verus_strategy();
     let required = [
         "Core proof bodies are out of scope for this phase.",
-        "src/core/proofs.rs",
-        "proof code lives only in `proofs.rs` files",
+        "src/core/assumed_proof.rs",
         "protocol-neutral plumbing properties",
         "Projector proof modules may import theorem functions from this module.",
         "must not call `assume(...)` directly",
@@ -136,8 +135,6 @@ fn verus_strategy_centralizes_assumed_core_theorems() {
         "matcher_preserves_role_scope_selector(need, matched)",
         "context_replacement_preserves_owner_boundaries(before, after, owner)",
         "purges_are_self_only(output, current_fact_id)",
-        "projection_output_owners_are_self(output, current_fact_id)",
-        "no_materialized_output(output)",
         "atomic_projection_commit_sound(before, output, after)",
         "#[verifier::external_body]",
         "Every trusted theorem stub must have a name beginning with `theorem_`",
@@ -145,12 +142,6 @@ fn verus_strategy_centralizes_assumed_core_theorems() {
         "establish protocol meaning",
         "receipt remains only a receipt",
         "Replacing a trusted core",
-        "Do not rely on static source analysis as proof.",
-        "Do not cheat by placing protocol conclusions in core.",
-        "Foundational axioms may assume SQLite transactions",
-        "## Threat Model Checklist",
-        "TM-M1 root workspace slice",
-        "TM-D6",
     ];
     let missing = required
         .into_iter()

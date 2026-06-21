@@ -32,29 +32,26 @@ protocol-neutral plumbing properties that projectors can use as evidence.
 Use a dedicated proof module for the temporary trust boundary:
 
 ```text
-src/core/proofs.rs
+src/core/assumed_proof.rs
 ```
 
-For this phase, proof code lives only in `proofs.rs` files: the centralized
-core theorem surface is `src/core/proofs.rs`, and fact-family or producer
-certificates live in their existing `src/protocol/<scope>/<family>/proofs.rs`
-files. Do not add proof directories, static-analysis proof fixtures, or
-parallel source files for proof work in this phase.
+If the crate already exposes a proof facade, `src/core/proof.rs` may re-export
+this module, but the trusted bodies should stay in `assumed_proof.rs` while they
+are assumptions. The name is intentionally blunt: reviewers should not mistake
+these stubs for completed core proofs.
 
-Normal Rust builds may compile executable proof predicates while the Verus
-runner is absent, but they must be ordinary checks over runtime values. Once
-Verus-only syntax lands, that syntax must be behind the same dedicated Verus
-gate used by the rest of the proof surface:
+Normal Rust builds must not compile proof modules. The module should be behind
+the same dedicated Verus gate used by the rest of the proof surface:
 
 ```rust
 #[cfg(feature = "verus-proof")]
-pub mod proofs;
+pub mod assumed_proof;
 ```
 
 Projector proof modules may import theorem functions from this module. They
 must not call `assume(...)` directly for core behavior. The only direct
 assumptions for core behavior belong inside the theorem stubs in
-`src/core/proofs.rs`.
+`src/core/assumed_proof.rs`.
 
 ## Assumed Core Theorems
 
@@ -67,8 +64,6 @@ The first assumed theorem surface should be small and protocol-neutral:
 | `matcher_preserves_role_scope_selector(need, matched)` | A match preserves requested role, scope, owner boundaries, and exact or range selector relation. | Does not prove that the role's producer emitted semantically valid evidence. |
 | `context_replacement_preserves_owner_boundaries(before, after, owner)` | Reprojection replaces context only for the current owner and does not rewrite unrelated owners. | Does not prove the replacement context is sufficient for any protocol output. |
 | `purges_are_self_only(output, current_fact_id)` | Projector output cannot request a purge for any fact other than the fact currently being projected. | Does not prove the self-purge is authorized by deletion, close, retirement, expiry, or retention context. |
-| `projection_output_owners_are_self(output, current_fact_id)` | Projector-emitted needs, offers, time wakes, and purges are owned by the current projected fact. | Does not prove emitted rows, offers, or intents are semantically valid. |
-| `no_materialized_output(output)` | A waiting projector output contains no rows, offers, intents, facts, time wakes, or purges. | Does not prove the waiting needs are the right protocol needs. |
 | `atomic_projection_commit_sound(before, output, after)` | Context replacement, rows, queued intents, facts, sync-share contributions, and accepted purges commit atomically. | Does not prove those effects satisfy a fact-family predicate. |
 
 The theorem names can be adjusted once the Verus runner lands, but the split
@@ -82,7 +77,7 @@ the proof shape should look like this:
 
 ```rust
 #[cfg(feature = "verus-proof")]
-pub mod proofs {
+pub mod assumed_proof {
     use vstd::prelude::*;
 
     verus! {
@@ -214,7 +209,7 @@ the assumed statement was too broad.
 Use these rules when adding projector proofs under this strategy:
 
 1. Add or update module-local semantic predicates for every protected output.
-2. Import core theorem functions from `src/core/proofs.rs`; do not create
+2. Import core theorem functions from `src/core/assumed_proof.rs`; do not create
    local copies of core assumptions.
 3. Keep protocol authority in the projector proof. Core theorems may establish
    payload origin and selector matching, not role meaning.
@@ -225,79 +220,6 @@ Use these rules when adding projector proofs under this strategy:
    the Verus target once the runner exists.
 6. Document any additional assumptions, especially cryptographic primitive
    soundness and byte-canonicalization assumptions.
-7. Do not rely on static source analysis as proof. Tests that inspect source
-   text may guard layout policy, but proof claims must be predicates or theorems
-   over the executable values the runtime actually passes between core,
-   projectors, and handlers.
-8. Do not cheat by placing protocol conclusions in core. A core theorem may be
-   difficult to prove over SQLite-backed projection machinery, but it must be a
-   logically coherent theorem about core-owned mechanics. If a theorem would
-   need to know that an admin, endpoint, receipt, deletion, key wrap, content
-   signer, or workspace is semantically valid, it belongs in the owning
-   protocol proof instead.
-9. Foundational axioms may assume SQLite transactions, cryptographic
-   primitives, BLAKE3 content addressing, byte parsers, and other substrate
-   tools satisfy their advertised contracts. Those axioms should be named at the
-   boundary where they are used and should not smuggle in protocol authority.
-10. Commit the completed work on that same worktree branch before handoff or
-    review.
-
-## Threat Model Checklist
-
-Work through `THREAT_MODEL.md` in order. A checked item means this strategy has
-at least one executable projector proof slice for that invariant; it does not
-mean the full cross-projector invariant is complete unless the note says so.
-
-- [x] TM-M1 root workspace slice: `auth::workspace` proves a workspace row,
-  `auth_workspace` offer, and sync-share intent materialize only after matching
-  signature evidence and local identity-scoped invite acceptance. Remaining:
-  user, admin, invite, endpoint, content-signer, recipient-key, and connection
-  authority projectors.
-- [x] TM-M2 workspace carrier boundary slice: workspace proof consumes
-  `signature_proof` and local `auth_workspace_accepted` predicates; carrier
-  facts alone do not satisfy the projector's authority needs. Remaining:
-  connection receipt/frame projectors and sync carrier projectors.
-- [x] TM-M3 root workspace scope slice: workspace proof keys the row, offer,
-  signature need, accepted need, and sync-share workspace id to the projected
-  workspace fact id. Remaining: all cross-workspace auth, key, content, and
-  connection projectors.
-- [ ] TM-M4: prove admin/user/device/invite issuer escalation paths in
-  `auth::admin`, `auth::user_invite`, `auth::device_invite`,
-  `auth::endpoint`, and `auth::endpoint_shared`.
-- [ ] TM-M5: prove removal, recipient-key supersession, frontier retirement,
-  and retention-floor gates before future shareability or key-wrap creation.
-- [ ] TM-C1: prove encrypted content projectors and connection frames never
-  expose plaintext without local key material.
-- [x] TM-C2 workspace local-bootstrap slice: workspace sync-share proof rejects
-  the local `invite_accepted` payload as sync context. Remaining: all local
-  secret fact families and connection sendability filters.
-- [ ] TM-C3: prove sync shareability, dependency closure, range request, and
-  connection send paths stay inside authorized non-local workspace visibility.
-- [ ] TM-C4: prove key-wrap creation validates recipient, source secret,
-  signer, frontier, source coordinate, workspace, and retirement state.
-- [ ] TM-C5: prove message, reaction, file, and file-slice opening requires
-  content authority plus local secret coverage and deletion/retirement checks.
-- [ ] TM-I1: prove content authorship is signer-bound for message, reaction,
-  file, file-slice, deletion, and retention-policy rows.
-- [ ] TM-I2: prove admin authority does not imply content-signing authority.
-- [ ] TM-I3: prove replayed facts cannot alter accepted sender, body, deletion
-  target, key coordinate, or workspace.
-- [x] TM-I4 workspace evidence slice: workspace proof treats signature and
-  invite-accepted facts as evidence that must satisfy producer predicates before
-  root workspace materialization. Remaining: connection receipts, observations,
-  requests, connections, and frame projectors.
-- [ ] TM-D1: prove deletion facts publish purge context only for authorized
-  exact targets and target projectors self-purge only themselves.
-- [ ] TM-D2: prove target deletion removes or retracts user-visible rows and
-  shareability before live send paths can expose purged bytes.
-- [ ] TM-D3: prove root and recipient private material retirement removes
-  deleted-content derivation paths while preserving surviving content coverage.
-- [ ] TM-D4: prove replayed carrier data cannot resurrect locally deleted
-  content after target-owned deletion commits.
-- [ ] TM-D5: compose content deletion, root retirement, retained-node coverage,
-  sync retraction, and local/private send rejection against deletion collusion.
-- [ ] TM-D6: prove post-retirement key healing wraps only surviving path nodes,
-  not retired roots, deleted leaves, or superseded recipient keys.
 
 ## Migration To Real Core Proofs
 
