@@ -335,8 +335,9 @@ mod projector_tests {
     fn workspace_projector_emits_sync_share_contribution_after_acceptance() {
         let fact = author::create_workspace(123_000, [9; 32], "Runtime").expect("workspace fact");
         let accepted = accepted_fact(fact.id, fact.id, 124_000);
+        let signature = signature_fact(fact.id);
         let projected = WorkspaceProjector::new()
-            .project(&fact, &accepted_context(fact.id, &accepted))
+            .project(&fact, &accepted_context(fact.id, &accepted, &signature))
             .expect("project workspace");
 
         let intent_kinds = projected
@@ -350,6 +351,14 @@ mod projector_tests {
             .offers
             .iter()
             .any(|offer| offer.role.as_str() == "auth_workspace"));
+        let share = crate::protocol::sync::share_fact_with_sync::decode_share_fact_with_sync(
+            &projected.effects.intents[0],
+        )
+        .expect("share intent");
+        assert_eq!(share.workspace_id, fact.id);
+        assert_eq!(share.owner_fact_id, fact.id);
+        assert_eq!(share.context_have, vec![signature.id]);
+        assert!(!share.context_have.contains(&accepted.id));
     }
 
     #[test]
@@ -375,8 +384,9 @@ mod projector_tests {
     fn workspace_projector_rejects_mismatched_accepted_payload() {
         let fact = author::create_workspace(123_000, [9; 32], "Runtime").expect("workspace fact");
         let accepted = accepted_fact([8; 32], [8; 32], 124_000);
+        let signature = signature_fact(fact.id);
         let err = WorkspaceProjector::new()
-            .project(&fact, &accepted_context(fact.id, &accepted))
+            .project(&fact, &accepted_context(fact.id, &accepted, &signature))
             .expect_err("mismatched accepted workspace must reject");
 
         assert!(err.contains("different workspace"), "{err}");
@@ -407,13 +417,14 @@ mod projector_tests {
     fn accepted_context(
         workspace_id: crate::core::facts::FactId,
         accepted: &Fact,
+        signature: &Fact,
     ) -> ProjectionContext {
         let need: ContextNeed =
             invite_accepted::workspace_accepted_need(workspace_id, workspace_id);
         let offer: ContextOffer =
             invite_accepted::workspace_accepted_offer(accepted.id, workspace_id);
         ProjectionContext::from_matches(vec![
-            signature_match(workspace_id),
+            signature_match(workspace_id, signature),
             MatchedContext {
                 need,
                 offer,
@@ -422,17 +433,22 @@ mod projector_tests {
         ])
     }
 
-    fn signature_match(workspace_id: crate::core::facts::FactId) -> MatchedContext {
-        let private_key = [9; 32];
-        let signer_public_key = crate::core::crypto::ed25519_public_key(&private_key);
-        let scope = crate::protocol::auth::workspace::scope(workspace_id);
-        let signature = crate::protocol::auth::signature::author::create_signature(
+    fn signature_fact(workspace_id: crate::core::facts::FactId) -> Fact {
+        crate::protocol::auth::signature::author::create_signature(
             workspace_id,
             workspace_id,
-            &private_key,
+            &[9; 32],
             123_000,
         )
-        .expect("workspace signature fact");
+        .expect("workspace signature fact")
+    }
+
+    fn signature_match(
+        workspace_id: crate::core::facts::FactId,
+        signature: &Fact,
+    ) -> MatchedContext {
+        let signer_public_key = crate::core::crypto::ed25519_public_key(&[9; 32]);
+        let scope = crate::protocol::auth::workspace::scope(workspace_id);
         MatchedContext {
             need: crate::protocol::auth::signature::project::signature_proof_need(
                 workspace_id,
@@ -448,7 +464,7 @@ mod projector_tests {
                 signer_public_key,
             )
             .expect("signature offer"),
-            payload: signature,
+            payload: signature.clone(),
         }
     }
 }
