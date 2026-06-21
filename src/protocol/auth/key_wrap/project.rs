@@ -226,7 +226,7 @@ pub mod adapt {
 // that recipient-key, key-request, and local-material projection consume. The
 // key-wrap family owns wrap sources, so the policy lives here.
 
-use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
+use crate::core::context::{ContextKey, ContextNeed, ContextOffer, ContextOfferClaim, Role};
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::project_fact::{
@@ -313,6 +313,25 @@ pub fn frontier_root_wrap_source_offers(
     )
 }
 
+pub fn frontier_root_wrap_source_offer_claims(
+    scope: FactScope,
+    workspace_id: FactId,
+    frontier_id: FactId,
+    owner_endpoint_id: FactId,
+    frontier_created_at_ms: u64,
+) -> Vec<ContextOfferClaim> {
+    wrap_source_offer_claims(
+        scope,
+        WrapSourceDescriptor {
+            workspace_id,
+            frontier_id,
+            owner_endpoint_id,
+            frontier_created_at_ms,
+            kind: WrapSourceKind::FrontierRoot,
+        },
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn history_node_wrap_source_offers(
     owner: FactId,
@@ -327,6 +346,34 @@ pub fn history_node_wrap_source_offers(
 ) -> Vec<ContextOffer> {
     wrap_source_offers(
         owner,
+        scope,
+        WrapSourceDescriptor {
+            workspace_id,
+            frontier_id,
+            owner_endpoint_id,
+            frontier_created_at_ms: 0,
+            kind: WrapSourceKind::HistoryNode {
+                range_start,
+                range_width,
+                bit_depth,
+                fact_id_prefix,
+            },
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn history_node_wrap_source_offer_claims(
+    scope: FactScope,
+    workspace_id: FactId,
+    frontier_id: FactId,
+    owner_endpoint_id: FactId,
+    range_start: u64,
+    range_width: u64,
+    bit_depth: u16,
+    fact_id_prefix: FactId,
+) -> Vec<ContextOfferClaim> {
+    wrap_source_offer_claims(
         scope,
         WrapSourceDescriptor {
             workspace_id,
@@ -360,6 +407,28 @@ fn wrap_source_offers(
     let requested_key = wrap_offer_key(REQUESTED_DOMAIN, &source, &metadata);
     let requested = ContextOffer::range(
         owner,
+        wrap_source_role(),
+        scope,
+        requested_key.clone(),
+        requested_key,
+    );
+    vec![proactive, requested]
+}
+
+fn wrap_source_offer_claims(
+    scope: FactScope,
+    source: WrapSourceDescriptor,
+) -> Vec<ContextOfferClaim> {
+    let metadata = encode_wrap_source_descriptor(&source).as_bytes().to_vec();
+    let proactive_key = wrap_offer_key(PROACTIVE_DOMAIN, &source, &metadata);
+    let proactive = ContextOfferClaim::range(
+        wrap_source_role(),
+        scope.clone(),
+        proactive_key.clone(),
+        proactive_key,
+    );
+    let requested_key = wrap_offer_key(REQUESTED_DOMAIN, &source, &metadata);
+    let requested = ContextOfferClaim::range(
         wrap_source_role(),
         scope,
         requested_key.clone(),
@@ -882,15 +951,13 @@ fn key_wrap(
                 signer_public_key,
                 wrap: wrap.clone(),
             })?))
-            .offer(ContextOffer::range(
-                fact.id,
+            .offer(ContextOfferClaim::range(
                 "sync_exact_fact",
                 scope.clone(),
                 fact.id,
                 fact.id,
             ))
-            .offer(ContextOffer::range(
-                fact.id,
+            .offer(ContextOfferClaim::range(
                 "sync_key_wrap",
                 scope,
                 fact.id,

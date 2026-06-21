@@ -204,7 +204,7 @@ pub mod adapt {
 //      and signer public key, then mark the evidence fact shareable in that
 //      workspace.
 
-use crate::core::context::{ContextNeed, ContextOffer};
+use crate::core::context::{ContextNeed, ContextOffer, ContextOfferClaim};
 use crate::core::crypto::Ed25519PublicKey;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::project_fact::{
@@ -260,8 +260,7 @@ impl SignatureProjector {
         // 2. Context.
 
         // 3. Materialize.
-        let output = ProjectionOutput::new().offer(signature_proof_offer(
-            fact.id,
+        let output = ProjectionOutput::new().offer(signature_proof_offer_claim(
             scope,
             signature.target_fact_id,
             signature.signer_public_key,
@@ -300,6 +299,21 @@ pub fn signature_proof_offer(
 ) -> Result<ContextOffer, String> {
     ContextOffer::for_key_parts(
         owner,
+        SIGNATURE_PROOF_ROLE,
+        scope,
+        [
+            crate::core::context::ContextKeyPart::bytes(&target_fact_id),
+            crate::core::context::ContextKeyPart::bytes(&signer_public_key),
+        ],
+    )
+}
+
+pub fn signature_proof_offer_claim(
+    scope: FactScope,
+    target_fact_id: FactId,
+    signer_public_key: Ed25519PublicKey,
+) -> Result<ContextOfferClaim, String> {
+    ContextOfferClaim::for_key_parts(
         SIGNATURE_PROOF_ROLE,
         scope,
         [
@@ -396,7 +410,7 @@ mod tests {
         assert_eq!(output.offers.len(), 1);
         assert_eq!(output.offers[0].role, SIGNATURE_PROOF_ROLE);
         assert_eq!(
-            output.offers[0],
+            output.offers[0].clone().into_offer(fact.id),
             signature_proof_offer(
                 fact.id,
                 crate::protocol::auth::workspace::scope(workspace_id),

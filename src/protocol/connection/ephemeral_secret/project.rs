@@ -239,7 +239,7 @@ pub mod adapt {
 // Request and connection projectors own the context checks that consume this
 // offer.
 
-use crate::core::context::ContextOffer;
+use crate::core::context::ContextOfferClaim;
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::{RowMutation, Value};
 use crate::core::project_fact::{
@@ -320,14 +320,12 @@ impl ConnectionEphemeralSecretProjector {
         // 3. Materialize.
         Ok(ProjectionOutput::new()
             .need(close_need)
-            .offer(ContextOffer::for_key(
-                fact.id,
+            .offer(ContextOfferClaim::for_key(
                 CONNECTION_EPHEMERAL_SECRET_ROLE,
                 FactScope::Local,
                 fact.id,
             ))
-            .offer(ContextOffer::for_key(
-                fact.id,
+            .offer(ContextOfferClaim::for_key(
                 CONNECTION_EPHEMERAL_SECRET_PUBLIC_KEY_ROLE,
                 FactScope::Local,
                 secret.ephemeral_public_key,

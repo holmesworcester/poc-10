@@ -384,6 +384,82 @@ impl ContextOffer {
     }
 }
 
+/// An ownerless offer emitted by a projector before core attaches the fact id.
+///
+/// Projectors describe the role, scope, and key range they provide. Core turns
+/// the claim into a stored [`ContextOffer`] with `owner = projected_fact.id`
+/// during projection preparation, so projector code cannot choose the stored
+/// offer owner.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ContextOfferClaim {
+    /// Matching role.
+    pub role: Role,
+    /// Matching scope.
+    pub scope: FactScope,
+    /// Inclusive start of the opaque byte range this offer provides.
+    pub start_key: ContextKey,
+    /// Inclusive end of the opaque byte range this offer provides.
+    pub end_key: ContextKey,
+}
+
+impl ContextOfferClaim {
+    /// Build an exact-key offer claim.
+    pub fn for_key(role: impl Into<Role>, scope: FactScope, key: impl Into<Vec<u8>>) -> Self {
+        let key = ContextKey::from_bytes(key);
+        Self {
+            role: role.into(),
+            scope,
+            start_key: key.clone(),
+            end_key: key,
+        }
+    }
+
+    /// Build an exact-key offer claim from bounded canonical key parts.
+    pub fn for_key_parts<'a, I, P>(
+        role: impl Into<Role>,
+        scope: FactScope,
+        parts: I,
+    ) -> Result<Self, String>
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<ContextKeyPart<'a>>,
+    {
+        let key = ContextKey::from_parts(parts)?;
+        Ok(Self {
+            role: role.into(),
+            scope,
+            start_key: key.clone(),
+            end_key: key,
+        })
+    }
+
+    /// Build a true range offer claim with inclusive byte endpoints.
+    pub fn range(
+        role: impl Into<Role>,
+        scope: FactScope,
+        start_key: impl Into<Vec<u8>>,
+        end_key: impl Into<Vec<u8>>,
+    ) -> Self {
+        Self {
+            role: role.into(),
+            scope,
+            start_key: ContextKey::from_bytes(start_key),
+            end_key: ContextKey::from_bytes(end_key),
+        }
+    }
+
+    /// Attach the projected fact owner after core has validated projection.
+    pub fn into_offer(self, owner: FactId) -> ContextOffer {
+        ContextOffer {
+            owner,
+            role: self.role,
+            scope: self.scope,
+            start_key: self.start_key,
+            end_key: self.end_key,
+        }
+    }
+}
+
 // =============================================================================
 // Context Set API
 // =============================================================================

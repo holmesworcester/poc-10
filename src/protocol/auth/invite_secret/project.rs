@@ -306,7 +306,12 @@ mod tests {
 
         assert!(output.needs.is_empty());
         assert_eq!(
-            output.offers,
+            output
+                .offers
+                .iter()
+                .cloned()
+                .map(|claim| claim.into_offer(fact.id))
+                .collect::<Vec<_>>(),
             vec![
                 ContextOffer::range(
                     fact.id,
@@ -379,15 +384,13 @@ impl InviteSecretProjector {
         }
         // 3. Materialize.
         Ok(ProjectionOutput::new()
-            .offer(crate::core::context::ContextOffer::range(
-                fact.id,
+            .offer(crate::core::context::ContextOfferClaim::range(
                 "auth_invite_secret",
                 crate::core::facts::FactScope::Global,
                 fact.id,
                 fact.id,
             ))
-            .offer(crate::core::context::ContextOffer::range(
-                fact.id,
+            .offer(crate::core::context::ContextOfferClaim::range(
                 "connection_invite_secret",
                 crate::core::facts::FactScope::Local,
                 fact.id,

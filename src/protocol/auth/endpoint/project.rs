@@ -269,6 +269,15 @@ pub fn daemon_endpoint_offer(
     )
 }
 
+pub fn daemon_endpoint_offer_claim() -> crate::core::context::ContextOfferClaim {
+    crate::core::context::ContextOfferClaim::range(
+        DAEMON_ENDPOINT_ROLE,
+        crate::core::facts::FactScope::Local,
+        DAEMON_ENDPOINT_KEY,
+        DAEMON_ENDPOINT_KEY,
+    )
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct EndpointProjector;
 
@@ -312,7 +321,12 @@ mod tests {
 
         assert!(output.needs.is_empty());
         assert_eq!(
-            output.offers,
+            output
+                .offers
+                .iter()
+                .cloned()
+                .map(|claim| claim.into_offer(fact.id))
+                .collect::<Vec<_>>(),
             vec![
                 ContextOffer::range(
                     fact.id,
@@ -380,14 +394,13 @@ impl EndpointProjector {
 
         // 3. Materialize.
         let mut output = ProjectionOutput::new();
-        output = output.offer(crate::core::context::ContextOffer::range(
-            fact.id,
+        output = output.offer(crate::core::context::ContextOfferClaim::range(
             "auth_local_endpoint",
             crate::core::facts::FactScope::Local,
             endpoint.endpoint,
             endpoint.endpoint,
         ));
-        output = output.offer(daemon_endpoint_offer(fact.id));
+        output = output.offer(daemon_endpoint_offer_claim());
         output = output.row_mutation(RowMutation::InsertValues(local_endpoint_insert(&endpoint)));
         Ok(output)
     }

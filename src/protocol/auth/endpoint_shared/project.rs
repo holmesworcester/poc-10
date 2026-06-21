@@ -373,15 +373,13 @@ impl EndpointSharedProjector {
         // 3. Materialize.
         Ok(share_fact_with_sync(
             ProjectionOutput::new()
-                .offer(crate::core::context::ContextOffer::range(
-                    fact.id,
+                .offer(crate::core::context::ContextOfferClaim::range(
                     "content_signer",
                     crate::protocol::auth::workspace::scope(shared.workspace_id),
                     shared.endpoint_id,
                     shared.endpoint_id,
                 ))
-                .offer(crate::core::context::ContextOffer::range(
-                    fact.id,
+                .offer(crate::core::context::ContextOfferClaim::range(
                     "auth_endpoint_shared",
                     crate::core::facts::FactScope::Global,
                     fact.id,

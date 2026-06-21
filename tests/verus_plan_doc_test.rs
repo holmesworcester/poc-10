@@ -21,6 +21,10 @@ fn repo_file(path: &str) -> String {
     fs::read_to_string(root.join(path)).unwrap_or_else(|err| panic!("read {path}: {err}"))
 }
 
+fn core_proofs() -> String {
+    repo_file("src/core/proofs.rs")
+}
+
 #[test]
 fn verus_projector_proof_modules_verify() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -105,19 +109,62 @@ fn protocol_proof_modules_do_not_claim_model_only_theorems() {
 }
 
 #[test]
+fn core_proofs_make_trust_boundary_explicit() {
+    let text = core_proofs();
+    let required = [
+        "Read the declarations from most significant to most helper-like:",
+        "Every exported `theorem_*` below currently uses",
+        "`#[verifier::external_body]`",
+        "It is an explicit proof debt",
+        "Not proven here today: every exported `theorem_*` runtime/core property.",
+        "First stubs to replace: the near-term core glue stubs",
+        "Punted composition theorem stubs.",
+        "Near-term core theorem stubs.",
+        "Foundational trusted stubs.",
+        "Spec helpers and witness structs are vocabulary.",
+        "SpecContextOfferClaim",
+        "offer_claim_finalizes_to_projected_owner",
+        "theorem_projection_context_sound",
+        "theorem_matched_payloads_are_offer_owner_facts",
+        "theorem_matcher_preserves_role_scope_selector",
+        "theorem_context_replacement_preserves_owner_boundaries",
+        "theorem_atomic_projection_commit_sound",
+        "theorem_projection_output_owner_bearing_effects_are_self",
+        "theorem_purges_are_self_only",
+        "theorem_offer_claim_finalizes_to_projected_owner",
+        "theorem_projection_context_lacks_payload_for_need",
+        "theorem_parked_output_for_missing_need",
+        "theorem_ed25519_verify_binds",
+    ];
+    let missing = required
+        .into_iter()
+        .filter(|needle| !text.contains(needle))
+        .collect::<Vec<_>>();
+    assert!(
+        missing.is_empty(),
+        "src/core/proofs.rs is missing explicit proof-boundary structure:\n{}",
+        missing.join("\n")
+    );
+}
+
+#[test]
 fn verus_plan_uses_current_fact_layout_and_context_terms() {
     let plan = verus_plan();
     let required = [
-        "src/protocol/<scope>/<fact_family>/proof.rs",
-        "Proof layout follows the target staged",
-        "fact-family roles: decode, authenticate, adapt, project, and effects",
-        "src/protocol/<scope>/<verb_object>_proof.rs",
-        "src/protocol/connection/request/proof.rs",
-        "src/protocol/connection/response/proof.rs",
-        "src/protocol/auth/admin/proof.rs",
-        "src/protocol/auth/key_wrap_creation/proof.rs",
-        "src/protocol/auth/key_wrap_recovery/proof.rs",
-        "src/protocol/content/file_slice/proof.rs",
+        "src/core/proofs.rs",
+        "src/protocol/<scope>/<fact_family>/proofs.rs",
+        "fact-family roles: decode, authenticate, adapt, project",
+        "effects. Do not create proof subdirectories",
+        "Do not create proof subdirectories, sibling `*_proof.rs` files, or",
+        "src/protocol/connection/request/proofs.rs",
+        "src/protocol/connection/connection/proofs.rs",
+        "src/protocol/auth/admin/proofs.rs",
+        "src/protocol/auth/key_wrap/proofs.rs",
+        "src/protocol/content/file/proofs.rs",
+        "nearest owning `proofs.rs` module",
+        "#[cfg(verus_keep_ghost)]",
+        "pub mod proofs;",
+        "offer_claim_finalizes_to_projected_owner(claim, offer, current_fact_id)",
         "`create.rs`, `layout.rs`, and `rows.rs` are transitional implementation or",
         "not target proof homes for new work.",
         "matched payloads are loaded from the offer owner's fact id",
@@ -144,6 +191,16 @@ fn verus_plan_uses_current_fact_layout_and_context_terms() {
         "src/core/matchers/proof.rs",
         "src/core/projection/proof.rs",
         "src/core/wake_loop/proof.rs",
+        "src/core/proof.rs",
+        "src/core/context_proof.rs",
+        "src/core/pipeline_proof.rs",
+        "src/protocol/<scope>/<fact_family>/proof.rs",
+        "src/protocol/<scope>/<verb_object>_proof.rs",
+        "src/protocol/connection/request/proof.rs",
+        "src/protocol/auth/admin/proof.rs",
+        "src/protocol/sync/share_fact_with_sync_proof.rs",
+        "pub mod proof;",
+        "feature = \"verus-proof\"",
         "payload_ref",
         "payload refs",
         "row intent",
@@ -179,7 +236,7 @@ fn verus_plan_names_meaningful_security_proof_targets() {
     let required = [
         "## Proof Target Selection",
         "### Auth Authority DAG",
-        "valid_admin_offer(admin_offer, admin_fact, graph)",
+        "valid_admin_offer_claim(admin_claim, admin_fact, graph)",
         "Cycles of admin facts do not bootstrap authority",
         "### Auth Key Material And Forward Secrecy",
         "Deterministic key-wrap identity excludes request entropy",
@@ -209,20 +266,36 @@ fn verus_plan_names_meaningful_security_proof_targets() {
         "{VERUS_TODO_PATH} is missing meaningful security proof targets:\n{}",
         missing.join("\n")
     );
+
+    let forbidden = [
+        "valid_admin_offer(admin_offer, admin_fact, graph)",
+        "valid_user_offer(user_offer, user_fact, graph)",
+        "valid_recipient_key_offer(recipient_key_offer, recipient_key_fact, graph)",
+    ];
+    let present = forbidden
+        .into_iter()
+        .filter(|needle| plan.contains(needle))
+        .collect::<Vec<_>>();
+    assert!(
+        present.is_empty(),
+        "{VERUS_TODO_PATH} still contains retired owned-offer proof terms:\n{}",
+        present.join("\n")
+    );
 }
 
 #[test]
 fn verus_strategy_centralizes_assumed_core_theorems() {
     let strategy = verus_strategy();
     let required = [
-        "Core proof bodies are out of scope for this phase.",
+        "small protocol-neutral core properties",
+        "Core matching, offer-owner payload loading, context replacement, and atomic",
         "src/core/proofs.rs",
         "proof code lives only in `proofs.rs` files",
         "Do not add normal Rust `theorem_*` shims or",
         "certificate structs in `proofs.rs`",
         "whole-codebase proof of every threat-model invariant",
         "parallel Verus model",
-        "actual core Rust behavior",
+        "real core Rust behavior",
         "Verus-only proof code is gated with `cfg(verus_keep_ghost)`",
         "protocol-neutral plumbing properties",
         "Projector proof modules may import theorem functions from this module.",
@@ -234,7 +307,11 @@ fn verus_strategy_centralizes_assumed_core_theorems() {
         "parked_output_for_missing_need(output, need)",
         "context_replacement_preserves_owner_boundaries(before, after, owner)",
         "purges_are_self_only(output, current_fact_id)",
-        "projection_output_owners_are_self(output, current_fact_id)",
+        "Core Theorem Surface",
+        "offer_claim_finalizes_to_projected_owner(claim, offer, current_fact_id)",
+        "projection_output_owner_bearing_effects_are_self(output, current_fact_id)",
+        "trusted until core model",
+        "prove now",
         "atomic_projection_commit_sound(before, output, after)",
         "#[verifier::external_body]",
         "Every trusted theorem stub must have a name beginning with `theorem_`",
@@ -242,8 +319,8 @@ fn verus_strategy_centralizes_assumed_core_theorems() {
         "for an arbitrary output",
         "ProjectionContext::payload_for(&need)",
         "ProjectionOutput::new().need(need)",
-        "core theorems establish plumbing soundness, and projector theorems",
-        "establish protocol meaning",
+        "Core theorems establish plumbing",
+        "Projector theorems establish protocol meaning.",
         "theorem_ed25519_verify_binds(evidence)",
         "must not state protocol",
         "Proof modules must verify with Verus before a checklist item can move out of",
@@ -255,7 +332,7 @@ fn verus_strategy_centralizes_assumed_core_theorems() {
         "quantify over real Rust inputs and outputs",
         "Standalone `Spec*` duplicates are forbidden as proof targets.",
         "Disconnected model-level slices are not accepted",
-        "materialized protected",
+        "materializes proof-relevant output",
         "output implies required authority evidence",
         "Use iff only for exact projector characterization.",
         "Constructor lemmas are not checklist coverage by themselves.",
@@ -266,6 +343,11 @@ fn verus_strategy_centralizes_assumed_core_theorems() {
         "Do not rely on static source analysis as proof.",
         "Do not cheat by placing protocol conclusions in core.",
         "Foundational axioms may assume SQLite transactions",
+        "## Current Execution Plan",
+        "Finish the universal offer-claim runtime boundary.",
+        "Prove the tractable core boundary first",
+        "Leave matcher graph construction, offer-owner payload loading, context",
+        "Start projector coverage with the smallest high-value authority producer",
         "## Threat Model Checklist",
         "TM-M1 root workspace slice",
         "TM-D6",
@@ -283,7 +365,10 @@ fn verus_strategy_centralizes_assumed_core_theorems() {
     let forbidden = [
         "Core assumptions prove admin validity",
         "Core assumptions prove deletion authority",
+        "Core proof bodies are out of scope for this phase.",
+        "## Assumed Core Theorems",
         "projectors may call assume(...) directly",
+        "projection_output_owners_are_self(output, current_fact_id)",
         "They may remain as regression checks over",
         "Model-only projector relations are staging artifacts.",
         "model-level Verus theorem",

@@ -540,15 +540,13 @@ fn materialized_output(
 ) -> Result<ProjectionOutput, String> {
     Ok(share_fact_with_sync(
         output
-            .offer(crate::core::context::ContextOffer::range(
-                fact.id,
+            .offer(crate::core::context::ContextOfferClaim::range(
                 "auth_admin",
                 crate::core::facts::FactScope::Global,
                 fact.id,
                 fact.id,
             ))
-            .offer(crate::core::context::ContextOffer::range(
-                fact.id,
+            .offer(crate::core::context::ContextOfferClaim::range(
                 "auth_admin",
                 crate::protocol::auth::workspace::scope(admin.workspace_id),
                 admin.user_fact_id,

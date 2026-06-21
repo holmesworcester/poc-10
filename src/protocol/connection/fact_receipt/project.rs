@@ -347,7 +347,7 @@ pub mod adapt {
 // and frame-child projectors own the path-specific proof that consumes the
 // offer.
 
-use crate::core::context::{ContextNeed, ContextOffer};
+use crate::core::context::{ContextNeed, ContextOffer, ContextOfferClaim};
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::project_fact::{
@@ -390,6 +390,14 @@ pub fn connection_fact_receipt_need(owner: FactId, received_fact_id: FactId) -> 
 pub fn connection_fact_receipt_offer(owner: FactId, received_fact_id: FactId) -> ContextOffer {
     ContextOffer::for_key(
         owner,
+        CONNECTION_FACT_RECEIPT_ROLE,
+        FactScope::Local,
+        received_fact_id,
+    )
+}
+
+pub fn connection_fact_receipt_offer_claim(received_fact_id: FactId) -> ContextOfferClaim {
+    ContextOfferClaim::for_key(
         CONNECTION_FACT_RECEIPT_ROLE,
         FactScope::Local,
         received_fact_id,
@@ -473,7 +481,12 @@ mod tests {
 
         assert!(output.needs.is_empty());
         assert_eq!(
-            output.offers,
+            output
+                .offers
+                .iter()
+                .cloned()
+                .map(|claim| claim.into_offer(fact.id))
+                .collect::<Vec<_>>(),
             vec![connection_fact_receipt_offer(
                 fact.id,
                 receipt.received_fact_id,
@@ -536,8 +549,7 @@ impl ConnectionFactReceiptProjector {
         validate_local_receipt_scope(fact)?;
         // 3. Materialize.
         Ok(ProjectionOutput::new()
-            .offer(connection_fact_receipt_offer(
-                fact.id,
+            .offer(connection_fact_receipt_offer_claim(
                 received.received_fact_id,
             ))
             .row_mutation(RowMutation::InsertValues(

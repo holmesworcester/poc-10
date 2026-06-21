@@ -250,8 +250,7 @@ impl LocalSignerSecretProjector {
 
         // 3. Materialize.
         Ok(
-            ProjectionOutput::new().offer(crate::core::context::ContextOffer::range(
-                fact.id,
+            ProjectionOutput::new().offer(crate::core::context::ContextOfferClaim::range(
                 "local_signer_secret",
                 workspace_scope(secret.workspace_id),
                 secret.signer_id,

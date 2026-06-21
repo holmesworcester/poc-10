@@ -225,14 +225,14 @@ pub mod adapt {
 // byte ranges, so the time/leaf-prefix layout for encrypted-message secret
 // coverage lives here. Content-message projection consumes these helpers.
 
-use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
+use crate::core::context::{ContextKey, ContextNeed, ContextOffer, ContextOfferClaim, Role};
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::{RowMutation, TableDeleteWhere, TableInsert, Value};
 use crate::core::project_fact::{
     FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
 };
 use crate::protocol::auth::key_wrap::project::{
-    history_node_wrap_source_offers, require_local_scope,
+    history_node_wrap_source_offer_claims, require_local_scope,
 };
 use crate::protocol::auth::local_key_secret;
 use crate::protocol::auth::local_secret_retirement;
@@ -298,6 +298,32 @@ pub fn secret_offer(
         prefix_bound(leaf_prefix, prefix_bytes, BoundSide::High),
     );
     ContextOffer::range(owner, secret_role(), scope, start, end)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn secret_offer_claim(
+    scope: FactScope,
+    workspace_id: FactId,
+    frontier_id: FactId,
+    start_minute: u64,
+    end_minute: u64,
+    prefix_bytes: u8,
+    leaf_prefix: FactId,
+) -> ContextOfferClaim {
+    let prefix_bytes = prefix_bytes.min(32);
+    let start = secret_range_key(
+        workspace_id,
+        frontier_id,
+        start_minute,
+        prefix_bound(leaf_prefix, prefix_bytes, BoundSide::Low),
+    );
+    let end = secret_range_key(
+        workspace_id,
+        frontier_id,
+        end_minute,
+        prefix_bound(leaf_prefix, prefix_bytes, BoundSide::High),
+    );
+    ContextOfferClaim::range(secret_role(), scope, start, end)
 }
 
 pub fn secret_need_key(
@@ -591,8 +617,7 @@ fn project_local_history_node_secret(
         .map_err(|_| "history node prefix byte width overflow".to_string())?;
     // 3. Materialize: publish wrap-source, source, and coverage offers.
     let mut output = waiting;
-    for offer in history_node_wrap_source_offers(
-        fact.id,
+    for offer in history_node_wrap_source_offer_claims(
         scope.clone(),
         node.workspace_id,
         node.frontier_id,
@@ -605,10 +630,9 @@ fn project_local_history_node_secret(
         output = output.offer(offer);
     }
     if node.tombstone_node_id != [0; 32] {
-        output = output.offer(local_secret_retirement::secret_retired_offer(
-            fact.id,
-            node.tombstone_node_id,
-        ));
+        output = output.offer(
+            local_secret_retirement::project::secret_retired_offer_claim(node.tombstone_node_id),
+        );
     }
     output = output.row_mutation(RowMutation::InsertValues(TableInsert {
         table: LOCAL_HISTORY_NODE_SECRET_ROWS,
@@ -650,15 +674,13 @@ fn project_local_history_node_secret(
         }));
     }
     Ok(output
-        .offer(ContextOffer::range(
-            fact.id,
+        .offer(ContextOfferClaim::range(
             "local_secret_source",
             FactScope::Local,
             fact.id,
             fact.id,
         ))
-        .offer(secret_offer(
-            fact.id,
+        .offer(secret_offer_claim(
             scope,
             node.workspace_id,
             node.frontier_id,

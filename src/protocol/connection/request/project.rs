@@ -834,7 +834,7 @@ pub mod adapt {
 //   3. MATERIALIZE. Initiators write retryable request send state; responders
 //      emit a receipt and the deterministic create_connection intent.
 
-use crate::core::context::{ContextNeed, ContextOffer};
+use crate::core::context::{ContextNeed, ContextOffer, ContextOfferClaim};
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::RowMutation;
@@ -873,6 +873,10 @@ pub fn connection_request_offer(owner: FactId, request_id: FactId) -> ContextOff
     )
 }
 
+pub fn connection_request_offer_claim(request_id: FactId) -> ContextOfferClaim {
+    ContextOfferClaim::for_key(CONNECTION_REQUEST_ROLE, FactScope::Global, request_id)
+}
+
 pub fn connection_for_request_need(owner: FactId, request_id: FactId) -> ContextNeed {
     ContextNeed::for_key(
         owner,
@@ -889,6 +893,10 @@ pub fn connection_for_request_offer(owner: FactId, request_id: FactId) -> Contex
         FactScope::Local,
         request_id,
     )
+}
+
+pub fn connection_for_request_offer_claim(request_id: FactId) -> ContextOfferClaim {
+    ContextOfferClaim::for_key(CONNECTION_FOR_REQUEST_ROLE, FactScope::Local, request_id)
 }
 
 /// Projector route metadata for the connection-request fact.
@@ -1003,7 +1011,7 @@ fn project_sender_request(
         return Err("connection request dialed_addr is required for sending".to_string());
     };
     Ok(output
-        .offer(connection_request_offer(fact.id, fact.id))
+        .offer(connection_request_offer_claim(fact.id))
         .row_mutation(RowMutation::InsertValues(connection_request_row(
             fact.id,
             fact.id,
@@ -1104,7 +1112,7 @@ fn project_receiver_request(
     })?;
     let receive_id = receipt.id;
     Ok(output
-        .offer(connection_request_offer(fact.id, fact.id))
+        .offer(connection_request_offer_claim(fact.id))
         .fact(receipt)
         .intent(create_connection_intent(CreateConnection {
             request_id: fact.id,

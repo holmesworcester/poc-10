@@ -201,7 +201,7 @@ pub mod adapt {
 //   3. MATERIALIZE. Once validated, projection publishes exact retirement
 //      context for the target; the target secret projector owns self-purge.
 
-use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
+use crate::core::context::{ContextKey, ContextNeed, ContextOffer, ContextOfferClaim, Role};
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::project_fact::{
     FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
@@ -220,6 +220,10 @@ pub fn secret_retired_offer(owner: FactId, target_secret_id: FactId) -> ContextO
     exact_local_offer(owner, LOCAL_SECRET_RETIRED_ROLE, target_secret_id)
 }
 
+pub fn secret_retired_offer_claim(target_secret_id: FactId) -> ContextOfferClaim {
+    exact_local_offer_claim(LOCAL_SECRET_RETIRED_ROLE, target_secret_id)
+}
+
 fn exact_local_need(owner: FactId, role: &'static str, key: FactId) -> ContextNeed {
     let key = ContextKey::from_bytes(key);
     ContextNeed {
@@ -235,6 +239,16 @@ fn exact_local_offer(owner: FactId, role: &'static str, key: FactId) -> ContextO
     let key = ContextKey::from_bytes(key);
     ContextOffer {
         owner,
+        role: Role::expect(role),
+        scope: FactScope::Local,
+        start_key: key.clone(),
+        end_key: key,
+    }
+}
+
+fn exact_local_offer_claim(role: &'static str, key: FactId) -> ContextOfferClaim {
+    let key = ContextKey::from_bytes(key);
+    ContextOfferClaim {
         role: Role::expect(role),
         scope: FactScope::Local,
         start_key: key.clone(),
@@ -301,7 +315,7 @@ impl LocalSecretRetirementProjector {
         // 3. Materialize.
         Ok(ProjectionOutput::new()
             .need(target_need)
-            .offer(secret_retired_offer(fact.id, retirement.target_secret_id)))
+            .offer(secret_retired_offer_claim(retirement.target_secret_id)))
     }
 }
 

@@ -195,7 +195,7 @@ pub mod adapt {
 // its shared recipient fact. Projection offers local-recipient context while the
 // key is live, and self-purges when a superseding recipient key retires it.
 
-use crate::core::context::{ContextNeed, ContextOffer};
+use crate::core::context::{ContextNeed, ContextOfferClaim};
 use crate::core::facts::Fact;
 use crate::core::intents::{RowMutation, TableDeleteWhere, TableInsert, Value};
 use crate::core::project_fact::{
@@ -318,8 +318,7 @@ fn local_recipient_key(
                 Value::Bytes(local.recipient_secret.to_vec()),
             ],
         }))
-        .offer(ContextOffer::range(
-            fact.id,
+        .offer(ContextOfferClaim::range(
             "local_recipient_key",
             scope,
             local.recipient_key_id,

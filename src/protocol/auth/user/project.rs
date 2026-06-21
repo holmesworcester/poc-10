@@ -332,8 +332,7 @@ impl UserProjector {
         // 3. Materialize.
         Ok(share_fact_with_sync(
             ProjectionOutput::new()
-                .offer(crate::core::context::ContextOffer::range(
-                    fact.id,
+                .offer(crate::core::context::ContextOfferClaim::range(
                     "auth_user",
                     crate::core::facts::FactScope::Global,
                     fact.id,

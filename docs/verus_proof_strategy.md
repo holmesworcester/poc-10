@@ -3,41 +3,44 @@
 This document defines the first poc-10 Verus strategy for proving strong
 invariants from the threat model over the actual Rust codebase. The eventual
 goal is a whole-codebase proof of every threat-model invariant, not a proof of a
-parallel Verus model. The initial proof boundary defers core proof bodies and
-treats core guarantees as trusted theorems. Projector proofs consume those
-theorems through one explicit core proof module instead of scattering local
-assumptions through protocol proof files.
+parallel Verus model. The initial proof boundary proves small protocol-neutral
+core glue where possible and keeps the remaining core guarantees as centralized
+trusted theorems. Projector proofs consume those theorems through one explicit
+core proof module instead of scattering local assumptions through protocol proof
+files.
 
-The near-term goal is not to prove core internals yet. It is to let projector
-proofs make real progress against authority, deletion, shareability, and
-transport invariants while keeping every unproved core claim visible, named, and
-replaceable. A deferred core proof is still a claim about the real core Rust
-behavior. It is not permission to prove an unrelated model and count that as
-threat-model coverage.
+The near-term goal is to prove the small protocol-neutral core properties that
+the offer-claim model makes tractable, then use them as composition glue for
+projector proofs against authority, deletion, shareability, and transport
+invariants. Core properties that still require matcher, SQLite, or commit
+modeling remain visible, named, and replaceable trusted stubs. A deferred core
+proof is still a claim about the real core Rust behavior. It is not permission
+to prove an unrelated model and count that as threat-model coverage.
 
 ## Scope
 
 The first proof phase covers projector and handler-facing security invariants:
-which rows, context offers, deferred intents, sync-share contributions, and
-self-purges may be emitted from valid facts and valid matched context.
+which rows, context offer claims, deferred intents, sync-share contributions,
+and self-purges may be emitted from valid facts and valid matched context. It
+also covers the small core properties needed to compose those proofs, starting
+with offer-claim finalization, owner-bearing output ownership, self-only purges,
+parked missing-context output, and missing-payload lookup.
 
-Core proof bodies are out of scope for this phase. Core matching, context
-lookup, parked missing-context output construction, context replacement, purge
-enforcement, and atomic commit properties are assumed true as theorem-shaped
-proof functions. Those assumptions must live in one module and must be
-documented as trusted stubs until core proofs replace them. Every trusted core
-theorem must be a realistic statement about actual core Rust behavior or a
-foundational substrate contract. If the theorem would not be a cogent future
-proof obligation over core code, do not add it.
+Core matching, offer-owner payload loading, context replacement, and atomic
+commit proofs are still deferred. Those trusted theorem stubs must live in one
+module and must be documented as trusted stubs until real core proofs replace
+them. Every trusted core theorem must be a realistic statement about actual core
+Rust behavior or a foundational substrate contract. If the theorem would not be
+a cogent future proof obligation over core code, do not add it.
 
 Projector proofs remain responsible for protocol meaning. Core assumptions never
 prove that an admin is valid, an endpoint may sign content, a deletion is
 authorized, a receipt grants authority, or a fact is sendable. They prove only
 protocol-neutral plumbing properties that projectors can use as evidence.
 
-## Trusted Core Module
+## Core Proof Module
 
-Use a dedicated proof module for the temporary trust boundary:
+Use a dedicated proof module for the core theorem surface:
 
 ```text
 src/core/proofs.rs
@@ -73,25 +76,31 @@ must not call `assume(...)` directly for core behavior. The only direct
 assumptions for core behavior belong inside the theorem stubs in
 `src/core/proofs.rs`.
 
-## Assumed Core Theorems
+## Core Theorem Surface
 
-The first assumed theorem surface should be small and protocol-neutral:
+Keep the core theorem surface small and protocol-neutral. These names are proof
+interfaces, not proof coverage by themselves. Each entry must carry a status:
+`prove now` for neutral Rust code that the current refactor makes tractable,
+`trusted until core model` for SQLite, matcher, or commit machinery that still
+needs a real core proof model, or `foundational assumption` for substrate
+contracts such as crypto, parsers, content addressing, and transactions.
 
-| Predicate or theorem | Assumed guarantee | Explicit non-guarantee |
-| --- | --- | --- |
-| `projection_context_sound(ctx, graph)` | The actual `ProjectionContext` was assembled from standing needs, matched offers, and offer-owner payloads in the graph. | Does not prove any role-specific authority or semantic validity. |
-| `matched_payloads_are_offer_owner_facts(matched)` | A matched payload exposed to a projector is the fact bytes owned by the matched offer owner. | Does not prove the consuming projector may trust the payload's protocol meaning without cross-checks. |
-| `matcher_preserves_role_scope_selector(need, matched)` | A match preserves requested role, scope, owner boundaries, and exact or range selector relation. | Does not prove that the role's producer emitted semantically valid evidence. |
-| `projection_context_lacks_payload_for_need(ctx, need)` | The actual `ProjectionContext::payload_for(&need)` path returned `None` for that need. | Does not prove the projector chose the right need or that waiting is semantically sufficient. |
-| `parked_output_for_missing_need(output, need)` | The actual `ProjectionOutput::new().need(need)` waiting path contains exactly the stable need and no materialized rows, offers, intents, facts, time wakes, or purges. | Does not prove the missing need is the right protocol dependency. |
-| `context_replacement_preserves_owner_boundaries(before, after, owner)` | Reprojection replaces context only for the current owner and does not rewrite unrelated owners. | Does not prove the replacement context is sufficient for any protocol output. |
-| `purges_are_self_only(output, current_fact_id)` | Projector output cannot request a purge for any fact other than the fact currently being projected. | Does not prove the self-purge is authorized by deletion, close, retirement, expiry, or retention context. |
-| `projection_output_owners_are_self(output, current_fact_id)` | Projector-emitted needs, offers, time wakes, and purges are owned by the current projected fact. | Does not prove emitted rows, offers, or intents are semantically valid. |
-| `atomic_projection_commit_sound(before, output, after)` | Context replacement, rows, queued intents, facts, sync-share contributions, and accepted purges commit atomically. | Does not prove those effects satisfy a fact-family predicate. |
+| Predicate or theorem | Status | Guarantee | Explicit non-guarantee |
+| --- | --- | --- | --- |
+| `offer_claim_finalizes_to_projected_owner(claim, offer, current_fact_id)` | prove now | `ProjectionOutput::context_set(current_fact_id)` stores every emitted `ContextOfferClaim` as a `ContextOffer` with `owner = current_fact_id` and unchanged role, scope, start key, and end key. | Does not prove the claim is semantically valid for its role. |
+| `projection_output_owner_bearing_effects_are_self(output, current_fact_id)` | prove now | Owner-bearing projector outputs such as needs, time wakes, and purges are owned by the current projected fact. Offer claims are ownerless until core finalization. | Does not prove emitted rows, offer claims, or intents are semantically valid. |
+| `purges_are_self_only(output, current_fact_id)` | prove now | Projector output cannot request a purge for any fact other than the fact currently being projected. | Does not prove the self-purge is authorized by deletion, close, retirement, expiry, or retention context. |
+| `parked_output_for_missing_need(output, need)` | prove now | The actual `ProjectionOutput::new().need(need)` waiting path contains exactly the stable need and no materialized rows, offer claims, intents, facts, time wakes, or purges. | Does not prove the missing need is the right protocol dependency. |
+| `projection_context_lacks_payload_for_need(ctx, need)` | prove now after Rust-view bridge | The actual `ProjectionContext::payload_for(&need)` path returned `None` for that need. | Does not prove the projector chose the right need or that waiting is semantically sufficient. |
+| `projection_context_sound(ctx, graph)` | trusted until core model | The actual `ProjectionContext` was assembled from standing needs, matched offers, and offer-owner payloads in the graph. | Does not prove any role-specific authority or semantic validity. |
+| `matched_payloads_are_offer_owner_facts(matched)` | trusted until core model | A matched payload exposed to a projector is the fact bytes owned by the matched offer owner. | Does not prove the consuming projector may trust the payload's protocol meaning without cross-checks. |
+| `matcher_preserves_role_scope_selector(need, matched)` | trusted until core model | A match preserves requested role, scope, owner boundaries, and exact or range selector relation. | Does not prove that the role's producer emitted semantically valid evidence. |
+| `context_replacement_preserves_owner_boundaries(before, after, owner)` | trusted until core model | Reprojection replaces context only for the current owner and does not rewrite unrelated owners. | Does not prove the replacement context is sufficient for any protocol output. |
+| `atomic_projection_commit_sound(before, output, after)` | trusted until core model | Context replacement, rows, queued intents, facts, sync-share contributions, and accepted purges commit atomically. | Does not prove those effects satisfy a fact-family predicate. |
 
-The theorem names can be adjusted once the Verus runner lands, but the split
-must remain: core theorems establish plumbing soundness, and projector theorems
-establish protocol meaning.
+The status can move only when the theorem verifies with Verus against the actual
+Rust path or a verified Rust-code view. Core theorems establish plumbing
+soundness. Projector theorems establish protocol meaning.
 
 ## Foundational Crypto Theorems
 
@@ -224,7 +233,9 @@ include protocol predicates. Do not add a theorem that asserts
 `no_materialized_output(output)` for an arbitrary output. A missing-context
 theorem must be tied to the actual `ProjectionContext::payload_for(&need)`
 absence and the actual parked output shape, such as
-`ProjectionOutput::new().need(need)`.
+`ProjectionOutput::new().need(need)`. Entries marked `prove now` should be
+replaced with real Verus proofs before they are used to claim threat-model
+coverage.
 
 ## Projector Proof Contract
 
@@ -236,7 +247,7 @@ actual Rust projector code path:
 
 ```text
 Rust projector function or verified Rust-code relation(fact, context, output)
-+ output materializes protected authority, rows, shareability, plaintext,
++ output materializes authority offer claims, rows, shareability, plaintext,
   key material, or purge effects
   -> the required authority evidence existed
      and the output is exactly the allowed canonical shape
@@ -247,7 +258,7 @@ Full iff theorems are useful when the spec can characterize the exact Rust
 projector relation:
 
 ```text
-projector materializes protected output
+projector materializes proof-relevant output
   <-> required authority evidence exists and canonical output is emitted
 ```
 
@@ -258,8 +269,16 @@ only-if half is also proved.
 For a producer projector:
 
 ```text
-projector emits Offer(role = R, owner = F)
-  -> valid_R_offer(offer, owner_fact, graph)
+projector emits ContextOfferClaim(role = R, selector = K)
+  -> valid_R_offer_claim(claim, owner_fact, graph)
+```
+
+For core offer finalization:
+
+```text
+prepare_projection(fact = F, output.offers = claims)
+  -> committed ContextOffer for each claim has owner = F.id
+     and copies claim.role, claim.scope, claim.start_key, claim.end_key exactly
 ```
 
 For core matching:
@@ -282,6 +301,10 @@ receipt path, deletion coordinate, or protocol-specific relation
      satisfies the target predicate
 ```
 
+The producer theorem proves ownerless claims. The consumer theorem reasons from
+matched, finalized `ContextOffer`s after core has attached the projected fact id
+as owner.
+
 The consumer step is where threat-model invariants become strong. A matched
 receipt remains only a receipt until the receiving projector proves the
 relationship it needs. A matched admin offer remains only an admin certificate
@@ -303,11 +326,11 @@ shape:
 
 ```text
 standing_context_sound(before)
-+ assumed core theorem for projection context construction
++ core theorem for projection context construction
 + projector theorem for the current fact
-+ assumed core theorem for context replacement and atomic commit
++ core theorem for context replacement and atomic commit
 = standing_context_sound(after)
-  and every committed row, authority offer, sync-share contribution,
+  and every committed row, finalized authority offer, sync-share contribution,
   deferred intent, and purge has a valid derivation
 ```
 
@@ -315,6 +338,30 @@ The induction initially depends on trusted core theorems. That is acceptable
 only because the assumptions are centralized and named. Replacing a trusted core
 stub with a real core proof must not require projector theorem rewrites unless
 the assumed statement was too broad.
+
+## Current Execution Plan
+
+1. Finish the universal offer-claim runtime boundary. Projectors emit
+   `ContextOfferClaim`s; core finalizes them into stored `ContextOffer`s with
+   the projected fact id as owner. This is required before any producer
+   projector theorem can be trusted as an offer certificate.
+2. Prove the tractable core boundary first, not as threat-model coverage but as
+   composition glue: offer-claim finalization, owner-bearing output ownership,
+   self-only purge requests, parked missing-context output, and missing-payload
+   lookup. These are protocol-neutral and should not remain trusted stubs after
+   the Rust-view bridge exists.
+3. Leave matcher graph construction, offer-owner payload loading, context
+   replacement, and atomic SQLite commit as centralized trusted core theorems
+   until their real core proof model exists.
+4. Start projector coverage with the smallest high-value authority producer:
+   the root workspace or signature-proof path, depending on which has the
+   cleanest Rust-code view. The proof must show dangerous output implies
+   decoded fact bytes, required matched context, primitive crypto binding, and
+   exact canonical offer-claim or row output.
+5. Compose outward through the threat model: workspace authority, admin/user
+   delegation, endpoint/content signer authority, connection receipts,
+   shareability, deletion/self-purge, and key-material retirement. Checklist
+   items stay unchecked until the composed only-if theorem verifies.
 
 ## Review Rules
 
@@ -335,8 +382,9 @@ Use these rules when adding projector proofs under this strategy:
 6. Pair runtime changes with realistic Rust tests, and pair proof changes with
    a Verus verification run. A Rust test can prevent regressions, but it cannot
    move a proof checklist item by itself.
-7. Prove the safety direction before claiming coverage: materialized protected
-   output implies required authority evidence and exact allowed effects.
+7. Prove the safety direction before claiming coverage: materialized
+   proof-relevant output implies required authority evidence and exact allowed
+   effects.
 8. Use iff only for exact projector characterization. Never let the easy
    completeness direction substitute for the only-if safety direction.
 9. Constructor lemmas are not checklist coverage by themselves. A theorem that

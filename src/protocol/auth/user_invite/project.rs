@@ -450,15 +450,13 @@ fn materialized_output(
 ) -> Result<ProjectionOutput, String> {
     Ok(share_fact_with_sync(
         output
-            .offer(crate::core::context::ContextOffer::range(
-                fact.id,
+            .offer(crate::core::context::ContextOfferClaim::range(
                 "auth_user_invite",
                 crate::core::facts::FactScope::Global,
                 fact.id,
                 fact.id,
             ))
-            .offer(crate::core::context::ContextOffer::range(
-                fact.id,
+            .offer(crate::core::context::ContextOfferClaim::range(
                 "auth_user_invite_key",
                 crate::protocol::auth::workspace::scope(invite.workspace_id),
                 invite.public_key.to_vec(),

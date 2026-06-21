@@ -541,15 +541,13 @@ fn materialized_output(
             .row_mutation(RowMutation::InsertValues(device_invite_row(
                 fact.id, invite,
             )))
-            .offer(crate::core::context::ContextOffer::range(
-                fact.id,
+            .offer(crate::core::context::ContextOfferClaim::range(
                 "auth_device_invite",
                 crate::core::facts::FactScope::Global,
                 fact.id,
                 fact.id,
             ))
-            .offer(crate::core::context::ContextOffer::range(
-                fact.id,
+            .offer(crate::core::context::ContextOfferClaim::range(
                 "auth_device_invite_key",
                 crate::protocol::auth::workspace::scope(invite.workspace_id),
                 device_invite_key.clone(),

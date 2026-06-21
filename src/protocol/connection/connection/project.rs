@@ -946,7 +946,7 @@ pub mod adapt {
 //   3. MATERIALIZE. Live connections write one connection row; close context
 //      deletes that row and purges the connection fact.
 
-use crate::core::context::{ContextNeed, ContextOffer};
+use crate::core::context::{ContextNeed, ContextOffer, ContextOfferClaim};
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::{RowMutation, Value};
@@ -978,6 +978,10 @@ pub fn connection_need(owner: FactId, connection_id: FactId) -> ContextNeed {
 
 pub fn connection_offer(owner: FactId, connection_id: FactId) -> ContextOffer {
     ContextOffer::for_key(owner, CONNECTION_ROLE, FactScope::Local, connection_id)
+}
+
+pub fn connection_offer_claim(connection_id: FactId) -> ContextOfferClaim {
+    ContextOfferClaim::for_key(CONNECTION_ROLE, FactScope::Local, connection_id)
 }
 
 /// Projector route metadata for the connection fact.
@@ -1064,8 +1068,7 @@ impl ConnectionProjector {
                 );
                 let output = needs.apply_to(materialized_output(fact, &connection));
                 Ok(output
-                    .offer(request::project::connection_for_request_offer(
-                        fact.id,
+                    .offer(request::project::connection_for_request_offer_claim(
                         connection.request_id,
                     ))
                     .intent(seed_connection_sync_intent(SeedConnectionSync {
@@ -1225,7 +1228,7 @@ fn merge_projection_output(
 
 fn materialized_output(fact: &Fact, connection: &ConnectionFact) -> ProjectionOutput {
     ProjectionOutput::new()
-        .offer(connection_offer(fact.id, fact.id))
+        .offer(connection_offer_claim(fact.id))
         .row_mutation(RowMutation::InsertValues(
             connection_row(ConnectionRowFields {
                 connection_id: fact.id,

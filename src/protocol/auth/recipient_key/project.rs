@@ -238,7 +238,7 @@ pub mod adapt {
 // fact, publishes recipient context, and emits proactive key-wrap creation facts when
 // eligible local wrap sources and signer secrets are available.
 
-use crate::core::context::{ContextNeed, ContextOffer};
+use crate::core::context::{ContextNeed, ContextOfferClaim};
 use crate::core::facts::Fact;
 use crate::core::intents::{RowMutation, TableInsert, Value};
 use crate::core::project_fact::{
@@ -375,8 +375,7 @@ fn recipient_key(
         };
         validate_previous_recipient_key(previous_fact, &recipient)?;
         context_have.push(previous_fact.id);
-        previous_superseded_offer = Some(ContextOffer::range(
-            fact.id,
+        previous_superseded_offer = Some(ContextOfferClaim::range(
             "recipient_superseded",
             scope.clone(),
             recipient.previous_recipient_key_id,
@@ -402,8 +401,7 @@ fn recipient_key(
         materialized_output = materialized_output.offer(offer);
     }
     output = share_fact_with_sync(
-        materialized_output.offer(ContextOffer::range(
-            fact.id,
+        materialized_output.offer(ContextOfferClaim::range(
             "recipient_key",
             scope.clone(),
             fact.id,

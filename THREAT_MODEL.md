@@ -250,9 +250,9 @@ review.
 
 | Invariants | Proof surface |
 | --- | --- |
-| TM-M1, TM-M3, TM-M4 | Auth authority DAG predicates: `valid_workspace_offer`, `valid_user_offer`, `valid_admin_offer`, `valid_device_invite_offer`, `valid_endpoint_shared_offer`, `valid_content_signer_offer`. |
+| TM-M1, TM-M3, TM-M4 | Auth authority DAG predicates: `valid_workspace_offer_claim`, `valid_user_offer_claim`, `valid_admin_offer_claim`, `valid_device_invite_offer_claim`, `valid_endpoint_shared_offer_claim`, `valid_content_signer_offer_claim`. |
 | TM-M2, TM-I4 | Connection handshake and receipt predicates: request/connection/frame projectors prove receipts and opened carrier facts do not grant semantic authority. |
-| TM-M5, TM-C4, TM-D3, TM-D6 | Auth key-material predicates and handlers: `valid_recipient_key_offer`, `valid_wrap_source_offer`, `valid_secret_coverage_offer`, `valid_key_wrap_fact`, `create_key_wrap`, and `unwrap_key_wrap`. |
+| TM-M5, TM-C4, TM-D3, TM-D6 | Auth key-material predicates and handlers: `valid_recipient_key_offer_claim`, `valid_wrap_source_offer_claim`, `valid_secret_coverage_offer_claim`, `valid_key_wrap_fact`, `create_key_wrap`, and `unwrap_key_wrap`. |
 | TM-C1, TM-C5, TM-I1, TM-I2 | Content admission predicates for message, reaction, file, file-slice, deletion, and retention-policy projectors. |
 | TM-C2, TM-C3, TM-D2, TM-D4 | Sync shareability and connection sendability: `share_fact_with_sync`, dependency closure, connection-visible send filters, and local/private tag rejection. |
 | TM-D1, TM-D2, TM-D4 | Content deletion/retention proof: deletion facts publish `fact_purged` only for proved targets, and target projectors self-purge only their own facts. |
@@ -261,9 +261,10 @@ review.
 The core induction target remains:
 
 ```text
-Every materialized row, emitted authority offer, emitted sync-share contribution,
-emitted deferred intent, and emitted purge has a derivation from valid facts and
-valid matched context.
+Every materialized row, emitted authority offer claim, emitted sync-share
+contribution, emitted deferred intent, and emitted purge has a derivation from
+valid facts and valid matched context. Core finalization then stores each offer
+claim as an authority offer owned by the projected fact.
 ```
 
 ## Known Weaknesses
