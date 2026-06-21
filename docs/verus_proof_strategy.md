@@ -1,15 +1,19 @@
 # Verus Proof Strategy
 
 This document defines the first poc-10 Verus strategy for proving strong
-projector invariants from the threat model while leaving core proof work out of
-scope. The initial proof boundary treats core guarantees as trusted theorems.
-Projector proofs consume those theorems through one explicit core proof module
-instead of scattering local assumptions through protocol proof files.
+invariants from the threat model over the actual Rust codebase. The eventual
+goal is a whole-codebase proof of every threat-model invariant, not a proof of a
+parallel Verus model. The initial proof boundary defers core proof bodies and
+treats core guarantees as trusted theorems. Projector proofs consume those
+theorems through one explicit core proof module instead of scattering local
+assumptions through protocol proof files.
 
-The goal is not to prove core yet. The goal is to let projector proofs make
-real progress against authority, deletion, shareability, and transport
-invariants while keeping every unproved core claim visible, named, and
-replaceable.
+The near-term goal is not to prove core internals yet. It is to let projector
+proofs make real progress against authority, deletion, shareability, and
+transport invariants while keeping every unproved core claim visible, named, and
+replaceable. A deferred core proof is still a claim about the real core Rust
+behavior. It is not permission to prove an unrelated model and count that as
+threat-model coverage.
 
 ## Scope
 
@@ -18,9 +22,13 @@ which rows, context offers, deferred intents, sync-share contributions, and
 self-purges may be emitted from valid facts and valid matched context.
 
 Core proof bodies are out of scope for this phase. Core matching, context
-replacement, purge enforcement, and atomic commit properties are assumed true as
-theorem-shaped proof functions. Those assumptions must live in one module and
-must be documented as trusted stubs until core proofs replace them.
+lookup, parked missing-context output construction, context replacement, purge
+enforcement, and atomic commit properties are assumed true as theorem-shaped
+proof functions. Those assumptions must live in one module and must be
+documented as trusted stubs until core proofs replace them. Every trusted core
+theorem must be a realistic statement about actual core Rust behavior or a
+foundational substrate contract. If the theorem would not be a cogent future
+proof obligation over core code, do not add it.
 
 Projector proofs remain responsible for protocol meaning. Core assumptions never
 prove that an admin is valid, an endpoint may sign content, a deletion is
@@ -71,13 +79,14 @@ The first assumed theorem surface should be small and protocol-neutral:
 
 | Predicate or theorem | Assumed guarantee | Explicit non-guarantee |
 | --- | --- | --- |
-| `projection_context_sound(ctx, graph)` | The projection context was assembled from standing needs, matched offers, and offer-owner payloads in the graph. | Does not prove any role-specific authority or semantic validity. |
-| `matched_payloads_are_offer_owner_facts(ctx, graph)` | A matched payload exposed to a projector is the fact bytes owned by the matched offer owner. | Does not prove the consuming projector may trust the payload's protocol meaning without cross-checks. |
+| `projection_context_sound(ctx, graph)` | The actual `ProjectionContext` was assembled from standing needs, matched offers, and offer-owner payloads in the graph. | Does not prove any role-specific authority or semantic validity. |
+| `matched_payloads_are_offer_owner_facts(matched)` | A matched payload exposed to a projector is the fact bytes owned by the matched offer owner. | Does not prove the consuming projector may trust the payload's protocol meaning without cross-checks. |
 | `matcher_preserves_role_scope_selector(need, matched)` | A match preserves requested role, scope, owner boundaries, and exact or range selector relation. | Does not prove that the role's producer emitted semantically valid evidence. |
+| `projection_context_lacks_payload_for_need(ctx, need)` | The actual `ProjectionContext::payload_for(&need)` path returned `None` for that need. | Does not prove the projector chose the right need or that waiting is semantically sufficient. |
+| `parked_output_for_missing_need(output, need)` | The actual `ProjectionOutput::new().need(need)` waiting path contains exactly the stable need and no materialized rows, offers, intents, facts, time wakes, or purges. | Does not prove the missing need is the right protocol dependency. |
 | `context_replacement_preserves_owner_boundaries(before, after, owner)` | Reprojection replaces context only for the current owner and does not rewrite unrelated owners. | Does not prove the replacement context is sufficient for any protocol output. |
 | `purges_are_self_only(output, current_fact_id)` | Projector output cannot request a purge for any fact other than the fact currently being projected. | Does not prove the self-purge is authorized by deletion, close, retirement, expiry, or retention context. |
 | `projection_output_owners_are_self(output, current_fact_id)` | Projector-emitted needs, offers, time wakes, and purges are owned by the current projected fact. | Does not prove emitted rows, offers, or intents are semantically valid. |
-| `no_materialized_output(output)` | A waiting projector output contains no rows, offers, intents, facts, time wakes, or purges. | Does not prove the waiting needs are the right protocol needs. |
 | `atomic_projection_commit_sound(before, output, after)` | Context replacement, rows, queued intents, facts, sync-share contributions, and accepted purges commit atomically. | Does not prove those effects satisfy a fact-family predicate. |
 
 The theorem names can be adjusted once the Verus runner lands, but the split
@@ -153,13 +162,22 @@ verus! {
         ) -> bool;
 
         pub open spec fn matched_payloads_are_offer_owner_facts(
-            ctx: SpecProjectionContext,
-            graph: SpecPipelineGraph,
+            matched: SpecMatchedContext,
         ) -> bool;
 
         pub open spec fn matcher_preserves_role_scope_selector(
             need: SpecContextNeed,
             matched: SpecMatchedContext,
+        ) -> bool;
+
+        pub open spec fn projection_context_lacks_payload_for_need(
+            ctx: SpecProjectionContext,
+            need: SpecContextNeed,
+        ) -> bool;
+
+        pub open spec fn parked_output_for_missing_need(
+            output: SpecProjectionOutput,
+            need: SpecContextNeed,
         ) -> bool;
 
         pub open spec fn context_replacement_preserves_owner_boundaries(
@@ -190,10 +208,9 @@ verus! {
 
         #[verifier::external_body]
         pub proof fn theorem_matched_payloads_are_offer_owner_facts(
-            ctx: SpecProjectionContext,
-            graph: SpecPipelineGraph,
+            matched: SpecMatchedContext,
         )
-            ensures matched_payloads_are_offer_owner_facts(ctx, graph)
+            ensures matched_payloads_are_offer_owner_facts(matched)
         {
         }
     }
@@ -203,17 +220,22 @@ verus! {
 Every trusted theorem stub must have a name beginning with `theorem_`, an
 `ensures` clause that states the core property being assumed, and a short
 comment naming it as a temporary trusted core assumption. Stub bodies should not
-include protocol predicates.
+include protocol predicates. Do not add a theorem that asserts
+`no_materialized_output(output)` for an arbitrary output. A missing-context
+theorem must be tied to the actual `ProjectionContext::payload_for(&need)`
+absence and the actual parked output shape, such as
+`ProjectionOutput::new().need(need)`.
 
 ## Projector Proof Contract
 
 Projector proofs should consume core theorems as proof functions and then prove
 the fact-family predicate for each output.
 
-The security bar for threat-model coverage is the only-if direction:
+The security bar for threat-model coverage is the only-if direction over the
+actual Rust projector code path:
 
 ```text
-projector relation(fact, context, output)
+Rust projector function or verified Rust-code relation(fact, context, output)
 + output materializes protected authority, rows, shareability, plaintext,
   key material, or purge effects
   -> the required authority evidence existed
@@ -221,8 +243,8 @@ projector relation(fact, context, output)
      and no forbidden effect exists
 ```
 
-Full iff theorems are useful when the spec can characterize the exact projector
-relation:
+Full iff theorems are useful when the spec can characterize the exact Rust
+projector relation:
 
 ```text
 projector materializes protected output
@@ -266,10 +288,13 @@ relationship it needs. A matched admin offer remains only an admin certificate
 until the consuming projector proves the workspace, signer, and target
 relationship for its own output.
 
-Model-only projector relations are staging artifacts. They may be useful and
-must verify, but they do not close a threat-model checklist item until a
-correspondence theorem ties the relation to the Rust projector code or to a
-trusted core theorem that precisely describes that code path.
+Model-only projector relations are not proof work for this repo. Do not add or
+keep a disconnected Verus model of a projector as a substitute for proving the
+actual Rust code. Spec and ghost helper types are allowed only as abstractions
+of actual Rust values or functions, and only when they are tied to those values
+by a Rust-code correspondence theorem or a named trusted boundary theorem that
+precisely describes that code path. Any theorem over only `Spec*` data is a
+helper lemma, not a projector proof.
 
 ## Induction Shape
 
@@ -296,74 +321,81 @@ the assumed statement was too broad.
 Use these rules when adding projector proofs under this strategy:
 
 1. Add or update module-local semantic predicates for every protected output.
-2. Import core theorem functions from `src/core/proofs.rs`; do not create
+2. Proofs must target actual Rust code. The top-level projector theorem must
+   quantify over real Rust inputs and outputs, or over a verified view extracted
+   from those inputs and outputs by an explicit correspondence theorem.
+   Standalone `Spec*` duplicates are forbidden as proof targets.
+3. Import core theorem functions from `src/core/proofs.rs`; do not create
    local copies of core assumptions.
-3. Keep protocol authority in the projector proof. Core theorems may establish
+4. Keep protocol authority in the projector proof. Core theorems may establish
    payload origin and selector matching, not role meaning.
-4. Make missing-context and mismatched-context cases explicit: missing context
+5. Make missing-context and mismatched-context cases explicit: missing context
    parks with stable needs, and mismatched context rejects or emits no
    materialized output.
-5. Pair runtime changes with realistic Rust tests, and pair proof changes with
+6. Pair runtime changes with realistic Rust tests, and pair proof changes with
    a Verus verification run. A Rust test can prevent regressions, but it cannot
    move a proof checklist item by itself.
-6. Prove the safety direction before claiming coverage: materialized protected
+7. Prove the safety direction before claiming coverage: materialized protected
    output implies required authority evidence and exact allowed effects.
-7. Use iff only for exact projector characterization. Never let the easy
+8. Use iff only for exact projector characterization. Never let the easy
    completeness direction substitute for the only-if safety direction.
-8. Constructor lemmas are not checklist coverage by themselves. A theorem that
+9. Constructor lemmas are not checklist coverage by themselves. A theorem that
    starts with valid inputs and a constructed output may support another proof,
    but the checklist requires a dangerous-output-implies-authority theorem.
-9. Document any additional assumptions, especially cryptographic primitive
+10. Document any additional assumptions, especially cryptographic primitive
    soundness and byte-canonicalization assumptions.
-10. Keep crypto stubs primitive-level. They may prove byte/key/signature binding,
+11. Keep crypto stubs primitive-level. They may prove byte/key/signature binding,
    not workspace authority, content authority, deletion authority, or
    shareability.
-11. Do not rely on static source analysis as proof. Tests that inspect source
+12. Do not rely on static source analysis as proof. Tests that inspect source
    text may guard layout policy, but proof claims must be predicates or theorems
    over the executable values the runtime actually passes between core,
    projectors, and handlers.
-12. Do not cheat by placing protocol conclusions in core. A core theorem may be
+13. Do not cheat by placing protocol conclusions in core. A core theorem may be
    difficult to prove over SQLite-backed projection machinery, but it must be a
    logically coherent theorem about core-owned mechanics. If a theorem would
    need to know that an admin, endpoint, receipt, deletion, key wrap, content
    signer, or workspace is semantically valid, it belongs in the owning
    protocol proof instead.
-13. Foundational axioms may assume SQLite transactions, cryptographic
+14. Foundational axioms may assume SQLite transactions, cryptographic
    primitives, BLAKE3 content addressing, byte parsers, and other substrate
    tools satisfy their advertised contracts. Those axioms should be named at the
    boundary where they are used and should not smuggle in protocol authority.
-14. Every proof change must include a walkthrough before handoff. The
+15. Every proof change must include a walkthrough before handoff. The
     walkthrough must name the theorem shape, trusted stubs or assumptions,
     proof steps, what the theorem really proves, and the remaining gaps against
     the threat model.
-15. Commit the completed work on that same worktree branch before handoff or
+16. Commit the completed work on that same worktree branch before handoff or
     review.
 
 ## Threat Model Checklist
 
 Work through `THREAT_MODEL.md` in order. A checked item requires a Verus
-only-if safety theorem over a projector relation that is tied to the code path
-we run, or a named trusted theorem that precisely stands for that code path.
-Model-level Verus slices are noted but remain unchecked until that
-correspondence exists.
+only-if safety theorem over the actual Rust code path, or over a verified view
+that has an explicit correspondence theorem back to that Rust code path. A
+named trusted theorem may stand for foundational core, SQLite, parser, or
+crypto behavior, but it must precisely describe that boundary and must not
+encode protocol authority. Disconnected model-level slices are not accepted and
+should be removed or replaced with Rust-backed proof work before any checklist
+item is claimed.
 
-- [ ] TM-M1 root workspace slice: model-level Verus theorem
-  `theorem_workspace_materialization_only_if` proves that modeled workspace
+- [ ] TM-M1 root workspace slice: prove that actual `WorkspaceProjector`
   materialization implies decoded global workspace evidence, valid signature
   evidence, local identity-scoped invite acceptance, and canonical row/offer/
-  sync-share output. Remaining before checked: prove the spec relation
-  corresponds to the Rust `WorkspaceProjector` output and then cover user,
-  admin, invite, endpoint, content-signer, recipient-key, and connection
-  authority projectors.
-- [ ] TM-M2 workspace carrier boundary slice: model-level workspace proof
-  consumes `signature_proof` and local `auth_workspace_accepted` predicates;
-  carrier facts alone do not satisfy the modeled projector's authority needs.
-  Remaining before checked: runtime correspondence plus connection
+  sync-share output. Blocked until the current `SpecWorkspace*` helper lemmas
+  are replaced by, or connected to, a theorem over the Rust projector inputs and
+  outputs; then cover user, admin, invite, endpoint, content-signer,
+  recipient-key, and connection authority projectors.
+- [ ] TM-M2 workspace carrier boundary slice: prove over the Rust workspace
+  projector path that signature proof and local accepted-invite evidence are
+  required, and carrier facts alone cannot satisfy authority needs. Blocked
+  until Rust-code correspondence exists; then compose with connection
   receipt/frame projectors and sync carrier projectors.
-- [ ] TM-M3 root workspace scope slice: model-level workspace proof keys the
-  row, offer, signature need, accepted need, and sync-share workspace id to the
-  projected workspace fact id. Remaining before checked: runtime correspondence
-  plus all cross-workspace auth, key, content, and connection projectors.
+- [ ] TM-M3 root workspace scope slice: prove over the Rust workspace projector
+  path that the row, offer, signature need, accepted need, and sync-share
+  workspace id are all keyed to the projected workspace fact id. Blocked until
+  Rust-code correspondence exists; then compose with cross-workspace auth, key,
+  content, and connection projectors.
 - [ ] TM-M4: prove admin/user/device/invite issuer escalation paths in
   `auth::admin`, `auth::user_invite`, `auth::device_invite`,
   `auth::endpoint`, and `auth::endpoint_shared`.
@@ -371,10 +403,10 @@ correspondence exists.
   and retention-floor gates before future shareability or key-wrap creation.
 - [ ] TM-C1: prove encrypted content projectors and connection frames never
   expose plaintext without local key material.
-- [ ] TM-C2 workspace local-bootstrap slice: model-level workspace sync-share
-  proof rejects the local `invite_accepted` payload as sync context. Remaining
-  before checked: runtime correspondence, all local secret fact families, and
-  connection sendability filters.
+- [ ] TM-C2 workspace local-bootstrap slice: prove over the Rust workspace
+  projector path that sync-share output cannot be justified by the local
+  `invite_accepted` payload. Blocked until Rust-code correspondence exists; then
+  cover all local secret fact families and connection sendability filters.
 - [ ] TM-C3: prove sync shareability, dependency closure, range request, and
   connection send paths stay inside authorized non-local workspace visibility.
 - [ ] TM-C4: prove key-wrap creation validates recipient, source secret,
@@ -386,10 +418,10 @@ correspondence exists.
 - [ ] TM-I2: prove admin authority does not imply content-signing authority.
 - [ ] TM-I3: prove replayed facts cannot alter accepted sender, body, deletion
   target, key coordinate, or workspace.
-- [ ] TM-I4 workspace evidence slice: model-level workspace proof treats
-  signature and invite-accepted facts as evidence that must satisfy producer
-  predicates before root workspace materialization. Remaining before checked:
-  runtime correspondence plus connection receipts, observations, requests,
+- [ ] TM-I4 workspace evidence slice: prove over the Rust workspace projector
+  path that signature and invite-accepted facts must satisfy producer predicates
+  before root workspace materialization. Blocked until Rust-code correspondence
+  exists; then compose with connection receipts, observations, requests,
   connections, and frame projectors.
 - [ ] TM-D1: prove deletion facts publish purge context only for authorized
   exact targets and target projectors self-purge only themselves.

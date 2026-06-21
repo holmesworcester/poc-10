@@ -145,6 +145,8 @@ pub mod verus_model {
             current_fact_id: workspace.fact_id,
             all_output_owners_are_self: true,
             purges_only_current_fact: true,
+            waiting_need_count: 0int,
+            waiting_need_0: workspace_signature_need(workspace),
             has_materialized_rows: true,
             has_materialized_offers: true,
             has_materialized_intents: true,

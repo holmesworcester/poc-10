@@ -3,8 +3,9 @@
 //! This module is the temporary trusted core proof boundary for projector proof
 //! work. It must not know protocol roles such as `auth_workspace`,
 //! `signature_proof`, or `content_message`; it only states properties that core
-//! owns: matched payload ownership, selector matching, owner-scoped projector
-//! output, self-only purges, context replacement, and atomic projection commit.
+//! owns: matched payload ownership, selector matching, parked missing-context
+//! output shape, owner-scoped projector output, self-only purges, context
+//! replacement, and atomic projection commit.
 //!
 //! The theorem bodies are intentionally trusted stubs for this proof phase.
 //! Projector proofs may consume these theorem functions, but protocol meaning
@@ -51,6 +52,8 @@ pub mod verus_model {
     #[derive(Copy, Clone)]
     pub struct SpecProjectionContext {
         pub graph_token: int,
+        pub missing_need: SpecContextNeed,
+        pub missing_need_absent: bool,
     }
 
     #[derive(Copy, Clone)]
@@ -58,6 +61,8 @@ pub mod verus_model {
         pub current_fact_id: int,
         pub all_output_owners_are_self: bool,
         pub purges_only_current_fact: bool,
+        pub waiting_need_count: int,
+        pub waiting_need_0: SpecContextNeed,
         pub has_materialized_rows: bool,
         pub has_materialized_offers: bool,
         pub has_materialized_intents: bool,
@@ -91,6 +96,14 @@ pub mod verus_model {
             && matched.offer.start_key <= need.end_key
     }
 
+    pub open spec fn context_need_equal(a: SpecContextNeed, b: SpecContextNeed) -> bool {
+        a.owner == b.owner
+            && a.role == b.role
+            && a.scope == b.scope
+            && a.start_key == b.start_key
+            && a.end_key == b.end_key
+    }
+
     pub open spec fn matched_payloads_are_offer_owner_facts(
         matched: SpecMatchedContext,
     ) -> bool {
@@ -102,6 +115,13 @@ pub mod verus_model {
         graph: SpecPipelineGraph,
     ) -> bool {
         ctx.graph_token == graph.token
+    }
+
+    pub open spec fn projection_context_lacks_payload_for_need(
+        ctx: SpecProjectionContext,
+        need: SpecContextNeed,
+    ) -> bool {
+        ctx.missing_need_absent && context_need_equal(ctx.missing_need, need)
     }
 
     pub open spec fn context_replacement_preserves_owner_boundaries(
@@ -133,6 +153,16 @@ pub mod verus_model {
             && !output.has_materialized_facts
             && !output.has_time_wakes
             && !output.has_purges
+    }
+
+    pub open spec fn parked_output_for_missing_need(
+        output: SpecProjectionOutput,
+        need: SpecContextNeed,
+    ) -> bool {
+        output.current_fact_id == need.owner
+            && output.waiting_need_count == 1int
+            && context_need_equal(output.waiting_need_0, need)
+            && no_materialized_output(output)
     }
 
     pub open spec fn atomic_projection_commit_sound(
@@ -210,14 +240,6 @@ pub mod verus_model {
         current_fact_id: int,
     )
         ensures purges_are_self_only(output, current_fact_id)
-    {
-    }
-
-    // Temporary trusted core assumption: waiting outputs materialize no durable
-    // rows, offers, facts, intents, wakes, or purges.
-    #[verifier::external_body]
-    pub proof fn theorem_no_materialized_output(output: SpecProjectionOutput)
-        ensures no_materialized_output(output)
     {
     }
 
