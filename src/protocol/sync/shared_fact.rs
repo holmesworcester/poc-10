@@ -11,7 +11,6 @@ pub mod encode;
 pub mod fact;
 pub mod index;
 pub mod project;
-pub mod proofs;
 
 pub const TYPE_SHARED_FACT: u8 = encode::TYPE_SHARED_FACT;
 

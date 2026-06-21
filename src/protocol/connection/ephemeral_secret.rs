@@ -15,7 +15,6 @@ pub mod author;
 pub mod encode;
 pub mod fact;
 pub mod project;
-pub mod proofs;
 
 use crate::core::crypto::{X25519PrivateKey, X25519PublicKey};
 use crate::core::db::{Db, TableInsert, TableName, TypedTableSchema, Value};

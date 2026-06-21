@@ -10,7 +10,6 @@ pub mod author;
 pub mod encode;
 pub mod fact;
 pub mod project;
-pub mod proofs;
 pub mod queries;
 
 use crate::core::db::{TableInsert, TableName, TypedTableSchema, Value};

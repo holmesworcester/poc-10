@@ -1375,15 +1375,13 @@ fn target_manifests_match_their_filesystem_modules() {
 }
 
 /// The only files a fact-family directory may contain.
-const STANDARD_FAMILY_FILES: [&str; 11] = [
+const STANDARD_FAMILY_FILES: [&str; 10] = [
     "fact.rs",
     "encode.rs",
     "author.rs",
     // Primary decode, authentication, and adaptation live as local modules in
     // project.rs so the projector owns the complete read path.
     "project.rs",
-    // Family-local formal obligations stay beside the fact family they prove.
-    "proofs.rs",
     "queries.rs",
     "api.rs",
     "cli.rs",

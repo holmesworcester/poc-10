@@ -10,7 +10,6 @@ pub mod author;
 pub mod encode;
 pub mod fact;
 pub mod project;
-pub mod proofs;
 
 pub(crate) use author::key_wrap_creation_fact;
 
