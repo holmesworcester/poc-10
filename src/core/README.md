@@ -260,8 +260,8 @@ alphabetically.
   emitted effects.
 - `proofs.rs`: protocol-neutral proof certificates for projection plumbing. It
   names theorem-shaped checks over matched payload ownership, selector matching,
-  owner-bearing projector output, offer-claim finalization, and self-only
-  purges; it must not prove protocol authority or fact-family semantics.
+  owner-scoped projector output, and self-only purges; it must not prove
+  protocol authority or fact-family semantics.
 - `runtime.rs`: executable engine for one selected protocol description. It
   opens databases, applies declared schemas, submits authored facts, exposes
   bounded projection and intent queue drains, owns the runtime-turn lock, admits

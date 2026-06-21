@@ -241,7 +241,8 @@ impl SyncSharedFactProjector {
         require_fact_scope(fact, &scope)?;
         // 3. Materialize.
         Ok(
-            ProjectionOutput::new().offer(crate::core::context::ContextOfferClaim::range(
+            ProjectionOutput::new().offer(crate::core::context::ContextOffer::range(
+                fact.id,
                 "sync_exact_fact",
                 scope,
                 shared.fact_id,
@@ -331,12 +332,7 @@ mod tests {
 
         assert!(output.needs.is_empty());
         assert_eq!(
-            output
-                .offers
-                .iter()
-                .cloned()
-                .map(|claim| claim.into_offer(fact.id))
-                .collect::<Vec<_>>(),
+            output.offers,
             vec![ContextOffer::range(
                 fact.id,
                 "sync_exact_fact",

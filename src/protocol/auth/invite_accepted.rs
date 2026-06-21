@@ -101,10 +101,12 @@ pub fn workspace_accepted_need(
     )
 }
 
-pub fn workspace_accepted_offer_claim(
+pub fn workspace_accepted_offer(
+    owner: crate::core::facts::FactId,
     workspace_id: crate::core::facts::FactId,
-) -> crate::core::context::ContextOfferClaim {
-    crate::core::context::ContextOfferClaim::range(
+) -> crate::core::context::ContextOffer {
+    crate::core::context::ContextOffer::range(
+        owner,
         AUTH_WORKSPACE_ACCEPTED_ROLE,
         crate::core::facts::FactScope::Global,
         workspace_id,

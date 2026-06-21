@@ -192,16 +192,16 @@ pub mod adapt {
 // secret-coverage offers while live, and self-purges when retirement context
 // for this secret arrives.
 
-use crate::core::context::{ContextNeed, ContextOfferClaim};
+use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::{RowMutation, TableDeleteWhere, TableInsert, Value};
 use crate::core::project_fact::{
     FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
 };
 use crate::protocol::auth::key_wrap::project::{
-    frontier_root_wrap_source_offer_claims, require_local_scope,
+    frontier_root_wrap_source_offers, require_local_scope,
 };
-use crate::protocol::auth::local_history_node_secret::project::secret_offer_claim;
+use crate::protocol::auth::local_history_node_secret::project::secret_offer;
 use crate::protocol::auth::local_secret_retirement;
 use crate::protocol::auth::removal_frontier;
 
@@ -291,7 +291,8 @@ fn project_local_key_secret(
     let mut output = ProjectionOutput::new()
         .need(frontier_need)
         .need(retirement_need);
-    for offer in frontier_root_wrap_source_offer_claims(
+    for offer in frontier_root_wrap_source_offers(
+        fact.id,
         scope.clone(),
         secret.workspace_id,
         secret.frontier_id,
@@ -320,13 +321,15 @@ fn project_local_key_secret(
                 Value::Bytes(secret.key_secret.to_vec()),
             ],
         }))
-        .offer(ContextOfferClaim::range(
+        .offer(ContextOffer::range(
+            fact.id,
             "local_secret_source",
             FactScope::Local,
             fact.id,
             fact.id,
         ))
-        .offer(secret_offer_claim(
+        .offer(secret_offer(
+            fact.id,
             scope,
             secret.workspace_id,
             secret.frontier_id,

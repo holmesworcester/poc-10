@@ -518,13 +518,15 @@ impl ContentFileProjector {
             ProjectionOutput::new()
                 .need(file_deletion_need)
                 .need(parent_deletion_need)
-                .offer(crate::core::context::ContextOfferClaim::range(
+                .offer(crate::core::context::ContextOffer::range(
+                    fact.id,
                     "content_file",
                     scope,
                     file.file_id,
                     file.file_id,
                 ))
-                .offer(crate::core::context::ContextOfferClaim::range(
+                .offer(crate::core::context::ContextOffer::range(
+                    fact.id,
                     "sync_exact_fact",
                     crate::protocol::auth::workspace::scope(file.workspace_id),
                     fact.id,

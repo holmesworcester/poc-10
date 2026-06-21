@@ -566,7 +566,7 @@ fn prepare_projection(
         projector.project(&fact, &pending_inputs)
     })?;
     enforce_owner_is_self(&fact, &output)?;
-    let projected_context = output.context_set(fact.id);
+    let projected_context = output.context_set();
     let runtime_effects = output.effects;
     validate_rebuild_projection_shape(&projected_context, &output.time_wakes, &runtime_effects)?;
     perf::measure_result("projection_validate_effects", || {
@@ -608,15 +608,17 @@ fn validate_rebuild_projection_shape(
     Ok(())
 }
 
-/// Reject any projected need, time wake, or purge whose owner is not the fact
-/// being projected. Projected offers are ownerless claims; core attaches the
-/// projected fact id when building the committed context set.
+/// Reject any projected need, offer, time wake, or purge whose owner is not the
+/// fact being projected.
 fn enforce_owner_is_self(fact: &Fact, output: &ProjectionOutput) -> Result<(), String> {
     for purged in &output.effects.purged_facts {
         enforce_projected_owner("projector tried to purge fact", *purged, fact.id)?;
     }
     for need in &output.needs {
         enforce_projected_owner("projector emitted need with owner", need.owner, fact.id)?;
+    }
+    for offer in &output.offers {
+        enforce_projected_owner("projector emitted offer with owner", offer.owner, fact.id)?;
     }
     for wake in &output.time_wakes {
         enforce_projected_owner(
@@ -2570,9 +2572,7 @@ pub(crate) mod context_db {
 pub mod effects {
     //! Projection effects and time-wake output for fact projectors.
 
-    use crate::core::context::{
-        ContextKey, ContextNeed, ContextOffer, ContextOfferClaim, ContextSet, Role,
-    };
+    use crate::core::context::{ContextKey, ContextNeed, ContextOffer, ContextSet, Role};
     use crate::core::effects::{IncomingMetadata, RuntimeEffects};
     use crate::core::facts::{Fact, FactId};
     use crate::core::intents::{Intent, RowMutation};
@@ -2606,13 +2606,6 @@ pub mod effects {
         fact_purged_range_offer(owner, scope, key.clone(), key)
     }
 
-    pub fn fact_purged_offer_claim(
-        scope: crate::core::facts::FactScope,
-        key: ContextKey,
-    ) -> ContextOfferClaim {
-        fact_purged_range_offer_claim(scope, key.clone(), key)
-    }
-
     pub fn fact_purged_range_need(
         owner: FactId,
         scope: crate::core::facts::FactScope,
@@ -2636,19 +2629,6 @@ pub mod effects {
     ) -> ContextOffer {
         ContextOffer {
             owner,
-            role: fact_purged_role(),
-            scope,
-            start_key,
-            end_key,
-        }
-    }
-
-    pub fn fact_purged_range_offer_claim(
-        scope: crate::core::facts::FactScope,
-        start_key: ContextKey,
-        end_key: ContextKey,
-    ) -> ContextOfferClaim {
-        ContextOfferClaim {
             role: fact_purged_role(),
             scope,
             start_key,
@@ -2716,9 +2696,9 @@ pub mod effects {
     /// Complete uncommitted output of projecting one fact.
     ///
     /// `needs` and `time_wakes` are replacement sets owned by the projected fact.
-    /// `offers` are append-only claims that core stores with the projected fact
-    /// id as owner. `effects` are ordinary runtime effects that commit in the
-    /// same transaction after ownership checks pass.
+    /// `offers` are append-only evidence owned by the projected fact. `effects` are
+    /// ordinary runtime effects that commit in the same transaction after ownership
+    /// checks pass.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct ProjectionOutput {
         /// Whether an incoming input should become a retained fact after successful
@@ -2727,8 +2707,8 @@ pub mod effects {
         pub retain_self: bool,
         /// Complete replacement needs for the projected fact.
         pub needs: Vec<ContextNeed>,
-        /// New durable offer claims for the projected fact.
-        pub offers: Vec<ContextOfferClaim>,
+        /// New durable offers for the projected fact.
+        pub offers: Vec<ContextOffer>,
         /// Complete replacement time wakes for the projected fact.
         pub time_wakes: Vec<TimeWake>,
         /// Child facts, self-purge, row mutations, and intents to commit with this projection.
@@ -2766,7 +2746,7 @@ pub mod effects {
             self
         }
 
-        pub fn offer(mut self, offer: ContextOfferClaim) -> Self {
+        pub fn offer(mut self, offer: ContextOffer) -> Self {
             self.offers.push(offer);
             self
         }
@@ -2835,15 +2815,10 @@ pub mod effects {
             self
         }
 
-        pub fn context_set(&self, owner: FactId) -> ContextSet {
+        pub fn context_set(&self) -> ContextSet {
             ContextSet {
                 needs: self.needs.clone(),
-                offers: self
-                    .offers
-                    .iter()
-                    .cloned()
-                    .map(|claim| claim.into_offer(owner))
-                    .collect(),
+                offers: self.offers.clone(),
             }
             .normalized()
         }
@@ -3026,9 +3001,8 @@ pub mod route {
 
 pub use context::{MatchedContext, ProjectionContext, ProjectionMode};
 pub use effects::{
-    fact_purged_need, fact_purged_offer, fact_purged_offer_claim, fact_purged_range_need,
-    fact_purged_range_offer, fact_purged_range_offer_claim, fact_purged_role, ProjectionOutput,
-    TimeRange, TimeWake, Timeline,
+    fact_purged_need, fact_purged_offer, fact_purged_range_need, fact_purged_range_offer,
+    fact_purged_role, ProjectionOutput, TimeRange, TimeWake, Timeline,
 };
 pub use route::{
     EffectiveTagFn, EnvelopeRoute, FactAdmissionFn, FactProjectorInfo, FactRoute, Projector,
@@ -3703,9 +3677,7 @@ fn u64_column(value: i64, name: &str) -> rusqlite::Result<u64> {
 #[cfg(test)]
 mod contract_tests {
     use super::*;
-    use crate::core::context::{
-        ContextKey, ContextNeed, ContextOffer, ContextOfferClaim, ContextSetAdditions, Role,
-    };
+    use crate::core::context::{ContextKey, ContextNeed, ContextOffer, ContextSetAdditions, Role};
     use crate::core::effects::StorageRequirement;
     use crate::core::facts::{FactId, FactScope};
     use crate::core::intents::{Intent, IntentKind};
@@ -4572,7 +4544,7 @@ mod contract_tests {
             let key = ContextKey::from_bytes(fact.id);
             Ok(ProjectionOutput::new()
                 .drop_incoming()
-                .offer(offer_claim_for(fact, &role, &key)))
+                .offer(offer_for(fact, &role, &key)))
         });
         let err = drain_projection(&projector, &store, &[], None, 10)
             .expect_err("dropped incoming offers should fail");
@@ -4724,23 +4696,22 @@ mod contract_tests {
     }
 
     #[test]
-    fn projection_run_attaches_projected_fact_owner_to_offer_claims() {
+    fn projection_run_rejects_offer_owned_by_another_fact() {
         let fact = Fact::new(FactScope::Global, 1, b"owned".to_vec());
-        let role = Role::new("exact").unwrap();
-        let key = ContextKey::from_bytes(fact.id);
         let projector = test_projector(|fact: &Fact, _context: &ProjectionContext| {
-            let role = Role::new("exact").unwrap();
-            let key = ContextKey::from_bytes(fact.id);
-            Ok(ProjectionOutput::new().offer(offer_claim_for(fact, &role, &key)))
+            Ok(ProjectionOutput::new().offer(ContextOffer {
+                owner: [9; 32],
+                role: Role::new("exact").unwrap(),
+                scope: fact.scope.clone(),
+                start_key: ContextKey::from_bytes(fact.id),
+                end_key: ContextKey::from_bytes(fact.id),
+            }))
         });
 
-        let run = run_projection(&projector, &fact, ProjectionContext::new(Vec::new()))
-            .expect("projection should finalize offer claim");
+        let err = run_projection(&projector, &fact, ProjectionContext::new(Vec::new()))
+            .expect_err("projection should reject foreign offer owner");
 
-        assert_eq!(
-            run.projected_context.offers,
-            vec![offer_for(&fact, &role, &key)]
-        );
+        assert!(err.contains("projector emitted offer with owner"));
     }
 
     #[test]
@@ -5181,15 +5152,6 @@ mod contract_tests {
         }
     }
 
-    fn offer_claim_for(fact: &Fact, role: &Role, key: &ContextKey) -> ContextOfferClaim {
-        ContextOfferClaim {
-            role: role.clone(),
-            scope: fact.scope.clone(),
-            start_key: key.clone(),
-            end_key: key.clone(),
-        }
-    }
-
     struct TestProjector<F> {
         project: F,
     }
@@ -5295,9 +5257,7 @@ mod contract_tests {
             context: &ProjectionContext,
         ) -> Result<ProjectionOutput, String> {
             if fact.id == self.offered_id {
-                return Ok(
-                    ProjectionOutput::new().offer(offer_claim_for(fact, &self.role, &self.key))
-                );
+                return Ok(ProjectionOutput::new().offer(offer_for(fact, &self.role, &self.key)));
             }
 
             if fact.id != self.dependent_id {
@@ -5334,14 +5294,14 @@ mod contract_tests {
             context: &ProjectionContext,
         ) -> Result<ProjectionOutput, String> {
             if fact.id == self.first_offer_id {
-                return Ok(ProjectionOutput::new().offer(offer_claim_for(
+                return Ok(ProjectionOutput::new().offer(offer_for(
                     fact,
                     &self.first_role,
                     &self.first_key,
                 )));
             }
             if fact.id == self.second_offer_id {
-                return Ok(ProjectionOutput::new().offer(offer_claim_for(
+                return Ok(ProjectionOutput::new().offer(offer_for(
                     fact,
                     &self.second_role,
                     &self.second_key,
@@ -5422,9 +5382,7 @@ mod contract_tests {
             _context: &ProjectionContext,
         ) -> Result<ProjectionOutput, String> {
             if fact.id == self.offered_id {
-                return Ok(
-                    ProjectionOutput::new().offer(offer_claim_for(fact, &self.role, &self.key))
-                );
+                return Ok(ProjectionOutput::new().offer(offer_for(fact, &self.role, &self.key)));
             }
             if fact.id == self.failing_id {
                 return Err("projection failed".to_string());
@@ -5450,9 +5408,7 @@ mod contract_tests {
             context: &ProjectionContext,
         ) -> Result<ProjectionOutput, String> {
             if fact.id == self.offered_id {
-                return Ok(
-                    ProjectionOutput::new().offer(offer_claim_for(fact, &self.role, &self.key))
-                );
+                return Ok(ProjectionOutput::new().offer(offer_for(fact, &self.role, &self.key)));
             }
             if fact.id == self.failing_id {
                 let need = need_for(fact, &self.role, &self.key);
@@ -5493,7 +5449,7 @@ mod contract_tests {
                 ChildMode::Offer => {
                     let role = Role::new("child_ready").unwrap();
                     let key = ContextKey::from_bytes(fact.id);
-                    Ok(ProjectionOutput::new().offer(offer_claim_for(fact, &role, &key)))
+                    Ok(ProjectionOutput::new().offer(offer_for(fact, &role, &key)))
                 }
                 ChildMode::Need => {
                     let role = Role::new("missing_child_context").unwrap();
@@ -5539,7 +5495,7 @@ mod contract_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::context::{ContextKey, ContextNeed, ContextOffer, ContextOfferClaim, Role};
+    use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
     use crate::core::effects::StorageRequirement;
     use crate::core::facts::{Fact, FactId, FactScope};
     use crate::core::schema::CORE_SCHEMA_SOURCE;
@@ -5723,7 +5679,7 @@ mod tests {
             .need(need.clone())
             .need(need.clone());
 
-        assert_eq!(output.context_set(id).needs, vec![need]);
+        assert_eq!(output.context_set().needs, vec![need]);
     }
 
     #[test]
@@ -5739,7 +5695,8 @@ mod tests {
                 start_key: key.clone(),
                 end_key: key.clone(),
             })
-            .offer(ContextOfferClaim {
+            .offer(ContextOffer {
+                owner: id,
                 role,
                 scope: FactScope::Global,
                 start_key: key.clone(),
@@ -5779,8 +5736,9 @@ mod tests {
     struct ModelProjector;
 
     impl ModelProjector {
-        fn project(&self, _fact: &Fact, semantic: u16) -> Result<ProjectionOutput, String> {
-            Ok(ProjectionOutput::new().offer(ContextOfferClaim::range(
+        fn project(&self, fact: &Fact, semantic: u16) -> Result<ProjectionOutput, String> {
+            Ok(ProjectionOutput::new().offer(ContextOffer::range(
+                fact.id,
                 "model_semantic",
                 FactScope::Global,
                 vec![semantic as u8],

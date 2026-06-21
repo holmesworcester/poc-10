@@ -209,7 +209,7 @@ pub mod adapt {
 //   3. MATERIALIZE. Publish close offers only; target facts own their own row
 //      deletion and self-purge when those offers wake them.
 
-use crate::core::context::{ContextKey, ContextNeed, ContextOffer, ContextOfferClaim, Role};
+use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::project_fact::{
     FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
@@ -228,20 +228,12 @@ pub fn connection_closed_offer(owner: FactId, connection_id: FactId) -> ContextO
     exact_local_offer(owner, CONNECTION_CLOSED_ROLE, connection_id)
 }
 
-pub fn connection_closed_offer_claim(connection_id: FactId) -> ContextOfferClaim {
-    exact_local_offer_claim(CONNECTION_CLOSED_ROLE, connection_id)
-}
-
 pub fn ephemeral_secret_closed_need(owner: FactId, secret_id: FactId) -> ContextNeed {
     exact_local_need(owner, CONNECTION_EPHEMERAL_SECRET_CLOSED_ROLE, secret_id)
 }
 
 pub fn ephemeral_secret_closed_offer(owner: FactId, secret_id: FactId) -> ContextOffer {
     exact_local_offer(owner, CONNECTION_EPHEMERAL_SECRET_CLOSED_ROLE, secret_id)
-}
-
-pub fn ephemeral_secret_closed_offer_claim(secret_id: FactId) -> ContextOfferClaim {
-    exact_local_offer_claim(CONNECTION_EPHEMERAL_SECRET_CLOSED_ROLE, secret_id)
 }
 
 fn exact_local_need(owner: FactId, role: &'static str, key: FactId) -> ContextNeed {
@@ -259,16 +251,6 @@ fn exact_local_offer(owner: FactId, role: &'static str, key: FactId) -> ContextO
     let key = ContextKey::from_bytes(key);
     ContextOffer {
         owner,
-        role: Role::expect(role),
-        scope: FactScope::Local,
-        start_key: key.clone(),
-        end_key: key,
-    }
-}
-
-fn exact_local_offer_claim(role: &'static str, key: FactId) -> ContextOfferClaim {
-    let key = ContextKey::from_bytes(key);
-    ContextOfferClaim {
         role: Role::expect(role),
         scope: FactScope::Local,
         start_key: key.clone(),
@@ -375,12 +357,7 @@ mod tests {
 
         assert_eq!(output.needs, vec![expected_need]);
         assert_eq!(
-            output
-                .offers
-                .iter()
-                .cloned()
-                .map(|claim| claim.into_offer(fact.id))
-                .collect::<Vec<_>>(),
+            output.offers,
             vec![connection_closed_offer(fact.id, close.connection_id)]
         );
         assert!(output.effects.row_mutations.is_empty());
@@ -459,6 +436,6 @@ impl ConnectionCloseProjector {
         // 3. Materialize close context for the target owners.
         Ok(ProjectionOutput::new()
             .need(connection_need)
-            .offer(connection_closed_offer_claim(close.connection_id)))
+            .offer(connection_closed_offer(fact.id, close.connection_id)))
     }
 }

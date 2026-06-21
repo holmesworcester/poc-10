@@ -181,7 +181,7 @@ pub mod adapt {
 // a local signer secret. Projection publishes frontier context and shares the
 // fact with the workspace.
 
-use crate::core::context::{ContextNeed, ContextOfferClaim};
+use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::facts::Fact;
 use crate::core::intents::{RowMutation, TableInsert, Value};
 use crate::core::project_fact::{
@@ -289,7 +289,8 @@ impl RemovalFrontierProjector {
 
         // 3. Materialize.
         Ok(share_fact_with_sync(
-            ProjectionOutput::new().offer(ContextOfferClaim::range(
+            ProjectionOutput::new().offer(ContextOffer::range(
+                fact.id,
                 "auth_removal_frontier",
                 scope,
                 fact.id,

@@ -362,7 +362,8 @@ impl ContentFileDeletionProjector {
         });
         Ok(share_fact_with_sync(
             ProjectionOutput::new()
-                .offer(crate::core::project_fact::fact_purged_offer_claim(
+                .offer(crate::core::project_fact::fact_purged_offer(
+                    fact.id,
                     scope,
                     file_purged_key(deletion.target_file_id),
                 ))

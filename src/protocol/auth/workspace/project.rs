@@ -218,7 +218,6 @@ pub mod adapt {
 //   3. MATERIALIZE. Write the workspace row, publish workspace context, and
 //      mark the workspace fact shareable.
 
-use crate::core::context::ContextOfferClaim;
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::project_fact::{
@@ -226,8 +225,6 @@ use crate::core::project_fact::{
 };
 use crate::protocol::auth::{invite_accepted, signature};
 use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
-
-pub const AUTH_WORKSPACE_ROLE: &str = "auth_workspace";
 
 /// Projector route metadata for the workspace fact.
 pub const PROJECTOR_INFO: FactProjectorInfo =
@@ -305,8 +302,9 @@ impl WorkspaceProjector {
         // 3. Materialize.
         Ok(share_fact_with_sync(
             ProjectionOutput::new()
-                .offer(ContextOfferClaim::range(
-                    AUTH_WORKSPACE_ROLE,
+                .offer(crate::core::context::ContextOffer::range(
+                    fact.id,
+                    "auth_workspace",
                     crate::core::facts::FactScope::Global,
                     fact.id,
                     fact.id,
@@ -352,7 +350,7 @@ mod projector_tests {
         assert!(projected
             .offers
             .iter()
-            .any(|claim| claim.role.as_str() == AUTH_WORKSPACE_ROLE));
+            .any(|offer| offer.role.as_str() == "auth_workspace"));
         let share = crate::protocol::sync::share_fact_with_sync::decode_share_fact_with_sync(
             &projected.effects.intents[0],
         )
@@ -424,7 +422,7 @@ mod projector_tests {
         let need: ContextNeed =
             invite_accepted::workspace_accepted_need(workspace_id, workspace_id);
         let offer: ContextOffer =
-            invite_accepted::workspace_accepted_offer_claim(workspace_id).into_offer(accepted.id);
+            invite_accepted::workspace_accepted_offer(accepted.id, workspace_id);
         ProjectionContext::from_matches(vec![
             signature_match(workspace_id, signature),
             MatchedContext {

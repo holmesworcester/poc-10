@@ -10,9 +10,9 @@ state. Protocol fact families still own meaning and authority.
 The target invariant is:
 
 ```text
-Every materialized row, emitted authority offer claim, emitted sync-share
-contribution, emitted deferred intent, and emitted purge has a derivation from
-valid facts and valid matched context.
+Every materialized row, emitted authority offer, emitted sync-share contribution,
+emitted deferred intent, and emitted purge has a derivation from valid facts and
+valid matched context.
 ```
 
 For projectors this means proving more than shape preservation. A projector
@@ -44,30 +44,43 @@ signature transcript, key coordinate, BAO proof, or context selector.
 
 ## File Layout
 
-Verus proof code should live in `proofs.rs` files close to the code whose
-invariant it proves, with a small shared proof surface in core. Proof layout
-follows the fact-family roles: decode, authenticate, adapt, project, and
-effects. Do not create proof subdirectories, sibling `*_proof.rs` files, or
-singular `proof.rs` files for this phase.
+Verus proof code should live close to the code whose invariant it proves, with a
+small shared proof surface in core. Proof layout follows the target staged
+fact-family roles: decode, authenticate, adapt, project, and effects. The
+current source tree has flat manifests, scope modules, fact-family directories,
+and verb-named handler files; proof layout should follow that shape and keep
+`mod.rs` out of the tree.
 
 ```text
-src/core/proofs.rs
-src/protocol/<scope>/<fact_family>/proofs.rs
+src/core/proof.rs
+src/core/context_proof.rs
+src/core/pipeline_proof.rs
+
+src/protocol/<scope>/<fact_family>/proof.rs
+src/protocol/<scope>/<fact_family>/proof/
+  authenticate.rs
+  adapt.rs
+  project.rs
+  authority.rs
+  effects.rs
+
+src/protocol/<scope>/<verb_object>_proof.rs
 ```
 
 A single proof file per fact family is preferred at first:
 
 ```text
-src/protocol/connection/request/proofs.rs
-src/protocol/connection/connection/proofs.rs
-src/protocol/auth/admin/proofs.rs
-src/protocol/auth/key_wrap/proofs.rs
-src/protocol/content/file/proofs.rs
+src/protocol/connection/request/proof.rs
+src/protocol/connection/response/proof.rs
+src/protocol/auth/admin/proof.rs
+src/protocol/auth/key_wrap_creation/proof.rs
+src/protocol/auth/key_wrap_recovery/proof.rs
+src/protocol/content/file_slice/proof.rs
 ```
 
-Verb-named intent handlers such as `sync/share_fact_with_sync.rs` should put
-their Verus proof obligations in the nearest owning `proofs.rs` module instead
-of creating sibling proof files.
+Verb-named intent handlers such as `sync/share_fact_with_sync.rs` should use a
+sibling proof file such as `src/protocol/sync/share_fact_with_sync_proof.rs`
+rather than creating handler subdirectories.
 
 Proofs should not live directly in `project.rs`, `commands.rs`, `author.rs`,
 `encode.rs`, `decode.rs`, `authenticate.rs`, `adapt.rs`, `create.rs`,
@@ -77,31 +90,36 @@ decode, validate, emit needs, offers, row mutations, facts, purges, or intents.
 `create.rs`, `layout.rs`, and `rows.rs` are transitional implementation or
 inventory names, not target proof homes for new work.
 
-The exception is a small specification hook that must sit on the executable
-item being verified. A pure helper may carry a Verus precondition,
-postcondition, or ghost-free spec reference if that is the least invasive way
-to verify it. Larger lemmas, induction arguments, proof-only wrappers, model
-types, and role predicates belong in `proofs.rs`.
+The exception is a small specification hook that must sit on the executable item
+being verified. A pure helper may carry a Verus precondition, postcondition, or
+ghost-free spec reference if that is the least invasive way to verify it. Larger
+lemmas, induction arguments, proof-only wrappers, model types, and role
+certificates belong in proof files.
+
+Split a fact family's proof into `proof/` subfiles only after the file becomes
+hard to review. The split should follow invariants, not generic names. For
+example, `projector.rs`, `handshake.rs`, `authority.rs`, and `key_material.rs`
+are useful; `helpers.rs` is not.
 
 Normal Rust builds should not compile proof files. Module manifests should gate
-proof modules behind the Verus cfg used by this workspace:
+proof modules behind a dedicated cfg or feature:
 
 ```rust
-#[cfg(verus_keep_ghost)]
-pub mod proofs;
+#[cfg(feature = "verus-proof")]
+pub mod proof;
 ```
 
-Production code must not depend on proof modules.
+The exact gate can be chosen when the Verus runner is introduced, but production
+code must not depend on proof modules.
 
 ## Shared Core Proof Surface
 
-`src/core/proofs.rs` owns protocol-neutral specification types and lemmas:
+`src/core/proof.rs` owns protocol-neutral specification types and lemmas:
 
 ```text
 SpecFact
 SpecFactScope
 SpecContextNeed
-SpecContextOfferClaim
 SpecContextOffer
 SpecMatchedContext
 SpecProjectionOutput
@@ -118,7 +136,6 @@ projection_context_sound(ctx, graph)
 standing_context_sound(graph)
 row_mutations_bounded(output)
 purges_are_self_only(output, current_fact_id)
-offer_claim_finalizes_to_projected_owner(claim, offer, current_fact_id)
 atomic_runtime_effects_sound(output, graph)
 ```
 
@@ -130,8 +147,8 @@ exact matcher is the equal-endpoint case of range matching
 matched payloads are loaded from the offer owner's fact id
 matched payload helpers preserve the need chosen by the projector
 context replacement preserves owner boundaries
-unchanged needs and finalized offers do not create new wake work
-new matching finalized offers wake only matching need owners
+unchanged needs and offers do not create new wake work
+new matching offers wake only matching need owners
 row mutation and purge commit is atomic with context replacement
 core rejects cross-fact purges from projector output
 ```
@@ -142,19 +159,19 @@ These core proofs intentionally do not know protocol roles such as
 ## Fact Family Proof Contract
 
 Each fact family owns its semantic predicates. A proof file should define the
-certificates for the context offer claims, rows, intents, sync-share
-contributions, and purges that the fact family emits.
+certificates for the context offers, rows, intents, sync-share contributions,
+and purges that the fact family emits.
 
 Example shape:
 
 ```text
 valid_request_fact(fact)
-valid_request_offer_claim(claim, payload, graph)
+valid_request_offer(offer, payload, graph)
 valid_request_row(row, fact, graph)
 valid_connection_intent(intent, fact, matched_context, graph)
 
 lemma_request_projector_waits_without_materializing(...)
-lemma_request_projector_offer_claim_is_valid(...)
+lemma_request_projector_offer_is_valid(...)
 lemma_request_projector_row_is_valid(...)
 lemma_request_projector_intent_is_valid(...)
 ```
@@ -164,9 +181,9 @@ Projector proof obligations:
 ```text
 1. Decode failure emits no output.
 2. Missing required context emits stable needs and no materialized rows,
-   authority offer claims, sync shares, deferred intents, or purges.
+   authority offers, sync shares, deferred intents, or purges.
 3. Invalid matched context rejects or emits no materialized output.
-4. Every emitted offer claim satisfies that role's semantic offer predicate.
+4. Every emitted offer satisfies that role's semantic offer predicate.
 5. Every emitted row mutation satisfies that table's row predicate.
 6. Every emitted deferred intent satisfies that intent's input and authority
    predicate.
@@ -204,16 +221,8 @@ Proof composition should use offer predicates as certificates.
 For a producer projector:
 
 ```text
-projector emits ContextOfferClaim(role = R, selector = K)
-  -> valid_R_offer_claim(claim, F, graph)
-```
-
-For core offer finalization:
-
-```text
-prepare_projection(fact = F, output.offers = claims)
-  -> committed ContextOffer for each claim has owner = F.id
-     and copies claim role, scope, and key range exactly
+projector emits Offer(role = R, owner = F)
+  -> valid_R_offer(offer, F, graph)
 ```
 
 For a matcher:
@@ -262,14 +271,14 @@ store queries.
 Authority predicates:
 
 ```text
-valid_workspace_offer_claim(workspace_claim, workspace_fact)
-valid_user_invite_offer_claim(user_invite_claim, user_invite_fact, graph)
-valid_user_offer_claim(user_claim, user_fact, graph)
-valid_admin_offer_claim(admin_claim, admin_fact, graph)
-valid_device_invite_offer_claim(device_invite_claim, device_invite_fact, graph)
-valid_endpoint_shared_offer_claim(endpoint_claim, endpoint_fact, graph)
-valid_invite_server_offer_claim(invite_server_claim, invite_server_fact, graph)
-valid_content_signer_offer_claim(content_signer_claim, endpoint_fact, graph)
+valid_workspace_offer(workspace_offer, workspace_fact)
+valid_user_invite_offer(user_invite_offer, user_invite_fact, graph)
+valid_user_offer(user_offer, user_fact, graph)
+valid_admin_offer(admin_offer, admin_fact, graph)
+valid_device_invite_offer(device_invite_offer, device_invite_fact, graph)
+valid_endpoint_shared_offer(endpoint_offer, endpoint_fact, graph)
+valid_invite_server_offer(invite_server_offer, invite_server_fact, graph)
+valid_content_signer_offer(content_signer_offer, endpoint_fact, graph)
 ```
 
 Admin closure:
@@ -283,18 +292,18 @@ workspace root
   -> user / invite / endpoint / content-signer authority
 ```
 
-The proof should show that an `auth_admin` offer claim can be emitted only in
-one of two cases:
+The proof should show that an `auth_admin` offer can appear only from one of two
+cases:
 
 ```text
 bootstrap:
   workspace exists
-  valid_user_invite_offer_claim(bootstrap_invite)
+  valid_user_invite_offer(bootstrap_invite)
   bootstrap_invite.workspace_id == workspace_id
   bootstrap_invite.authority_fact_id == workspace_id
   bootstrap_invite.signer_id == workspace_id
   bootstrap_invite.signer_public_key == workspace.public_key
-  valid_user_offer_claim(user)
+  valid_user_offer(user)
   user.signer_id == bootstrap_invite.id
   user.workspace_id == workspace_id
   user.public_key == admin.public_key
@@ -305,17 +314,16 @@ bootstrap:
   admin.signature verifies under workspace.public_key
 
 delegated:
-  valid_admin_offer_claim(authority_admin)
+  valid_admin_offer(authority_admin)
   authority_admin.workspace_id == admin.workspace_id
-  valid_user_offer_claim(user)
+  valid_user_offer(user)
   user.workspace_id == admin.workspace_id
   user.public_key == admin.public_key
   admin.signature verifies under authority signer path
 ```
 
 Cycles of admin facts do not bootstrap authority because the induction requires
-an already valid authority certificate before a delegated admin offer claim can
-be emitted.
+an already valid authority offer before a delegated admin offer can be emitted.
 
 The auth proof set should also cover `user_invite`, `user`, `device_invite`,
 `endpoint_shared`, and `invite_server` branch predicates. Each branch must prove
@@ -328,9 +336,9 @@ Key-material proofs should cover shared key facts, local secret facts, and the
 local work facts that connect them:
 
 ```text
-valid_recipient_key_offer_claim(recipient_key_claim, recipient_key_fact, graph)
-valid_wrap_source_offer_claim(wrap_source_claim, source_fact, graph)
-valid_secret_coverage_offer_claim(secret_claim, local_secret_fact, graph)
+valid_recipient_key_offer(recipient_key_offer, recipient_key_fact, graph)
+valid_wrap_source_offer(wrap_source_offer, source_fact, graph)
+valid_secret_coverage_offer(secret_offer, local_secret_fact, graph)
 valid_key_wrap_fact(key_wrap_fact, recipient_key, source_secret, signer, graph)
 valid_unwrapped_secret_fact(local_secret_fact, key_wrap, recipient_key, graph)
 ```
@@ -363,12 +371,12 @@ model.
 Predicates:
 
 ```text
-valid_connection_invite_secret_offer_claim(claim, invite_secret)
-valid_ephemeral_secret_offer_claim(claim, ephemeral_secret)
-valid_connection_fact_receipt_offer_claim(claim, receipt_fact)
-valid_request_offer_claim(claim, request_fact, graph)
+valid_connection_invite_secret_offer(offer, invite_secret)
+valid_ephemeral_secret_offer(offer, ephemeral_secret)
+valid_connection_fact_receipt_offer(offer, receipt_fact)
+valid_request_offer(offer, request_fact, graph)
 valid_connection_row(row, response_fact, graph)
-valid_connection_offer_claim(claim, response_fact, graph)
+valid_connection_offer(offer, response_fact, graph)
 ```
 
 Proof chain:
@@ -412,10 +420,10 @@ offers, retention-floor offers, sync-share contributions, and self-purges.
 Core predicates to reuse:
 
 ```text
-valid_content_signer_offer_claim(...)
-valid_auth_user_offer_claim(...)
-valid_auth_admin_offer_claim(...)
-valid_secret_coverage_offer_claim(...)
+valid_content_signer_offer(...)
+valid_auth_user_offer(...)
+valid_auth_admin_offer(...)
+valid_secret_coverage_offer(...)
 ```
 
 Fact-family targets:

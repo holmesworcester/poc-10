@@ -214,7 +214,7 @@ pub mod adapt {
 //   3. MATERIALIZE. Publish local `connection_frame_observation` context keyed
 //      by the observed wire fact id.
 
-use crate::core::context::{ContextKey, ContextNeed, ContextOffer, ContextOfferClaim, Role};
+use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::project_fact::{
     FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
@@ -239,15 +239,6 @@ pub fn connection_frame_observation_need(owner: FactId, frame_fact_id: FactId) -
 pub fn connection_frame_observation_offer(owner: FactId, frame_fact_id: FactId) -> ContextOffer {
     ContextOffer {
         owner,
-        role: Role::expect(CONNECTION_FRAME_OBSERVATION_ROLE),
-        scope: FactScope::Local,
-        start_key: ContextKey::from_bytes(frame_fact_id),
-        end_key: ContextKey::from_bytes(frame_fact_id),
-    }
-}
-
-pub fn connection_frame_observation_offer_claim(frame_fact_id: FactId) -> ContextOfferClaim {
-    ContextOfferClaim {
         role: Role::expect(CONNECTION_FRAME_OBSERVATION_ROLE),
         scope: FactScope::Local,
         start_key: ContextKey::from_bytes(frame_fact_id),
@@ -322,12 +313,7 @@ mod tests {
 
         assert!(output.needs.is_empty());
         assert_eq!(
-            output
-                .offers
-                .iter()
-                .cloned()
-                .map(|claim| claim.into_offer(fact.id))
-                .collect::<Vec<_>>(),
+            output.offers,
             vec![connection_frame_observation_offer(
                 fact.id,
                 observed.frame_fact_id,
@@ -383,7 +369,8 @@ impl ConnectionFrameObservationProjector {
         // 2. Context.
         // 3. Materialize.
         Ok(
-            ProjectionOutput::new().offer(connection_frame_observation_offer_claim(
+            ProjectionOutput::new().offer(connection_frame_observation_offer(
+                fact.id,
                 observed.frame_fact_id,
             )),
         )

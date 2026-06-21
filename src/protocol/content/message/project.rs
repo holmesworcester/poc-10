@@ -361,18 +361,6 @@ pub fn retention_floor_offer(
     )
 }
 
-pub fn retention_floor_offer_claim(
-    workspace_id: crate::core::facts::FactId,
-) -> crate::core::context::ContextOfferClaim {
-    let key = workspace_id.to_vec();
-    crate::core::context::ContextOfferClaim::range(
-        crate::core::context::Role::expect(RETENTION_FLOOR_ROLE),
-        crate::protocol::auth::workspace::scope(workspace_id),
-        key.clone(),
-        key,
-    )
-}
-
 fn content_message_row(message_id: FactId, fact: &ContentMessageFact) -> TableInsert {
     read_models::CONTENT_MESSAGES.insert(vec![
         Value::Bytes(fact.workspace_id.to_vec()),
@@ -616,7 +604,8 @@ impl ContentMessageProjector {
         // 3. Materialize.
         Ok(share_fact_with_sync(
             ready_message_output(fact, &message, deletion_need, retention_floor_need)
-                .offer(crate::core::context::ContextOfferClaim::range(
+                .offer(crate::core::context::ContextOffer::range(
+                    fact.id,
                     "content_message",
                     scope,
                     fact.id,

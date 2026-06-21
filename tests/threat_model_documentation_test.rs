@@ -84,7 +84,7 @@ fn threat_model_maps_invariants_to_verus_proof_surfaces() {
         "Content admission predicates",
         "Sync shareability and connection sendability",
         "content deletion, auth root retirement, retained-node coverage",
-        "Every materialized row, emitted authority offer claim, emitted sync-share",
+        "Every materialized row, emitted authority offer, emitted sync-share contribution",
     ];
 
     let missing = required

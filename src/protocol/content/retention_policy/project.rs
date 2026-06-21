@@ -422,15 +422,14 @@ impl RetentionPolicyProjector {
         let row = policy_row(fact.id, &policy);
         Ok(share_fact_with_sync(
             ProjectionOutput::new()
-                .offer(crate::core::context::ContextOfferClaim::range(
+                .offer(crate::core::context::ContextOffer::range(
+                    fact.id,
                     "sync_exact_fact",
                     FactScope::Global,
                     fact.id,
                     fact.id,
                 ))
-                .offer(message::project::retention_floor_offer_claim(
-                    policy.workspace_id,
-                ))
+                .offer(message::retention_floor_offer(fact.id, policy.workspace_id))
                 .row_mutation(RowMutation::InsertValues(row)),
             policy.workspace_id,
             fact,

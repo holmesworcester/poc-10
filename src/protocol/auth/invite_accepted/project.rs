@@ -317,7 +317,8 @@ impl InviteAcceptedProjector {
         // 3. Materialize.
         let invite_secret_id = derived_invite_secret_fact_id(&accepted)?;
         let mut output = ProjectionOutput::new()
-            .offer(crate::core::context::ContextOfferClaim::range(
+            .offer(crate::core::context::ContextOffer::range(
+                fact.id,
                 "connection_invite_secret",
                 crate::core::facts::FactScope::Local,
                 invite_secret_id,
@@ -327,7 +328,10 @@ impl InviteAcceptedProjector {
                 fact.id, &accepted,
             )?));
         if accepted.identity_scope {
-            output = output.offer(super::workspace_accepted_offer_claim(accepted.workspace_id));
+            output = output.offer(super::workspace_accepted_offer(
+                fact.id,
+                accepted.workspace_id,
+            ));
         }
         Ok(output)
     }
@@ -365,7 +369,7 @@ mod tests {
         assert!(output
             .offers
             .iter()
-            .any(|claim| claim.role.as_str() == super::super::AUTH_WORKSPACE_ACCEPTED_ROLE));
+            .any(|offer| offer.role.as_str() == super::super::AUTH_WORKSPACE_ACCEPTED_ROLE));
         assert!(output
             .offers
             .iter()
@@ -400,7 +404,7 @@ mod tests {
         assert!(!output
             .offers
             .iter()
-            .any(|claim| claim.role.as_str() == super::super::AUTH_WORKSPACE_ACCEPTED_ROLE));
+            .any(|offer| offer.role.as_str() == super::super::AUTH_WORKSPACE_ACCEPTED_ROLE));
         assert!(output
             .offers
             .iter()
