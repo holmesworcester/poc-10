@@ -266,7 +266,7 @@ For core matching:
 
 ```text
 theorem_projection_context_sound(ctx, graph)
-theorem_matched_payloads_are_offer_owner_facts(matched)
+theorem_matched_payloads_are_offer_owner_facts(ctx, graph)
 theorem_matcher_preserves_role_scope_selector(need, matched)
   -> projector may know the matched payload source and selector relation
 ```
@@ -382,8 +382,9 @@ item is claimed.
 - [ ] TM-M1 root workspace slice: prove that actual `WorkspaceProjector`
   materialization implies decoded global workspace evidence, valid signature
   evidence, local identity-scoped invite acceptance, and canonical row/offer/
-  sync-share output. Blocked until a theorem over the Rust projector inputs and
-  outputs exists; then cover user, admin, invite, endpoint, content-signer,
+  sync-share output. Blocked until the current `SpecWorkspace*` helper lemmas
+  are replaced by, or connected to, a theorem over the Rust projector inputs and
+  outputs; then cover user, admin, invite, endpoint, content-signer,
   recipient-key, and connection authority projectors.
 - [ ] TM-M2 workspace carrier boundary slice: prove over the Rust workspace
   projector path that signature proof and local accepted-invite evidence are

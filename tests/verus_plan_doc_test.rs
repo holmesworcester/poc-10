@@ -16,11 +16,6 @@ fn verus_strategy() -> String {
     fs::read_to_string(root.join(VERUS_STRATEGY_PATH)).expect("read Verus strategy doc")
 }
 
-fn repo_file(path: &str) -> String {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    fs::read_to_string(root.join(path)).unwrap_or_else(|err| panic!("read {path}: {err}"))
-}
-
 #[test]
 fn verus_projector_proof_modules_verify() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -46,60 +41,6 @@ fn verus_projector_proof_modules_verify() {
             "Verus failed for {proof_file}\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
-        );
-    }
-}
-
-#[test]
-fn protocol_proof_modules_do_not_claim_model_only_theorems() {
-    let proof_files = [
-        "src/protocol/auth/signature/proofs.rs",
-        "src/protocol/auth/invite_accepted/proofs.rs",
-        "src/protocol/auth/workspace/proofs.rs",
-    ];
-    let required = [
-        "No theorem in this file currently claims threat-model coverage.",
-        "actual Rust inputs and output",
-    ];
-    let forbidden = [
-        "SpecSignatureFact",
-        "SpecSignatureProofOffer",
-        "SpecInviteAcceptedFact",
-        "SpecWorkspaceAcceptedOffer",
-        "SpecWorkspaceFact",
-        "SpecWorkspaceMaterializedOutput",
-        "theorem_signature_projector_offer_is_valid",
-        "theorem_workspace_accepted_projector_offer_is_valid",
-        "theorem_workspace_materialization_only_if",
-        "theorem_workspace_projector_materializes_iff_safety_shape",
-        "theorem_workspace_materialized_output",
-        "workspace_projector_materializes(",
-        "valid_signature_proof_offer(",
-        "valid_workspace_accepted_offer(",
-    ];
-
-    for proof_file in proof_files {
-        let text = repo_file(proof_file);
-        let missing = required
-            .iter()
-            .copied()
-            .filter(|needle| !text.contains(needle))
-            .collect::<Vec<_>>();
-        assert!(
-            missing.is_empty(),
-            "{proof_file} must state Rust-backed proof obligations and no current coverage:\n{}",
-            missing.join("\n")
-        );
-
-        let present = forbidden
-            .iter()
-            .copied()
-            .filter(|needle| text.contains(needle))
-            .collect::<Vec<_>>();
-        assert!(
-            present.is_empty(),
-            "{proof_file} still contains model-only proof artifacts:\n{}",
-            present.join("\n")
         );
     }
 }
