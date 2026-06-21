@@ -12,10 +12,14 @@ files.
 The near-term goal is to prove the small protocol-neutral core properties that
 the offer-claim model makes tractable, then use them as composition glue for
 projector proofs against authority, deletion, shareability, and transport
-invariants. Core properties that still require matcher, SQLite, or commit
-modeling remain visible, named, and replaceable trusted stubs. A deferred core
-proof is still a claim about the real core Rust behavior. It is not permission
-to prove an unrelated model and count that as threat-model coverage.
+invariants. The central runtime proof boundary is table ownership: projected
+tables and projection-owned certificate tables are written only by
+`project_fact`, intent tables are written only by intent handling, and query
+modules read without authority-bearing writes. Core properties that still
+require matcher, SQLite, or commit modeling remain visible, named, and
+replaceable trusted stubs. A deferred core proof is still a claim about the real
+core Rust behavior. It is not permission to prove an unrelated model and count
+that as threat-model coverage.
 
 ## Scope
 
@@ -26,12 +30,13 @@ also covers the small core properties needed to compose those proofs, starting
 with offer-claim finalization, owner-bearing output ownership, self-only purges,
 parked missing-context output, and missing-payload lookup.
 
-Core matching, offer-owner payload loading, context replacement, and atomic
-commit proofs are still deferred. Those trusted theorem stubs must live in one
-module and must be documented as trusted stubs until real core proofs replace
-them. Every trusted core theorem must be a realistic statement about actual core
-Rust behavior or a foundational substrate contract. If the theorem would not be
-a cogent future proof obligation over core code, do not add it.
+Core matching, offer-owner payload loading, projected-table write confinement,
+context replacement, and atomic commit proofs are still deferred. Those trusted
+theorem stubs must live in one module and must be documented as trusted stubs
+until real core proofs replace them. Every trusted core theorem must be a
+realistic statement about actual core Rust behavior or a foundational substrate
+contract. If the theorem would not be a cogent future proof obligation over core
+code, do not add it.
 
 Projector proofs remain responsible for protocol meaning. Core assumptions never
 prove that an admin is valid, an endpoint may sign content, a deletion is
@@ -95,12 +100,134 @@ contracts such as crypto, parsers, content addressing, and transactions.
 | `projection_context_sound(ctx, graph)` | trusted until core model | The actual `ProjectionContext` was assembled from standing needs, matched offers, and offer-owner payloads in the graph. | Does not prove any role-specific authority or semantic validity. |
 | `matched_payloads_are_offer_owner_facts(matched)` | trusted until core model | A matched payload exposed to a projector is the fact bytes owned by the matched offer owner. | Does not prove the consuming projector may trust the payload's protocol meaning without cross-checks. |
 | `matcher_preserves_role_scope_selector(need, matched)` | trusted until core model | A match preserves requested role, scope, owner boundaries, and exact or range selector relation. | Does not prove that the role's producer emitted semantically valid evidence. |
+| `projected_table_writes_are_project_fact_only(before, after)` | trusted until table ownership refactor | Rows in projected tables and projection-owned certificate tables can change only during the `project_fact` commit path. | Does not prove the projector's emitted row mutation is semantically valid. |
+| `projection_context_marks_proven_payloads(ctx, graph)` | trusted until core model | Each matched payload carries whether its offer owner was already in the projection-owned proven-facts set when context was assembled. | Does not require all matched offers or payloads to be proven. |
 | `context_replacement_preserves_owner_boundaries(before, after, owner)` | trusted until core model | Reprojection replaces context only for the current owner and does not rewrite unrelated owners. | Does not prove the replacement context is sufficient for any protocol output. |
 | `atomic_projection_commit_sound(before, output, after)` | trusted until core model | Context replacement, rows, queued intents, facts, sync-share contributions, and accepted purges commit atomically. | Does not prove those effects satisfy a fact-family predicate. |
 
 The status can move only when the theorem verifies with Verus against the actual
 Rust path or a verified Rust-code view. Core theorems establish plumbing
 soundness. Projector theorems establish protocol meaning.
+
+## Table Ownership Implementation Direction
+
+The table-ownership proof is an implementation refactor before it is a Verus
+proof. The code should make unauthorized writes unrepresentable:
+
+```rust
+pub struct ProjectedTableSchema { /* wraps TableName and columns */ }
+pub struct IntentTableSchema { /* wraps TableName and columns */ }
+pub struct NetworkTableSchema { /* wraps TableName and columns */ }
+
+pub enum ProjectedRowMutation {
+    InsertValues(ProjectedTableInsert),
+    DeleteWhere(ProjectedTableDeleteWhere),
+}
+
+pub enum IntentRowMutation {
+    InsertValues(IntentTableInsert),
+    DeleteWhere(IntentTableDeleteWhere),
+}
+```
+
+Protocol row builders that feed projectors should return
+`ProjectedRowMutation`, not a universal `RowMutation`. Intent handlers should
+return `IntentRowMutation` or handler-owned effect types, not projected row
+mutations. The shared `TableName` string wrapper may still exist for schema and
+read queries, but it must not remain the authority token for writes into
+projected tables.
+
+`Db` should expose owned write capabilities instead of raw write authority:
+
+```rust
+pub struct ReadDb<'a> { /* read/query access */ }
+pub(crate) struct ProjectionWriteTx<'a> { /* project_fact-only writes */ }
+pub(crate) struct IntentWriteTx<'a> { /* intent-handler writes */ }
+
+impl ProjectionWriteTx<'_> {
+    fn apply_projected_rows(&mut self, rows: &[ProjectedRowMutation]) -> Result<(), Error>;
+    fn insert_proven_fact(&mut self, cert: ProvenFactCertificate) -> Result<(), Error>;
+}
+
+impl IntentWriteTx<'_> {
+    fn apply_intent_rows(&mut self, rows: &[IntentRowMutation]) -> Result<(), Error>;
+}
+```
+
+`ProjectionWriteTx` should be constructed only by the `project_fact` commit
+path. `IntentWriteTx` should be constructed only by the intent handling path.
+Query modules may continue to prepare read SQL through a read-only view, but
+they should not receive a transaction capability that can mutate projected
+tables.
+
+The migration should happen in narrow steps:
+
+1. Inventory tables by owner in schema declarations: projected, intent,
+   network, local-control, and core fact storage.
+2. Introduce `ProjectedTableSchema` and `ProjectedRowMutation`; port projector
+   row builders to return those types.
+3. Change `ProjectionOutput` to carry projected row mutations only.
+4. Change intent effects to carry intent-owned row mutations only.
+5. Replace the generic row mutation commit path with owner-specific commit
+   functions on `ProjectionWriteTx` and `IntentWriteTx`.
+6. Add a projection-owned `proven_facts` or certificate table after the
+   projected write boundary exists. Its insert API requires a sealed
+   `ProvenFactCertificate` produced by the projection proof path.
+7. Only after the Rust API shape blocks cross-owner writes, replace
+   `projected_table_writes_are_project_fact_only` with a real Verus theorem
+   over the owner-specific transaction functions.
+
+SQLite authorizer hooks or source-scanning tests may be useful as defense in
+depth while migrating, but they are not the final proof mechanism. The final
+proof should rest on Rust types, module privacy, and Verus-checked functions
+that operate on those types.
+
+The refactor must preserve core readability. Table ownership should make the
+projection path easier to audit, not bury it under generic capability machinery.
+Use direct names such as `ProjectedRowMutation`, `ProjectionWriteTx`, and
+`IntentWriteTx`; avoid macro-heavy ownership DSLs, deeply generic transaction
+traits, and type parameters that obscure the actual commit order. Keep
+`project_fact.rs` readable as load, prepare, commit: load context, run the
+selected projector, validate owner/proof boundaries, publish projected state,
+wake dependents, and commit follow-up work. If a proof-supporting abstraction
+does not make that sequence clearer to a maintainer, it is too expensive.
+
+Implementation changes should be staged so the runtime remains workable after
+each commit:
+
+```text
+one owner split at a time
+small adapter functions at old call sites
+no broad rewrites of query SQL while changing write authority
+tests for each migrated table family
+proof stubs updated only after the Rust path exists
+```
+
+Offers stay flexible under this design. Projectors may emit `ContextOfferClaim`
+values before the producing fact is proven, because some offers are wakeup
+edges needed to discover the fact that can validate them. The proof-critical
+change is that `ProjectionContext` exposes whether each matched payload owner
+was already proven when context was assembled:
+
+```rust
+impl ProjectionContext {
+    pub fn payload_for_checked(&self, need: &ContextNeed, label: &str)
+        -> Result<Option<&Fact>, String>;
+
+    pub fn payload_for_proven(&self, need: &ContextNeed, label: &str)
+        -> Result<Option<&Fact>, String>;
+
+    pub fn matched_payloads_for(&self, need: &ContextNeed)
+        -> impl Iterator<Item = (&ContextOffer, &Fact)>;
+
+    pub fn matched_proven_payloads_for(&self, need: &ContextNeed)
+        -> impl Iterator<Item = (&ContextOffer, &Fact)>;
+}
+```
+
+Projector proofs must use the proven-payload accessors for authority-bearing
+dependencies and may use ordinary matched payloads only for candidate,
+non-authority wakeup logic.
 
 ## Foundational Crypto Theorems
 
@@ -184,6 +311,11 @@ verus! {
             need: SpecContextNeed,
         ) -> bool;
 
+        pub open spec fn projection_context_marks_proven_payloads(
+            ctx: SpecProjectionContext,
+            graph: SpecPipelineGraph,
+        ) -> bool;
+
         pub open spec fn parked_output_for_missing_need(
             output: SpecProjectionOutput,
             need: SpecContextNeed,
@@ -193,6 +325,11 @@ verus! {
             before: SpecPipelineGraph,
             after: SpecPipelineGraph,
             owner: SpecFactId,
+        ) -> bool;
+
+        pub open spec fn projected_table_writes_are_project_fact_only(
+            before: SpecPipelineGraph,
+            after: SpecPipelineGraph,
         ) -> bool;
 
         pub open spec fn purges_are_self_only(
@@ -295,6 +432,7 @@ For a consumer projector:
 ```text
 projection_context_sound(ctx, graph)
 valid_R_offer(offer, payload, graph)
+payload proof status is proven when this role is authority-bearing
 consumer validates type, workspace, signer, endpoint, key coordinate,
 receipt path, deletion coordinate, or protocol-specific relation
   -> emitted row, offer, intent, sync-share contribution, or self-purge
@@ -327,6 +465,7 @@ shape:
 ```text
 standing_context_sound(before)
 + core theorem for projection context construction
++ core theorem for projected-table write ownership
 + projector theorem for the current fact
 + core theorem for context replacement and atomic commit
 = standing_context_sound(after)
@@ -341,24 +480,34 @@ the assumed statement was too broad.
 
 ## Current Execution Plan
 
-1. Finish the universal offer-claim runtime boundary. Projectors emit
+1. Establish the projected-table ownership boundary. Inventory every table by
+   owner, introduce owner-specific table schema and row mutation types, and make
+   projected tables writable only through the `project_fact` commit path. Intent
+   tables get their own intent-handler write capability; queries remain read
+   only for authority-bearing state.
+2. Finish the universal offer-claim runtime boundary. Projectors emit
    `ContextOfferClaim`s; core finalizes them into stored `ContextOffer`s with
    the projected fact id as owner. This is required before any producer
    projector theorem can be trusted as an offer certificate.
-2. Prove the tractable core boundary first, not as threat-model coverage but as
+3. Add projection-visible proof status for matched payloads. Context remains a
+   candidate index; projectors check whether a matched payload is already proven
+   exactly where their theorem needs prior authority.
+4. Prove the tractable core boundary first, not as threat-model coverage but as
    composition glue: offer-claim finalization, owner-bearing output ownership,
    self-only purge requests, parked missing-context output, and missing-payload
    lookup. These are protocol-neutral and should not remain trusted stubs after
    the Rust-view bridge exists.
-3. Leave matcher graph construction, offer-owner payload loading, context
-   replacement, and atomic SQLite commit as centralized trusted core theorems
-   until their real core proof model exists.
-4. Start projector coverage with the smallest high-value authority producer:
+5. Leave matcher graph construction, offer-owner payload loading,
+   projected-table write confinement, context replacement, and atomic SQLite
+   commit as centralized trusted core theorems until their real core proof
+   model exists.
+6. Start projector coverage with the smallest high-value authority producer:
    the root workspace or signature-proof path, depending on which has the
    cleanest Rust-code view. The proof must show dangerous output implies
-   decoded fact bytes, required matched context, primitive crypto binding, and
-   exact canonical offer-claim or row output.
-5. Compose outward through the threat model: workspace authority, admin/user
+   decoded fact bytes, required matched context including proven-payload status
+   where authority is required, primitive crypto binding, and exact canonical
+   offer-claim or row output.
+7. Compose outward through the threat model: workspace authority, admin/user
    delegation, endpoint/content signer authority, connection receipts,
    shareability, deletion/self-purge, and key-material retirement. Checklist
    items stay unchecked until the composed only-if theorem verifies.

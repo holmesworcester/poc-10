@@ -15,6 +15,12 @@ contribution, emitted deferred intent, and emitted purge has a derivation from
 valid facts and valid matched context.
 ```
 
+The runtime proof also depends on table ownership. Query-visible projected rows
+are not safe merely because their projector proof exists; they are safe only if
+projected tables are writable through `project_fact` and not through arbitrary
+handlers, query helpers, or generic row mutations. Intent tables have their own
+intent-handler boundary.
+
 For projectors this means proving more than shape preservation. A projector
 cannot emit an offer, row mutation, deferred intent, sync-share contribution, or
 self-purge unless the fact-family predicate for that output is satisfied.
@@ -36,6 +42,8 @@ target is meaningful only if it names:
 4. The negative case: missing context parks, mismatched context rejects, and
    untrusted carrier data cannot grant authority.
 5. The ownership boundary: core plumbing, protocol projector, or intent handler.
+6. The table owner: projected, intent, network, local-control, or core fact
+   storage.
 
 Prioritize targets that protect authority, secrecy, shareability, deletion, and
 transport admission. Do not spend early proof effort on layout round trips, enum
@@ -115,7 +123,10 @@ context_set_normalized(set)
 range_match_sound(need, offer)
 exact_match_sound(need, offer)
 projection_context_sound(ctx, graph)
+projection_context_marks_proven_payloads(ctx, graph)
 standing_context_sound(graph)
+projected_table_sound(graph)
+projected_table_writes_are_project_fact_only(before, after)
 row_mutations_bounded(output)
 purges_are_self_only(output, current_fact_id)
 offer_claim_finalizes_to_projected_owner(claim, offer, current_fact_id)
@@ -125,9 +136,12 @@ atomic_runtime_effects_sound(output, graph)
 Core lemmas:
 
 ```text
+projected tables are writable only by project_fact
+intent tables are writable only by intent handling
 range matcher returns only same role and scope with overlapping selector ranges
 exact matcher is the equal-endpoint case of range matching
 matched payloads are loaded from the offer owner's fact id
+matched payloads carry proven status from projection-owned certificates
 matched payload helpers preserve the need chosen by the projector
 context replacement preserves owner boundaries
 unchanged needs and finalized offers do not create new wake work
@@ -138,6 +152,25 @@ core rejects cross-fact purges from projector output
 
 These core proofs intentionally do not know protocol roles such as
 `auth_admin`, `content_message`, or `request`.
+
+Implementation work before those proofs:
+
+```text
+ProjectedTableSchema and ProjectedRowMutation replace universal write tokens for projected rows
+IntentTableSchema and IntentRowMutation replace universal write tokens for intent rows
+ProjectionOutput carries projected row mutations only
+intent effects carry intent-owned mutations only
+ProjectionWriteTx is constructible only by project_fact
+IntentWriteTx is constructible only by intent handling
+ProjectionContext exposes payload_for_proven and matched_proven_payloads_for
+```
+
+This ownership work must keep core readable and workable. Prefer explicit
+owner-specific names over generic capability frameworks, keep the projection
+worker organized as load, prepare, commit, and migrate one table owner at a
+time. Do not mix broad query rewrites with write-authority refactors. Each
+migration step should leave the runtime understandable, tested, and easy to
+review before the next table family moves.
 
 ## Fact Family Proof Contract
 
@@ -167,7 +200,11 @@ Projector proof obligations:
    authority offer claims, sync shares, deferred intents, or purges.
 3. Invalid matched context rejects or emits no materialized output.
 4. Every emitted offer claim satisfies that role's semantic offer predicate.
-5. Every emitted row mutation satisfies that table's row predicate.
+   Offers may be emitted as candidate wakeup edges before the producing fact is
+   proven; consumers must require proven payload status when the role is used as
+   authority.
+5. Every emitted projected row mutation satisfies that table's row predicate,
+   and only `project_fact` may commit it.
 6. Every emitted deferred intent satisfies that intent's input and authority
    predicate.
 7. Every emitted sync-share contribution is for an already admitted non-local
@@ -194,7 +231,7 @@ Intent handler proof obligations:
    protocol effects.
 3. Every returned fact is constructed by its owning fact-family helper.
 4. Every returned purge is exact and authorized by the input facts.
-5. The handler does not mutate projector-owned rows directly.
+5. The handler does not mutate projected rows directly.
 ```
 
 ## Stringing Proofs Across Context
@@ -230,6 +267,7 @@ For a consumer projector:
 projection_context_sound(ctx, graph)
 ctx contains matched offer for role R
 valid_R_offer(offer, payload, graph)
+payload proof status is proven if role R is authority-bearing
 consumer validates module-specific cross-checks
   -> consumer output predicate holds
 ```
@@ -238,11 +276,14 @@ For runtime work:
 
 ```text
 standing_context_sound(before)
+projected_table_sound(before)
 projector theorem for current fact
+projected table writes are confined to project_fact
 context replacement for current owner
 matcher soundness for newly added context
 atomic commit of rows, facts, purges, and queued intents
   -> standing_context_sound(after)
+  -> projected_table_sound(after)
   -> materialized rows, sync shares, and intents remain sound
 ```
 
@@ -515,6 +556,8 @@ verus.toml or equivalent local runner config
 The runner should verify only proof-enabled modules first:
 
 ```text
+core projected-table ownership lemmas
+core proven-payload context lemmas
 core context and matcher lemmas
 core projection-output purge and replacement lemmas
 connection_ephemeral_secret proof
