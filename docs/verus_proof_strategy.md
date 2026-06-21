@@ -332,11 +332,7 @@ Use these rules when adding projector proofs under this strategy:
    primitives, BLAKE3 content addressing, byte parsers, and other substrate
    tools satisfy their advertised contracts. Those axioms should be named at the
    boundary where they are used and should not smuggle in protocol authority.
-14. Every proof change must include a walkthrough before handoff. The
-    walkthrough must name the theorem shape, trusted stubs or assumptions,
-    proof steps, what the theorem really proves, and the remaining gaps against
-    the threat model.
-15. Commit the completed work on that same worktree branch before handoff or
+14. Commit the completed work on that same worktree branch before handoff or
     review.
 
 ## Threat Model Checklist

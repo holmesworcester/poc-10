@@ -187,8 +187,6 @@ fn verus_strategy_centralizes_assumed_core_theorems() {
         "output implies required authority evidence",
         "Use iff only for exact projector characterization.",
         "Constructor lemmas are not checklist coverage by themselves.",
-        "Every proof change must include a walkthrough before handoff.",
-        "what the theorem really proves, and the remaining gaps against",
         "receipt remains only a receipt",
         "Replacing a trusted core",
         "Do not rely on static source analysis as proof.",
