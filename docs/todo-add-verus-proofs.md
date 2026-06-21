@@ -316,6 +316,46 @@ single projector.
 The first proof set should cover invariants that would be security bugs if
 mis-projected.
 
+### First Foothold: Signature Proof Certificate
+
+Start with `auth::signature` before the auth DAG or connection handshake. It is
+one projector, has no upstream protocol-authority dependency, and produces a
+certificate that later authority proofs consume.
+
+The high-level slice is:
+
+```text
+A stored proven signature_proof offer can exist only if it came from a routed
+auth::signature fact whose bytes verified an Ed25519 signature over the exact
+workspace_id and target_fact_id under the exact signer_public_key encoded in
+the offer selector.
+```
+
+Proof shape:
+
+```text
+SignatureProjector emits signature_proof claim C
+  -> decoded payload is SignatureFact
+  -> owner fact id binds the exact payload bytes
+  -> owner fact scope is workspace scope(payload.workspace_id)
+  -> Ed25519 verifies signature_message(workspace_id, target_fact_id)
+     under payload.signer_public_key
+  -> C.role == signature_proof
+  -> C.scope == workspace scope(payload.workspace_id)
+  -> C.selector == (target_fact_id, signer_public_key)
+
+core finalizes C into stored offer O
+  -> O.owner == owner fact id
+  -> O copies C.role, C.scope, and C.selector exactly
+```
+
+This proves no carrier or context row can manufacture a `signature_proof`
+certificate for a different target, signer key, or workspace than the bytes
+actually verified. It does not prove that the signer is a member, admin,
+endpoint, content author, deleter, or key-wrap authority. Consumer projectors
+must prove those role meanings separately when they use `signature_proof`
+context.
+
 ### Auth Authority DAG
 
 Auth relationships should be modeled as a least authorized closure, not as broad
@@ -418,9 +458,9 @@ Proof obligations:
 
 ### Connection Handshake
 
-The first vertical proof slice should remain the connection handshake. It has a
-small surface, crosses several context roles, and exercises the exact composition
-model.
+After the signature foothold, the first vertical proof slice should be the
+connection handshake. It has a small surface, crosses several context roles,
+and exercises the exact composition model.
 
 Predicates:
 
@@ -581,6 +621,7 @@ core projected-table ownership lemmas
 core proven-payload context lemmas
 core context and matcher lemmas
 core projection-output purge and replacement lemmas
+auth_signature proof
 connection_ephemeral_secret proof
 connection_fact_receipt proof
 request proof

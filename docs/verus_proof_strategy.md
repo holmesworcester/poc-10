@@ -496,6 +496,40 @@ relationship it needs. A matched admin offer remains only an admin certificate
 until the consuming projector proves the workspace, signer, and target
 relationship for its own output.
 
+## First Foothold Target
+
+The first projector proof target is `auth::signature`. It is the smallest
+reusable authority-adjacent certificate: it proves signature binding, not
+membership authority.
+
+Target theorem:
+
+```text
+stored proven signature_proof offer O
+  -> O.owner = signature fact F.id
+  -> F was routed through auth::signature::SignatureProjector
+  -> SignatureProjector emitted the claim finalized into O
+  -> F.bytes decode to SignatureFact {
+       workspace_id,
+       target_fact_id,
+       signer_public_key,
+       signature
+     }
+  -> F.id == hash(F.bytes)
+  -> F.scope == workspace scope(workspace_id)
+  -> Ed25519 verifies signature_message(workspace_id, target_fact_id)
+     under signer_public_key
+  -> O.role == signature_proof
+  -> O.scope == workspace scope(workspace_id)
+  -> O.selector == (target_fact_id, signer_public_key)
+```
+
+This proves that carrier or context data cannot manufacture a
+`signature_proof` certificate for a different target, signer key, or workspace
+than the bytes actually verified. It does not prove that the signer is a member,
+admin, endpoint, content author, deleter, or key-wrap authority. Those meanings
+belong to the consumer projectors that use the signature certificate.
+
 Model-only projector relations are not proof work for this repo. Do not add or
 keep a disconnected Verus model of a projector as a substitute for proving the
 actual Rust code. Spec and ghost helper types are allowed only as abstractions
@@ -552,12 +586,11 @@ the assumed statement was too broad.
    projected-table write confinement, context replacement, and atomic SQLite
    commit as centralized trusted core theorems until their real core proof
    model exists.
-6. Start projector coverage with the smallest high-value authority producer:
-   the root workspace or signature-proof path, depending on which has the
-   cleanest Rust-code view. The proof must show dangerous output implies
-   decoded fact bytes, required matched context including proven-payload status
-   where authority is required, primitive crypto binding, and exact canonical
-   offer-claim or row output.
+6. Start projector coverage with `auth::signature`. The proof must show a
+   finalized `signature_proof` offer implies decoded signature fact bytes, fact
+   id and workspace-scope binding, primitive Ed25519 binding, and the exact
+   canonical offer selector for `(target_fact_id, signer_public_key)`. It must
+   not claim membership or protocol authority.
 7. Use route-local projector theorem stubs only to prove core composition and
    conditional high-level invariants. Replace each used stub with the real
    projector proof before checking off the related threat-model invariant.
