@@ -66,6 +66,16 @@ pub mod verus_model {
         pub has_purges: bool,
     }
 
+    #[derive(Copy, Clone)]
+    pub struct SpecEd25519Verification {
+        pub public_key: int,
+        pub message_domain: int,
+        pub message_part_0: int,
+        pub message_part_1: int,
+        pub signature: int,
+        pub verifier_accepts: bool,
+    }
+
     pub open spec fn matcher_preserves_role_scope_selector(
         need: SpecContextNeed,
         matched: SpecMatchedContext,
@@ -131,6 +141,12 @@ pub mod verus_model {
         after: SpecPipelineGraph,
     ) -> bool {
         before.token == after.token && output.current_fact_id == output.current_fact_id
+    }
+
+    pub open spec fn ed25519_signature_binds(
+        evidence: SpecEd25519Verification,
+    ) -> bool {
+        evidence.verifier_accepts
     }
 
     // Temporary trusted core assumption: core context construction exposes only
@@ -213,6 +229,18 @@ pub mod verus_model {
         after: SpecPipelineGraph,
     )
         ensures atomic_projection_commit_sound(before, output, after)
+    {
+    }
+
+    // Temporary trusted foundational assumption: Ed25519 verification binds the
+    // verified message bytes to the public key and signature. This proves no
+    // protocol authority by itself.
+    #[verifier::external_body]
+    pub proof fn theorem_ed25519_verify_binds(
+        evidence: SpecEd25519Verification,
+    )
+        requires evidence.verifier_accepts
+        ensures ed25519_signature_binds(evidence)
     {
     }
 }

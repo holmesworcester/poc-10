@@ -9,9 +9,15 @@
 use vstd::prelude::*;
 
 #[cfg(verus_keep_ghost)]
+#[path = "../../../core/proofs.rs"]
+pub mod core_proofs;
+
+#[cfg(verus_keep_ghost)]
 verus! {
 pub mod verus_model {
     use vstd::prelude::*;
+
+    use super::core_proofs::verus_model as core;
 
     pub open spec fn signature_proof_role() -> int {
         1int
@@ -19,6 +25,10 @@ pub mod verus_model {
 
     pub open spec fn signature_selector(target_fact_id: int, signer_public_key: int) -> int {
         target_fact_id * 1000003int + signer_public_key
+    }
+
+    pub open spec fn signature_message_domain() -> int {
+        10int
     }
 
     #[derive(Copy, Clone)]
@@ -29,6 +39,7 @@ pub mod verus_model {
         pub workspace_id: int,
         pub target_fact_id: int,
         pub signer_public_key: int,
+        pub signature: int,
         pub decoded: bool,
         pub signature_verified: bool,
     }
@@ -58,6 +69,19 @@ pub mod verus_model {
         }
     }
 
+    pub open spec fn signature_verification(
+        fact: SpecSignatureFact,
+    ) -> core::SpecEd25519Verification {
+        core::SpecEd25519Verification {
+            public_key: fact.signer_public_key,
+            message_domain: signature_message_domain(),
+            message_part_0: fact.workspace_id,
+            message_part_1: fact.target_fact_id,
+            signature: fact.signature,
+            verifier_accepts: fact.signature_verified,
+        }
+    }
+
     pub open spec fn valid_signature_proof_offer(
         offer: SpecSignatureProofOffer,
         fact: SpecSignatureFact,
@@ -66,7 +90,7 @@ pub mod verus_model {
         signer_public_key: int,
     ) -> bool {
         fact.decoded
-            && fact.signature_verified
+            && core::ed25519_signature_binds(signature_verification(fact))
             && fact.workspace_id == workspace_id
             && fact.target_fact_id == target_fact_id
             && fact.signer_public_key == signer_public_key
@@ -102,6 +126,7 @@ pub mod verus_model {
                 signer_public_key,
             )
     {
+        core::theorem_ed25519_verify_binds(signature_verification(fact));
     }
 }
 }

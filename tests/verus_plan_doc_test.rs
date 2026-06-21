@@ -177,7 +177,16 @@ fn verus_strategy_centralizes_assumed_core_theorems() {
         "Every trusted theorem stub must have a name beginning with `theorem_`",
         "core theorems establish plumbing soundness, and projector theorems",
         "establish protocol meaning",
+        "theorem_ed25519_verify_binds(evidence)",
+        "must not state protocol",
         "Proof modules must verify with Verus before a checklist item can move out of",
+        "The security bar for threat-model coverage is the only-if direction:",
+        "Full iff theorems are useful when the spec can characterize the exact projector",
+        "Model-only projector relations are staging artifacts.",
+        "materialized protected",
+        "output implies required authority evidence",
+        "Use iff only for exact projector characterization.",
+        "Constructor lemmas are not checklist coverage by themselves.",
         "receipt remains only a receipt",
         "Replacing a trusted core",
         "Do not rely on static source analysis as proof.",
@@ -202,6 +211,8 @@ fn verus_strategy_centralizes_assumed_core_theorems() {
         "Core assumptions prove deletion authority",
         "projectors may call assume(...) directly",
         "They may remain as regression checks over",
+        "- [x] TM-M1 root workspace slice",
+        "- [x] TM-C2 workspace local-bootstrap slice",
     ];
     let present = forbidden
         .into_iter()

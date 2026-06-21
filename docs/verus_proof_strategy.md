@@ -84,6 +84,33 @@ The theorem names can be adjusted once the Verus runner lands, but the split
 must remain: core theorems establish plumbing soundness, and projector theorems
 establish protocol meaning.
 
+## Foundational Crypto Theorems
+
+Cryptographic theorem stubs are allowed only for primitive-level facts. They
+may state that an advertised verifier result binds a public key, message, and
+signature according to the primitive's contract. They must not state protocol
+authority.
+
+Allowed shape:
+
+```text
+theorem_ed25519_verify_binds(evidence)
+  requires evidence.verifier_accepts
+  ensures ed25519_signature_binds(evidence)
+```
+
+Forbidden shape:
+
+```text
+ed25519 verifies -> signer is a workspace admin
+ed25519 verifies -> content may be admitted
+ed25519 verifies -> fact is sync-shareable
+```
+
+Protocol modules must consume crypto binding as one input and still prove the
+workspace, target, signer, endpoint, content-author, deletion, or key-coordinate
+relationship required by the threat model.
+
 ## Verification Command
 
 Proof modules must verify with Verus before a checklist item can move out of
@@ -183,6 +210,29 @@ include protocol predicates.
 Projector proofs should consume core theorems as proof functions and then prove
 the fact-family predicate for each output.
 
+The security bar for threat-model coverage is the only-if direction:
+
+```text
+projector relation(fact, context, output)
++ output materializes protected authority, rows, shareability, plaintext,
+  key material, or purge effects
+  -> the required authority evidence existed
+     and the output is exactly the allowed canonical shape
+     and no forbidden effect exists
+```
+
+Full iff theorems are useful when the spec can characterize the exact projector
+relation:
+
+```text
+projector materializes protected output
+  <-> required authority evidence exists and canonical output is emitted
+```
+
+The `->` half is mandatory for threat-model safety. The `<-` half is
+completeness/liveness and should not be counted as security coverage unless the
+only-if half is also proved.
+
 For a producer projector:
 
 ```text
@@ -215,6 +265,11 @@ receipt remains only a receipt until the receiving projector proves the
 relationship it needs. A matched admin offer remains only an admin certificate
 until the consuming projector proves the workspace, signer, and target
 relationship for its own output.
+
+Model-only projector relations are staging artifacts. They may be useful and
+must verify, but they do not close a threat-model checklist item until a
+correspondence theorem ties the relation to the Rust projector code or to a
+trusted core theorem that precisely describes that code path.
 
 ## Induction Shape
 
@@ -251,44 +306,60 @@ Use these rules when adding projector proofs under this strategy:
 5. Pair runtime changes with realistic Rust tests, and pair proof changes with
    a Verus verification run. A Rust test can prevent regressions, but it cannot
    move a proof checklist item by itself.
-6. Document any additional assumptions, especially cryptographic primitive
+6. Prove the safety direction before claiming coverage: materialized protected
+   output implies required authority evidence and exact allowed effects.
+7. Use iff only for exact projector characterization. Never let the easy
+   completeness direction substitute for the only-if safety direction.
+8. Constructor lemmas are not checklist coverage by themselves. A theorem that
+   starts with valid inputs and a constructed output may support another proof,
+   but the checklist requires a dangerous-output-implies-authority theorem.
+9. Document any additional assumptions, especially cryptographic primitive
    soundness and byte-canonicalization assumptions.
-7. Do not rely on static source analysis as proof. Tests that inspect source
+10. Keep crypto stubs primitive-level. They may prove byte/key/signature binding,
+   not workspace authority, content authority, deletion authority, or
+   shareability.
+11. Do not rely on static source analysis as proof. Tests that inspect source
    text may guard layout policy, but proof claims must be predicates or theorems
    over the executable values the runtime actually passes between core,
    projectors, and handlers.
-8. Do not cheat by placing protocol conclusions in core. A core theorem may be
+12. Do not cheat by placing protocol conclusions in core. A core theorem may be
    difficult to prove over SQLite-backed projection machinery, but it must be a
    logically coherent theorem about core-owned mechanics. If a theorem would
    need to know that an admin, endpoint, receipt, deletion, key wrap, content
    signer, or workspace is semantically valid, it belongs in the owning
    protocol proof instead.
-9. Foundational axioms may assume SQLite transactions, cryptographic
+13. Foundational axioms may assume SQLite transactions, cryptographic
    primitives, BLAKE3 content addressing, byte parsers, and other substrate
    tools satisfy their advertised contracts. Those axioms should be named at the
    boundary where they are used and should not smuggle in protocol authority.
-10. Commit the completed work on that same worktree branch before handoff or
+14. Commit the completed work on that same worktree branch before handoff or
     review.
 
 ## Threat Model Checklist
 
-Work through `THREAT_MODEL.md` in order. A checked item means this strategy has
-at least one Verus projector proof slice for that invariant; it does not
-mean the full cross-projector invariant is complete unless the note says so.
+Work through `THREAT_MODEL.md` in order. A checked item requires a Verus
+only-if safety theorem over a projector relation that is tied to the code path
+we run, or a named trusted theorem that precisely stands for that code path.
+Model-level Verus slices are noted but remain unchecked until that
+correspondence exists.
 
-- [x] TM-M1 root workspace slice: `auth::workspace` proves a workspace row,
-  `auth_workspace` offer, and sync-share intent materialize only after matching
-  signature evidence and local identity-scoped invite acceptance. Remaining:
-  user, admin, invite, endpoint, content-signer, recipient-key, and connection
+- [ ] TM-M1 root workspace slice: model-level Verus theorem
+  `theorem_workspace_materialization_only_if` proves that modeled workspace
+  materialization implies decoded global workspace evidence, valid signature
+  evidence, local identity-scoped invite acceptance, and canonical row/offer/
+  sync-share output. Remaining before checked: prove the spec relation
+  corresponds to the Rust `WorkspaceProjector` output and then cover user,
+  admin, invite, endpoint, content-signer, recipient-key, and connection
   authority projectors.
-- [x] TM-M2 workspace carrier boundary slice: workspace proof consumes
-  `signature_proof` and local `auth_workspace_accepted` predicates; carrier
-  facts alone do not satisfy the projector's authority needs. Remaining:
-  connection receipt/frame projectors and sync carrier projectors.
-- [x] TM-M3 root workspace scope slice: workspace proof keys the row, offer,
-  signature need, accepted need, and sync-share workspace id to the projected
-  workspace fact id. Remaining: all cross-workspace auth, key, content, and
-  connection projectors.
+- [ ] TM-M2 workspace carrier boundary slice: model-level workspace proof
+  consumes `signature_proof` and local `auth_workspace_accepted` predicates;
+  carrier facts alone do not satisfy the modeled projector's authority needs.
+  Remaining before checked: runtime correspondence plus connection
+  receipt/frame projectors and sync carrier projectors.
+- [ ] TM-M3 root workspace scope slice: model-level workspace proof keys the
+  row, offer, signature need, accepted need, and sync-share workspace id to the
+  projected workspace fact id. Remaining before checked: runtime correspondence
+  plus all cross-workspace auth, key, content, and connection projectors.
 - [ ] TM-M4: prove admin/user/device/invite issuer escalation paths in
   `auth::admin`, `auth::user_invite`, `auth::device_invite`,
   `auth::endpoint`, and `auth::endpoint_shared`.
@@ -296,9 +367,10 @@ mean the full cross-projector invariant is complete unless the note says so.
   and retention-floor gates before future shareability or key-wrap creation.
 - [ ] TM-C1: prove encrypted content projectors and connection frames never
   expose plaintext without local key material.
-- [x] TM-C2 workspace local-bootstrap slice: workspace sync-share proof rejects
-  the local `invite_accepted` payload as sync context. Remaining: all local
-  secret fact families and connection sendability filters.
+- [ ] TM-C2 workspace local-bootstrap slice: model-level workspace sync-share
+  proof rejects the local `invite_accepted` payload as sync context. Remaining
+  before checked: runtime correspondence, all local secret fact families, and
+  connection sendability filters.
 - [ ] TM-C3: prove sync shareability, dependency closure, range request, and
   connection send paths stay inside authorized non-local workspace visibility.
 - [ ] TM-C4: prove key-wrap creation validates recipient, source secret,
@@ -310,10 +382,11 @@ mean the full cross-projector invariant is complete unless the note says so.
 - [ ] TM-I2: prove admin authority does not imply content-signing authority.
 - [ ] TM-I3: prove replayed facts cannot alter accepted sender, body, deletion
   target, key coordinate, or workspace.
-- [x] TM-I4 workspace evidence slice: workspace proof treats signature and
-  invite-accepted facts as evidence that must satisfy producer predicates before
-  root workspace materialization. Remaining: connection receipts, observations,
-  requests, connections, and frame projectors.
+- [ ] TM-I4 workspace evidence slice: model-level workspace proof treats
+  signature and invite-accepted facts as evidence that must satisfy producer
+  predicates before root workspace materialization. Remaining before checked:
+  runtime correspondence plus connection receipts, observations, requests,
+  connections, and frame projectors.
 - [ ] TM-D1: prove deletion facts publish purge context only for authorized
   exact targets and target projectors self-purge only themselves.
 - [ ] TM-D2: prove target deletion removes or retracts user-visible rows and
