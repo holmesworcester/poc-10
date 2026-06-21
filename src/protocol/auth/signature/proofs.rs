@@ -1,107 +1,103 @@
-//! Verus proofs for the `protocol::auth::signature` fact family.
+//! Proof predicates for the `protocol::auth::signature` fact family.
 //!
-//! Signature facts are evidence producers. They do not prove authority over a
-//! target; they prove only that the `signature_proof` offer is bound to a
-//! decoded signature fact in the correct workspace scope, target fact id, and
-//! signer public key.
+//! Keep family-local proof work here: canonical layout, fact-boundary
+//! authentication, context proof obligations, projection offers, and row
+//! materialization. Cross-family or core substrate proofs belong outside this
+//! fact-family module.
 
-#[cfg(verus_keep_ghost)]
-use vstd::prelude::*;
+use crate::core::context::ContextOffer;
+use crate::core::crypto::Ed25519PublicKey;
+use crate::core::facts::{Fact, FactId};
 
-#[cfg(verus_keep_ghost)]
-verus! {
-pub mod verus_model {
-    use vstd::prelude::*;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ValidSignatureProofOffer;
 
-    pub open spec fn signature_proof_role() -> int {
-        1int
+/// A `signature_proof` offer is valid for one target only when its owner payload
+/// is a signature fact in the same workspace scope, the payload names the same
+/// target and signer key, and the embedded signature verifies.
+pub fn valid_signature_proof_offer(
+    offer: &ContextOffer,
+    payload: &Fact,
+    workspace_id: FactId,
+    target_fact_id: FactId,
+    signer_public_key: Ed25519PublicKey,
+) -> bool {
+    let scope = crate::protocol::auth::workspace::scope(workspace_id);
+    let expected_offer = match super::project::signature_proof_offer(
+        payload.id,
+        scope.clone(),
+        target_fact_id,
+        signer_public_key,
+    ) {
+        Ok(offer) => offer,
+        Err(_) => return false,
+    };
+    if offer != &expected_offer || payload.scope != scope {
+        return false;
     }
-
-    pub open spec fn signature_selector(target_fact_id: int, signer_public_key: int) -> int {
-        target_fact_id * 1000003int + signer_public_key
-    }
-
-    #[derive(Copy, Clone)]
-    pub struct SpecSignatureFact {
-        pub fact_id: int,
-        pub scope: int,
-        pub workspace_scope: int,
-        pub workspace_id: int,
-        pub target_fact_id: int,
-        pub signer_public_key: int,
-        pub decoded: bool,
-        pub signature_verified: bool,
-    }
-
-    #[derive(Copy, Clone)]
-    pub struct SpecSignatureProofOffer {
-        pub owner: int,
-        pub role: int,
-        pub scope: int,
-        pub start_key: int,
-        pub end_key: int,
-        pub target_fact_id: int,
-        pub signer_public_key: int,
-    }
-
-    pub open spec fn signature_projector_offer(
-        fact: SpecSignatureFact,
-    ) -> SpecSignatureProofOffer {
-        SpecSignatureProofOffer {
-            owner: fact.fact_id,
-            role: signature_proof_role(),
-            scope: fact.workspace_scope,
-            start_key: signature_selector(fact.target_fact_id, fact.signer_public_key),
-            end_key: signature_selector(fact.target_fact_id, fact.signer_public_key),
-            target_fact_id: fact.target_fact_id,
-            signer_public_key: fact.signer_public_key,
-        }
-    }
-
-    pub open spec fn valid_signature_proof_offer(
-        offer: SpecSignatureProofOffer,
-        fact: SpecSignatureFact,
-        workspace_id: int,
-        target_fact_id: int,
-        signer_public_key: int,
-    ) -> bool {
-        fact.decoded
-            && fact.signature_verified
-            && fact.workspace_id == workspace_id
-            && fact.target_fact_id == target_fact_id
-            && fact.signer_public_key == signer_public_key
-            && fact.scope == fact.workspace_scope
-            && offer.owner == fact.fact_id
-            && offer.role == signature_proof_role()
-            && offer.scope == fact.workspace_scope
-            && offer.start_key == signature_selector(target_fact_id, signer_public_key)
-            && offer.end_key == signature_selector(target_fact_id, signer_public_key)
-            && offer.target_fact_id == target_fact_id
-            && offer.signer_public_key == signer_public_key
-    }
-
-    pub proof fn theorem_signature_projector_offer_is_valid(
-        fact: SpecSignatureFact,
-        workspace_id: int,
-        target_fact_id: int,
-        signer_public_key: int,
-    )
-        requires
-            fact.decoded,
-            fact.signature_verified,
-            fact.workspace_id == workspace_id,
-            fact.target_fact_id == target_fact_id,
-            fact.signer_public_key == signer_public_key,
-            fact.scope == fact.workspace_scope,
-        ensures
-            valid_signature_proof_offer(
-                signature_projector_offer(fact),
-                fact,
-                workspace_id,
-                target_fact_id,
-                signer_public_key,
-            )
-    {
-    }
+    let signature = match super::decode_fact_payload(payload.body()) {
+        Ok(signature) => signature,
+        Err(_) => return false,
+    };
+    signature.workspace_id == workspace_id
+        && signature.target_fact_id == target_fact_id
+        && signature.signer_public_key == signer_public_key
+        && super::project::authenticate::prove_signature_evidence(&signature).is_ok()
 }
+
+pub fn theorem_valid_signature_proof_offer(
+    offer: &ContextOffer,
+    payload: &Fact,
+    workspace_id: FactId,
+    target_fact_id: FactId,
+    signer_public_key: Ed25519PublicKey,
+) -> Result<ValidSignatureProofOffer, String> {
+    valid_signature_proof_offer(
+        offer,
+        payload,
+        workspace_id,
+        target_fact_id,
+        signer_public_key,
+    )
+    .then_some(ValidSignatureProofOffer)
+    .ok_or_else(|| "signature_proof offer is not valid for the requested target".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signature_offer_certificate_binds_workspace_target_and_signer() {
+        let workspace_id = [3; 32];
+        let target_fact_id = [9; 32];
+        let private_key = [7; 32];
+        let signer_public_key = crate::core::crypto::ed25519_public_key(&private_key);
+        let payload =
+            super::super::author::create_signature(workspace_id, target_fact_id, &private_key, 123)
+                .expect("signature fact");
+        let offer = super::super::project::signature_proof_offer(
+            payload.id,
+            crate::protocol::auth::workspace::scope(workspace_id),
+            target_fact_id,
+            signer_public_key,
+        )
+        .expect("signature offer");
+
+        theorem_valid_signature_proof_offer(
+            &offer,
+            &payload,
+            workspace_id,
+            target_fact_id,
+            signer_public_key,
+        )
+        .expect("valid signature offer");
+        assert!(!valid_signature_proof_offer(
+            &offer,
+            &payload,
+            [4; 32],
+            target_fact_id,
+            signer_public_key,
+        ));
+    }
 }
