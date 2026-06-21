@@ -127,6 +127,7 @@ projection_context_marks_proven_payloads(ctx, graph)
 standing_context_sound(graph)
 projected_table_sound(graph)
 projected_table_writes_are_project_fact_only(before, after)
+project_fact_dispatches_owner_route(fact, route)
 row_mutations_bounded(output)
 purges_are_self_only(output, current_fact_id)
 offer_claim_finalizes_to_projected_owner(claim, offer, current_fact_id)
@@ -142,6 +143,7 @@ range matcher returns only same role and scope with overlapping selector ranges
 exact matcher is the equal-endpoint case of range matching
 matched payloads are loaded from the offer owner's fact id
 matched payloads carry proven status from projection-owned certificates
+proven offer status links offer owner, fact route, emitted claim, and projector theorem
 matched payload helpers preserve the need chosen by the projector
 context replacement preserves owner boundaries
 unchanged needs and finalized offers do not create new wake work
@@ -153,6 +155,15 @@ core rejects cross-fact purges from projector output
 These core proofs intentionally do not know protocol roles such as
 `auth_admin`, `content_message`, or `request`.
 
+During core-only work, protocol projector correctness may be represented by
+route-local trusted theorem contracts. This is useful for proving that core
+composition works assuming the routed projectors satisfy their advertised
+contracts. The stubs must be specific to a fact route and output kind, and must
+name the owner fact, emitted claim or effect, and semantic predicate they stand
+for. Do not add a blanket theorem that all projector output is valid. These
+stubs are proof debt in the owning protocol `proofs.rs` files and cannot by
+themselves check off threat-model invariants.
+
 Implementation work before those proofs:
 
 ```text
@@ -163,6 +174,7 @@ intent effects carry intent-owned mutations only
 ProjectionWriteTx is constructible only by project_fact
 IntentWriteTx is constructible only by intent handling
 ProjectionContext exposes payload_for_proven and matched_proven_payloads_for
+ProvenFactCertificate records the owner fact id, fact route, finalized claim, and projector theorem obligation
 ```
 
 This ownership work must keep core readable and workable. Prefer explicit
@@ -268,16 +280,25 @@ projection_context_sound(ctx, graph)
 ctx contains matched offer for role R
 valid_R_offer(offer, payload, graph)
 payload proof status is proven if role R is authority-bearing
+proven status links offer -> owner fact -> fact route -> projector theorem
 consumer validates module-specific cross-checks
   -> consumer output predicate holds
 ```
+
+Do not treat proven status as a stand-alone boolean. An authority-bearing
+consumer can rely on a matched offer only through the whole certificate chain:
+the stored offer names an owner fact, core projected that fact through the
+fact-type route registered for it, that route emitted the ownerless claim, core
+finalized the claim without changing role, scope, or key range, and the routed
+projector theorem proves the claim predicate for the owner fact's decoded bytes
+and proven matched context.
 
 For runtime work:
 
 ```text
 standing_context_sound(before)
 projected_table_sound(before)
-projector theorem for current fact
+projector theorem or explicit route-local projector theorem stub for current fact
 projected table writes are confined to project_fact
 context replacement for current owner
 matcher soundness for newly added context

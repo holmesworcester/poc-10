@@ -102,12 +102,28 @@ contracts such as crypto, parsers, content addressing, and transactions.
 | `matcher_preserves_role_scope_selector(need, matched)` | trusted until core model | A match preserves requested role, scope, owner boundaries, and exact or range selector relation. | Does not prove that the role's producer emitted semantically valid evidence. |
 | `projected_table_writes_are_project_fact_only(before, after)` | trusted until table ownership refactor | Rows in projected tables and projection-owned certificate tables can change only during the `project_fact` commit path. | Does not prove the projector's emitted row mutation is semantically valid. |
 | `projection_context_marks_proven_payloads(ctx, graph)` | trusted until core model | Each matched payload carries whether its offer owner was already in the projection-owned proven-facts set when context was assembled. | Does not require all matched offers or payloads to be proven. |
+| `project_fact_dispatches_owner_route(fact, route)` | trusted until router proof | The actual `project_fact` path projected the owner fact through the fact-type route registered for that fact before committing its output. | Does not prove that route's projector theorem or any role-specific predicate. |
 | `context_replacement_preserves_owner_boundaries(before, after, owner)` | trusted until core model | Reprojection replaces context only for the current owner and does not rewrite unrelated owners. | Does not prove the replacement context is sufficient for any protocol output. |
 | `atomic_projection_commit_sound(before, output, after)` | trusted until core model | Context replacement, rows, queued intents, facts, sync-share contributions, and accepted purges commit atomically. | Does not prove those effects satisfy a fact-family predicate. |
 
 The status can move only when the theorem verifies with Verus against the actual
 Rust path or a verified Rust-code view. Core theorems establish plumbing
 soundness. Projector theorems establish protocol meaning.
+
+For core-only proof work, projector correctness may be represented as
+route-local trusted theorem contracts. That is useful for proving the runtime
+composition shape:
+
+```text
+if every fact route P satisfies its projector theorem contract,
+then project_fact preserves standing_context_sound and projected_table_sound
+```
+
+These contracts must be specific to a route and output kind: emitted claim,
+projected row, deferred intent, sync-share contribution, or purge. Do not add a
+blanket axiom that all projector output is valid. A route-local projector stub
+is proof debt for the owning protocol `proofs.rs` file and cannot move a
+threat-model checklist item by itself.
 
 ## Table Ownership Implementation Direction
 
@@ -205,9 +221,15 @@ proof stubs updated only after the Rust path exists
 
 Offers stay flexible under this design. Projectors may emit `ContextOfferClaim`
 values before the producing fact is proven, because some offers are wakeup
-edges needed to discover the fact that can validate them. The proof-critical
-change is that `ProjectionContext` exposes whether each matched payload owner
-was already proven when context was assembled:
+edges needed to discover the fact that can validate them. A proven offer is not
+just a proven bit. For authority-bearing use, proof status must mean the stored
+offer is linked to its owner fact, the owner fact was dispatched through the
+fact-type route registered for that fact, core finalized one of that route's
+emitted claims without changing the role, scope, or key range, and the routed
+projector theorem proved the claim predicate for the owner fact's decoded bytes
+and matched context. The proof-critical change is that `ProjectionContext`
+exposes whether each matched payload owner already had that certificate chain
+when context was assembled:
 
 ```rust
 impl ProjectionContext {
@@ -433,6 +455,7 @@ For a consumer projector:
 projection_context_sound(ctx, graph)
 valid_R_offer(offer, payload, graph)
 payload proof status is proven when this role is authority-bearing
+proven status links offer -> owner fact -> fact route -> projector theorem
 consumer validates type, workspace, signer, endpoint, key coordinate,
 receipt path, deletion coordinate, or protocol-specific relation
   -> emitted row, offer, intent, sync-share contribution, or self-purge
@@ -442,6 +465,30 @@ receipt path, deletion coordinate, or protocol-specific relation
 The producer theorem proves ownerless claims. The consumer theorem reasons from
 matched, finalized `ContextOffer`s after core has attached the projected fact id
 as owner.
+
+This provenance chain is required for every authority-bearing offer. Knowing
+that an offer-shaped row is marked proven is insufficient unless the proof also
+identifies the owner fact, the route used to project that fact, and the
+projector theorem that validates claims from that route:
+
+```text
+stored offer O
+  -> O.owner = F.id
+  -> project_fact dispatched F through route P
+  -> P emitted ownerless claim C
+  -> core finalized C into O without changing role/scope/range
+  -> P's theorem proves C is valid from F's decoded bytes and proven context
+```
+
+Core owns the dispatch and finalization parts of this chain. The protocol
+projector owns the last step: role meaning and semantic validity.
+
+While core proof work is in progress, that last step may be a route-local
+projector theorem stub. The stub must have the same shape as the real future
+projector theorem and must name the route, owner fact, emitted claim or effect,
+and semantic predicate it stands for. High-level threat-model theorems may be
+proved conditionally on those stubs, but final checklist coverage requires
+replacing every used stub with a Verus proof in the owning projector module.
 
 The consumer step is where threat-model invariants become strong. A matched
 receipt remains only a receipt until the receiving projector proves the
@@ -466,7 +513,8 @@ shape:
 standing_context_sound(before)
 + core theorem for projection context construction
 + core theorem for projected-table write ownership
-+ projector theorem for the current fact
++ projector theorem, or explicit route-local projector theorem stub, for the
+  current fact
 + core theorem for context replacement and atomic commit
 = standing_context_sound(after)
   and every committed row, finalized authority offer, sync-share contribution,
@@ -488,7 +536,10 @@ the assumed statement was too broad.
 2. Finish the universal offer-claim runtime boundary. Projectors emit
    `ContextOfferClaim`s; core finalizes them into stored `ContextOffer`s with
    the projected fact id as owner. This is required before any producer
-   projector theorem can be trusted as an offer certificate.
+   projector theorem can be trusted as an offer certificate. Proven offer
+   certificates must record the exact owner fact and fact route so consumers can
+   compose through the theorem for the projector that actually emitted the
+   claim.
 3. Add projection-visible proof status for matched payloads. Context remains a
    candidate index; projectors check whether a matched payload is already proven
    exactly where their theorem needs prior authority.
@@ -507,7 +558,10 @@ the assumed statement was too broad.
    decoded fact bytes, required matched context including proven-payload status
    where authority is required, primitive crypto binding, and exact canonical
    offer-claim or row output.
-7. Compose outward through the threat model: workspace authority, admin/user
+7. Use route-local projector theorem stubs only to prove core composition and
+   conditional high-level invariants. Replace each used stub with the real
+   projector proof before checking off the related threat-model invariant.
+8. Compose outward through the threat model: workspace authority, admin/user
    delegation, endpoint/content signer authority, connection receipts,
    shareability, deletion/self-purge, and key-material retirement. Checklist
    items stay unchecked until the composed only-if theorem verifies.
