@@ -112,14 +112,17 @@ offer value are copied unchanged. For a slice of claims, Cargo-verus proves
 the same length, owner, role, scope, start key, end key, and value preservation
 for every returned offer. For the pre-normalization context-set construction,
 Cargo-verus proves the input needs are carried unchanged and the constructed
-offers preserve the same owner and claim fields. That is not the full
-offer-finalization theorem yet: the
+offers preserve the same owner and claim fields. Cargo-verus also proves that
+the rebuild-shape decision accepts exactly non-rebuild projections or rebuild
+projections with no standing needs, offers, or time wakes. That is not the full
+offer-finalization or rebuild-admission theorem yet: the
 `ProjectionOutput::context_set` normalization step and the `prepare_projection`
-call order remain open core proof work. It is also not the full owner-bearing
-output theorem yet: the exported theorem still needs a correspondence proof
-tying the `enforce_owner_is_self` `Result` wrapper, diagnostic rejection
-branches, and `prepare_projection` call order to the verified status and allow
-helpers.
+call order remain open core proof work, as does the
+`validate_rebuild_projection_shape` `Result` wrapper. It is also not the full
+owner-bearing output theorem yet: the exported theorem still needs a
+correspondence proof tying the `enforce_owner_is_self` `Result` wrapper,
+diagnostic rejection branches, and `prepare_projection` call order to the
+verified status and allow helpers.
 
 ### Stage 3: Routed Projection Evidence
 
@@ -616,6 +619,7 @@ forall returned offer: offer.role/scope/start/end/value match the same-index cla
 context_set_from_projection_parts(needs, claims, owner) preserves needs
 context_set_from_projection_parts(needs, claims, owner) builds same-index owned offers
 projection_route_evidence(fact_id, effective_tag, route_tag, projector_info, storage_requirement) preserves every route evidence field
+rebuild_projection_shape_allowed(rebuild_derived_state, needs, offers, wakes) accepts if and only if non-rebuild or empty rebuild output
 ```
 
 These contracts are proofs over helper Rust code that normal builds execute.
@@ -634,6 +638,9 @@ longer the equality decision, per-slice scans, aggregate owner predicate,
 status classification, or accept-status decision; it is proving the
 `enforce_owner_is_self` `Result` wrapper, diagnostic rejection branches, and
 `prepare_projection` call order over executable helper code.
+The remaining rebuild-admission gap is no longer the standing-output decision;
+it is proving the `validate_rebuild_projection_shape` `Result` wrapper and
+`prepare_projection` call order around the verified decision helper.
 
 The remaining route-dispatch gap is no longer route-evidence field stamping; it
 is proving that `RouterProjector` selected the registered route for the

@@ -56,7 +56,7 @@ use self::context_db::{
     wake_context_matches_in_tx,
 };
 use crate::core::command::AuthoredFacts;
-use crate::core::context::{ContextNeed, ContextSet, ContextSetAdditions};
+use crate::core::context::{ContextNeed, ContextOffer, ContextSet, ContextSetAdditions};
 use crate::core::db::{quoted_identifier, quoted_table_name, Db, TableName};
 use crate::core::effects::RuntimeEffects;
 use crate::core::facts::{
@@ -607,16 +607,18 @@ fn validate_rebuild_projection_shape(
     time_wakes: &[TimeWake],
     effects: &RuntimeEffects,
 ) -> Result<(), String> {
-    if !effects.rebuild_derived_state {
+    if rebuild_projection_shape_allowed(
+        effects.rebuild_derived_state,
+        &context.needs,
+        &context.offers,
+        time_wakes,
+    ) {
         return Ok(());
     }
-    if !context.needs.is_empty() || !context.offers.is_empty() || !time_wakes.is_empty() {
-        return Err(
-            "derived-state rebuild projection cannot publish standing context or time wakes"
-                .to_string(),
-        );
-    }
-    Ok(())
+    Err(
+        "derived-state rebuild projection cannot publish standing context or time wakes"
+            .to_string(),
+    )
 }
 
 /// Reject any projected need, time wake, or purge whose owner is not the fact
@@ -936,6 +938,30 @@ fn owner_status_allows_projection(status: u8) -> (accepted: bool)
         accepted <==> status == OWNER_CHECK_ACCEPTED,
 {
     status == OWNER_CHECK_ACCEPTED
+}
+
+/// Decision used before admitting a projection-wide rebuild effect.
+///
+/// A rebuild projection may request a reset of derived state, but it must not
+/// simultaneously publish standing context or time wakes. Those outputs would
+/// become visible just before the reset effect is committed and make the core
+/// induction story ambiguous.
+fn rebuild_projection_shape_allowed(
+    rebuild_derived_state: bool,
+    needs: &[ContextNeed],
+    offers: &[ContextOffer],
+    wakes: &[TimeWake],
+) -> (accepted: bool)
+    ensures
+        accepted <==> (
+            !rebuild_derived_state
+                || (needs@.len() == 0 && offers@.len() == 0 && wakes@.len() == 0)
+        ),
+{
+    if !rebuild_derived_state {
+        return true;
+    }
+    needs.len() == 0 && offers.len() == 0 && wakes.len() == 0
 }
 } // verus!
 
@@ -5230,6 +5256,59 @@ mod contract_tests {
 
         assert!(
             err.contains("intent kind unknown_followup is not registered"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn rebuild_projection_accepts_empty_standing_output() {
+        let fact = Fact::new(FactScope::Global, 1, b"empty rebuild".to_vec());
+        let projector = test_projector(|_fact: &Fact, _context: &ProjectionContext| {
+            Ok(ProjectionOutput::new().rebuild_derived_state())
+        });
+
+        let projection = run_projection(&projector, &fact, ProjectionContext::default())
+            .expect("empty rebuild projection should validate");
+
+        assert!(projection.runtime_effects.rebuild_derived_state);
+        assert!(projection.projected_context.needs.is_empty());
+        assert!(projection.projected_context.offers.is_empty());
+        assert!(projection.time_wakes.is_empty());
+    }
+
+    #[test]
+    fn rebuild_projection_rejects_standing_context_or_time_wakes() {
+        let role = Role::new("rebuild_guard").unwrap();
+        let key = ContextKey::from_bytes([3; 32]);
+        let need_fact = Fact::new(FactScope::Global, 1, b"rebuild with need".to_vec());
+        let time_fact = Fact::new(FactScope::Global, 1, b"rebuild with time wake".to_vec());
+
+        let need_output = ProjectionOutput::new()
+            .need(need_for(&need_fact, &role, &key))
+            .rebuild_derived_state();
+        assert_rebuild_projection_shape_rejected(&need_fact, need_output);
+
+        let time_output = ProjectionOutput::new()
+            .time_wake(TimeWake {
+                timeline: Timeline::new("rebuild_guard").unwrap(),
+                owner: time_fact.id,
+                at: 10,
+            })
+            .rebuild_derived_state();
+        assert_rebuild_projection_shape_rejected(&time_fact, time_output);
+    }
+
+    fn assert_rebuild_projection_shape_rejected(fact: &Fact, output: ProjectionOutput) {
+        let projector =
+            test_projector(move |_fact: &Fact, _context: &ProjectionContext| Ok(output.clone()));
+
+        let err = run_projection(&projector, fact, ProjectionContext::default())
+            .expect_err("rebuild with standing output should fail validation");
+
+        assert!(
+            err.contains(
+                "derived-state rebuild projection cannot publish standing context or time wakes"
+            ),
             "{err}"
         );
     }

@@ -78,6 +78,10 @@
 //!   projector_info, storage_requirement)` returns `ProjectionRouteEvidence`
 //!   with exactly those same field values. This proves route-evidence field
 //!   stamping, not route selection.
+//! - Proven in production Rust today:
+//!   `rebuild_projection_shape_allowed(rebuild_derived_state, needs, offers,
+//!   wakes)` accepts if and only if the projection is not a rebuild, or it is a
+//!   rebuild with no standing needs, offers, or time wakes.
 //! - Assumed only to call production code: the Verus contract for the derived
 //!   `ContextOfferClaim::clone` says clone preserves the whole claim. This
 //!   assumption is a Rust trait boundary helper, not a runtime theorem over
@@ -95,6 +99,9 @@
 //!   `enforce_owner_is_self` `Result` wrapper, diagnostic rejection branches,
 //!   and `prepare_projection` call order to the verified status and allow
 //!   helpers.
+//! - Not proven yet for rebuild admission: the `validate_rebuild_projection_shape`
+//!   `Result` wrapper and `prepare_projection` call order around the verified
+//!   rebuild-shape decision helper.
 //! - Punted for a later core proof model: the composition stubs that cross
 //!   matcher construction, offer loading, route dispatch, projected-table
 //!   write ownership, context replacement, and commit.

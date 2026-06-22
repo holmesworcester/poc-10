@@ -86,7 +86,7 @@ fn cargo_verus_verifies_production_core_projection_contracts() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        combined.contains("verification results:: 20 verified, 0 errors"),
+        combined.contains("verification results:: 21 verified, 0 errors"),
         "production proof should verify the real core projection contracts:\n{combined}"
     );
 }
@@ -181,6 +181,9 @@ fn core_proofs_make_trust_boundary_explicit() {
         "returns `ProjectionRouteEvidence`",
         "with exactly those same field values",
         "not route selection",
+        "`rebuild_projection_shape_allowed(rebuild_derived_state, needs, offers,",
+        "accepts if and only if the projection is not a rebuild",
+        "no standing needs, offers, or time wakes",
         "Refactored but not yet proved",
         "`ProjectionDispatcher::dispatch_projection`",
         "`RoutedProjection`",
@@ -192,6 +195,8 @@ fn core_proofs_make_trust_boundary_explicit() {
         "`PreparedProjection` correspondence theorem is not complete yet",
         "Not proven yet for offer finalization",
         "Not proven yet for owner enforcement",
+        "Not proven yet for rebuild admission",
+        "`validate_rebuild_projection_shape`",
         "exported theorem tying",
         "`enforce_owner_is_self` `Result` wrapper, diagnostic rejection branches",
         "Not proven here today: every exported `theorem_*` runtime/core property.",
@@ -311,6 +316,9 @@ fn verus_plan_is_single_core_first_source() {
         "owner, role, scope",
         "start key, end key, and value preservation",
         "every returned offer",
+        "rebuild-shape decision accepts exactly non-rebuild projections",
+        "no standing needs, offers, or time wakes",
+        "`validate_rebuild_projection_shape` `Result` wrapper",
         "`ProjectionOutput::context_set` normalization step",
         "keep leaf projectors on the simple `Projector::project` API",
         "`ProjectionDispatcher` selects",
@@ -468,10 +476,14 @@ fn verus_plan_is_single_core_first_source() {
         "context_set_from_projection_parts(needs, claims, owner) preserves needs",
         "context_set_from_projection_parts(needs, claims, owner) builds same-index owned offers",
         "projection_route_evidence(fact_id, effective_tag, route_tag, projector_info, storage_requirement) preserves every route evidence field",
+        "rebuild_projection_shape_allowed(rebuild_derived_state, needs, offers, wakes) accepts if and only if non-rebuild or empty rebuild output",
         "assume_specification` for the derived `ContextOfferClaim::clone`",
         "clone preserves the whole claim",
         "remaining owner-checking gap",
         "accept-status decision",
+        "remaining rebuild-admission gap",
+        "standing-output decision",
+        "`validate_rebuild_projection_shape` `Result` wrapper",
         "remaining route-dispatch gap",
         "route-evidence field stamping",
         "called that selected projector",
