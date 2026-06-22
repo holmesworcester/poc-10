@@ -1254,6 +1254,18 @@ fn version_replay_rebuild_projection_accepts(
     version_replay_rebuild_shape_status_allows_projection(status)
 }
 
+/// Decide whether projector runtime effects contain no intent-owned row writes.
+///
+/// Projected rows live on `ProjectionOutput::row_mutations`. Intent row
+/// mutations live inside `RuntimeEffects` for intent handlers and other runtime
+/// boundaries, so projection admission must reject them.
+fn projection_effects_have_no_intent_row_mutations(effects: &RuntimeEffects) -> (accepted: bool)
+    ensures
+        accepted <==> effects.row_mutations@.len() == 0,
+{
+    effects.row_mutations.len() == 0
+}
+
 spec fn offer_is_finalized_claim(
     offer: ContextOffer,
     claim: ContextOfferClaim,
@@ -1980,7 +1992,7 @@ pub(crate) mod commit_effects {
     fn validate_no_intent_row_mutations_from_projection(
         effects: &RuntimeEffects,
     ) -> Result<(), String> {
-        if effects.row_mutations.is_empty() {
+        if super::projection_effects_have_no_intent_row_mutations(effects) {
             Ok(())
         } else {
             Err(
@@ -5287,6 +5299,7 @@ mod contract_tests {
         ContextKey, ContextNeed, ContextOffer, ContextOfferClaim, ContextOfferValue,
         ContextSetAdditions, Role,
     };
+    use crate::core::db::{IntentRowMutation, TableInsert, Value};
     use crate::core::effects::StorageRequirement;
     use crate::core::facts::{FactId, FactScope};
     use crate::core::intents::{Intent, IntentKind};
@@ -6331,6 +6344,33 @@ mod contract_tests {
             err.contains("intent kind unknown_followup is not registered"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn projection_rejects_intent_row_mutation_output() {
+        let fact = Fact::new(FactScope::Global, 1, b"intent row mutation".to_vec());
+        let projector = test_projector(|_fact: &Fact, _context: &ProjectionContext| {
+            Ok(ProjectionOutput {
+                effects: RuntimeEffects::new().row_mutation(IntentRowMutation::InsertValues(
+                    TableInsert {
+                        table: TableName::new("intent_only_rows"),
+                        columns: &["id"],
+                        values: vec![Value::Bytes(b"bad".to_vec())],
+                    },
+                )),
+                ..ProjectionOutput::new()
+            })
+        });
+
+        let err = run_projection_with_registered_intents(
+            &projector,
+            &fact,
+            ProjectionContext::new(Vec::new()),
+            &[],
+        )
+        .expect_err("projector intent row mutation output should fail validation");
+
+        assert!(err.contains("projectors must emit projected rows"), "{err}");
     }
 
     #[test]

@@ -86,7 +86,7 @@ fn cargo_verus_verifies_production_core_projection_contracts() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        combined.contains("verification results:: 50 verified, 0 errors"),
+        combined.contains("verification results:: 51 verified, 0 errors"),
         "production proof should verify the real core projection contracts:\n{combined}"
     );
 }
@@ -208,6 +208,9 @@ fn core_proofs_make_trust_boundary_explicit() {
         "`version_replay_rebuild_projection_status(context, wakes, effects)`",
         "`version_replay_rebuild_projection_accepts(context, wakes, effects)`",
         "`validate_version_replay_rebuild_projection_shape` uses this",
+        "`projection_effects_have_no_intent_row_mutations(effects)` accepts",
+        "`RuntimeEffects.row_mutations` is empty",
+        "`validate_no_intent_row_mutations_from_projection` uses this",
         "Refactored but not yet proved",
         "`ProjectionDispatcher::dispatch_projection`",
         "`RoutedProjection`",
@@ -401,7 +404,10 @@ fn verus_plan_is_single_core_first_source() {
         "`ProjectionOutput` carries `Vec<ProjectedRowMutation>`",
         "`RuntimeEffects.row_mutations` carries\n`Vec<IntentRowMutation>`",
         "projection\nvalidation rejects non-empty intent row mutations",
-        "`RuntimeDescription`\nnow carries separate `projected_row_mutation_tables` and",
+        "`projection_effects_have_no_intent_row_mutations(effects)` is verified",
+        "`effects.row_mutations` is empty",
+        "validation guard uses it for\nthe success branch",
+        "`RuntimeDescription` now carries separate\n`projected_row_mutation_tables` and",
         "`intent_row_mutation_tables` lists",
         "`bootstrap_connection_attempt_rows` as intent-owned",
         "inventory every user-facing query module",
@@ -543,6 +549,7 @@ fn verus_plan_is_single_core_first_source() {
         "version_replay_rebuild_shape_status_allows_projection(status) accepts if and only if status is VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED",
         "version_replay_rebuild_projection_status(context, wakes, effects) returns accepted or standing-output exactly from the prepared context, time wakes, and rebuild effect",
         "version_replay_rebuild_projection_accepts(context, wakes, effects) accepts if and only if ordinary projection or empty version replay rebuild prepared output",
+        "projection_effects_have_no_intent_row_mutations(effects) accepts if and only if RuntimeEffects.row_mutations is empty",
         "matched_context_owner_matches_payload(matched) accepts if and only if matched.routed_offer.offer.owner == matched.payload.id",
         "routed_offer_owner_matches_producer(routed_offer) accepts if and only if routed_offer.offer.owner == routed_offer.producer_route.fact_id",
         "matched_context_has_routed_provenance(matched) accepts if and only if matched.routed_offer.offer.owner == matched.payload.id and matched.routed_offer.offer.owner == matched.routed_offer.producer_route.fact_id",

@@ -323,8 +323,12 @@ Current production-code foothold: `ProjectionOutput::row_mutation` now accepts
 `RuntimeEffects::row_mutation` now accepts `IntentRowMutation`; projection
 validation rejects non-empty intent row mutations inside projector effects; and
 projection commit calls `apply_projected_row_mutations_in_tx` at the same
-commit position where generic row mutations used to run. `RuntimeDescription`
-now carries separate `projected_row_mutation_tables` and
+commit position where generic row mutations used to run.
+`projection_effects_have_no_intent_row_mutations(effects)` is verified over the
+actual `RuntimeEffects` value and accepts if and only if
+`effects.row_mutations` is empty; the projection validation guard uses it for
+the success branch. `RuntimeDescription` now carries separate
+`projected_row_mutation_tables` and
 `intent_row_mutation_tables` lists. The protocol registry classifies current
 projector read-model tables as projected tables and classifies
 `bootstrap_connection_attempt_rows` as intent-owned connection-maintenance
@@ -729,6 +733,7 @@ version_replay_rebuild_shape_status(version_replay_rebuild, needs, offers, wakes
 version_replay_rebuild_shape_status_allows_projection(status) accepts if and only if status is VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED
 version_replay_rebuild_projection_status(context, wakes, effects) returns accepted or standing-output exactly from the prepared context, time wakes, and rebuild effect
 version_replay_rebuild_projection_accepts(context, wakes, effects) accepts if and only if ordinary projection or empty version replay rebuild prepared output
+projection_effects_have_no_intent_row_mutations(effects) accepts if and only if RuntimeEffects.row_mutations is empty
 matched_context_owner_matches_payload(matched) accepts if and only if matched.routed_offer.offer.owner == matched.payload.id
 routed_offer_owner_matches_producer(routed_offer) accepts if and only if routed_offer.offer.owner == routed_offer.producer_route.fact_id
 matched_context_has_routed_provenance(matched) accepts if and only if matched.routed_offer.offer.owner == matched.payload.id and matched.routed_offer.offer.owner == matched.routed_offer.producer_route.fact_id

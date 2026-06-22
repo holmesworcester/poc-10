@@ -139,6 +139,12 @@
 //!   output. `validate_version_replay_rebuild_projection_shape` uses this
 //!   verified helper for its success branch.
 //! - Proven in production Rust today:
+//!   `projection_effects_have_no_intent_row_mutations(effects)` accepts if and
+//!   only if `RuntimeEffects.row_mutations` is empty.
+//!   `validate_no_intent_row_mutations_from_projection` uses this verified
+//!   helper for its success branch, so projector runtime effects cannot carry
+//!   intent-owned row mutations past projection admission.
+//! - Proven in production Rust today:
 //!   `matched_context_owner_matches_payload(matched)` accepts if and only if
 //!   the routed matched offer owner equals the loaded payload fact id, and
 //!   `routed_offer_owner_matches_producer(routed_offer)` accepts if and only if
@@ -179,6 +185,8 @@
 //!   `projected_table_writes_are_project_fact_only` a realistic production-code
 //!   target, but it is not the theorem yet; the proof must still tie
 //!   validation, commit routing, and raw-SQL confinement to the split lists.
+//!   The local guard rejecting intent row mutations from projector effects is
+//!   proved.
 //! - Not proven here today: every exported `theorem_*` runtime/core property.
 //! - Not proven yet for offer finalization: `prepare_projection` call order.
 //!   The unnormalized bridge from `ProjectionOutput` to `ContextSet` is proved,
