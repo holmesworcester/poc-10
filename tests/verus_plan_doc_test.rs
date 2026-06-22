@@ -86,7 +86,7 @@ fn cargo_verus_verifies_production_core_projection_contracts() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        combined.contains("verification results:: 66 verified, 0 errors"),
+        combined.contains("verification results:: 67 verified, 0 errors"),
         "production proof should verify the real core projection contracts:\n{combined}"
     );
 }
@@ -202,6 +202,9 @@ fn core_proofs_make_trust_boundary_explicit() {
         "`RuntimeEffects.storage_requirement` to the selected route requirement",
         "preserving emitted facts, priority facts, incoming facts and\n//!   metadata",
         "dispatcher applied it to the selected projector output",
+        "`prepared_projection_from_validated_output(...)` constructs",
+        "preserves the source, fact,\n//!   mode, route evidence",
+        "not\n//!   a proof that route dispatch",
         "`runtime_effects_with_intent_row_mutation(effects, mutation)` appends",
         "exactly one `IntentRowMutation`",
         "`ProjectedRowMutation::table` and `IntentRowMutation::table` return",
@@ -422,12 +425,14 @@ fn verus_plan_is_single_core_first_source() {
         "`runtime_effects_with_storage_requirement(effects, requirement)` is verified",
         "sets\n`RuntimeEffects.storage_requirement` to the selected route requirement",
         "preserving emitted facts, priority facts, incoming facts and metadata",
-        "This is selected-route\nmetadata-search and routed-output constructor proof",
-        "not the full route\ntheorem",
+        "`prepared_projection_from_validated_output(...)` is verified",
+        "preserves the source, fact, mode, route evidence",
+        "prepared-output\ncarry proof, not the full route theorem",
         "Leaf projectors still return plain `ProjectionOutput`",
         "Cargo-verus",
-        "still needs to prove executable route/stamp alignment",
-        "selected projector function call",
+        "still needs to prove\nexecutable route/stamp alignment",
+        "the selected projector function call",
+        "larger `prepare_projection` call-order theorem",
         "Route-search discovery",
         "`FactRoute` while it contains the projector function pointer",
         "Cargo-verus does\nnot support function pointer types as a proof target",
@@ -598,6 +603,7 @@ fn verus_plan_is_single_core_first_source() {
         "select_route_stamp(stamps, effective_tag) returns the first matching route stamp or proves no route stamp matches",
         "routed_projection_from_selected_route(fact_id, effective_tag, stamp, output) preserves selected route stamp metadata and preserves output unchanged",
         "runtime_effects_with_storage_requirement(effects, requirement) sets the storage requirement and preserves the effect payload",
+        "prepared_projection_from_validated_output preserves route evidence and validated output pieces in PreparedProjection",
         "version_replay_rebuild_shape_allowed(version_replay_rebuild, needs, offers, wakes) accepts if and only if ordinary projection or empty version replay rebuild output",
         "version_replay_rebuild_shape_status(version_replay_rebuild, needs, offers, wakes) returns accepted or standing-output exactly from that predicate",
         "version_replay_rebuild_shape_status_allows_projection(status) accepts if and only if status is VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED",

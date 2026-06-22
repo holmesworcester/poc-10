@@ -624,7 +624,7 @@ fn prepare_projection(
             fact_admission,
         )
     })?;
-    Ok(PreparedProjection {
+    Ok(prepared_projection_from_validated_output(
         source,
         fact,
         mode,
@@ -632,12 +632,12 @@ fn prepare_projection(
         input_received_at_ms,
         input_staged_at_ms,
         incoming_metadata,
-        retain_self: output.retain_self,
+        output.retain_self,
         projected_context,
-        time_wakes: output.time_wakes,
+        output.time_wakes,
         projected_row_mutations,
         runtime_effects,
-    })
+    ))
 }
 
 fn validate_version_replay_rebuild_projection_shape(
@@ -745,6 +745,18 @@ pub struct ExProjectedRowMutation(ProjectedRowMutation);
 #[verifier(external_body)]
 #[allow(dead_code)]
 pub struct ExTableName(TableName);
+
+#[verifier(external_type_specification)]
+#[allow(dead_code)]
+pub struct ExProjectionSource(ProjectionSource);
+
+#[verifier(external_type_specification)]
+#[allow(dead_code)]
+pub struct ExProjectionMode(ProjectionMode);
+
+#[verifier(external_type_specification)]
+#[allow(dead_code)]
+pub struct ExPreparedProjection(PreparedProjection);
 
 pub assume_specification[<TableName as std::cmp::PartialEq>::eq](
     left: &TableName,
@@ -1546,6 +1558,57 @@ fn clone_context_needs(needs: &[ContextNeed]) -> (out: Vec<ContextNeed>)
         i += 1;
     }
     out
+}
+
+/// Build the commit-ready projection object after every prepare-stage guard
+/// has accepted.
+///
+/// This helper is intentionally only a carry proof: it proves the route
+/// evidence and validated output pieces survive the prepare boundary unchanged.
+/// It does not prove the dispatcher selected the route or that earlier guards
+/// were called in the right order.
+fn prepared_projection_from_validated_output(
+    source: ProjectionSource,
+    fact: Fact,
+    mode: ProjectionMode,
+    route_evidence: ProjectionRouteEvidence,
+    input_received_at_ms: u64,
+    input_staged_at_ms: Option<u64>,
+    incoming_metadata: Option<IncomingMetadata>,
+    retain_self: bool,
+    projected_context: ContextSet,
+    time_wakes: Vec<TimeWake>,
+    projected_row_mutations: Vec<ProjectedRowMutation>,
+    runtime_effects: RuntimeEffects,
+) -> (projection: PreparedProjection)
+    ensures
+        projection.source == source,
+        projection.fact == fact,
+        projection.mode == mode,
+        projection.route_evidence == route_evidence,
+        projection.input_received_at_ms == input_received_at_ms,
+        projection.input_staged_at_ms == input_staged_at_ms,
+        projection.incoming_metadata == incoming_metadata,
+        projection.retain_self == retain_self,
+        projection.projected_context == projected_context,
+        projection.time_wakes@ == time_wakes@,
+        projection.projected_row_mutations@ == projected_row_mutations@,
+        projection.runtime_effects == runtime_effects,
+{
+    PreparedProjection {
+        source,
+        fact,
+        mode,
+        route_evidence,
+        input_received_at_ms,
+        input_staged_at_ms,
+        incoming_metadata,
+        retain_self,
+        projected_context,
+        time_wakes,
+        projected_row_mutations,
+        runtime_effects,
+    }
 }
 } // verus!
 

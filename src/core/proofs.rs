@@ -126,6 +126,14 @@
 //!   verified production helper; the remaining route gap is proving the
 //!   dispatcher applied it to the selected projector output.
 //! - Proven in production Rust today:
+//!   `prepared_projection_from_validated_output(...)` constructs the
+//!   `PreparedProjection` that commit consumes and preserves the source, fact,
+//!   mode, route evidence, timing metadata, incoming metadata, retention bit,
+//!   projected context, time wakes, projected row mutations, and runtime
+//!   effects passed to it. This is a carry proof after validation succeeds, not
+//!   a proof that route dispatch, owner checks, context finalization, replay
+//!   admission, or runtime-effect validation were called in the right order.
+//! - Proven in production Rust today:
 //!   `runtime_effects_with_intent_row_mutation(effects, mutation)` appends
 //!   exactly one `IntentRowMutation` to `RuntimeEffects.row_mutations` while
 //!   preserving storage requirement, facts, priority facts, incoming facts and
@@ -235,9 +243,10 @@
 //!   router-stamped `ProjectionRouteEvidence` from the same route selection that
 //!   calls the projector. `PreparedProjection` carries that route evidence.
 //!   The route metadata search, field-stamping, selected-stamp helper, and
-//!   routed-output constructor are verified, but the executable route/stamp
-//!   alignment check, function-pointer call, and `PreparedProjection`
-//!   correspondence theorem are not complete yet.
+//!   routed-output constructor are verified, and the validated prepared-output
+//!   constructor preserves that route evidence. The executable route/stamp
+//!   alignment check, selected function-pointer call, and larger
+//!   `prepare_projection` call-order theorem are not complete yet.
 //! - Refactored but not yet proved: projected row output and intent row output
 //!   now use separate Rust types, separate `RuntimeDescription` table lists, and
 //!   separate DB apply helpers. This gives
