@@ -304,18 +304,22 @@ That record carries the matched offer fields, offer owner fact id, producer
 route identity, output kind or index when needed to disambiguate route output,
 and stable offer-carried values where selector/range fields are not expressive
 enough. Consumers must depend on the standard offer boundary plus provenance
-and then cite the producer theorem for semantic authority. Prefer
-`ProjectionContext::proven_offers_for` and
-`ProjectionContext::matched_proven_offers_for`; do not expose a raw `Fact` as a
-projector authority surface. This stage
-deliberately precedes query rewiring: projection context loading is core input
-plumbing, while user-facing queries are later consumers of projected/proven
-state.
+and then cite the producer theorem for semantic authority. Core exposes
+`ProjectionContext::attested_offer_for` and
+`ProjectionContext::matched_attested_offers_for` for local route provenance:
+the stored offer owner, loaded payload fact id, and producer route fact id all
+agree. That is still not a protocol proof. `ProvenOffer` is the later
+composition of one attested offer with the route-local producer theorem for an
+accepted offer contract. Do not expose a raw `Fact` as a projector authority
+surface. This stage deliberately precedes query rewiring: projection context
+loading is core input plumbing, while user-facing queries are later consumers
+of projected/proven state.
 
-The authority-facing `ProjectionContext` should be a collection of matched
-`ProvenOffer` records, grouped or filtered by accepted offer contracts, not
-just by the needs that happened to wake the projector. A projector should name
-two related but distinct surfaces:
+The authority-facing `ProjectionContext` should expose matched attested routed
+offers grouped or filtered by accepted offer contracts, then compose those into
+`ProvenOffer` records by producer theorem application, not just by the needs
+that happened to wake the projector. A projector should name two related but
+distinct surfaces:
 
 ```text
 needs emitted for scheduling/liveness
@@ -378,8 +382,9 @@ only that current proven offer, not the producer's historical fact graph.
 Success criteria: `projection_context_records_offer_provenance` and
 `matched_offer_loads_owner_fact` lose `external_body`; candidate
 accessors are not used in authority-bearing projector proofs; tests cover a
-matched unproven offer being visible for wakeup but rejected by
-`proven_offers_for`; producer proof walkthroughs show
+matched unattested offer being visible for wakeup but rejected by attested
+accessors, and later a matched attested-but-unproved offer rejected by
+`ProvenOffer` construction when no producer theorem applies; producer proof walkthroughs show
 faithful decode/adapt from every supported fact version to the stable offer
 predicate, including any required multi-fact compatibility joins; consumer proof
 walkthroughs identify the emitted offer contracts proved by the producer and the
@@ -677,6 +682,8 @@ version_replay_rebuild_shape_status_allows_projection(status) accepts if and onl
 matched_context_owner_matches_payload(matched) accepts if and only if matched.routed_offer.offer.owner == matched.payload.id
 routed_offer_owner_matches_producer(routed_offer) accepts if and only if routed_offer.offer.owner == routed_offer.producer_route.fact_id
 matched_context_has_routed_provenance(matched) accepts if and only if matched.routed_offer.offer.owner == matched.payload.id and matched.routed_offer.offer.owner == matched.routed_offer.producer_route.fact_id
+RoutedOffer::owner_matches_producer accepts if and only if routed_offer.offer.owner == routed_offer.producer_route.fact_id
+MatchedContext::has_routed_provenance accepts if and only if matched.routed_offer.offer.owner == matched.payload.id and matched.routed_offer.offer.owner == matched.routed_offer.producer_route.fact_id
 ```
 
 These contracts are proofs over helper Rust code that normal builds execute.
@@ -707,7 +714,9 @@ offer-owner/producer-route equality decision for one `RoutedOffer`:
 runtime, the SQL pending-context loader asks the active `ProjectionDispatcher`
 for producer route evidence while loading matched offer owners, and Cargo-verus
 proves both production decision helpers plus their combined routed-provenance
-predicate. The open core work is proving that
+predicate. The production `attested_offer_for` and
+`matched_attested_offers_for` accessors filter on that same local predicate.
+The open core work is proving that
 `pending_projection_input_context_for_owner` and the SQL loader construct every
 projector-visible matched context through that checked path and proving route
 selection through the whole production dispatcher call graph. Semantic
@@ -788,30 +797,34 @@ stored offer O
   -> P's theorem proves C from F's decoded bytes and proven context
 ```
 
-At runtime, the validity proof record is the stored offer. The proof-facing
-value is a `ProvenOffer`: a view of that `ContextOffer` plus provenance derived
-from core invariants, especially owner fact id, producer route identity, and
-output kind/index when one route can emit several authority-bearing outputs. It
-is not a separate persisted proof row. A `ProvenOffer` is constructible only
-from core-attested route provenance plus the producer theorem for the accepted
-offer contract. Checking role, scope, and selector without checking producer
-route and predicate version is never authority.
+At runtime, the validity proof record is the stored offer. Core's proof-facing
+value is an attested routed offer: a view of that `ContextOffer` plus
+provenance derived from core invariants, especially owner fact id, producer
+route identity, and output kind/index when one route can emit several
+authority-bearing outputs. It is not a separate persisted proof row. A later
+`ProvenOffer` is constructible only from that core-attested route provenance
+plus the producer theorem for the accepted offer contract. Checking role,
+scope, and selector without checking producer route and predicate version is
+never authority.
 
-`ProjectionContext` should expose candidate context for wakeup and proven offer
-accessors for authority:
+`ProjectionContext` should expose candidate context for wakeup, attested
+routed-offer accessors for core provenance, and later proven-offer constructors
+for authority:
 
 ```rust
 offer_for(...)
 matched_offers_for(...)
-proven_offers_for(...)
-matched_proven_offers_for(...)
+attested_offer_for(...)
+matched_attested_offers_for(...)
+ProvenOffer::from_attested(...)
 ```
 
-Projector proofs must use proven offers for authority-bearing dependencies.
-Producer projector theorems connect those offers to decoded/adapted owner fact
-bytes. Consumer projectors check the stable offer boundary and should not know
-every producer fact version. Candidate payload access is migration debt and
-must be removed from projector authority paths.
+Projector proofs must use proven offers, not merely attested offers, for
+authority-bearing dependencies. Producer projector theorems connect those
+offers to decoded/adapted owner fact bytes. Consumer projectors check the stable
+offer boundary and should not know every producer fact version. Candidate
+payload access is migration debt and must be removed from projector authority
+paths.
 
 Each projector should name accepted proven offer contracts separately from the
 needs it emits. Needs describe what can wake the projector; accepted offer

@@ -2069,10 +2069,7 @@ pub mod context {
         ensures
             accepted <==> routed_offer.offer.owner == routed_offer.producer_route.fact_id,
     {
-        super::projected_owner_matches(
-            routed_offer.offer.owner,
-            routed_offer.producer_route.fact_id,
-        )
+        routed_offer.owner_matches_producer()
     }
 
     /// Decide the complete local routed-context provenance predicate.
@@ -2088,10 +2085,44 @@ pub mod context {
                 && matched.routed_offer.offer.owner == matched.routed_offer.producer_route.fact_id
             ),
     {
-        if !matched_context_owner_matches_payload(matched) {
-            return false;
+        matched.has_routed_provenance()
+    }
+
+    impl RoutedOffer {
+        /// Decide whether this offer's route evidence names the offer owner.
+        ///
+        /// This is core provenance only. It proves no protocol meaning for the
+        /// offer role, keys, or value.
+        pub fn owner_matches_producer(&self) -> (accepted: bool)
+            ensures
+                accepted <==> self.offer.owner == self.producer_route.fact_id,
+        {
+            super::projected_owner_matches(
+                self.offer.owner,
+                self.producer_route.fact_id,
+            )
         }
-        routed_offer_owner_matches_producer(&matched.routed_offer)
+    }
+
+    impl MatchedContext {
+        /// Decide whether this matched context has the complete local core
+        /// provenance link: stored offer owner, loaded payload fact id, and
+        /// route-evidence fact id all name the same fact.
+        ///
+        /// This remains short of semantic authority. A consumer proof must also
+        /// cite the producer route theorem for the accepted offer contract.
+        pub fn has_routed_provenance(&self) -> (accepted: bool)
+            ensures
+                accepted <==> (
+                    self.routed_offer.offer.owner == self.payload.id
+                    && self.routed_offer.offer.owner == self.routed_offer.producer_route.fact_id
+                ),
+        {
+            if !matched_context_owner_matches_payload(self) {
+                return false;
+            }
+            self.routed_offer.owner_matches_producer()
+        }
     }
     } // verus!
 
@@ -2238,6 +2269,28 @@ pub mod context {
             need: &'a ContextNeed,
         ) -> impl Iterator<Item = &'a RoutedOffer> + 'a {
             self.matched_entries_for(need)
+                .map(|matched| &matched.routed_offer)
+        }
+
+        /// Return the first matched offer whose local core provenance checks.
+        ///
+        /// "Attested" here means the offer owner, loaded payload fact id, and
+        /// producer route fact id agree. It is the strongest authority surface
+        /// core can provide before a route-local projector theorem proves the
+        /// offer's protocol meaning.
+        pub fn attested_offer_for(&self, need: &ContextNeed) -> Option<&RoutedOffer> {
+            self.matched_entries_for(need)
+                .find(|matched| matched.has_routed_provenance())
+                .map(|matched| &matched.routed_offer)
+        }
+
+        /// Return every matched offer whose local core provenance checks.
+        pub fn matched_attested_offers_for<'a>(
+            &'a self,
+            need: &'a ContextNeed,
+        ) -> impl Iterator<Item = &'a RoutedOffer> + 'a {
+            self.matched_entries_for(need)
+                .filter(|matched| matched.has_routed_provenance())
                 .map(|matched| &matched.routed_offer)
         }
 
@@ -6956,6 +7009,34 @@ mod tests {
             context.payload_for(&need_b).map(|payload| payload.id),
             Some([22; 32])
         );
+    }
+
+    #[test]
+    fn projection_context_attested_offers_keep_core_provenance_visible() {
+        let role = Role::new("attested").unwrap();
+        let need = ContextNeed {
+            owner: [1; 32],
+            role,
+            scope: FactScope::Global,
+            start_key: ContextKey::from_bytes([2; 32]),
+            end_key: ContextKey::from_bytes([2; 32]),
+        };
+        let payload_id = [42; 32];
+        let context =
+            ProjectionContext::from_matches(vec![matched_context(need.clone(), payload_id)]);
+
+        let offer = context
+            .attested_offer_for(&need)
+            .expect("attested offer for need");
+        assert_eq!(offer.offer.owner, payload_id);
+        assert_eq!(offer.producer_route.fact_id, payload_id);
+        assert!(offer.owner_matches_producer());
+
+        let owners = context
+            .matched_attested_offers_for(&need)
+            .map(|offer| offer.offer.owner)
+            .collect::<Vec<_>>();
+        assert_eq!(owners, vec![payload_id]);
     }
 
     #[test]

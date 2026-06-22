@@ -556,6 +556,28 @@ fn matched_context_uses_checked_construction() {
 }
 
 #[test]
+fn routed_offer_uses_checked_construction() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+
+    for path in rust_files(root) {
+        let relative = path.strip_prefix(root).unwrap().display().to_string();
+        let text = source_text(&path);
+        for (line_number, line) in text.lines().enumerate() {
+            if line.trim() == "RoutedOffer {" {
+                offenders.push(format!("{relative}:{}", line_number + 1));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "RoutedOffer carries the offer-owner/producer-route provenance link; construct it with RoutedOffer::new:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn poc10_root_exports_protocol_owned_manifests() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
 

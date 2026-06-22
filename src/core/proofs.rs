@@ -101,11 +101,14 @@
 //!   `routed_offer_owner_matches_producer(routed_offer)` accepts if and only if
 //!   the offer owner equals the producer route fact id. The combined helper
 //!   `matched_context_has_routed_provenance(matched)` accepts if and only if
-//!   both links hold for one matched context. Runtime tests also exercise the
-//!   SQL pending-context loader path that asks the dispatcher for producer
-//!   route evidence while loading matched owner facts. This proves local core
-//!   provenance only; route-local semantic offer theorems and the whole-loader
-//!   theorem are still open.
+//!   both links hold for one matched context. `RoutedOffer::owner_matches_producer`
+//!   and `MatchedContext::has_routed_provenance` expose the same production
+//!   decisions to the context accessors, and `ProjectionContext` now exposes
+//!   attested routed offers as the core-provenance surface. Runtime tests also
+//!   exercise the SQL pending-context loader path that asks the dispatcher for
+//!   producer route evidence while loading matched owner facts. This proves
+//!   local core provenance only; route-local semantic offer theorems and the
+//!   whole-loader theorem are still open.
 //! - Assumed only to call production code: the Verus contract for the derived
 //!   `ContextOfferClaim::clone` says clone preserves the whole claim. This
 //!   assumption is a Rust trait boundary helper, not a runtime theorem over
