@@ -2510,10 +2510,10 @@ pub mod context {
     //! Projection context visible while processing one fact.
 
     use super::effects::{TimeRange, Timeline};
-    use super::route::ProjectionRouteEvidence;
+    use super::route::{FactRouteId, ProjectionRouteEvidence};
     use super::IncomingMetadata;
-    use crate::core::context::{ContextNeed, ContextOffer};
-    use crate::core::facts::Fact;
+    use crate::core::context::{ContextNeed, ContextOffer, Role};
+    use crate::core::facts::{Fact, FactScope};
     use std::collections::BTreeMap;
     use vstd::prelude::*;
 
@@ -2562,6 +2562,32 @@ pub mod context {
         pub offer: ContextOffer,
         /// Route evidence for the offer owner fact.
         pub producer_route: ProjectionRouteEvidence,
+    }
+
+    /// Authority-facing offer contract accepted by a consumer projector.
+    ///
+    /// This is still not semantic proof. It names the standard offer boundary a
+    /// consumer is willing to use: role, scope, and producer route. A later
+    /// route-local theorem for `producer_route_id` must prove what that offer
+    /// means before a proof can construct a semantic `ProvenOffer`.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct AcceptedOfferContract {
+        /// Offer role admitted by the consumer proof.
+        pub role: Role,
+        /// Offer scope admitted by the consumer proof.
+        pub scope: FactScope,
+        /// Producer route whose theorem must justify the offer semantics.
+        pub producer_route_id: FactRouteId,
+    }
+
+    impl AcceptedOfferContract {
+        pub fn new(role: Role, scope: FactScope, producer_route_id: FactRouteId) -> Self {
+            Self {
+                role,
+                scope,
+                producer_route_id,
+            }
+        }
     }
 
     impl RoutedOffer {
@@ -2672,6 +2698,10 @@ pub mod context {
     #[allow(dead_code)]
     pub struct ExRoutedOffer(RoutedOffer);
 
+    #[verifier(external_type_specification)]
+    #[allow(dead_code)]
+    pub struct ExAcceptedOfferContract(AcceptedOfferContract);
+
     pub open spec fn matched_context_routed_provenance_spec(matched: MatchedContext) -> bool {
         matched.routed_offer.offer.owner == matched.payload.id
             && matched.routed_offer.offer.owner == matched.routed_offer.producer_route.fact_id
@@ -2688,6 +2718,39 @@ pub mod context {
             accepted <==> offer.owner == producer_route.fact_id,
     {
         super::projected_owner_matches(offer.owner, producer_route.fact_id)
+    }
+
+    /// Decide whether a locally attested offer matches the standard contract a
+    /// consumer projector accepts as authority input.
+    ///
+    /// This is a boundary check only: role, scope, producer route id, and local
+    /// owner-route provenance. The route-local producer theorem remains the
+    /// separate semantic proof obligation.
+    fn routed_offer_matches_accepted_contract(
+        routed_offer: &RoutedOffer,
+        contract: &AcceptedOfferContract,
+    ) -> (accepted: bool)
+        ensures
+            accepted <==> (
+                routed_offer.offer.role == contract.role
+                    && routed_offer.offer.scope == contract.scope
+                    && routed_offer.producer_route.route_id.effective_tag
+                        == contract.producer_route_id.effective_tag
+                    && routed_offer.offer.owner == routed_offer.producer_route.fact_id
+            ),
+    {
+        if routed_offer.offer.role != contract.role {
+            return false;
+        }
+        if routed_offer.offer.scope != contract.scope {
+            return false;
+        }
+        if routed_offer.producer_route.route_id.effective_tag
+            != contract.producer_route_id.effective_tag
+        {
+            return false;
+        }
+        routed_offer.owner_matches_producer()
     }
 
     /// Construct a routed offer after the runtime gate has checked provenance.
@@ -2838,6 +2901,28 @@ pub mod context {
                 self.offer.owner,
                 self.producer_route.fact_id,
             )
+        }
+
+        /// Decide whether this locally attested offer matches a consumer's
+        /// accepted authority contract.
+        ///
+        /// Passing this check is not enough for protocol authority. Consumer
+        /// proofs must still cite the route-local producer theorem for the
+        /// named route and offer kind.
+        pub fn matches_accepted_contract(
+            &self,
+            contract: &AcceptedOfferContract,
+        ) -> (accepted: bool)
+            ensures
+                accepted <==> (
+                    self.offer.role == contract.role
+                        && self.offer.scope == contract.scope
+                        && self.producer_route.route_id.effective_tag
+                            == contract.producer_route_id.effective_tag
+                        && self.offer.owner == self.producer_route.fact_id
+                ),
+        {
+            routed_offer_matches_accepted_contract(self, contract)
         }
     }
 
@@ -3077,6 +3162,40 @@ pub mod context {
         ) -> impl Iterator<Item = &'a RoutedOffer> + 'a {
             self.matched_entries_for(need)
                 .filter(|matched| matched.has_routed_provenance())
+                .map(|matched| &matched.routed_offer)
+        }
+
+        /// Return the first locally attested offer admitted by a consumer
+        /// contract for this need.
+        ///
+        /// This is the authority-facing context shape core can provide without
+        /// understanding protocol semantics: a matched offer whose local
+        /// provenance checks and whose role, scope, and producer route match the
+        /// consumer's declared contract.
+        pub fn accepted_attested_offer_for(
+            &self,
+            need: &ContextNeed,
+            contract: &AcceptedOfferContract,
+        ) -> Option<&RoutedOffer> {
+            self.matched_entries_for(need)
+                .find(|matched| {
+                    matched.has_routed_provenance()
+                        && matched.routed_offer.matches_accepted_contract(contract)
+                })
+                .map(|matched| &matched.routed_offer)
+        }
+
+        /// Return every locally attested offer admitted by a consumer contract.
+        pub fn matched_accepted_attested_offers_for<'a>(
+            &'a self,
+            need: &'a ContextNeed,
+            contract: &'a AcceptedOfferContract,
+        ) -> impl Iterator<Item = &'a RoutedOffer> + 'a {
+            self.matched_entries_for(need)
+                .filter(move |matched| {
+                    matched.has_routed_provenance()
+                        && matched.routed_offer.matches_accepted_contract(contract)
+                })
                 .map(|matched| &matched.routed_offer)
         }
 
@@ -4767,12 +4886,32 @@ pub mod route {
         }
     }
 
+    /// Stable proof identity for one fact route.
+    ///
+    /// The route id is intentionally ordinary data, unlike the executable
+    /// projector function pointer. Protocol registries should derive it from
+    /// the same declaration that selects the projector, then carry it in route
+    /// evidence so producer theorems can be keyed by a typed route identity.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct FactRouteId {
+        /// Current protocols use the unique effective fact tag as route id.
+        pub effective_tag: u8,
+    }
+
+    impl FactRouteId {
+        pub const fn from_effective_tag(effective_tag: u8) -> Self {
+            Self { effective_tag }
+        }
+    }
+
     /// Route from one effective fact tag to the projector that owns that tag.
     ///
     /// The effective tag is usually the first fact byte. Envelope routes may
     /// decode an outer envelope and return the inner semantic tag instead.
     #[derive(Debug, Clone, Copy)]
     pub struct FactRoute {
+        /// Stable route identity used by proof-facing route evidence.
+        pub route_id: FactRouteId,
         /// Effective fact tag routed to this projector function.
         pub tag: u8,
         /// Leaf projector function called after the router selects this route.
@@ -4790,6 +4929,8 @@ pub mod route {
     /// call itself remains ordinary Rust execution selected by the router.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct FactRouteStamp {
+        /// Stable route identity used by proof-facing route evidence.
+        pub route_id: FactRouteId,
         /// Effective fact tag routed to this projector function.
         pub tag: u8,
         /// Storage version required by this route's committed effects.
@@ -4801,6 +4942,7 @@ pub mod route {
     impl FactRoute {
         pub const fn stamp(&self) -> FactRouteStamp {
             FactRouteStamp {
+                route_id: self.route_id,
                 tag: self.tag,
                 storage_requirement: self.storage_requirement,
                 projector_info: self.projector_info,
@@ -4835,6 +4977,8 @@ pub mod route {
     pub struct ProjectionRouteEvidence {
         /// Fact being projected when this route was selected.
         pub fact_id: FactId,
+        /// Stable identity for the registered route that produced the output.
+        pub route_id: FactRouteId,
         /// Semantic tag used for routing after envelope decoding.
         pub effective_tag: u8,
         /// `FactRoute.tag` for the selected registered route.
@@ -4854,6 +4998,9 @@ pub mod route {
         pub fn for_loaded_fact_fixture(fact: &Fact) -> Self {
             Self {
                 fact_id: fact.id,
+                route_id: FactRouteId::from_effective_tag(
+                    fact.bytes.first().copied().unwrap_or_default(),
+                ),
                 effective_tag: fact.bytes.first().copied().unwrap_or_default(),
                 route_tag: fact.bytes.first().copied().unwrap_or_default(),
                 projector_info: FactProjectorInfo::projector("test_projector"),
@@ -4866,6 +5013,10 @@ pub mod route {
     #[verifier(external_type_specification)]
     #[allow(dead_code)]
     pub struct ExFactProjectorInfo(FactProjectorInfo);
+
+    #[verifier(external_type_specification)]
+    #[allow(dead_code)]
+    pub struct ExFactRouteId(FactRouteId);
 
     #[verifier(external_type_specification)]
     #[allow(dead_code)]
@@ -4886,6 +5037,7 @@ pub mod route {
     /// route selection itself was correct.
     fn projection_route_evidence(
         fact_id: FactId,
+        route_id: FactRouteId,
         effective_tag: u8,
         route_tag: u8,
         projector_info: FactProjectorInfo,
@@ -4893,6 +5045,7 @@ pub mod route {
     ) -> (evidence: ProjectionRouteEvidence)
         ensures
             evidence.fact_id == fact_id,
+            evidence.route_id == route_id,
             evidence.effective_tag == effective_tag,
             evidence.route_tag == route_tag,
             evidence.projector_info == projector_info,
@@ -4900,6 +5053,7 @@ pub mod route {
     {
         ProjectionRouteEvidence {
             fact_id,
+            route_id,
             effective_tag,
             route_tag,
             projector_info,
@@ -4921,6 +5075,7 @@ pub mod route {
             stamp.tag == effective_tag,
         ensures
             evidence.fact_id == fact_id,
+            evidence.route_id == stamp.route_id,
             evidence.effective_tag == effective_tag,
             evidence.route_tag == effective_tag,
             evidence.route_tag == stamp.tag,
@@ -4929,6 +5084,7 @@ pub mod route {
     {
         projection_route_evidence(
             fact_id,
+            stamp.route_id,
             effective_tag,
             stamp.tag,
             stamp.projector_info,
@@ -5025,6 +5181,7 @@ pub mod route {
             stamp.tag == effective_tag,
         ensures
             routed.route.fact_id == fact_id,
+            routed.route.route_id == stamp.route_id,
             routed.route.effective_tag == effective_tag,
             routed.route.route_tag == effective_tag,
             routed.route.route_tag == stamp.tag,
@@ -5197,16 +5354,18 @@ pub mod route {
     }
 }
 
-pub use context::{MatchedContext, ProjectionContext, ProjectionMode, RoutedOffer};
+pub use context::{
+    AcceptedOfferContract, MatchedContext, ProjectionContext, ProjectionMode, RoutedOffer,
+};
 pub use effects::{
     fact_purged_need, fact_purged_offer, fact_purged_offer_claim, fact_purged_range_need,
     fact_purged_range_offer, fact_purged_range_offer_claim, fact_purged_role, ProjectionOutput,
     TimeRange, TimeWake, Timeline,
 };
 pub use route::{
-    EffectiveTagFn, EnvelopeRoute, FactAdmissionFn, FactProjectorInfo, FactRoute, FactRouteStamp,
-    FactRouteTable, ProjectionDispatcher, ProjectionRouteEvidence, Projector, ProjectorFn,
-    RoutedProjection, RouterProjector,
+    EffectiveTagFn, EnvelopeRoute, FactAdmissionFn, FactProjectorInfo, FactRoute, FactRouteId,
+    FactRouteStamp, FactRouteTable, ProjectionDispatcher, ProjectionRouteEvidence, Projector,
+    ProjectorFn, RoutedProjection, RouterProjector,
 };
 
 const OWNER_KEYED_FACT_CLEANUP_TABLES: &[TableName] = &[
@@ -6012,12 +6171,14 @@ mod contract_tests {
     }
 
     const VERSION_GUARD_ROUTES: &[FactRoute] = &[FactRoute {
+        route_id: FactRouteId::from_effective_tag(201),
         tag: 201,
         projector: version_guard_projector,
         storage_requirement: StorageRequirement::Current(7),
         projector_info: FactProjectorInfo::projector("version_guard_projector"),
     }];
     const VERSION_GUARD_STAMPS: &[FactRouteStamp] = &[FactRouteStamp {
+        route_id: FactRouteId::from_effective_tag(201),
         tag: 201,
         storage_requirement: StorageRequirement::Current(7),
         projector_info: FactProjectorInfo::projector("version_guard_projector"),
@@ -8383,6 +8544,66 @@ mod tests {
     }
 
     #[test]
+    fn projection_context_accepted_attested_offers_require_declared_contract() {
+        let payload_id = [55; 32];
+        let role = Role::new("accepted_contract").unwrap();
+        let scope = FactScope::Global;
+        let need = ContextNeed::range(
+            payload_id,
+            role.clone(),
+            scope.clone(),
+            b"contract-key",
+            b"contract-key",
+        );
+        let context =
+            ProjectionContext::from_matches(vec![matched_context(need.clone(), payload_id)]);
+
+        assert!(
+            context.offer_for(&need).is_some(),
+            "the wakeup-facing offer remains visible for liveness"
+        );
+
+        let accepted = AcceptedOfferContract::new(
+            role.clone(),
+            scope.clone(),
+            FactRouteId::from_effective_tag(payload_id[0]),
+        );
+        assert_eq!(
+            context
+                .accepted_attested_offer_for(&need, &accepted)
+                .map(|offer| offer.offer.owner),
+            Some(payload_id)
+        );
+
+        let wrong_route = AcceptedOfferContract::new(
+            role.clone(),
+            scope.clone(),
+            FactRouteId::from_effective_tag(payload_id[0] + 1),
+        );
+        assert!(context
+            .accepted_attested_offer_for(&need, &wrong_route)
+            .is_none());
+
+        let wrong_role = AcceptedOfferContract::new(
+            Role::new("other_contract").unwrap(),
+            scope.clone(),
+            FactRouteId::from_effective_tag(payload_id[0]),
+        );
+        assert!(context
+            .accepted_attested_offer_for(&need, &wrong_role)
+            .is_none());
+
+        let wrong_scope = AcceptedOfferContract::new(
+            role,
+            FactScope::Local,
+            FactRouteId::from_effective_tag(payload_id[0]),
+        );
+        assert!(context
+            .accepted_attested_offer_for(&need, &wrong_scope)
+            .is_none());
+    }
+
+    #[test]
     fn projection_context_provenance_guard_rejects_manual_payload_mismatch() {
         let role = Role::new("guarded").unwrap();
         let key = ContextKey::from_bytes([2; 32]);
@@ -8808,6 +9029,7 @@ mod tests {
         }
 
         let route = FactRoute {
+            route_id: FactRouteId::from_effective_tag(200),
             tag: 200,
             projector: model_projector,
             storage_requirement: StorageRequirement::MaintenanceBypass,
@@ -8816,6 +9038,7 @@ mod tests {
 
         assert_eq!(route.projector_info.project, "ModelProjector");
         let stamp = route.stamp();
+        assert_eq!(stamp.route_id, FactRouteId::from_effective_tag(200));
         assert_eq!(stamp.tag, 200);
         assert_eq!(
             stamp.storage_requirement,
@@ -8858,12 +9081,14 @@ mod tests {
     const ROUTE_EVIDENCE_INFO: FactProjectorInfo =
         FactProjectorInfo::projector("RouteEvidenceProjector");
     const ROUTE_EVIDENCE_ROUTES: &[FactRoute] = &[FactRoute {
+        route_id: FactRouteId::from_effective_tag(ROUTE_EVIDENCE_TAG),
         tag: ROUTE_EVIDENCE_TAG,
         projector: route_evidence_projector,
         storage_requirement: ROUTE_EVIDENCE_STORAGE,
         projector_info: ROUTE_EVIDENCE_INFO,
     }];
     const ROUTE_EVIDENCE_STAMPS: &[FactRouteStamp] = &[FactRouteStamp {
+        route_id: FactRouteId::from_effective_tag(ROUTE_EVIDENCE_TAG),
         tag: ROUTE_EVIDENCE_TAG,
         storage_requirement: ROUTE_EVIDENCE_STORAGE,
         projector_info: ROUTE_EVIDENCE_INFO,
@@ -8889,6 +9114,10 @@ mod tests {
             .expect("routed projection");
 
         assert_eq!(run.route.fact_id, fact.id);
+        assert_eq!(
+            run.route.route_id,
+            FactRouteId::from_effective_tag(ROUTE_EVIDENCE_TAG)
+        );
         assert_eq!(run.route.effective_tag, ROUTE_EVIDENCE_TAG);
         assert_eq!(run.route.route_tag, ROUTE_EVIDENCE_TAG);
         assert_eq!(run.route.projector_info, ROUTE_EVIDENCE_INFO);
@@ -8950,6 +9179,10 @@ mod tests {
 
         assert_eq!(routed.offer().owner, offered.id);
         assert_eq!(routed.producer_route().fact_id, offered.id);
+        assert_eq!(
+            routed.producer_route().route_id,
+            FactRouteId::from_effective_tag(ROUTE_EVIDENCE_TAG)
+        );
         assert_eq!(routed.producer_route().route_tag, ROUTE_EVIDENCE_TAG);
         assert_eq!(routed.producer_route().projector_info, ROUTE_EVIDENCE_INFO);
         assert_eq!(
@@ -8979,6 +9212,7 @@ mod tests {
     fn router_projector_rejects_route_stamp_mismatch_before_projection() {
         ROUTE_EVIDENCE_PROJECTOR_CALLS.store(0, Ordering::SeqCst);
         const MISMATCHED_STAMPS: &[FactRouteStamp] = &[FactRouteStamp {
+            route_id: FactRouteId::from_effective_tag(ROUTE_EVIDENCE_TAG),
             tag: ROUTE_EVIDENCE_TAG,
             storage_requirement: StorageRequirement::Current(99),
             projector_info: ROUTE_EVIDENCE_INFO,

@@ -93,30 +93,31 @@
 //!   after core stamps `owner` onto that claim's role, scope, range, and value.
 //!   This is a final-output guard, not a semantic role proof.
 //! - Proven in production Rust today:
-//!   `projection_route_evidence(fact_id, effective_tag, route_tag,
+//!   `projection_route_evidence(fact_id, route_id, effective_tag, route_tag,
 //!   projector_info, storage_requirement)` returns `ProjectionRouteEvidence`
-//!   with exactly those same field values. This proves route-evidence field
-//!   stamping, not route selection.
+//!   with exactly those same field values, including the stable route id. This
+//!   proves route-evidence field stamping, not route selection.
 //! - Proven in production Rust today:
 //!   `selected_route_evidence(fact_id, effective_tag, stamp)` builds evidence
 //!   from the selected route's proof-relevant `FactRouteStamp`; when the selected
 //!   stamp tag equals the effective tag, the evidence route tag is that same
-//!   effective tag and the projector info/storage requirement come from the
-//!   stamp. This helper does not, by itself, prove metadata search or the
-//!   projector function pointer call.
+//!   effective tag and the route id/projector info/storage requirement come
+//!   from the stamp. This helper does not, by itself, prove metadata search or
+//!   the projector call.
 //! - Proven in production Rust today:
 //!   `select_route_stamp(stamps, effective_tag)` searches the actual
 //!   proof-relevant route metadata slice. If it returns `Some`, the selected
 //!   stamp is the first stamp in the slice with `tag == effective_tag`; if it
 //!   returns `None`, no stamp in the slice has that tag. This proves metadata
-//!   search only; executable route/stamp alignment is enforced by runtime check
-//!   and tests, not by Verus today.
+//!   search only. The generic `RouterProjector` still checks executable
+//!   route/stamp alignment at runtime; the protocol production dispatcher now
+//!   uses a generated direct match instead of this function-pointer router.
 //! - Proven in production Rust today:
 //!   `routed_projection_from_selected_route(fact_id, effective_tag, stamp,
 //!   output)` attaches that selected-stamp route evidence to the actual
 //!   projector output value passed to it and preserves the output unchanged.
-//!   This still does not prove executable route/stamp alignment or the
-//!   projector function pointer call.
+//!   This still does not prove the generated protocol dispatcher's call-order
+//!   theorem.
 //! - Proven in production Rust today:
 //!   `runtime_effects_with_storage_requirement(effects, requirement)` sets
 //!   `RuntimeEffects.storage_requirement` to the selected route requirement
@@ -124,7 +125,7 @@
 //!   metadata, purges, row mutations, intents, local intents, and the version
 //!   replay rebuild flag. `RuntimeEffects::with_storage_requirement` uses this
 //!   verified production helper; the remaining route gap is proving the
-//!   dispatcher applied it to the selected projector output.
+//!   generated dispatcher applied it to the selected projector output.
 //! - Proven in production Rust today:
 //!   `prepared_projection_from_validated_output(...)` constructs the
 //!   `PreparedProjection` that commit consumes and preserves the source, fact,
@@ -282,6 +283,15 @@
 //!   local core provenance only; route-local semantic offer theorems and the
 //!   whole-loader theorem are still open.
 //! - Proven in production Rust today:
+//!   `RoutedOffer::matches_accepted_contract(contract)` accepts if and only if
+//!   the locally attested offer matches the consumer contract's role, scope,
+//!   and producer route id, and the offer owner still equals the producer route
+//!   fact id. `ProjectionContext::accepted_attested_offer_for` and
+//!   `matched_accepted_attested_offers_for` expose that route-pinned,
+//!   offer-only authority input surface. This is not semantic provenness; a
+//!   route-local producer theorem must still justify the contract before a
+//!   later proof can construct a `ProvenOffer`.
+//! - Proven in production Rust today:
 //!   `matched_contexts_all_have_routed_provenance(matched)` accepts if and only if
 //!   every matched context in the slice has the local routed-provenance link,
 //!   and `prepare_projection` calls the corresponding `ProjectionContext`
@@ -296,13 +306,15 @@
 //!   runtime theorems over projection.
 //! - Refactored but not yet proved: `ProjectionDispatcher::dispatch_projection`
 //!   now returns `RoutedProjection`, which is a plain `ProjectionOutput` plus
-//!   router-stamped `ProjectionRouteEvidence` from the same route selection that
-//!   calls the projector. `PreparedProjection` carries that route evidence.
-//!   The route metadata search, field-stamping, selected-stamp helper, and
-//!   routed-output constructor are verified, and the validated prepared-output
-//!   constructor preserves that route evidence. The executable route/stamp
-//!   alignment check, selected function-pointer call, and larger
-//!   `prepare_projection` call-order theorem are not complete yet.
+//!   route-stamped `ProjectionRouteEvidence` from the same route selection that
+//!   calls the projector. The protocol dispatcher is generated from the single
+//!   route declaration list as a direct `match effective_tag` branch that calls
+//!   the named projector in that branch; the generic `RouterProjector`
+//!   function-pointer path remains only for reusable/test dispatch. The route
+//!   metadata search, field-stamping, selected-stamp helper, and routed-output
+//!   constructor are verified, and the validated prepared-output constructor
+//!   preserves that route evidence. The larger generated-dispatcher and
+//!   `prepare_projection` call-order theorems are not complete yet.
 //! - Refactored but not yet proved: projected row output and intent row output
 //!   now use separate Rust types, separate `RuntimeDescription` table lists, and
 //!   separate DB apply helpers. This gives

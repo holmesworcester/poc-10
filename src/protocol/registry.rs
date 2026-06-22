@@ -25,8 +25,8 @@ use crate::core::facts::Fact;
 use crate::core::intents::TypedTableSchema;
 use crate::core::network;
 use crate::core::project_fact::{
-    FactRoute, FactRouteStamp, FactRouteTable, ProjectionContext, ProjectionDispatcher,
-    ProjectionOutput, ProjectionRouteEvidence, Projector, RoutedProjection, RouterProjector,
+    FactRoute, FactRouteId, FactRouteStamp, ProjectionContext, ProjectionDispatcher,
+    ProjectionOutput, ProjectionRouteEvidence, Projector, RoutedProjection,
 };
 use crate::core::runtime::{HandlerRoute, RecurringIntentSpec};
 use crate::protocol::cli as command;
@@ -1217,13 +1217,15 @@ impl Projector for ProtocolProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        RouterProjector::new(FACT_ROUTE_TABLE, &[]).project(fact, context)
+        self.dispatch_projection(fact, context)
+            .map(|routed| routed.output)
     }
 }
 
 impl ProjectionDispatcher for ProtocolProjector {
     fn route_evidence(&self, fact: &Fact) -> Result<ProjectionRouteEvidence, String> {
-        RouterProjector::new(FACT_ROUTE_TABLE, &[]).route_evidence(fact)
+        let effective_tag = protocol_effective_tag(fact)?;
+        protocol_route_evidence_for_effective_tag(fact.id, effective_tag)
     }
 
     fn dispatch_projection(
@@ -1231,8 +1233,16 @@ impl ProjectionDispatcher for ProtocolProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<RoutedProjection, String> {
-        RouterProjector::new(FACT_ROUTE_TABLE, &[]).dispatch_projection(fact, context)
+        let effective_tag = protocol_effective_tag(fact)?;
+        dispatch_protocol_projection_for_effective_tag(effective_tag, fact, context)
     }
+}
+
+fn protocol_effective_tag(fact: &Fact) -> Result<u8, String> {
+    fact.bytes
+        .first()
+        .copied()
+        .ok_or_else(|| "cannot project empty fact bytes".to_string())
 }
 
 // Every fact route is explicit: the generated route fn calls the family
@@ -1257,6 +1267,7 @@ macro_rules! projector_routes {
 
         pub(crate) const FACT_ROUTES: &[FactRoute] = &[
             $(FactRoute {
+                route_id: FactRouteId::from_effective_tag($tag),
                 tag: $tag,
                 projector: $name,
                 storage_requirement: $storage_requirement,
@@ -1264,16 +1275,78 @@ macro_rules! projector_routes {
             },)+
         ];
 
+        #[cfg(test)]
         pub(crate) const FACT_ROUTE_STAMPS: &[FactRouteStamp] = &[
             $(FactRouteStamp {
+                route_id: FactRouteId::from_effective_tag($tag),
                 tag: $tag,
                 storage_requirement: $storage_requirement,
                 projector_info: $projector_info,
             },)+
         ];
 
-        pub(crate) const FACT_ROUTE_TABLE: FactRouteTable =
-            FactRouteTable::new(FACT_ROUTES, FACT_ROUTE_STAMPS);
+        fn protocol_route_stamp_for_effective_tag(effective_tag: u8) -> Option<FactRouteStamp> {
+            match effective_tag {
+                $($tag => Some(FactRouteStamp {
+                    route_id: FactRouteId::from_effective_tag($tag),
+                    tag: $tag,
+                    storage_requirement: $storage_requirement,
+                    projector_info: $projector_info,
+                }),)+
+                _ => None,
+            }
+        }
+
+        fn protocol_route_evidence_for_effective_tag(
+            fact_id: crate::core::facts::FactId,
+            effective_tag: u8,
+        ) -> Result<ProjectionRouteEvidence, String> {
+            let Some(stamp) = protocol_route_stamp_for_effective_tag(effective_tag) else {
+                return Err(format!(
+                    "no target projector registered for fact tag {effective_tag}"
+                ));
+            };
+            Ok(ProjectionRouteEvidence {
+                fact_id,
+                route_id: stamp.route_id,
+                effective_tag,
+                route_tag: stamp.tag,
+                projector_info: stamp.projector_info,
+                storage_requirement: stamp.storage_requirement,
+            })
+        }
+
+        fn dispatch_protocol_projection_for_effective_tag(
+            effective_tag: u8,
+            fact: &Fact,
+            context: &ProjectionContext,
+        ) -> Result<RoutedProjection, String> {
+            match effective_tag {
+                $($tag => {
+                    let output = <$projector>::new().project(fact, context)?;
+                    let output = ProjectionOutput {
+                        effects: output
+                            .effects
+                            .with_storage_requirement($storage_requirement),
+                        ..output
+                    };
+                    Ok(RoutedProjection {
+                        route: ProjectionRouteEvidence {
+                            fact_id: fact.id,
+                            route_id: FactRouteId::from_effective_tag($tag),
+                            effective_tag,
+                            route_tag: $tag,
+                            projector_info: $projector_info,
+                            storage_requirement: $storage_requirement,
+                        },
+                        output,
+                    })
+                },)+
+                _ => Err(format!(
+                    "no target projector registered for fact tag {effective_tag}"
+                )),
+            }
+        }
     };
 }
 
@@ -1480,6 +1553,38 @@ mod tests {
                 route.tag
             );
         }
+    }
+
+    #[test]
+    fn protocol_route_evidence_uses_generated_route_identity() {
+        let fact = Fact::new(
+            FactScope::Global,
+            0,
+            vec![auth::workspace::encode::TYPE_WORKSPACE],
+        );
+
+        let evidence = ProtocolProjector
+            .route_evidence(&fact)
+            .expect("route evidence for registered tag");
+
+        assert_eq!(evidence.fact_id, fact.id);
+        assert_eq!(
+            evidence.route_id,
+            FactRouteId::from_effective_tag(auth::workspace::encode::TYPE_WORKSPACE)
+        );
+        assert_eq!(
+            evidence.effective_tag,
+            auth::workspace::encode::TYPE_WORKSPACE
+        );
+        assert_eq!(evidence.route_tag, auth::workspace::encode::TYPE_WORKSPACE);
+        assert_eq!(
+            evidence.projector_info,
+            auth::workspace::project::PROJECTOR_INFO
+        );
+        assert_eq!(
+            evidence.storage_requirement,
+            auth::workspace::project::STORAGE_REQUIREMENT
+        );
     }
 
     #[test]

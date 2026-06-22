@@ -204,19 +204,22 @@ Concrete work: keep leaf projectors on the simple `Projector::project` API and
 put route evidence at the dispatcher boundary. `ProjectionDispatcher` selects
 the effective tag and registered `FactRoute`, calls that route projector, and
 returns a `RoutedProjection`. A `RoutedProjection` is the plain
-`ProjectionOutput` plus router-stamped `ProjectionRouteEvidence`: projected
-fact id, effective tag, registered route tag, stable projector info name, and
-storage requirement. Carry that route evidence through `PreparedProjection` so
-the commit path can say which route produced the output. The proof identity is
-the stable route tag/projector-info pair, not runtime function-pointer
-equality.
+`ProjectionOutput` plus route-stamped `ProjectionRouteEvidence`: projected
+fact id, route id, effective tag, registered route tag, stable projector info
+name, and storage requirement. Carry that route evidence through
+`PreparedProjection` so the commit path can say which route produced the
+output. The proof identity is the stable route id, not runtime function-pointer
+equality or a human-readable projector string.
 
 Terminology in this stage:
 
 - `ProjectionDispatcher`: the production entry point used by `project_fact`.
   It chooses the route before the leaf projector runs.
-- `FactRoute`: one registry row from a fact tag to the projector function,
-  storage requirement, and stable projector metadata for that tag.
+- `FactRoute`: one registry row from a fact tag to the route id, projector
+  function, storage requirement, and stable projector metadata for that tag.
+- `FactRouteId`: stable proof identity for the route. The current protocol
+  derives it from the unique effective fact tag, and route-local producer
+  theorems should be keyed by this value.
 - effective tag: the semantic fact tag after envelope decoding. For ordinary
   facts it is the first byte; for envelope facts it is the inner protocol tag.
 - route tag: the registered `FactRoute.tag` selected for the effective tag.
@@ -224,8 +227,8 @@ Terminology in this stage:
   plus route evidence stamped by the dispatcher that selected and called that
   projector. Leaf projectors do not construct this value.
 - `ProjectionRouteEvidence`: the route evidence carried with a
-  `RoutedProjection`: owner fact id, effective tag, route tag, projector info,
-  and storage requirement.
+  `RoutedProjection`: owner fact id, route id, effective tag, route tag,
+  projector info, and storage requirement.
 - `projector_info`: stable human-readable projector identity from the route
   table. It is proof/debug metadata, not a runtime authority check by itself.
 - `storage_requirement`: the storage-version guard the selected route requires
@@ -244,29 +247,30 @@ theorem that justifies it.
 Success criteria: `project_fact_dispatches_owner_route` loses `external_body`;
 tests show an unknown tag is rejected, an envelope effective tag routes to the
 semantic route, and the route evidence carried into `PreparedProjection`
-matches the stable route tag that ran; the route-tag to producer-theorem table
-is named explicitly as a proof obligation; and the runtime code still reads as
+matches the stable route id that ran; the route-id to producer-theorem table is
+named explicitly as a proof obligation; and the runtime code still reads as
 load, prepare, commit.
 
 Current production-code foothold: `ProjectionDispatcher::dispatch_projection`
-returns `RoutedProjection`. `RouterProjector` implements that dispatcher by
-computing the effective tag, searching a proof-relevant `FactRouteStamp` slice,
-checking that the executable `FactRoute` at the selected index still matches
-the selected stamp, calling that selected route's projector, applying the
-route's storage requirement to the output, and attaching
-`ProjectionRouteEvidence { fact_id, effective_tag, route_tag, projector_info,
-storage_requirement }`. Leaf projectors still return plain `ProjectionOutput`
-and cannot self-report a producer route. `prepare_projection` stores the route
-evidence in `PreparedProjection`. Cargo-verus proves the production helper
-`projection_route_evidence(fact_id, effective_tag, route_tag, projector_info,
-storage_requirement)` returns route evidence with exactly those same field
-values. Cargo-verus also proves that
+returns `RoutedProjection`. The poc-10 protocol dispatcher is generated from
+the single route declaration list as a direct `match effective_tag` branch:
+the branch for a tag calls that branch's named projector, applies that route's
+storage requirement, and attaches route evidence from the same declaration.
+`RouterProjector` remains available as a generic/test dispatcher for static
+route tables, but the protocol production path no longer relies on a
+function-pointer route table to decide which projector ran. Leaf projectors
+still return plain `ProjectionOutput` and cannot self-report a producer route.
+`prepare_projection` stores the route evidence in `PreparedProjection`.
+Cargo-verus proves the production helper
+`projection_route_evidence(fact_id, route_id, effective_tag, route_tag,
+projector_info, storage_requirement)` returns route evidence with exactly
+those same field values. Cargo-verus also proves that
 `selected_route_evidence(fact_id, effective_tag, stamp)` builds evidence from
 the selected route's proof-relevant `FactRouteStamp`: if the stamp tag is the
-effective tag, the evidence route tag is that same effective tag and the
-projector info/storage requirement come from the stamp. Cargo-verus also proves
-that `select_route_stamp(stamps, effective_tag)` searches the actual
-proof-relevant route metadata slice: `Some` returns the first stamp with
+effective tag, the evidence route id, route tag, projector info, and storage
+requirement come from the stamp. Cargo-verus also proves that
+`select_route_stamp(stamps, effective_tag)` searches the actual proof-relevant
+route metadata slice: `Some` returns the first stamp with
 `tag == effective_tag`, and `None` means no stamp in the slice has that tag.
 It also proves that
 `routed_projection_from_selected_route(fact_id, effective_tag, stamp, output)`
@@ -282,10 +286,10 @@ production constructor used after prepare-stage validation succeeds; it
 preserves the source, fact, mode, route evidence, timing metadata, incoming
 metadata, retention bit, projected context, time wakes, projected row
 mutations, and runtime effects carried into `PreparedProjection`. This is
-selected-route metadata-search, routed-output constructor, and prepared-output
-carry proof, not the full route theorem: Cargo-verus still needs to prove
-executable route/stamp alignment, the selected projector function call, and the
-larger `prepare_projection` call-order theorem.
+selected-route metadata-search, routed-output constructor, generated dispatch
+code shape, and prepared-output carry proof, not the full route theorem:
+Cargo-verus still needs to prove the generated protocol dispatch branch/call
+theorem and the larger `prepare_projection` call-order theorem.
 `projection_retains_fact_after_commit(projection)` is verified over the
 production lifecycle decision and accepts if and only if the projection does not
 purge itself and either its source was durable or its source was incoming with
@@ -302,14 +306,13 @@ offers, time wakes, projected row mutations, and every other runtime-effect
 field. Admission rules for what may coexist with that flag remain the separate
 version replay rebuild shape proofs.
 
-Route-search discovery: do not prove route-table search directly over
-`FactRoute` while it contains the projector function pointer. Cargo-verus does
-not support function pointer types as a proof target. The production router
-therefore searches `FactRouteStamp` metadata (`tag`, `projector_info`,
-`storage_requirement`) and keeps the projector function pointer as executable
-code outside the proof relation. The remaining route proof must connect the
-runtime route/stamp alignment check and selected function call to that verified
-metadata search.
+Route-search discovery: do not make a function pointer the proof identity.
+Cargo-verus does not support function pointer values as useful proof objects.
+The protocol route macro therefore generates a direct dispatcher match from
+the same declaration list that generates proof metadata. The reusable
+`RouterProjector` can still search `FactRouteStamp` metadata for tests and
+generic static tables, but high-value protocol proofs should target the direct
+generated dispatch shape.
 
 ### Stage 4: Projection DB Write Boundary
 
@@ -467,6 +470,17 @@ fact plus any accepted proven offers it consumed. It also names a stable
 predicate version, and every producer version that emits the offer must
 re-prove that it preserves the same predicate. Producer proofs establish
 emitted offer contracts; consumer proofs cite accepted offer contracts.
+
+Current production-code foothold: `AcceptedOfferContract` names the core-visible
+part of a consumer's accepted offer boundary: role, scope, and producer route
+id. Cargo-verus proves
+`RoutedOffer::matches_accepted_contract(contract)` accepts if and only if the
+locally attested offer has that role, scope, producer route id, and owner-route
+provenance. `ProjectionContext::accepted_attested_offer_for` and
+`matched_accepted_attested_offers_for` filter the matched context through that
+same production helper. This is still not a semantic `ProvenOffer`; the
+route-local producer theorem for the named route must later prove the offer's
+predicate version and domain meaning.
 
 Negative-authority contracts need a stronger context theorem than positive
 grant contracts. For a positive grant, missing context usually means no grant,
@@ -802,7 +816,7 @@ context_set_from_projection_parts(needs, claims, owner) builds same-index owned 
 clone_context_needs(needs) preserves the need sequence
 projection_output_context_set_parts(output, owner) preserves output needs and builds same-index owned offers from output claims
 projection_context_offers_match_claims(context, claims, owner) accepts only if every final offer matches an owner-stamped output claim
-projection_route_evidence(fact_id, effective_tag, route_tag, projector_info, storage_requirement) preserves every route evidence field
+projection_route_evidence(fact_id, route_id, effective_tag, route_tag, projector_info, storage_requirement) preserves every route evidence field
 selected_route_evidence(fact_id, effective_tag, stamp) preserves selected route stamp metadata and gives route_tag == effective_tag when stamp.tag == effective_tag
 select_route_stamp(stamps, effective_tag) returns the first matching route stamp or proves no route stamp matches
 routed_projection_from_selected_route(fact_id, effective_tag, stamp, output) preserves selected route stamp metadata and preserves output unchanged

@@ -1204,6 +1204,51 @@ fn poc10_protocol_cli_hosts_use_core_opened_runtime_and_return_output() {
 }
 
 #[test]
+fn target_projectors_cannot_emit_intent_row_mutations() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let projector_paths = target_projector_files(root);
+    let offenders = source_code_matches_in_paths(root, projector_paths, &["IntentRowMutation"]);
+
+    assert!(
+        offenders.is_empty(),
+        "poc-10 target projectors must not construct intent-owned row mutations; projected rows go through ProjectionOutput::row_mutation:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn protocol_dispatch_uses_generated_route_match() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let registry = source_text(&root.join("src/protocol/registry.rs"));
+
+    for required in [
+        "fn protocol_route_stamp_for_effective_tag(effective_tag: u8) -> Option<FactRouteStamp>",
+        "fn dispatch_protocol_projection_for_effective_tag(",
+        "match effective_tag",
+        "let output = <$projector>::new().project(fact, context)?;",
+        "route_id: FactRouteId::from_effective_tag($tag)",
+    ] {
+        assert!(
+            registry.contains(required),
+            "protocol registry should generate a direct route-id dispatch branch: {required:?}"
+        );
+    }
+
+    let protocol_projector_impl = registry
+        .split("impl ProjectionDispatcher for ProtocolProjector")
+        .nth(1)
+        .expect("projection dispatcher impl")
+        .split("// Every fact route is explicit")
+        .next()
+        .expect("dispatcher impl body");
+
+    assert!(
+        !protocol_projector_impl.contains("RouterProjector::new"),
+        "production protocol dispatch should not delegate selected projector calls to the function-pointer router"
+    );
+}
+
+#[test]
 fn poc10_target_projectors_do_not_write_store_rows_directly() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let projector_paths = target_projector_files(root);
