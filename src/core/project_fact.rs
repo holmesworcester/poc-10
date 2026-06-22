@@ -640,12 +640,7 @@ fn validate_version_replay_rebuild_projection_shape(
     time_wakes: &[TimeWake],
     effects: &RuntimeEffects,
 ) -> Result<(), String> {
-    let status = version_replay_rebuild_shape_status(
-        effects.version_replay_rebuild,
-        &context.needs,
-        &context.offers,
-        time_wakes,
-    );
+    let status = version_replay_rebuild_projection_status(context, time_wakes, effects);
     if version_replay_rebuild_shape_status_allows_projection(status) {
         return Ok(());
     }
@@ -1116,6 +1111,41 @@ fn version_replay_rebuild_shape_status_allows_projection(status: u8) -> (accepte
         accepted <==> status == VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED,
 {
     status == VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED
+}
+
+/// Classify whether a complete prepared projection shape can request
+/// wipe-and-replay for a storage-version upgrade.
+///
+/// Version replay rebuilds clear resettable derived/runtime state and requeue
+/// retained facts. A projection that requests that effect must not also publish
+/// standing context or time wakes in the same commit.
+fn version_replay_rebuild_projection_status(
+    context: &ContextSet,
+    wakes: &[TimeWake],
+    effects: &RuntimeEffects,
+) -> (status: u8)
+    ensures
+        status == VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED <==> (
+            !effects.version_replay_rebuild
+                || (context.needs@.len() == 0
+                    && context.offers@.len() == 0
+                    && wakes@.len() == 0)
+        ),
+        status == VERSION_REPLAY_REBUILD_SHAPE_STANDING_OUTPUT <==> !(
+            !effects.version_replay_rebuild
+                || (context.needs@.len() == 0
+                    && context.offers@.len() == 0
+                    && wakes@.len() == 0)
+        ),
+        status == VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED
+            || status == VERSION_REPLAY_REBUILD_SHAPE_STANDING_OUTPUT,
+{
+    version_replay_rebuild_shape_status(
+        effects.version_replay_rebuild,
+        &context.needs,
+        &context.offers,
+        wakes,
+    )
 }
 } // verus!
 
@@ -5907,6 +5937,24 @@ mod contract_tests {
         assert!(!version_replay_rebuild_shape_status_allows_projection(
             VERSION_REPLAY_REBUILD_SHAPE_STANDING_OUTPUT
         ));
+    }
+
+    #[test]
+    fn version_replay_rebuild_projection_status_reads_complete_projection_shape() {
+        let fact = Fact::new(FactScope::Global, 1, b"rebuild full status".to_vec());
+        let role = Role::new("rebuild_full_status").unwrap();
+        let key = ContextKey::from_bytes([5; 32]);
+        let context = ContextSet::new().need(need_for(&fact, &role, &key));
+        let effects = RuntimeEffects::new().version_replay_rebuild();
+
+        assert_eq!(
+            version_replay_rebuild_projection_status(&ContextSet::new(), &[], &effects),
+            VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED
+        );
+        assert_eq!(
+            version_replay_rebuild_projection_status(&context, &[], &effects),
+            VERSION_REPLAY_REBUILD_SHAPE_STANDING_OUTPUT
+        );
     }
 
     fn assert_version_replay_rebuild_shape_rejected(fact: &Fact, output: ProjectionOutput) {

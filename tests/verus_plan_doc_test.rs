@@ -86,7 +86,7 @@ fn cargo_verus_verifies_production_core_projection_contracts() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        combined.contains("verification results:: 32 verified, 0 errors"),
+        combined.contains("verification results:: 33 verified, 0 errors"),
         "production proof should verify the real core projection contracts:\n{combined}"
     );
 }
@@ -335,6 +335,7 @@ fn verus_plan_is_single_core_first_source() {
         "standing-output exactly from that predicate",
         "allow helper accepts",
         "only the accepted status",
+        "`version_replay_rebuild_projection_status(context, wakes, effects)` applies",
         "`projection_output_owner_status(output, fact_id)` applies that same verified",
         "`validate_version_replay_rebuild_projection_shape` `Result` wrapper",
         "`ProjectionOutput::context_set` normalization step",
@@ -511,6 +512,7 @@ fn verus_plan_is_single_core_first_source() {
         "version_replay_rebuild_shape_allowed(version_replay_rebuild, needs, offers, wakes) accepts if and only if ordinary projection or empty version replay rebuild output",
         "version_replay_rebuild_shape_status(version_replay_rebuild, needs, offers, wakes) returns accepted or standing-output exactly from that predicate",
         "version_replay_rebuild_shape_status_allows_projection(status) accepts if and only if status is VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED",
+        "version_replay_rebuild_projection_status(context, wakes, effects) returns accepted or standing-output exactly from the prepared context, time wakes, and rebuild effect",
         "matched_context_owner_matches_payload(matched) accepts if and only if matched.routed_offer.offer.owner == matched.payload.id",
         "routed_offer_owner_matches_producer(routed_offer) accepts if and only if routed_offer.offer.owner == routed_offer.producer_route.fact_id",
         "matched_context_has_routed_provenance(matched) accepts if and only if matched.routed_offer.offer.owner == matched.payload.id and matched.routed_offer.offer.owner == matched.routed_offer.producer_route.fact_id",
@@ -527,7 +529,7 @@ fn verus_plan_is_single_core_first_source() {
         "remaining version replay rebuild admission gap",
         "standing-output decision",
         "status classification",
-        "accept-status decision",
+        "full prepared-shape status bridge",
         "`validate_version_replay_rebuild_projection_shape` `Result` wrapper",
         "remaining route-dispatch gap",
         "route-evidence field stamping",

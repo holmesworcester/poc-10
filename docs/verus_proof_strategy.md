@@ -120,7 +120,11 @@ the version replay rebuild shape decision accepts exactly ordinary projections
 or version replay rebuild projections with empty standing output: no standing needs, offers, or time wakes.
 It also proves that the production status helper returns accepted or
 standing-output exactly from that predicate, and that the allow helper accepts
-only the accepted status. That is not the full offer-finalization or version
+only the accepted status.
+`version_replay_rebuild_projection_status(context, wakes, effects)` applies
+that same verified status classification to the actual prepared projection
+shape consumed by `validate_version_replay_rebuild_projection_shape`. That is
+not the full offer-finalization or version
 replay rebuild admission theorem yet: the
 `ProjectionOutput::context_set` normalization step and the `prepare_projection`
 call order remain open core proof work, as does the
@@ -683,6 +687,7 @@ selected_route_evidence(fact_id, effective_tag, stamp) preserves selected route 
 version_replay_rebuild_shape_allowed(version_replay_rebuild, needs, offers, wakes) accepts if and only if ordinary projection or empty version replay rebuild output
 version_replay_rebuild_shape_status(version_replay_rebuild, needs, offers, wakes) returns accepted or standing-output exactly from that predicate
 version_replay_rebuild_shape_status_allows_projection(status) accepts if and only if status is VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED
+version_replay_rebuild_projection_status(context, wakes, effects) returns accepted or standing-output exactly from the prepared context, time wakes, and rebuild effect
 matched_context_owner_matches_payload(matched) accepts if and only if matched.routed_offer.offer.owner == matched.payload.id
 routed_offer_owner_matches_producer(routed_offer) accepts if and only if routed_offer.offer.owner == routed_offer.producer_route.fact_id
 matched_context_has_routed_provenance(matched) accepts if and only if matched.routed_offer.offer.owner == matched.payload.id and matched.routed_offer.offer.owner == matched.routed_offer.producer_route.fact_id
@@ -707,9 +712,10 @@ status classification, accept-status decision, or full-output status bridge; it
 is proving the `enforce_owner_is_self` `Result` wrapper diagnostic rejection
 branches and `prepare_projection` call order over executable helper code.
 The remaining version replay rebuild admission gap is no longer the
-standing-output decision, status classification, or accept-status decision; it
-is proving the `validate_version_replay_rebuild_projection_shape` `Result`
-wrapper and `prepare_projection` call order around the verified status helper.
+standing-output decision, status classification, accept-status decision, or
+full prepared-shape status bridge; it is proving the
+`validate_version_replay_rebuild_projection_shape` `Result` wrapper and
+`prepare_projection` call order around the verified status helper.
 
 The remaining matched-context provenance gap is no longer the local
 owner/payload equality decision for one `MatchedContext` or the local
