@@ -290,11 +290,10 @@ impl UserProjector {
             fact.id,
             user.signer_public_key,
         )?;
-        let invite_need = crate::core::context::ContextNeed::range(
+        let invite_need = crate::core::context::ContextNeed::for_key(
             fact.id,
             "auth_user_invite",
             crate::core::facts::FactScope::Global,
-            user.signer_id,
             user.signer_id,
         );
         let waiting = ProjectionOutput::new()

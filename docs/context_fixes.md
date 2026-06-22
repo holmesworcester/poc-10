@@ -275,8 +275,7 @@ pending_projection_matches
   owner
   need_role
   need_scope_key
-  need_start_key
-  need_end_key
+  need_key
   offer_id
 ```
 

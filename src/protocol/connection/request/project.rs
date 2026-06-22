@@ -1377,8 +1377,7 @@ mod tests {
             .iter()
             .find(|need| need.role.as_str() == role)
             .expect("need role");
-        assert_eq!(need.start_key.as_bytes(), key);
-        assert_eq!(need.end_key.as_bytes(), key);
+        assert_eq!(need.key.as_bytes(), key);
     }
 
     #[test]

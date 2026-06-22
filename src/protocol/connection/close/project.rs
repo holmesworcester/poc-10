@@ -237,13 +237,11 @@ pub fn ephemeral_secret_closed_offer(owner: FactId, secret_id: FactId) -> Contex
 }
 
 fn exact_local_need(owner: FactId, role: &'static str, key: FactId) -> ContextNeed {
-    let key = ContextKey::from_bytes(key);
     ContextNeed {
         owner,
         role: Role::expect(role),
         scope: FactScope::Local,
-        start_key: key.clone(),
-        end_key: key,
+        key: ContextKey::from_bytes(key),
     }
 }
 

@@ -325,37 +325,33 @@ impl RetentionPolicyProjector {
             policy.signer_public_key,
         )?;
         let authority_need = if bootstrap_root {
-            crate::core::context::ContextNeed::range(
+            crate::core::context::ContextNeed::for_key(
                 fact.id,
                 "auth_workspace",
                 crate::core::facts::FactScope::Global,
                 policy.workspace_id,
-                policy.workspace_id,
             )
         } else {
-            crate::core::context::ContextNeed::range(
+            crate::core::context::ContextNeed::for_key(
                 fact.id,
                 "auth_admin",
                 auth::workspace::scope(policy.workspace_id),
                 policy.author_user_id,
-                policy.author_user_id,
             )
         };
         let signer_need = (!bootstrap_root).then(|| {
-            crate::core::context::ContextNeed::range(
+            crate::core::context::ContextNeed::for_key(
                 fact.id,
                 "content_signer",
                 auth::workspace::scope(policy.workspace_id),
                 policy.signer_id,
-                policy.signer_id,
             )
         });
         let previous_need = policy.supersedes_policy_id.map(|previous_id| {
-            crate::core::context::ContextNeed::range(
+            crate::core::context::ContextNeed::for_key(
                 fact.id,
                 "sync_exact_fact",
                 FactScope::Global,
-                previous_id,
                 previous_id,
             )
         });
@@ -760,11 +756,10 @@ mod projector_tests {
         authority: Fact,
     ) -> MatchedContext {
         matched(
-            crate::core::context::ContextNeed::range(
+            crate::core::context::ContextNeed::for_key(
                 owner,
                 "auth_admin",
                 auth::workspace::scope(policy.workspace_id),
-                policy.author_user_id,
                 policy.author_user_id,
             ),
             crate::core::context::ContextOffer::range(
@@ -780,11 +775,10 @@ mod projector_tests {
 
     fn signer_match(owner: [u8; 32], policy: &RetentionPolicyFact, signer: Fact) -> MatchedContext {
         matched(
-            crate::core::context::ContextNeed::range(
+            crate::core::context::ContextNeed::for_key(
                 owner,
                 "content_signer",
                 auth::workspace::scope(policy.workspace_id),
-                policy.signer_id,
                 policy.signer_id,
             ),
             crate::core::context::ContextOffer::range(
@@ -800,11 +794,10 @@ mod projector_tests {
 
     fn previous_match(owner: [u8; 32], previous: Fact) -> MatchedContext {
         matched(
-            crate::core::context::ContextNeed::range(
+            crate::core::context::ContextNeed::for_key(
                 owner,
                 "sync_exact_fact",
                 FactScope::Global,
-                previous.id,
                 previous.id,
             ),
             crate::core::context::ContextOffer::range(

@@ -304,18 +304,16 @@ impl ContentReactionProjector {
             reaction.signer_public_key,
         )?;
         let signer_need = project::signer_need(fact.id, reaction.workspace_id, reaction.signer_id);
-        let target_need = crate::core::context::ContextNeed::range(
+        let target_need = crate::core::context::ContextNeed::for_key(
             fact.id,
             "content_message",
             scope.clone(),
             reaction.target_message_id,
-            reaction.target_message_id,
         );
-        let author_need = crate::core::context::ContextNeed::range(
+        let author_need = crate::core::context::ContextNeed::for_key(
             fact.id,
             "auth_user",
             crate::core::facts::FactScope::Global,
-            reaction.author_user_id,
             reaction.author_user_id,
         );
         if !signature::project::signature_proof_ready(

@@ -273,11 +273,10 @@ fn project_local_key_secret(
             .purge_self(fact.id));
     }
 
-    let frontier_need = ContextNeed::range(
+    let frontier_need = ContextNeed::for_key(
         fact.id,
         "auth_removal_frontier",
         scope.clone(),
-        secret.frontier_id,
         secret.frontier_id,
     );
     let Some(frontier_fact) = projection_context.payload_for(&frontier_need) else {

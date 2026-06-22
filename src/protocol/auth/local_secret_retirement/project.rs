@@ -221,13 +221,11 @@ pub fn secret_retired_offer(owner: FactId, target_secret_id: FactId) -> ContextO
 }
 
 fn exact_local_need(owner: FactId, role: &'static str, key: FactId) -> ContextNeed {
-    let key = ContextKey::from_bytes(key);
     ContextNeed {
         owner,
         role: Role::expect(role),
         scope: FactScope::Local,
-        start_key: key.clone(),
-        end_key: key,
+        key: ContextKey::from_bytes(key),
     }
 }
 
@@ -287,11 +285,10 @@ impl LocalSecretRetirementProjector {
         }
 
         // 2. Context.
-        let target_need = ContextNeed::range(
+        let target_need = ContextNeed::for_key(
             fact.id,
             "local_secret_source",
             FactScope::Local,
-            retirement.target_secret_id,
             retirement.target_secret_id,
         );
         let Some(target) = context.payload_for(&target_need) else {

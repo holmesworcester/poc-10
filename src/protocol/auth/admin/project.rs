@@ -451,18 +451,16 @@ impl BootstrapAdminNeeds {
     fn new(owner: FactId, admin: &AdminFact, signature: ContextNeed) -> Self {
         Self {
             signature,
-            workspace: crate::core::context::ContextNeed::range(
+            workspace: crate::core::context::ContextNeed::for_key(
                 owner,
                 "auth_workspace",
                 crate::core::facts::FactScope::Global,
                 admin.workspace_id,
-                admin.workspace_id,
             ),
-            user: crate::core::context::ContextNeed::range(
+            user: crate::core::context::ContextNeed::for_key(
                 owner,
                 "auth_user",
                 crate::core::facts::FactScope::Global,
-                admin.user_fact_id,
                 admin.user_fact_id,
             ),
         }
@@ -487,25 +485,22 @@ impl DelegatedAdminNeeds {
     fn new(owner: FactId, admin: &AdminFact, signature: ContextNeed) -> Self {
         Self {
             signature,
-            workspace: crate::core::context::ContextNeed::range(
+            workspace: crate::core::context::ContextNeed::for_key(
                 owner,
                 "auth_workspace",
                 crate::core::facts::FactScope::Global,
                 admin.workspace_id,
-                admin.workspace_id,
             ),
-            authority: crate::core::context::ContextNeed::range(
+            authority: crate::core::context::ContextNeed::for_key(
                 owner,
                 "auth_admin",
                 crate::core::facts::FactScope::Global,
                 admin.authority_fact_id,
-                admin.authority_fact_id,
             ),
-            user: crate::core::context::ContextNeed::range(
+            user: crate::core::context::ContextNeed::for_key(
                 owner,
                 "auth_user",
                 crate::core::facts::FactScope::Global,
-                admin.user_fact_id,
                 admin.user_fact_id,
             ),
         }
@@ -572,11 +567,10 @@ fn decode_user_payload(fact: &Fact) -> Result<crate::protocol::auth::user::fact:
 }
 
 fn auth_user_invite_need(owner: FactId, invite_id: FactId) -> ContextNeed {
-    crate::core::context::ContextNeed::range(
+    crate::core::context::ContextNeed::for_key(
         owner,
         "auth_user_invite",
         crate::core::facts::FactScope::Global,
-        invite_id,
         invite_id,
     )
 }

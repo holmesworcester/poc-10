@@ -743,8 +743,7 @@ pub mod authenticate {
 
         fn assert_exact_need(need: &ContextNeed, role: &str, key: FactId) {
             assert_eq!(need.role.as_str(), role);
-            assert_eq!(need.start_key.as_bytes(), key);
-            assert_eq!(need.end_key.as_bytes(), key);
+            assert_eq!(need.key.as_bytes(), key);
         }
 
         fn exact_need_with_key<'a>(
@@ -754,11 +753,7 @@ pub mod authenticate {
         ) -> &'a ContextNeed {
             needs
                 .iter()
-                .find(|need| {
-                    need.role.as_str() == role
-                        && need.start_key.as_bytes() == key
-                        && need.end_key.as_bytes() == key
-                })
+                .find(|need| need.role.as_str() == role && need.key.as_bytes() == key)
                 .expect("exact need")
         }
 

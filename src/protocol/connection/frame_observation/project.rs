@@ -231,8 +231,7 @@ pub fn connection_frame_observation_need(owner: FactId, frame_fact_id: FactId) -
         owner,
         role: Role::expect(CONNECTION_FRAME_OBSERVATION_ROLE),
         scope: FactScope::Local,
-        start_key: ContextKey::from_bytes(frame_fact_id),
-        end_key: ContextKey::from_bytes(frame_fact_id),
+        key: ContextKey::from_bytes(frame_fact_id),
     }
 }
 

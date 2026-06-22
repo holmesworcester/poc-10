@@ -403,18 +403,16 @@ fn authority_need(
     signer_id: [u8; 32],
 ) -> ContextNeed {
     match shared.endpoint_role {
-        EndpointRole::InviteServer => crate::core::context::ContextNeed::range(
+        EndpointRole::InviteServer => crate::core::context::ContextNeed::for_key(
             fact.id,
             "auth_invite_server",
             crate::core::facts::FactScope::Global,
             signer_id,
-            signer_id,
         ),
-        EndpointRole::Device => crate::core::context::ContextNeed::range(
+        EndpointRole::Device => crate::core::context::ContextNeed::for_key(
             fact.id,
             "auth_device_invite",
             crate::core::facts::FactScope::Global,
-            signer_id,
             signer_id,
         ),
     }

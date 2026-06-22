@@ -273,25 +273,22 @@ fn key_request(
         fact.id,
         request.signer_public_key,
     )?;
-    let requester_need = ContextNeed::range(
+    let requester_need = ContextNeed::for_key(
         fact.id,
         "content_signer",
         scope.clone(),
         request.requester_endpoint_id,
-        request.requester_endpoint_id,
     );
-    let recipient_need = ContextNeed::range(
+    let recipient_need = ContextNeed::for_key(
         fact.id,
         "recipient_key",
         scope.clone(),
         request.recipient_key_id,
-        request.recipient_key_id,
     );
-    let frontier_need = ContextNeed::range(
+    let frontier_need = ContextNeed::for_key(
         fact.id,
         "auth_removal_frontier",
         scope.clone(),
-        request.frontier_id,
         request.frontier_id,
     );
     let source_need = requested_wrap_source_need(
@@ -536,31 +533,28 @@ mod projector_tests {
 
     fn requester_need(request: &Fact) -> ContextNeed {
         let decoded = decode::decode_key_request(&request.bytes).expect("decode request");
-        ContextNeed::range(
+        ContextNeed::for_key(
             request.id,
             "content_signer",
             request.scope.clone(),
-            decoded.requester_endpoint_id,
             decoded.requester_endpoint_id,
         )
     }
 
     fn recipient_need(request: &Fact, recipient_key_id: [u8; 32]) -> ContextNeed {
-        ContextNeed::range(
+        ContextNeed::for_key(
             request.id,
             "recipient_key",
             request.scope.clone(),
-            recipient_key_id,
             recipient_key_id,
         )
     }
 
     fn frontier_need(request: &Fact, frontier_id: [u8; 32]) -> ContextNeed {
-        ContextNeed::range(
+        ContextNeed::for_key(
             request.id,
             "auth_removal_frontier",
             request.scope.clone(),
-            frontier_id,
             frontier_id,
         )
     }
@@ -571,8 +565,8 @@ mod projector_tests {
                 payload.id,
                 need.role.clone(),
                 need.scope.clone(),
-                need.start_key.as_bytes(),
-                need.end_key.as_bytes(),
+                need.key.as_bytes(),
+                need.key.as_bytes(),
             ),
             need,
             payload,

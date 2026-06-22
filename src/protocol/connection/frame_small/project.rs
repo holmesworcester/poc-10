@@ -996,8 +996,7 @@ mod material_tests {
             .iter()
             .find(|need| need.role.as_str() == "auth_local_endpoint")
             .expect("endpoint need");
-        assert_eq!(endpoint_need.start_key.as_bytes(), [2; 32]);
-        assert_eq!(endpoint_need.end_key.as_bytes(), [2; 32]);
+        assert_eq!(endpoint_need.key.as_bytes(), [2; 32]);
 
         let public_key = crypto::x25519_public_key(&[10; 32]);
         let secret_need = needs
@@ -1007,8 +1006,7 @@ mod material_tests {
                     == connection::ephemeral_secret::project::CONNECTION_EPHEMERAL_SECRET_PUBLIC_KEY_ROLE
             })
             .expect("ephemeral public-key need");
-        assert_eq!(secret_need.start_key.as_bytes(), public_key);
-        assert_eq!(secret_need.end_key.as_bytes(), public_key);
+        assert_eq!(secret_need.key.as_bytes(), public_key);
     }
 
     fn packed_inner_bundle(

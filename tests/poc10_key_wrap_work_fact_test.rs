@@ -253,27 +253,11 @@ fn creation_context(
     endpoint_id: [u8; 32],
 ) -> ProjectionContext {
     let scope = workspace_scope(workspace_id);
-    let recipient_need = ContextNeed::range(
-        owner.id,
-        "recipient_key",
-        scope.clone(),
-        recipient.id,
-        recipient.id,
-    );
-    let source_need = ContextNeed::range(
-        owner.id,
-        "local_secret_source",
-        FactScope::Local,
-        source.id,
-        source.id,
-    );
-    let signer_need = ContextNeed::range(
-        owner.id,
-        "local_signer_secret",
-        scope,
-        endpoint_id,
-        endpoint_id,
-    );
+    let recipient_need =
+        ContextNeed::for_key(owner.id, "recipient_key", scope.clone(), recipient.id);
+    let source_need =
+        ContextNeed::for_key(owner.id, "local_secret_source", FactScope::Local, source.id);
+    let signer_need = ContextNeed::for_key(owner.id, "local_signer_secret", scope, endpoint_id);
     ProjectionContext::from_matches(vec![
         matched(recipient_need, recipient.clone()),
         matched(source_need, source.clone()),
@@ -290,34 +274,17 @@ fn recovery_context(
     workspace_id: [u8; 32],
 ) -> ProjectionContext {
     let scope = workspace_scope(workspace_id);
-    let key_wrap_need = ContextNeed::range(
-        owner.id,
-        "sync_key_wrap",
-        scope.clone(),
-        key_wrap.id,
-        key_wrap.id,
-    );
-    let recipient_need = ContextNeed::range(
-        owner.id,
-        "recipient_key",
-        scope.clone(),
-        recipient.id,
-        recipient.id,
-    );
-    let frontier_need = ContextNeed::range(
+    let key_wrap_need = ContextNeed::for_key(owner.id, "sync_key_wrap", scope.clone(), key_wrap.id);
+    let recipient_need =
+        ContextNeed::for_key(owner.id, "recipient_key", scope.clone(), recipient.id);
+    let frontier_need = ContextNeed::for_key(
         owner.id,
         "auth_removal_frontier",
         scope.clone(),
         frontier.id,
-        frontier.id,
     );
-    let local_recipient_need = ContextNeed::range(
-        owner.id,
-        "local_recipient_key",
-        scope,
-        recipient.id,
-        recipient.id,
-    );
+    let local_recipient_need =
+        ContextNeed::for_key(owner.id, "local_recipient_key", scope, recipient.id);
     ProjectionContext::from_matches(vec![
         matched(key_wrap_need, key_wrap.clone()),
         matched(recipient_need, recipient.clone()),
@@ -338,25 +305,13 @@ fn key_wrap_projection_context(
     signer_public_key: [u8; 32],
 ) -> ProjectionContext {
     let scope = workspace_scope(workspace_id);
-    let signer_need = ContextNeed::range(
-        owner.id,
-        "content_signer",
-        scope.clone(),
-        endpoint_id,
-        endpoint_id,
-    );
-    let recipient_need = ContextNeed::range(
-        owner.id,
-        "recipient_key",
-        scope.clone(),
-        recipient.id,
-        recipient.id,
-    );
-    let frontier_need = ContextNeed::range(
+    let signer_need = ContextNeed::for_key(owner.id, "content_signer", scope.clone(), endpoint_id);
+    let recipient_need =
+        ContextNeed::for_key(owner.id, "recipient_key", scope.clone(), recipient.id);
+    let frontier_need = ContextNeed::for_key(
         owner.id,
         "auth_removal_frontier",
         scope.clone(),
-        frontier.id,
         frontier.id,
     );
     let mut matches = vec![
@@ -379,8 +334,8 @@ fn matched(need: ContextNeed, payload: Fact) -> MatchedContext {
             payload.id,
             need.role.clone(),
             need.scope.clone(),
-            need.start_key.as_bytes(),
-            need.end_key.as_bytes(),
+            need.key.as_bytes(),
+            need.key.as_bytes(),
         ),
         need,
         payload,

@@ -316,11 +316,10 @@ impl ContentFileSliceProjector {
             fact.id,
             slice.signer_public_key,
         )?;
-        let file_need = crate::core::context::ContextNeed::range(
+        let file_need = crate::core::context::ContextNeed::for_key(
             fact.id,
             "content_file",
             scope.clone(),
-            slice.file_id,
             slice.file_id,
         );
         if !signature::project::signature_proof_ready(
@@ -359,11 +358,10 @@ impl ContentFileSliceProjector {
             return Err("file slice index is out of range for parent file".to_string());
         }
         let verified_ciphertext = verified_slice_ciphertext(&slice, &file)?;
-        let message_need = crate::core::context::ContextNeed::range(
+        let message_need = crate::core::context::ContextNeed::for_key(
             fact.id,
             "content_message",
             scope.clone(),
-            file.message_id,
             file.message_id,
         );
         let Some(message_payload) =

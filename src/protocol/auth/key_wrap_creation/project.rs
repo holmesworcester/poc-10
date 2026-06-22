@@ -181,25 +181,22 @@ fn project_key_wrap_creation(
     let scope = crate::protocol::auth::workspace::scope(creation.workspace_id);
 
     // 2. Context: exact recipient, source, and signer facts named by this work fact.
-    let recipient_need = ContextNeed::range(
+    let recipient_need = ContextNeed::for_key(
         fact.id,
         "recipient_key",
         scope.clone(),
         creation.recipient_key_id,
-        creation.recipient_key_id,
     );
-    let source_need = ContextNeed::range(
+    let source_need = ContextNeed::for_key(
         fact.id,
         "local_secret_source",
         FactScope::Local,
         creation.source_fact_id,
-        creation.source_fact_id,
     );
-    let signer_need = ContextNeed::range(
+    let signer_need = ContextNeed::for_key(
         fact.id,
         "local_signer_secret",
         scope,
-        creation.owner_endpoint_id,
         creation.owner_endpoint_id,
     );
     let output = ProjectionOutput::new()
@@ -264,26 +261,23 @@ mod tests {
 
         assert!(output.effects.facts.is_empty());
         assert_eq!(output.needs.len(), 3);
-        assert!(output.needs.contains(&ContextNeed::range(
+        assert!(output.needs.contains(&ContextNeed::for_key(
             fact.id,
             "recipient_key",
             crate::protocol::auth::workspace::scope(creation.workspace_id),
-            creation.recipient_key_id,
-            creation.recipient_key_id,
+            creation.recipient_key_id
         )));
-        assert!(output.needs.contains(&ContextNeed::range(
+        assert!(output.needs.contains(&ContextNeed::for_key(
             fact.id,
             "local_secret_source",
             FactScope::Local,
-            creation.source_fact_id,
-            creation.source_fact_id,
+            creation.source_fact_id
         )));
-        assert!(output.needs.contains(&ContextNeed::range(
+        assert!(output.needs.contains(&ContextNeed::for_key(
             fact.id,
             "local_signer_secret",
             crate::protocol::auth::workspace::scope(creation.workspace_id),
-            creation.owner_endpoint_id,
-            creation.owner_endpoint_id,
+            creation.owner_endpoint_id
         )));
     }
 

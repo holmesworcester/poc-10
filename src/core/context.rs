@@ -17,36 +17,31 @@
 //! Context is the durable dependency surface between projectors; it is not a
 //! hidden dependency loader or a second projection queue. A projector emits the
 //! needs and offers it owns, and `project_fact.rs` records newly satisfiable
-//! range overlaps. The semantic meaning of a role or byte range stays with the
+//! offer coverage. The semantic meaning of a role or byte range stays with the
 //! projector that created it and with the projector that later validates the
 //! matched scalar value.
 //!
-//! Every context edge has a key interval:
+//! Every context need has one exact key:
 //!
 //! ```text
-//! owner, role, scope, start_key, end_key
+//! owner, role, scope, key
 //! ```
 //!
-//! `role` and `scope` partition the search space. `start_key` and `end_key` are
-//! inclusive opaque byte endpoints inside that partition. Exact dependencies
-//! should use `ContextNeed::for_key` and `ContextOffer::for_key`; those
-//! constructors store the same key as both endpoints so the exact relationship
-//! remains compatible with true range matches. Composite exact dependencies can
-//! use `for_key_parts` to build one bounded canonical key. Broader dependencies
-//! use `range` and choose an order-preserving byte layout in the protocol domain
-//! so ordinary lexicographic range overlap is enough to find matching offers.
+//! `role` and `scope` partition the search space. Needs are exact lookups inside
+//! that partition. Offers may be exact or range claims, so a range offer can
+//! cover many exact needs. Composite exact dependencies can use `for_key_parts`
+//! to build one bounded canonical key.
 //!
 //! Core's only matching rule is:
 //!
 //! ```text
 //! need.role == offer.role
 //! need.scope == offer.scope
-//! need.start_key <= offer.end_key
-//! offer.start_key <= need.end_key
+//! offer.start_key <= need.key <= offer.end_key
 //! ```
 //!
 //! Core never parses range bytes or offer values. It stores them, indexes them,
-//! performs the overlap query, wakes affected owners, and hydrates matched
+//! performs the coverage query, wakes affected owners, and hydrates matched
 //! context from the stored offer row. The woken projector must still decode and
 //! validate the matched scalar value before emitting rows, offers, or intents.
 //!
@@ -231,38 +226,32 @@ pub struct ContextNeed {
     pub role: Role,
     /// Matching scope.
     pub scope: FactScope,
-    /// Inclusive start of the opaque byte range this need asks for.
-    pub start_key: ContextKey,
-    /// Inclusive end of the opaque byte range this need asks for.
-    pub end_key: ContextKey,
+    /// Opaque key this need asks for.
+    pub key: ContextKey,
 }
 
 impl ContextNeed {
     /// Build an exact-key need.
     ///
-    /// Exact needs are stored with identical start/end keys. They match exact
-    /// offers with the same key and true range offers that cover this key.
+    /// Exact needs match exact offers with the same key and range offers that
+    /// cover this key.
     pub fn for_key(
         owner: FactId,
         role: impl Into<Role>,
         scope: FactScope,
         key: impl Into<Vec<u8>>,
     ) -> Self {
-        let key = ContextKey::from_bytes(key);
         Self {
             owner,
             role: role.into(),
             scope,
-            start_key: key.clone(),
-            end_key: key,
+            key: ContextKey::from_bytes(key),
         }
     }
 
     /// Build an exact-key need from bounded canonical key parts.
     ///
-    /// Use this when multiple protocol fields together form one exact lookup
-    /// key. Use `range` only when the owner intentionally wants every matching
-    /// offer in a byte interval.
+    /// Use this when multiple protocol fields together form one exact lookup key.
     pub fn for_key_parts<'a, I, P>(
         owner: FactId,
         role: impl Into<Role>,
@@ -278,29 +267,8 @@ impl ContextNeed {
             owner,
             role: role.into(),
             scope,
-            start_key: key.clone(),
-            end_key: key,
+            key,
         })
-    }
-
-    /// Build a true range need with inclusive byte endpoints.
-    ///
-    /// Ranges can match many offers. Prefer `for_key` or `for_key_parts` for
-    /// ordinary fact-id or composite-key dependencies.
-    pub fn range(
-        owner: FactId,
-        role: impl Into<Role>,
-        scope: FactScope,
-        start_key: impl Into<Vec<u8>>,
-        end_key: impl Into<Vec<u8>>,
-    ) -> Self {
-        Self {
-            owner,
-            role: role.into(),
-            scope,
-            start_key: ContextKey::from_bytes(start_key),
-            end_key: ContextKey::from_bytes(end_key),
-        }
     }
 }
 
@@ -330,8 +298,7 @@ pub struct ContextOffer {
 impl ContextOffer {
     /// Build an exact-key offer.
     ///
-    /// Exact offers are stored with identical start/end keys. They satisfy exact
-    /// needs for the same key and true range needs that cover this key.
+    /// Exact offers satisfy exact needs for the same key.
     pub fn for_key(
         owner: FactId,
         role: impl Into<Role>,
@@ -616,15 +583,13 @@ mod tests {
             owner: id,
             role: role.clone(),
             scope: FactScope::Global,
-            start_key: ContextKey::from_bytes([2; 32]),
-            end_key: ContextKey::from_bytes([2; 32]),
+            key: ContextKey::from_bytes([2; 32]),
         };
         let added = ContextNeed {
             owner: id,
             role,
             scope: FactScope::Global,
-            start_key: ContextKey::from_bytes([3; 32]),
-            end_key: ContextKey::from_bytes([3; 32]),
+            key: ContextKey::from_bytes([3; 32]),
         };
 
         let previous = ContextSet::new().need(stable.clone()).need(stable.clone());
@@ -648,8 +613,7 @@ mod tests {
                 owner: id,
                 role: role.clone(),
                 scope: FactScope::Global,
-                start_key: key.clone(),
-                end_key: key.clone(),
+                key: key.clone(),
             })
             .offer(ContextOffer {
                 owner: id,
@@ -686,7 +650,7 @@ mod tests {
     }
 
     #[test]
-    fn key_part_need_and_offer_use_identical_endpoints() {
+    fn key_part_need_and_offer_use_identical_key() {
         let owner = [1; 32];
         let scope = FactScope::Global;
         let first = [2; 32];
@@ -696,23 +660,21 @@ mod tests {
         let offer = ContextOffer::for_key_parts(owner, "composite", scope, [&first, &second])
             .expect("offer");
 
-        assert_eq!(need.start_key, need.end_key);
         assert_eq!(offer.start_key, offer.end_key);
-        assert_eq!(need.start_key, offer.start_key);
+        assert_eq!(need.key, offer.start_key);
     }
 
     #[test]
-    fn exact_key_need_and_offer_use_identical_endpoints() {
+    fn exact_key_need_and_offer_use_identical_key() {
         let owner = [1; 32];
         let scope = FactScope::Global;
         let key = [2; 32];
         let need = ContextNeed::for_key(owner, "exact", scope.clone(), key);
         let offer = ContextOffer::for_key(owner, "exact", scope, key);
 
-        assert_eq!(need.start_key, ContextKey::from_bytes(key));
-        assert_eq!(need.start_key, need.end_key);
+        assert_eq!(need.key, ContextKey::from_bytes(key));
         assert_eq!(offer.start_key, offer.end_key);
-        assert_eq!(need.start_key, offer.start_key);
+        assert_eq!(need.key, offer.start_key);
     }
 
     #[test]
@@ -723,8 +685,7 @@ mod tests {
             owner: id,
             role,
             scope: FactScope::Global,
-            start_key: ContextKey::from_bytes([2; 32]),
-            end_key: ContextKey::from_bytes([2; 32]),
+            key: ContextKey::from_bytes([2; 32]),
         };
 
         let set = ContextSet::new()
@@ -745,8 +706,7 @@ mod tests {
                 owner: id,
                 role: role.clone(),
                 scope: FactScope::Global,
-                start_key: key.clone(),
-                end_key: key.clone(),
+                key: key.clone(),
             })
             .offer(ContextOffer {
                 owner: id,

@@ -274,10 +274,12 @@ pub fn proactive_wrap_source_need(
     workspace_id: FactId,
     min_frontier_created_at_ms: u64,
 ) -> ContextNeed {
-    let start = proactive_wrap_key_prefix(workspace_id, min_frontier_created_at_ms);
-    let mut end = proactive_wrap_key_prefix(workspace_id, u64::MAX);
-    end.extend_from_slice(&[0xff; ENCODED_WRAP_SOURCE_DESCRIPTOR_LEN]);
-    ContextNeed::range(owner, wrap_source_role(), scope, start, end)
+    ContextNeed::for_key(
+        owner,
+        wrap_source_role(),
+        scope,
+        proactive_wrap_key_prefix(workspace_id, min_frontier_created_at_ms),
+    )
 }
 
 pub fn requested_wrap_source_need(
@@ -286,10 +288,12 @@ pub fn requested_wrap_source_need(
     workspace_id: FactId,
     frontier_id: FactId,
 ) -> ContextNeed {
-    let start = requested_wrap_key_prefix(workspace_id, frontier_id);
-    let mut end = start.clone();
-    end.extend_from_slice(&[0xff; ENCODED_WRAP_SOURCE_DESCRIPTOR_LEN]);
-    ContextNeed::range(owner, wrap_source_role(), scope, start, end)
+    ContextNeed::for_key(
+        owner,
+        wrap_source_role(),
+        scope,
+        requested_wrap_key_prefix(workspace_id, frontier_id),
+    )
 }
 
 pub fn frontier_root_wrap_source_offers(
@@ -349,21 +353,23 @@ fn wrap_source_offers(
     source: WrapSourceDescriptor,
 ) -> Vec<ContextOffer> {
     let metadata = encode_wrap_source_descriptor(&source).as_bytes().to_vec();
-    let proactive_key = wrap_offer_key(PROACTIVE_DOMAIN, &source, &metadata);
+    let proactive_start = proactive_wrap_key_prefix(source.workspace_id, 0);
+    let proactive_end = wrap_offer_key(PROACTIVE_DOMAIN, &source, &metadata);
     let proactive = ContextOffer::range(
         owner,
         wrap_source_role(),
         scope.clone(),
-        proactive_key.clone(),
-        proactive_key,
+        proactive_start,
+        proactive_end,
     );
-    let requested_key = wrap_offer_key(REQUESTED_DOMAIN, &source, &metadata);
+    let requested_start = requested_wrap_key_prefix(source.workspace_id, source.frontier_id);
+    let requested_end = wrap_offer_key(REQUESTED_DOMAIN, &source, &metadata);
     let requested = ContextOffer::range(
         owner,
         wrap_source_role(),
         scope,
-        requested_key.clone(),
-        requested_key,
+        requested_start,
+        requested_end,
     );
     vec![proactive, requested]
 }
@@ -517,38 +523,24 @@ fn mask_prefix_to_depth(mut prefix: FactId, bit_depth: u16) -> FactId {
 }
 
 pub fn decode_proactive_wrap_need(need: &ContextNeed) -> Option<(FactId, u64)> {
-    let start = need.start_key.as_bytes();
-    let end = need.end_key.as_bytes();
-    if start.len() != 41 || start[0] != PROACTIVE_DOMAIN {
+    let key = need.key.as_bytes();
+    if key.len() != 41 || key[0] != PROACTIVE_DOMAIN {
         return None;
     }
-    if end.len() != 41 + ENCODED_WRAP_SOURCE_DESCRIPTOR_LEN || end[0] != PROACTIVE_DOMAIN {
-        return None;
-    }
-    let workspace_id: FactId = start[1..33].try_into().ok()?;
-    if end[1..33] != workspace_id {
-        return None;
-    }
+    let workspace_id: FactId = key[1..33].try_into().ok()?;
     Some((
         workspace_id,
-        u64::from_be_bytes(start[33..41].try_into().ok()?),
+        u64::from_be_bytes(key[33..41].try_into().ok()?),
     ))
 }
 
 pub fn decode_requested_wrap_need(need: &ContextNeed) -> Option<(FactId, FactId)> {
-    let start = need.start_key.as_bytes();
-    let end = need.end_key.as_bytes();
-    if start.len() != 65 || start[0] != REQUESTED_DOMAIN {
+    let key = need.key.as_bytes();
+    if key.len() != 65 || key[0] != REQUESTED_DOMAIN {
         return None;
     }
-    if end.len() != 65 + ENCODED_WRAP_SOURCE_DESCRIPTOR_LEN || end[0] != REQUESTED_DOMAIN {
-        return None;
-    }
-    let workspace_id: FactId = start[1..33].try_into().ok()?;
-    let frontier_id: FactId = start[33..65].try_into().ok()?;
-    if end[1..33] != workspace_id || end[33..65] != frontier_id {
-        return None;
-    }
+    let workspace_id: FactId = key[1..33].try_into().ok()?;
+    let frontier_id: FactId = key[33..65].try_into().ok()?;
     Some((workspace_id, frontier_id))
 }
 
@@ -556,19 +548,45 @@ pub fn wrap_source_offer_valid_for_need(
     need: &ContextNeed,
     offer: &ContextOffer,
 ) -> Option<WrapSourceDescriptor> {
-    if need.role != offer.role || need.scope != offer.scope || offer.start_key != offer.end_key {
+    if need.role != offer.role || need.scope != offer.scope {
         return None;
     }
-    let (domain, source) = decode_wrap_source_offer_key(&offer.start_key)?;
+    let (domain, source) = decode_wrap_source_offer_key(&offer.end_key)?;
+    let metadata = encode_wrap_source_descriptor(&source);
     match domain {
         PROACTIVE_DOMAIN => {
             let (workspace_id, min_frontier_created_at_ms) = decode_proactive_wrap_need(need)?;
+            if offer.start_key
+                != ContextKey::from_bytes(proactive_wrap_key_prefix(source.workspace_id, 0))
+                || offer.end_key
+                    != ContextKey::from_bytes(wrap_offer_key(
+                        PROACTIVE_DOMAIN,
+                        &source,
+                        metadata.as_bytes(),
+                    ))
+            {
+                return None;
+            }
             (source.workspace_id == workspace_id
                 && source.frontier_created_at_ms >= min_frontier_created_at_ms)
                 .then_some(source)
         }
         REQUESTED_DOMAIN => {
             let (workspace_id, frontier_id) = decode_requested_wrap_need(need)?;
+            if offer.start_key
+                != ContextKey::from_bytes(requested_wrap_key_prefix(
+                    source.workspace_id,
+                    source.frontier_id,
+                ))
+                || offer.end_key
+                    != ContextKey::from_bytes(wrap_offer_key(
+                        REQUESTED_DOMAIN,
+                        &source,
+                        metadata.as_bytes(),
+                    ))
+            {
+                return None;
+            }
             (source.workspace_id == workspace_id && source.frontier_id == frontier_id)
                 .then_some(source)
         }
@@ -613,11 +631,10 @@ pub(crate) fn add_signer_needs_for_matching_sources(
             continue;
         };
         validate_wrap_source_payload(payload, &source)?;
-        output = output.need(ContextNeed::range(
+        output = output.need(ContextNeed::for_key(
             need.owner,
             "local_signer_secret",
             need.scope.clone(),
-            source.owner_endpoint_id,
             source.owner_endpoint_id,
         ));
     }
@@ -630,13 +647,7 @@ fn local_signer_secret_fact_id(
     scope: &FactScope,
     signer_id: FactId,
 ) -> Option<FactId> {
-    let need = ContextNeed::range(
-        owner,
-        "local_signer_secret",
-        scope.clone(),
-        signer_id,
-        signer_id,
-    );
+    let need = ContextNeed::for_key(owner, "local_signer_secret", scope.clone(), signer_id);
     projection_context
         .matched_payloads_for(&need)
         .map(|(_, payload)| payload.id)
@@ -658,7 +669,7 @@ pub(crate) fn matching_signer_public_key(
         let Ok(endpoint) = auth::endpoint_shared::decode_fact_payload(payload.body()) else {
             continue;
         };
-        if endpoint.endpoint_id.as_slice() == need.start_key.as_bytes() {
+        if endpoint.endpoint_id.as_slice() == need.key.as_bytes() {
             return Ok(Some(endpoint.signing_public_key));
         }
     }
@@ -779,32 +790,28 @@ fn key_wrap(
     require_fact_scope(fact, &scope)?;
 
     // 2. Context: signer proof, recipient, frontier, and local recipient.
-    let signer_need = ContextNeed::range(
+    let signer_need = ContextNeed::for_key(
         fact.id,
         "content_signer",
         scope.clone(),
         wrap.signer_endpoint_id,
-        wrap.signer_endpoint_id,
     );
-    let recipient_need = ContextNeed::range(
+    let recipient_need = ContextNeed::for_key(
         fact.id,
         "recipient_key",
         scope.clone(),
         wrap.recipient_key_id,
-        wrap.recipient_key_id,
     );
-    let frontier_need = ContextNeed::range(
+    let frontier_need = ContextNeed::for_key(
         fact.id,
         "auth_removal_frontier",
         scope.clone(),
         wrap.frontier_id,
-        wrap.frontier_id,
     );
-    let local_recipient_need = ContextNeed::range(
+    let local_recipient_need = ContextNeed::for_key(
         fact.id,
         "local_recipient_key",
         scope.clone(),
-        wrap.recipient_key_id,
         wrap.recipient_key_id,
     );
 
@@ -959,33 +966,29 @@ mod projector_tests {
             .expect("project without context");
 
         assert_eq!(output.needs.len(), 4);
-        assert!(output.needs.contains(&ContextNeed::range(
+        assert!(output.needs.contains(&ContextNeed::for_key(
             fact.id,
             "content_signer",
             scope.clone(),
-            wrap.signer_endpoint_id,
-            wrap.signer_endpoint_id,
+            wrap.signer_endpoint_id
         )));
-        assert!(output.needs.contains(&ContextNeed::range(
+        assert!(output.needs.contains(&ContextNeed::for_key(
             fact.id,
             "recipient_key",
             scope.clone(),
-            wrap.recipient_key_id,
-            wrap.recipient_key_id,
+            wrap.recipient_key_id
         )));
-        assert!(output.needs.contains(&ContextNeed::range(
+        assert!(output.needs.contains(&ContextNeed::for_key(
             fact.id,
             "auth_removal_frontier",
             scope.clone(),
-            wrap.frontier_id,
-            wrap.frontier_id,
+            wrap.frontier_id
         )));
-        assert!(output.needs.contains(&ContextNeed::range(
+        assert!(output.needs.contains(&ContextNeed::for_key(
             fact.id,
             "local_recipient_key",
             scope,
-            wrap.recipient_key_id,
-            wrap.recipient_key_id,
+            wrap.recipient_key_id
         )));
         assert!(output.offers.is_empty());
         assert!(output.effects.row_mutations.is_empty());
@@ -1043,6 +1046,13 @@ mod wrap_source_tests {
     use super::*;
     use crate::protocol::auth::workspace::scope;
 
+    fn offer_covers_need_key(offer: &ContextOffer, need: &ContextNeed) -> bool {
+        offer.role == need.role
+            && offer.scope == need.scope
+            && offer.start_key <= need.key
+            && need.key <= offer.end_key
+    }
+
     #[test]
     fn wrap_source_validates_requested_frontier_only() {
         let scope = scope([1; 32]);
@@ -1054,7 +1064,8 @@ mod wrap_source_tests {
 
         assert!(matching
             .iter()
-            .any(|offer| wrap_source_offer_valid_for_need(&need, offer).is_some()));
+            .any(|offer| offer_covers_need_key(offer, &need)
+                && wrap_source_offer_valid_for_need(&need, offer).is_some()));
         assert!(!other_frontier
             .iter()
             .any(|offer| wrap_source_offer_valid_for_need(&need, offer).is_some()));
@@ -1063,16 +1074,20 @@ mod wrap_source_tests {
     #[test]
     fn wrap_source_validates_proactive_minimum_creation_time() {
         let scope = scope([1; 32]);
+        let zero_min_need = proactive_wrap_source_need([2; 32], scope.clone(), [1; 32], 0);
         let need = proactive_wrap_source_need([2; 32], scope.clone(), [1; 32], 50);
         let old =
             frontier_root_wrap_source_offers([3; 32], scope.clone(), [1; 32], [4; 32], [5; 32], 49);
         let new = frontier_root_wrap_source_offers([6; 32], scope, [1; 32], [7; 32], [8; 32], 50);
 
+        assert!(old
+            .iter()
+            .any(|offer| offer_covers_need_key(offer, &zero_min_need)
+                && wrap_source_offer_valid_for_need(&zero_min_need, offer).is_some()));
         assert!(!old
             .iter()
             .any(|offer| wrap_source_offer_valid_for_need(&need, offer).is_some()));
-        assert!(new
-            .iter()
-            .any(|offer| wrap_source_offer_valid_for_need(&need, offer).is_some()));
+        assert!(new.iter().any(|offer| offer_covers_need_key(offer, &need)
+            && wrap_source_offer_valid_for_need(&need, offer).is_some()));
     }
 }

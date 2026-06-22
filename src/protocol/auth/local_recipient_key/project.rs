@@ -257,11 +257,10 @@ fn local_recipient_key(
     require_local_scope(fact)?;
 
     // 2. Context: recipient match and supersession.
-    let recipient_need = ContextNeed::range(
+    let recipient_need = ContextNeed::for_key(
         fact.id,
         "recipient_key",
         scope.clone(),
-        local.recipient_key_id,
         local.recipient_key_id,
     );
     let Some(recipient_fact) = matched_payload_fact(projection_context, &recipient_need) else {
@@ -275,11 +274,10 @@ fn local_recipient_key(
         return Err("local recipient key public key does not match recipient".to_string());
     }
 
-    let superseded_need = ContextNeed::range(
+    let superseded_need = ContextNeed::for_key(
         fact.id,
         "recipient_superseded",
         scope.clone(),
-        local.recipient_key_id,
         local.recipient_key_id,
     );
     let is_superseded = projection_context.payload_for(&superseded_need).is_some();

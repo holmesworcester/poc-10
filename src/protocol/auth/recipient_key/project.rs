@@ -315,20 +315,14 @@ fn recipient_key(
         fact.id,
         recipient.signer_public_key,
     )?;
-    let signer_need = ContextNeed::range(
+    let signer_need = ContextNeed::for_key(
         fact.id,
         "content_signer",
         scope.clone(),
         recipient.endpoint_id,
-        recipient.endpoint_id,
     );
-    let superseded_need = ContextNeed::range(
-        fact.id,
-        "recipient_superseded",
-        scope.clone(),
-        fact.id,
-        fact.id,
-    );
+    let superseded_need =
+        ContextNeed::for_key(fact.id, "recipient_superseded", scope.clone(), fact.id);
     let min_frontier_created_at_ms =
         if recipient.previous_recipient_key_id == NO_PREVIOUS_RECIPIENT_KEY {
             0
@@ -362,11 +356,10 @@ fn recipient_key(
     }
 
     if recipient.previous_recipient_key_id != NO_PREVIOUS_RECIPIENT_KEY {
-        let previous_need = ContextNeed::range(
+        let previous_need = ContextNeed::for_key(
             fact.id,
             "recipient_key",
             scope.clone(),
-            recipient.previous_recipient_key_id,
             recipient.previous_recipient_key_id,
         );
         output = output.need(previous_need.clone());

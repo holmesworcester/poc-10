@@ -296,11 +296,10 @@ impl ContentFileDeletionProjector {
             deletion.signer_public_key,
         )?;
         let signer_need = project::signer_need(fact.id, deletion.workspace_id, deletion.signer_id);
-        let author_need = crate::core::context::ContextNeed::range(
+        let author_need = crate::core::context::ContextNeed::for_key(
             fact.id,
             "auth_user",
             crate::core::facts::FactScope::Global,
-            deletion.author_user_id,
             deletion.author_user_id,
         );
         if !signature::project::signature_proof_ready(
@@ -634,11 +633,10 @@ mod tests {
         let deletion = deletion_from_fact(deletion_fact);
         let scope = crate::protocol::auth::workspace::scope(deletion.workspace_id);
         MatchedContext {
-            need: crate::core::context::ContextNeed::range(
+            need: crate::core::context::ContextNeed::for_key(
                 deletion_fact.id,
                 "content_signer",
                 scope.clone(),
-                CONTENT_SIGNER_ID,
                 CONTENT_SIGNER_ID,
             ),
             offer: crate::core::context::ContextOffer::range(
@@ -654,11 +652,10 @@ mod tests {
 
     fn author_match(deletion_fact: &Fact, author_fact: &Fact) -> MatchedContext {
         MatchedContext {
-            need: crate::core::context::ContextNeed::range(
+            need: crate::core::context::ContextNeed::for_key(
                 deletion_fact.id,
                 "auth_user",
                 crate::core::facts::FactScope::Global,
-                author_fact.id,
                 author_fact.id,
             ),
             offer: crate::core::context::ContextOffer::range(

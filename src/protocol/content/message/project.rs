@@ -338,12 +338,11 @@ pub fn retention_floor_need(
     workspace_id: crate::core::facts::FactId,
 ) -> crate::core::context::ContextNeed {
     let key = workspace_id.to_vec();
-    crate::core::context::ContextNeed::range(
+    crate::core::context::ContextNeed::for_key(
         owner,
         crate::core::context::Role::expect(RETENTION_FLOOR_ROLE),
         crate::protocol::auth::workspace::scope(workspace_id),
         key.clone(),
-        key,
     )
 }
 
@@ -470,11 +469,10 @@ impl ContentMessageProjector {
             fact.id,
             message.signer_public_key,
         )?;
-        let signer_need = crate::core::context::ContextNeed::range(
+        let signer_need = crate::core::context::ContextNeed::for_key(
             fact.id,
             "content_signer",
             scope.clone(),
-            message.signer_id,
             message.signer_id,
         );
         let deletion_need = crate::core::project_fact::fact_purged_need(
@@ -483,11 +481,10 @@ impl ContentMessageProjector {
             fact_purged_key(message.frontier_id, message.minute, fact.id),
         );
         let retention_floor_need = retention_floor_need(fact.id, message.workspace_id);
-        let author_need = crate::core::context::ContextNeed::range(
+        let author_need = crate::core::context::ContextNeed::for_key(
             fact.id,
             "auth_user",
             crate::core::facts::FactScope::Global,
-            message.author_user_id,
             message.author_user_id,
         );
         let secret_need = coverage::secret_need(
@@ -970,11 +967,10 @@ pub fn decode_typed_fact<T>(
 }
 
 pub fn signer_need(owner: FactId, workspace_id: FactId, signer_id: FactId) -> ContextNeed {
-    crate::core::context::ContextNeed::range(
+    crate::core::context::ContextNeed::for_key(
         owner,
         "content_signer",
         crate::protocol::auth::workspace::scope(workspace_id),
-        signer_id,
         signer_id,
     )
 }
@@ -1454,13 +1450,13 @@ mod projector_tests {
             project::fact_purged_key([8; 32], 10, message_id),
         );
 
-        assert_eq!(message_need.start_key, exact_offer.start_key);
-        assert_eq!(message_need.end_key, exact_offer.end_key);
-        assert!(range_offer.start_key <= message_need.start_key);
-        assert!(range_offer.end_key >= message_need.end_key);
+        assert_eq!(message_need.key, exact_offer.start_key);
+        assert_eq!(exact_offer.start_key, exact_offer.end_key);
+        assert!(range_offer.start_key <= message_need.key);
+        assert!(range_offer.end_key >= message_need.key);
         assert!(
-            range_offer.end_key < other_frontier_need.start_key
-                || range_offer.start_key > other_frontier_need.end_key
+            range_offer.end_key < other_frontier_need.key
+                || range_offer.start_key > other_frontier_need.key
         );
     }
 
@@ -1583,11 +1579,10 @@ mod projector_tests {
     ) -> MatchedContext {
         let scope = crate::protocol::auth::workspace::scope(message.workspace_id);
         MatchedContext {
-            need: crate::core::context::ContextNeed::range(
+            need: crate::core::context::ContextNeed::for_key(
                 message_fact.id,
                 "content_signer",
                 scope.clone(),
-                message.signer_id,
                 message.signer_id,
             ),
             offer: crate::core::context::ContextOffer::range(
@@ -1632,11 +1627,10 @@ mod projector_tests {
         author: &Fact,
     ) -> MatchedContext {
         MatchedContext {
-            need: crate::core::context::ContextNeed::range(
+            need: crate::core::context::ContextNeed::for_key(
                 message_fact.id,
                 "auth_user",
                 crate::core::facts::FactScope::Global,
-                message.author_user_id,
                 message.author_user_id,
             ),
             offer: crate::core::context::ContextOffer::range(

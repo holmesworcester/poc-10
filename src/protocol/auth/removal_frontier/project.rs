@@ -244,18 +244,16 @@ impl RemovalFrontierProjector {
             fact.id,
             frontier.signer_public_key,
         )?;
-        let owner_signer_need = ContextNeed::range(
+        let owner_signer_need = ContextNeed::for_key(
             fact.id,
             "content_signer",
             scope.clone(),
             frontier.owner_endpoint_id,
-            frontier.owner_endpoint_id,
         );
-        let local_signer_need = ContextNeed::range(
+        let local_signer_need = ContextNeed::for_key(
             fact.id,
             "local_signer_secret",
             scope.clone(),
-            frontier.owner_endpoint_id,
             frontier.owner_endpoint_id,
         );
         let waiting = ProjectionOutput::new()

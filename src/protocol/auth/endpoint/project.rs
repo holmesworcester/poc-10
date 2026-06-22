@@ -248,11 +248,10 @@ const DAEMON_ENDPOINT_KEY: &[u8] = b"daemon_endpoint";
 pub fn daemon_endpoint_need(
     owner: crate::core::facts::FactId,
 ) -> crate::core::context::ContextNeed {
-    crate::core::context::ContextNeed::range(
+    crate::core::context::ContextNeed::for_key(
         owner,
         DAEMON_ENDPOINT_ROLE,
         crate::core::facts::FactScope::Local,
-        DAEMON_ENDPOINT_KEY,
         DAEMON_ENDPOINT_KEY,
     )
 }

@@ -383,18 +383,16 @@ impl ContentFileProjector {
             file.signer_public_key,
         )?;
         let signer_need = project::signer_need(fact.id, file.workspace_id, file.signer_id);
-        let parent_need = crate::core::context::ContextNeed::range(
+        let parent_need = crate::core::context::ContextNeed::for_key(
             fact.id,
             "content_message",
             scope.clone(),
             file.message_id,
-            file.message_id,
         );
-        let author_need = crate::core::context::ContextNeed::range(
+        let author_need = crate::core::context::ContextNeed::for_key(
             fact.id,
             "auth_user",
             crate::core::facts::FactScope::Global,
-            file.author_user_id,
             file.author_user_id,
         );
         let file_deletion_need = crate::core::project_fact::fact_purged_need(

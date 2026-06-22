@@ -10,10 +10,10 @@
 //! `src/core/README.md` and the projection boundary documented in
 //! `project_fact.rs`.
 //! `facts` and `local_fact_admissions` store immutable inputs and their local
-//! visibility metadata. `context_exact_edges`, `context_range_edges`,
-//! `context_exact_offers`, `context_range_offers`, `time_wakes`,
-//! `pending_projection`, and `pending_projection_matches` drive
-//! fact projection. `intents`, `intent_context`, `local_intents`, and
+//! visibility metadata. `context_needs`, `context_exact_offers`,
+//! `context_range_offers`, `time_wakes`, `pending_projection`, and
+//! `pending_projection_matches` drive fact projection. `intents`,
+//! `intent_context`, `local_intents`, and
 //! `local_intent_context` drive handler dispatch.
 //!
 //! Core schema is deliberately small and mechanical. It records the runtime
@@ -32,12 +32,10 @@ use crate::core::db::{ReplayTables, SchemaSource, TableName};
 pub(crate) const FACTS: TableName = TableName::new("facts");
 /// Local admission metadata table for content-addressed fact bytes.
 pub(crate) const LOCAL_FACT_ADMISSIONS: TableName = TableName::new("local_fact_admissions");
-/// Standing exact context edge table.
-pub(crate) const CONTEXT_EXACT_EDGES: TableName = TableName::new("context_exact_edges");
+/// Standing exact context need table.
+pub(crate) const CONTEXT_NEEDS: TableName = TableName::new("context_needs");
 /// Standing exact context offer table.
 pub(crate) const CONTEXT_EXACT_OFFERS: TableName = TableName::new("context_exact_offers");
-/// Standing true-range context edge table.
-pub(crate) const CONTEXT_RANGE_EDGES: TableName = TableName::new("context_range_edges");
 /// Standing true-range context offer table.
 pub(crate) const CONTEXT_RANGE_OFFERS: TableName = TableName::new("context_range_offers");
 /// Semantic time wake table.
@@ -64,9 +62,8 @@ pub(crate) const PROJECTION_TIMINGS: TableName = TableName::new("projection_timi
 const CORE_REPLAY_PROTECTED_TABLES: &[TableName] = &[FACTS, LOCAL_FACT_ADMISSIONS];
 
 const CORE_REPLAY_RESET_TABLES: &[TableName] = &[
-    CONTEXT_EXACT_EDGES,
+    CONTEXT_NEEDS,
     CONTEXT_EXACT_OFFERS,
-    CONTEXT_RANGE_EDGES,
     CONTEXT_RANGE_OFFERS,
     TIME_WAKES,
     PENDING_PROJECTION,
@@ -82,9 +79,8 @@ const CORE_REPLAY_RESET_TABLES: &[TableName] = &[
 
 const CORE_REPLAY_SUMMARY_TABLES: &[TableName] = &[
     FACTS,
-    CONTEXT_EXACT_EDGES,
+    CONTEXT_NEEDS,
     CONTEXT_EXACT_OFFERS,
-    CONTEXT_RANGE_EDGES,
     CONTEXT_RANGE_OFFERS,
     TIME_WAKES,
 ];
@@ -116,18 +112,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS local_fact_admissions_by_fact
 CREATE INDEX IF NOT EXISTS local_fact_admissions_by_scope_received_at
     ON local_fact_admissions (scope, scope_kind, scope_id, received_at);
 
-CREATE TABLE IF NOT EXISTS context_exact_edges (
+CREATE TABLE IF NOT EXISTS context_needs (
     owner BLOB NOT NULL,
-    direction TEXT NOT NULL,
     role TEXT NOT NULL,
     scope_key BLOB NOT NULL,
     key BLOB NOT NULL,
-    PRIMARY KEY (owner, direction, role, scope_key, key)
+    PRIMARY KEY (owner, role, scope_key, key)
 );
-CREATE INDEX IF NOT EXISTS context_exact_edges_by_key
-    ON context_exact_edges (direction, role, scope_key, key, owner);
-CREATE INDEX IF NOT EXISTS context_exact_edges_by_owner
-    ON context_exact_edges (owner);
+CREATE INDEX IF NOT EXISTS context_needs_by_key
+    ON context_needs (role, scope_key, key, owner);
+CREATE INDEX IF NOT EXISTS context_needs_by_owner
+    ON context_needs (owner);
 
 CREATE TABLE IF NOT EXISTS context_exact_offers (
     offer_id BLOB PRIMARY KEY NOT NULL,
@@ -143,22 +138,6 @@ CREATE INDEX IF NOT EXISTS context_exact_offers_by_key
     ON context_exact_offers (role, scope_key, key, owner);
 CREATE INDEX IF NOT EXISTS context_exact_offers_by_owner
     ON context_exact_offers (owner);
-
-CREATE TABLE IF NOT EXISTS context_range_edges (
-    owner BLOB NOT NULL,
-    direction TEXT NOT NULL,
-    role TEXT NOT NULL,
-    scope_key BLOB NOT NULL,
-    start_key BLOB NOT NULL,
-    end_key BLOB NOT NULL,
-    PRIMARY KEY (owner, direction, role, scope_key, start_key, end_key)
-);
-CREATE INDEX IF NOT EXISTS context_range_edges_by_range_start
-    ON context_range_edges (direction, role, scope_key, start_key);
-CREATE INDEX IF NOT EXISTS context_range_edges_by_range_end
-    ON context_range_edges (direction, role, scope_key, end_key);
-CREATE INDEX IF NOT EXISTS context_range_edges_by_owner
-    ON context_range_edges (owner);
 
 CREATE TABLE IF NOT EXISTS context_range_offers (
     offer_id BLOB PRIMARY KEY NOT NULL,
@@ -202,15 +181,13 @@ CREATE TABLE IF NOT EXISTS pending_projection_matches (
     owner BLOB NOT NULL,
     need_role TEXT NOT NULL,
     need_scope_key BLOB NOT NULL,
-    need_start_key BLOB NOT NULL,
-    need_end_key BLOB NOT NULL,
+    need_key BLOB NOT NULL,
     offer_id BLOB NOT NULL,
     PRIMARY KEY (
         owner,
         need_role,
         need_scope_key,
-        need_start_key,
-        need_end_key,
+        need_key,
         offer_id
     )
 );

@@ -152,32 +152,28 @@ fn project_key_wrap_recovery(
     let scope = crate::protocol::auth::workspace::scope(recovery.workspace_id);
 
     // 2. Context: exact wrap, recipient, frontier, and local recipient facts.
-    let key_wrap_need = ContextNeed::range(
+    let key_wrap_need = ContextNeed::for_key(
         fact.id,
         "sync_key_wrap",
         scope.clone(),
         recovery.key_wrap_id,
-        recovery.key_wrap_id,
     );
-    let recipient_need = ContextNeed::range(
+    let recipient_need = ContextNeed::for_key(
         fact.id,
         "recipient_key",
         scope.clone(),
         recovery.recipient_key_id,
-        recovery.recipient_key_id,
     );
-    let frontier_need = ContextNeed::range(
+    let frontier_need = ContextNeed::for_key(
         fact.id,
         "auth_removal_frontier",
         scope.clone(),
         recovery.frontier_id,
-        recovery.frontier_id,
     );
-    let local_recipient_need = ContextNeed::range(
+    let local_recipient_need = ContextNeed::for_key(
         fact.id,
         "local_recipient_key",
         scope,
-        recovery.recipient_key_id,
         recovery.recipient_key_id,
     );
     let output = ProjectionOutput::new()
@@ -247,33 +243,29 @@ mod tests {
 
         assert!(output.effects.facts.is_empty());
         assert_eq!(output.needs.len(), 4);
-        assert!(output.needs.contains(&ContextNeed::range(
+        assert!(output.needs.contains(&ContextNeed::for_key(
             fact.id,
             "sync_key_wrap",
             scope.clone(),
-            recovery.key_wrap_id,
-            recovery.key_wrap_id,
+            recovery.key_wrap_id
         )));
-        assert!(output.needs.contains(&ContextNeed::range(
+        assert!(output.needs.contains(&ContextNeed::for_key(
             fact.id,
             "recipient_key",
             scope.clone(),
-            recovery.recipient_key_id,
-            recovery.recipient_key_id,
+            recovery.recipient_key_id
         )));
-        assert!(output.needs.contains(&ContextNeed::range(
+        assert!(output.needs.contains(&ContextNeed::for_key(
             fact.id,
             "auth_removal_frontier",
             scope.clone(),
-            recovery.frontier_id,
-            recovery.frontier_id,
+            recovery.frontier_id
         )));
-        assert!(output.needs.contains(&ContextNeed::range(
+        assert!(output.needs.contains(&ContextNeed::for_key(
             fact.id,
             "local_recipient_key",
             scope,
-            recovery.recipient_key_id,
-            recovery.recipient_key_id,
+            recovery.recipient_key_id
         )));
     }
 

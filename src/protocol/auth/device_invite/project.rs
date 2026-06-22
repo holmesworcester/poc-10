@@ -447,25 +447,22 @@ impl UserAuthorityNeeds {
     ) -> Self {
         Self {
             signature,
-            workspace: crate::core::context::ContextNeed::range(
+            workspace: crate::core::context::ContextNeed::for_key(
                 owner,
                 "auth_workspace",
                 crate::core::facts::FactScope::Global,
                 invite.workspace_id,
-                invite.workspace_id,
             ),
-            user: crate::core::context::ContextNeed::range(
+            user: crate::core::context::ContextNeed::for_key(
                 owner,
                 "auth_user",
                 crate::core::facts::FactScope::Global,
                 invite.user_authority_fact_id,
-                invite.user_authority_fact_id,
             ),
-            user_invite: crate::core::context::ContextNeed::range(
+            user_invite: crate::core::context::ContextNeed::for_key(
                 owner,
                 "auth_user_invite",
                 crate::core::facts::FactScope::Global,
-                user_invite_fact_id,
                 user_invite_fact_id,
             ),
         }
@@ -495,18 +492,16 @@ impl EndpointAuthorityNeeds {
     ) -> Self {
         Self {
             signature,
-            workspace: crate::core::context::ContextNeed::range(
+            workspace: crate::core::context::ContextNeed::for_key(
                 owner,
                 "auth_workspace",
                 crate::core::facts::FactScope::Global,
                 invite.workspace_id,
-                invite.workspace_id,
             ),
-            endpoint_shared: crate::core::context::ContextNeed::range(
+            endpoint_shared: crate::core::context::ContextNeed::for_key(
                 owner,
                 "auth_endpoint_shared",
                 crate::core::facts::FactScope::Global,
-                signer_id,
                 signer_id,
             ),
         }

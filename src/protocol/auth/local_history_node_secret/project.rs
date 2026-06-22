@@ -264,13 +264,7 @@ pub fn secret_need(
     leaf_id: FactId,
 ) -> ContextNeed {
     let key = secret_need_key(workspace_id, frontier_id, minute, leaf_id);
-    ContextNeed::range(
-        owner,
-        secret_role(),
-        scope,
-        key.as_bytes().to_vec(),
-        key.as_bytes().to_vec(),
-    )
+    ContextNeed::for_key(owner, secret_role(), scope, key.as_bytes().to_vec())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -402,10 +396,7 @@ pub fn secret_coverage_offer_valid_for_need(need: &ContextNeed, offer: &ContextO
     if need.role != offer.role || need.scope != offer.scope {
         return false;
     }
-    if need.start_key != need.end_key {
-        return false;
-    }
-    let Some(need) = decode_secret_need_key(&need.start_key) else {
+    let Some(need) = decode_secret_need_key(&need.key) else {
         return false;
     };
     let Some(offer_range) = decode_secret_offer_range(offer) else {
@@ -482,28 +473,25 @@ fn project_local_history_node_secret(
     let scope = crate::protocol::auth::workspace::scope(node.workspace_id);
     require_local_scope(fact)?;
     // 2. Context and path validation.
-    let frontier_need = ContextNeed::range(
+    let frontier_need = ContextNeed::for_key(
         fact.id,
         "auth_removal_frontier",
         scope.clone(),
         node.frontier_id,
-        node.frontier_id,
     );
-    let source_need = ContextNeed::range(
+    let source_need = ContextNeed::for_key(
         fact.id,
         "local_secret_source",
         FactScope::Local,
-        node.source_secret_id,
         node.source_secret_id,
     );
     let tombstone_need = if node.tombstone_node_id == [0; 32] {
         None
     } else {
-        Some(ContextNeed::range(
+        Some(ContextNeed::for_key(
             fact.id,
             "local_secret_source",
             FactScope::Local,
-            node.tombstone_node_id,
             node.tombstone_node_id,
         ))
     };

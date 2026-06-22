@@ -385,11 +385,10 @@ impl WorkspaceAuthorityNeeds {
     fn new(owner: FactId, invite: &UserInviteFact, signature: ContextNeed) -> Self {
         Self {
             signature,
-            workspace: crate::core::context::ContextNeed::range(
+            workspace: crate::core::context::ContextNeed::for_key(
                 owner,
                 "auth_workspace",
                 crate::core::facts::FactScope::Global,
-                invite.workspace_id,
                 invite.workspace_id,
             ),
         }
@@ -417,18 +416,16 @@ impl EndpointAdminNeeds {
     ) -> Self {
         Self {
             signature,
-            endpoint_shared: crate::core::context::ContextNeed::range(
+            endpoint_shared: crate::core::context::ContextNeed::for_key(
                 owner,
                 "auth_endpoint_shared",
                 crate::core::facts::FactScope::Global,
                 signer_id,
-                signer_id,
             ),
-            admin: crate::core::context::ContextNeed::range(
+            admin: crate::core::context::ContextNeed::for_key(
                 owner,
                 "auth_admin",
                 crate::core::facts::FactScope::Global,
-                invite.authority_fact_id,
                 invite.authority_fact_id,
             ),
         }

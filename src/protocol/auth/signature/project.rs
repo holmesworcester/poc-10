@@ -425,7 +425,7 @@ mod tests {
             .expect("offer");
 
         assert_eq!(need.role, SIGNATURE_PROOF_ROLE);
-        assert_eq!(need.start_key, offer.start_key);
-        assert_eq!(need.end_key, offer.end_key);
+        assert_eq!(need.key, offer.start_key);
+        assert_eq!(offer.start_key, offer.end_key);
     }
 }
