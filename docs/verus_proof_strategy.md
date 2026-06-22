@@ -149,6 +149,9 @@ proved that `version_replay_rebuild_effect_has_no_fact_or_intent_work(effects)`
 accepts exactly ordinary effects or isolated rebuild effects with no emitted
 facts, priority facts, incoming facts, durable intents, or local intents; the
 runtime effect validator uses that verified helper for its success branch.
+`runtime_effects_with_version_replay_rebuild(effects)` is verified over the
+actual builder path and sets only the version replay rebuild flag while
+preserving the effect payload.
 Projected marker rows remain allowed so the version update fact can record the
 surviving storage-version row after the wipe/replay. It is also
 not the full owner-bearing output theorem yet: the exported theorem still needs a
@@ -754,6 +757,7 @@ version_replay_rebuild_shape_status_allows_projection(status) accepts if and onl
 version_replay_rebuild_projection_status(context, wakes, effects) returns accepted or standing-output exactly from the prepared context, time wakes, and rebuild effect
 version_replay_rebuild_projection_accepts(context, wakes, effects) accepts if and only if ordinary projection or empty version replay rebuild prepared output
 version_replay_rebuild_effect_has_no_fact_or_intent_work(effects) accepts if and only if ordinary effects or isolated rebuild effects with no facts or intents
+runtime_effects_with_version_replay_rebuild(effects) sets the version replay rebuild flag and preserves the effect payload
 runtime_effects_with_intent_row_mutation(effects, mutation) appends exactly one IntentRowMutation and preserves the effect payload
 projection_output_with_projected_row_mutation(output, mutation) appends exactly one ProjectedRowMutation and preserves RuntimeEffects.row_mutations
 projection_effects_have_no_intent_row_mutations(effects) accepts if and only if RuntimeEffects.row_mutations is empty

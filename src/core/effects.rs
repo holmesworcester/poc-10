@@ -146,9 +146,8 @@ impl RuntimeEffects {
     }
 
     /// Request the version-upgrade wipe plus retained-fact replay effect.
-    pub fn version_replay_rebuild(mut self) -> Self {
-        self.version_replay_rebuild = true;
-        self
+    pub fn version_replay_rebuild(self) -> Self {
+        runtime_effects_with_version_replay_rebuild(self)
     }
 }
 
@@ -200,6 +199,29 @@ fn runtime_effects_with_intent_row_mutation(
         updated.version_replay_rebuild == effects.version_replay_rebuild,
 {
     effects.row_mutations.push(mutation);
+    effects
+}
+
+/// Request version-upgrade wipe/replay without changing the effect payload.
+///
+/// Admission later enforces that this flag is not mixed with emitted facts or
+/// intents. This builder proof only states what the production setter changes.
+fn runtime_effects_with_version_replay_rebuild(
+    mut effects: RuntimeEffects,
+) -> (updated: RuntimeEffects)
+    ensures
+        updated.storage_requirement == effects.storage_requirement,
+        updated.facts@ == effects.facts@,
+        updated.priority_facts@ == effects.priority_facts@,
+        updated.incoming_facts@ == effects.incoming_facts@,
+        updated.incoming_fact_metadata == effects.incoming_fact_metadata,
+        updated.purged_facts@ == effects.purged_facts@,
+        updated.row_mutations@ == effects.row_mutations@,
+        updated.intents@ == effects.intents@,
+        updated.local_intents@ == effects.local_intents@,
+        updated.version_replay_rebuild,
+{
+    effects.version_replay_rebuild = true;
     effects
 }
 } // verus!
@@ -285,5 +307,29 @@ mod tests {
             updated.version_replay_rebuild,
             effects.version_replay_rebuild
         );
+    }
+
+    #[test]
+    fn version_replay_rebuild_builder_preserves_effect_payload() {
+        let fact = Fact::new(FactScope::Global, 1, b"replay guarded fact".to_vec());
+        let effects = RuntimeEffects::new()
+            .fact(fact)
+            .with_storage_requirement(StorageRequirement::Current(7));
+
+        let updated = effects.clone().version_replay_rebuild();
+
+        assert_eq!(updated.storage_requirement, effects.storage_requirement);
+        assert_eq!(updated.facts, effects.facts);
+        assert_eq!(updated.priority_facts, effects.priority_facts);
+        assert_eq!(updated.incoming_facts, effects.incoming_facts);
+        assert_eq!(
+            updated.incoming_fact_metadata,
+            effects.incoming_fact_metadata
+        );
+        assert_eq!(updated.purged_facts, effects.purged_facts);
+        assert_eq!(updated.row_mutations, effects.row_mutations);
+        assert_eq!(updated.intents, effects.intents);
+        assert_eq!(updated.local_intents, effects.local_intents);
+        assert!(updated.version_replay_rebuild);
     }
 }

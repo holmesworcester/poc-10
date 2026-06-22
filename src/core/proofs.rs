@@ -133,6 +133,12 @@
 //!   flag. `RuntimeEffects::row_mutation` uses this verified production helper;
 //!   table allowlist and raw-SQL confinement remain separate proof work.
 //! - Proven in production Rust today:
+//!   `runtime_effects_with_version_replay_rebuild(effects)` sets
+//!   `RuntimeEffects.version_replay_rebuild` while preserving storage
+//!   requirement, facts, priority facts, incoming facts and metadata, purges,
+//!   row mutations, intents, and local intents. Admission rules for what may
+//!   coexist with that flag are proved separately.
+//! - Proven in production Rust today:
 //!   `version_replay_rebuild_shape_allowed(version_replay_rebuild, needs, offers,
 //!   wakes)` accepts if and only if the projection is ordinary, or it is a
 //!   version replay rebuild with no standing needs, offers, or time wakes.
