@@ -134,6 +134,13 @@
 //!   a proof that route dispatch, owner checks, context finalization, replay
 //!   admission, or runtime-effect validation were called in the right order.
 //! - Proven in production Rust today:
+//!   `projection_mode_from_replay_flag(replay)` returns `Normal` if and only if
+//!   the stored SQL replay flag is `0`, and returns `Replay` if and only if the
+//!   flag is nonzero. `projection_mode_is_replay(mode)` accepts if and only if
+//!   the mode is `Replay`, and `replay_flag_for_projection_mode(mode)` returns
+//!   exactly `0` for `Normal` and `1` for `Replay`. This proves the local
+//!   SQL-to-projector replay-mode bridge, not queue-selection SQL correctness.
+//! - Proven in production Rust today:
 //!   `fact_ids_contain(ids, target)` accepts if and only if the target fact id
 //!   occurs in the scanned slice, and
 //!   `projection_retains_fact_after_commit(projection)` accepts if and only if
@@ -147,11 +154,41 @@
 //!   time wakes, projected row mutations, and runtime effects.
 //!   `ProjectionOutput::drop_incoming` uses this verified production helper.
 //! - Proven in production Rust today:
+//!   `projection_output_with_need`, `projection_output_with_offer`, and
+//!   `projection_output_with_time_wake` append exactly one need, ownerless
+//!   offer claim, or time wake to the actual `ProjectionOutput` while
+//!   preserving retention, the other projection-output lists, projected row
+//!   mutations, and runtime effects. The public `ProjectionOutput` context
+//!   builders use these verified production helpers.
+//! - Proven in production Rust today:
+//!   `projection_output_with_self_purge`, `projection_output_with_fact`,
+//!   `projection_output_with_incoming_fact`,
+//!   `projection_output_with_incoming_fact_metadata`,
+//!   `projection_output_with_intent`, and
+//!   `projection_output_with_local_intent` append exactly one nested
+//!   runtime-effect item through the actual `ProjectionOutput` while preserving
+//!   standing context, time wakes, projected row mutations, retention, and every
+//!   unrelated runtime-effect field. The metadata helper proves the incoming
+//!   fact vector append and leaves the exact `BTreeMap` update theorem for a
+//!   later map-specific proof. The public `ProjectionOutput` work-effect
+//!   builders use these verified production helpers.
+//! - Proven in production Rust today:
 //!   `projection_output_with_version_replay_rebuild(output)` sets only the
 //!   nested `RuntimeEffects.version_replay_rebuild` flag while preserving
 //!   retention, needs, offers, time wakes, projected row mutations, and every
 //!   other runtime-effect field. Admission rules for what may coexist with that
 //!   flag are proved separately.
+//! - Proven in production Rust today:
+//!   `runtime_effects_with_fact`, `runtime_effects_with_priority_fact`,
+//!   `runtime_effects_with_incoming_fact`,
+//!   `runtime_effects_with_incoming_fact_metadata`,
+//!   `runtime_effects_with_purge_fact`,
+//!   `runtime_effects_with_intent`, and `runtime_effects_with_local_intent`
+//!   append exactly one item to the named `RuntimeEffects` list while
+//!   preserving storage requirement, all other fact/purge/intent lists, row
+//!   mutations, and the version replay rebuild flag. The non-metadata builders
+//!   also preserve incoming metadata; the metadata builder proves the incoming
+//!   fact vector append without claiming the map-update relation.
 //! - Proven in production Rust today:
 //!   `runtime_effects_with_intent_row_mutation(effects, mutation)` appends
 //!   exactly one `IntentRowMutation` to `RuntimeEffects.row_mutations` while
@@ -286,6 +323,13 @@
 //!   `validate_version_replay_rebuild_projection_shape` `Result` wrapper and
 //!   `prepare_projection` call order around the verified prepared-shape accept
 //!   helper.
+//! - Not fully proven yet for incoming metadata map insertion:
+//!   `incoming_fact_with_metadata` now has verified production helpers for the
+//!   incoming-fact vector append and unrelated-field preservation, and runtime
+//!   tests cover the stored metadata lookup. A precise theorem that the metadata
+//!   map contains exactly the inserted `(fact.id, metadata)` relation still
+//!   needs a separate map-specific production helper/spec before it can be
+//!   claimed.
 //! - Punted for a later core proof model: the composition stubs that cross
 //!   matcher construction, offer loading, route dispatch, projected-table
 //!   write ownership, context replacement, and commit.

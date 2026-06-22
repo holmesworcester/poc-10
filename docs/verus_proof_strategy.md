@@ -115,6 +115,13 @@ every purge id, need owner, and time-wake owner in the actual
 `ProjectionOutput` is the projected fact id. `enforce_owner_is_self` uses this
 verified helper for its success branch; diagnostic rejection strings remain
 ordinary Rust.
+Cargo-verus proves the local replay-mode bridge: `projection_mode_from_replay_flag`
+decodes SQL replay flags to `ProjectionMode::Normal` exactly for `0` and
+`ProjectionMode::Replay` exactly for nonzero flags, `projection_mode_is_replay`
+accepts if and only if the mode is replay, and
+`replay_flag_for_projection_mode` writes exactly `0` for normal and `1` for
+replay. This is the mode conversion proof for wipe/replay plumbing; it does
+not prove queue-selection SQL correctness.
 Cargo-verus also proves that the returned `ContextOffer.owner` equals the
 owner argument for one claim and that role, scope, start key, end key, and
 offer value are copied unchanged. For a slice of claims, Cargo-verus proves
@@ -152,6 +159,26 @@ runtime effect validator uses that verified helper for its success branch.
 `runtime_effects_with_version_replay_rebuild(effects)` is verified over the
 actual builder path and sets only the version replay rebuild flag while
 preserving the effect payload.
+The basic builder shape is now uniform: Cargo-verus verifies that
+`projection_output_with_need`, `projection_output_with_offer`, and
+`projection_output_with_time_wake` append exactly one standing-output item while
+preserving the rest of the actual `ProjectionOutput`; it also verifies that
+`projection_output_with_self_purge`, `projection_output_with_fact`,
+`projection_output_with_incoming_fact`,
+`projection_output_with_incoming_fact_metadata`,
+`projection_output_with_intent`, and `projection_output_with_local_intent`
+append exactly one nested runtime-effect item while preserving standing context,
+time wakes, projected row mutations, retention, and unrelated runtime-effect
+fields. At the lower effect layer, Cargo-verus verifies the same one-field
+append discipline for
+`runtime_effects_with_fact`, `runtime_effects_with_priority_fact`,
+`runtime_effects_with_incoming_fact`,
+`runtime_effects_with_incoming_fact_metadata`,
+`runtime_effects_with_purge_fact`, `runtime_effects_with_intent`, and
+`runtime_effects_with_local_intent`. For metadata builders, the proved claim is
+the incoming-fact vector append and unrelated-field preservation; runtime tests
+cover the stored metadata lookup, and a precise `BTreeMap` update theorem still
+needs a separate proof-friendly production helper.
 Projected marker rows remain allowed so the version update fact can record the
 surviving storage-version row after the wipe/replay. It is also
 not the full owner-bearing output theorem yet: the exported theorem still needs a
@@ -781,10 +808,29 @@ select_route_stamp(stamps, effective_tag) returns the first matching route stamp
 routed_projection_from_selected_route(fact_id, effective_tag, stamp, output) preserves selected route stamp metadata and preserves output unchanged
 runtime_effects_with_storage_requirement(effects, requirement) sets the storage requirement and preserves the effect payload
 prepared_projection_from_validated_output preserves route evidence and validated output pieces in PreparedProjection
+projection_mode_from_replay_flag(replay) returns Normal exactly for replay == 0 and Replay exactly for replay != 0
+projection_mode_is_replay(mode) accepts if and only if mode is Replay
+replay_flag_for_projection_mode(mode) returns 0 exactly for Normal and 1 exactly for Replay
 fact_ids_contain(ids, target) accepts if and only if target occurs in the fact-id slice
 projection_retains_fact_after_commit(projection) accepts if and only if the projection does not purge itself and durable-or-retained-incoming source remains retained
 projection_output_drop_incoming(output) clears only retain_self and preserves projection output payload
+projection_output_with_need(output, need) appends exactly one need and preserves projection output payload
+projection_output_with_offer(output, offer) appends exactly one ownerless offer claim and preserves projection output payload
+projection_output_with_time_wake(output, wake) appends exactly one time wake and preserves projection output payload
+projection_output_with_self_purge(output, id) appends exactly one nested purge id and preserves standing output plus unrelated effects
+projection_output_with_fact(output, fact) appends exactly one nested emitted fact and preserves standing output plus unrelated effects
+projection_output_with_incoming_fact(output, fact) appends exactly one nested incoming fact and preserves standing output plus unrelated effects
+projection_output_with_incoming_fact_metadata(output, fact, metadata) appends exactly one nested incoming fact and preserves standing output plus unrelated effects; map-update semantics remain separate proof work
+projection_output_with_intent(output, intent) appends exactly one nested durable intent and preserves standing output plus unrelated effects
+projection_output_with_local_intent(output, intent) appends exactly one nested local intent and preserves standing output plus unrelated effects
 projection_output_with_version_replay_rebuild(output) sets only the nested version replay rebuild flag and preserves projection output payload
+runtime_effects_with_fact(effects, fact) appends exactly one emitted fact and preserves unrelated effects
+runtime_effects_with_priority_fact(effects, fact) appends exactly one priority fact and preserves unrelated effects
+runtime_effects_with_incoming_fact(effects, fact) appends exactly one incoming fact and preserves unrelated effects
+runtime_effects_with_incoming_fact_metadata(effects, fact, metadata) appends exactly one incoming fact and preserves unrelated effects; map-update semantics remain separate proof work
+runtime_effects_with_purge_fact(effects, id) appends exactly one purge id and preserves unrelated effects
+runtime_effects_with_intent(effects, intent) appends exactly one durable intent and preserves unrelated effects
+runtime_effects_with_local_intent(effects, intent) appends exactly one local intent and preserves unrelated effects
 version_replay_rebuild_shape_allowed(version_replay_rebuild, needs, offers, wakes) accepts if and only if ordinary projection or empty version replay rebuild output
 version_replay_rebuild_shape_status(version_replay_rebuild, needs, offers, wakes) returns accepted or standing-output exactly from that predicate
 version_replay_rebuild_shape_status_allows_projection(status) accepts if and only if status is VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED

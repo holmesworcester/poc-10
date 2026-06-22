@@ -564,14 +564,20 @@ fn next_incoming_projection_item(store: &Db) -> Result<Option<PendingProjectionI
         .map_err(|err| format!("load incoming facts: {err}"))
 }
 
+verus! {
 /// Decode the replay bit stored on durable pending projection rows.
-fn projection_mode_from_replay_flag(replay: i64) -> ProjectionMode {
+fn projection_mode_from_replay_flag(replay: i64) -> (mode: ProjectionMode)
+    ensures
+        mode == ProjectionMode::Normal <==> replay == 0,
+        mode == ProjectionMode::Replay <==> replay != 0,
+{
     if replay == 0 {
         ProjectionMode::Normal
     } else {
         ProjectionMode::Replay
     }
 }
+} // verus!
 
 // =============================================================================
 // Project Stage Helpers
@@ -753,6 +759,16 @@ pub struct ExProjectionSource(ProjectionSource);
 #[verifier(external_type_specification)]
 #[allow(dead_code)]
 pub struct ExProjectionMode(ProjectionMode);
+
+fn projection_mode_is_replay(mode: ProjectionMode) -> (replay: bool)
+    ensures
+        replay <==> mode == ProjectionMode::Replay,
+{
+    match mode {
+        ProjectionMode::Normal => false,
+        ProjectionMode::Replay => true,
+    }
+}
 
 #[verifier(external_type_specification)]
 #[allow(dead_code)]
@@ -2517,7 +2533,7 @@ pub mod context {
 
     impl ProjectionMode {
         pub fn is_replay(self) -> bool {
-            matches!(self, Self::Replay)
+            super::projection_mode_is_replay(self)
         }
     }
 
@@ -4303,19 +4319,16 @@ pub mod effects {
             projection_output_drop_incoming(self)
         }
 
-        pub fn need(mut self, need: ContextNeed) -> Self {
-            self.needs.push(need);
-            self
+        pub fn need(self, need: ContextNeed) -> Self {
+            projection_output_with_need(self, need)
         }
 
-        pub fn offer(mut self, offer: ContextOfferClaim) -> Self {
-            self.offers.push(offer);
-            self
+        pub fn offer(self, offer: ContextOfferClaim) -> Self {
+            projection_output_with_offer(self, offer)
         }
 
-        pub fn time_wake(mut self, wake: TimeWake) -> Self {
-            self.time_wakes.push(wake);
-            self
+        pub fn time_wake(self, wake: TimeWake) -> Self {
+            projection_output_with_time_wake(self, wake)
         }
 
         pub fn row_mutation(self, mutation: ProjectedRowMutation) -> Self {
@@ -4327,9 +4340,8 @@ pub mod effects {
         /// Core verifies at commit preparation that this id is the projected fact
         /// id. Cross-fact deletion must be expressed as context that wakes the
         /// target fact's projector, not as another projector purging it.
-        pub fn purge_self(mut self, id: FactId) -> Self {
-            self.effects.purged_facts.push(id);
-            self
+        pub fn purge_self(self, id: FactId) -> Self {
+            projection_output_with_self_purge(self, id)
         }
 
         /// Request the version-upgrade wipe plus retained-fact replay effect.
@@ -4344,36 +4356,24 @@ pub mod effects {
             projection_output_with_version_replay_rebuild(self)
         }
 
-        pub fn fact(mut self, fact: Fact) -> Self {
-            self.effects.facts.push(fact);
-            self
+        pub fn fact(self, fact: Fact) -> Self {
+            projection_output_with_fact(self, fact)
         }
 
-        pub fn incoming_fact(mut self, fact: Fact) -> Self {
-            self.effects.incoming_facts.push(fact);
-            self
+        pub fn incoming_fact(self, fact: Fact) -> Self {
+            projection_output_with_incoming_fact(self, fact)
         }
 
-        pub fn incoming_fact_with_metadata(
-            mut self,
-            fact: Fact,
-            metadata: IncomingMetadata,
-        ) -> Self {
-            self.effects
-                .incoming_fact_metadata
-                .insert(fact.id, metadata);
-            self.effects.incoming_facts.push(fact);
-            self
+        pub fn incoming_fact_with_metadata(self, fact: Fact, metadata: IncomingMetadata) -> Self {
+            projection_output_with_incoming_fact_metadata(self, fact, metadata)
         }
 
-        pub fn intent(mut self, intent: Intent) -> Self {
-            self.effects.intents.push(intent);
-            self
+        pub fn intent(self, intent: Intent) -> Self {
+            projection_output_with_intent(self, intent)
         }
 
-        pub fn local_intent(mut self, intent: Intent) -> Self {
-            self.effects.local_intents.push(intent);
-            self
+        pub fn local_intent(self, intent: Intent) -> Self {
+            projection_output_with_local_intent(self, intent)
         }
 
         pub fn context_set(&self, owner: FactId) -> ContextSet {
@@ -4382,6 +4382,64 @@ pub mod effects {
     }
 
     verus! {
+    /// Append a replacement context need to projection output.
+    ///
+    /// This is the proof-facing implementation of `ProjectionOutput::need`.
+    /// It appends exactly one need and leaves offers, time wakes, projected row
+    /// mutations, retention, and runtime effects unchanged.
+    fn projection_output_with_need(
+        mut output: ProjectionOutput,
+        need: ContextNeed,
+    ) -> (updated: ProjectionOutput)
+        ensures
+            updated.retain_self == output.retain_self,
+            updated.needs@ == output.needs@.push(need),
+            updated.offers@ == output.offers@,
+            updated.time_wakes@ == output.time_wakes@,
+            updated.row_mutations@ == output.row_mutations@,
+            updated.effects == output.effects,
+    {
+        output.needs.push(need);
+        output
+    }
+
+    /// Append an ownerless offer claim to projection output.
+    ///
+    /// Core later stamps the projected fact id onto this claim when it builds
+    /// the committed context set.
+    fn projection_output_with_offer(
+        mut output: ProjectionOutput,
+        offer: ContextOfferClaim,
+    ) -> (updated: ProjectionOutput)
+        ensures
+            updated.retain_self == output.retain_self,
+            updated.needs@ == output.needs@,
+            updated.offers@ == output.offers@.push(offer),
+            updated.time_wakes@ == output.time_wakes@,
+            updated.row_mutations@ == output.row_mutations@,
+            updated.effects == output.effects,
+    {
+        output.offers.push(offer);
+        output
+    }
+
+    /// Append a standing time wake to projection output.
+    fn projection_output_with_time_wake(
+        mut output: ProjectionOutput,
+        wake: TimeWake,
+    ) -> (updated: ProjectionOutput)
+        ensures
+            updated.retain_self == output.retain_self,
+            updated.needs@ == output.needs@,
+            updated.offers@ == output.offers@,
+            updated.time_wakes@ == output.time_wakes@.push(wake),
+            updated.row_mutations@ == output.row_mutations@,
+            updated.effects == output.effects,
+    {
+        output.time_wakes.push(wake);
+        output
+    }
+
     /// Mark projection output as a one-shot incoming projection.
     ///
     /// This is the proof-facing implementation of
@@ -4397,6 +4455,36 @@ pub mod effects {
             updated.effects == output.effects,
     {
         output.retain_self = false;
+        output
+    }
+
+    /// Append a self-purge request to projection output.
+    ///
+    /// This builder only records the requested id. The owner guard separately
+    /// proves that accepted projections may purge only the currently projected
+    /// fact id.
+    fn projection_output_with_self_purge(
+        mut output: ProjectionOutput,
+        id: FactId,
+    ) -> (updated: ProjectionOutput)
+        ensures
+            updated.retain_self == output.retain_self,
+            updated.needs@ == output.needs@,
+            updated.offers@ == output.offers@,
+            updated.time_wakes@ == output.time_wakes@,
+            updated.row_mutations@ == output.row_mutations@,
+            updated.effects.storage_requirement == output.effects.storage_requirement,
+            updated.effects.facts@ == output.effects.facts@,
+            updated.effects.priority_facts@ == output.effects.priority_facts@,
+            updated.effects.incoming_facts@ == output.effects.incoming_facts@,
+            updated.effects.incoming_fact_metadata == output.effects.incoming_fact_metadata,
+            updated.effects.purged_facts@ == output.effects.purged_facts@.push(id),
+            updated.effects.row_mutations@ == output.effects.row_mutations@,
+            updated.effects.intents@ == output.effects.intents@,
+            updated.effects.local_intents@ == output.effects.local_intents@,
+            updated.effects.version_replay_rebuild == output.effects.version_replay_rebuild,
+    {
+        output.effects.purged_facts.push(id);
         output
     }
 
@@ -4426,6 +4514,141 @@ pub mod effects {
             updated.effects.version_replay_rebuild,
     {
         output.effects.version_replay_rebuild = true;
+        output
+    }
+
+    /// Append a child fact to projection output.
+    fn projection_output_with_fact(
+        mut output: ProjectionOutput,
+        fact: Fact,
+    ) -> (updated: ProjectionOutput)
+        ensures
+            updated.retain_self == output.retain_self,
+            updated.needs@ == output.needs@,
+            updated.offers@ == output.offers@,
+            updated.time_wakes@ == output.time_wakes@,
+            updated.row_mutations@ == output.row_mutations@,
+            updated.effects.storage_requirement == output.effects.storage_requirement,
+            updated.effects.facts@ == output.effects.facts@.push(fact),
+            updated.effects.priority_facts@ == output.effects.priority_facts@,
+            updated.effects.incoming_facts@ == output.effects.incoming_facts@,
+            updated.effects.incoming_fact_metadata == output.effects.incoming_fact_metadata,
+            updated.effects.purged_facts@ == output.effects.purged_facts@,
+            updated.effects.row_mutations@ == output.effects.row_mutations@,
+            updated.effects.intents@ == output.effects.intents@,
+            updated.effects.local_intents@ == output.effects.local_intents@,
+            updated.effects.version_replay_rebuild == output.effects.version_replay_rebuild,
+    {
+        output.effects.facts.push(fact);
+        output
+    }
+
+    /// Append an incoming child fact to projection output.
+    fn projection_output_with_incoming_fact(
+        mut output: ProjectionOutput,
+        fact: Fact,
+    ) -> (updated: ProjectionOutput)
+        ensures
+            updated.retain_self == output.retain_self,
+            updated.needs@ == output.needs@,
+            updated.offers@ == output.offers@,
+            updated.time_wakes@ == output.time_wakes@,
+            updated.row_mutations@ == output.row_mutations@,
+            updated.effects.storage_requirement == output.effects.storage_requirement,
+            updated.effects.facts@ == output.effects.facts@,
+            updated.effects.priority_facts@ == output.effects.priority_facts@,
+            updated.effects.incoming_facts@ == output.effects.incoming_facts@.push(fact),
+            updated.effects.incoming_fact_metadata == output.effects.incoming_fact_metadata,
+            updated.effects.purged_facts@ == output.effects.purged_facts@,
+            updated.effects.row_mutations@ == output.effects.row_mutations@,
+            updated.effects.intents@ == output.effects.intents@,
+            updated.effects.local_intents@ == output.effects.local_intents@,
+            updated.effects.version_replay_rebuild == output.effects.version_replay_rebuild,
+    {
+        output.effects.incoming_facts.push(fact);
+        output
+    }
+
+    /// Append an incoming child fact with transport metadata to projection output.
+    ///
+    /// This proof covers the incoming-fact vector append and unrelated fields.
+    /// The exact metadata-map update remains ordinary Rust until core has a
+    /// proof-friendly map helper.
+    fn projection_output_with_incoming_fact_metadata(
+        mut output: ProjectionOutput,
+        fact: Fact,
+        metadata: IncomingMetadata,
+    ) -> (updated: ProjectionOutput)
+        ensures
+            updated.retain_self == output.retain_self,
+            updated.needs@ == output.needs@,
+            updated.offers@ == output.offers@,
+            updated.time_wakes@ == output.time_wakes@,
+            updated.row_mutations@ == output.row_mutations@,
+            updated.effects.storage_requirement == output.effects.storage_requirement,
+            updated.effects.facts@ == output.effects.facts@,
+            updated.effects.priority_facts@ == output.effects.priority_facts@,
+            updated.effects.incoming_facts@ == output.effects.incoming_facts@.push(fact),
+            updated.effects.purged_facts@ == output.effects.purged_facts@,
+            updated.effects.row_mutations@ == output.effects.row_mutations@,
+            updated.effects.intents@ == output.effects.intents@,
+            updated.effects.local_intents@ == output.effects.local_intents@,
+            updated.effects.version_replay_rebuild == output.effects.version_replay_rebuild,
+    {
+        output.effects.incoming_fact_metadata.insert(fact.id, metadata);
+        output.effects.incoming_facts.push(fact);
+        output
+    }
+
+    /// Append a durable intent to projection output.
+    fn projection_output_with_intent(
+        mut output: ProjectionOutput,
+        intent: Intent,
+    ) -> (updated: ProjectionOutput)
+        ensures
+            updated.retain_self == output.retain_self,
+            updated.needs@ == output.needs@,
+            updated.offers@ == output.offers@,
+            updated.time_wakes@ == output.time_wakes@,
+            updated.row_mutations@ == output.row_mutations@,
+            updated.effects.storage_requirement == output.effects.storage_requirement,
+            updated.effects.facts@ == output.effects.facts@,
+            updated.effects.priority_facts@ == output.effects.priority_facts@,
+            updated.effects.incoming_facts@ == output.effects.incoming_facts@,
+            updated.effects.incoming_fact_metadata == output.effects.incoming_fact_metadata,
+            updated.effects.purged_facts@ == output.effects.purged_facts@,
+            updated.effects.row_mutations@ == output.effects.row_mutations@,
+            updated.effects.intents@ == output.effects.intents@.push(intent),
+            updated.effects.local_intents@ == output.effects.local_intents@,
+            updated.effects.version_replay_rebuild == output.effects.version_replay_rebuild,
+    {
+        output.effects.intents.push(intent);
+        output
+    }
+
+    /// Append a connection-local intent to projection output.
+    fn projection_output_with_local_intent(
+        mut output: ProjectionOutput,
+        intent: Intent,
+    ) -> (updated: ProjectionOutput)
+        ensures
+            updated.retain_self == output.retain_self,
+            updated.needs@ == output.needs@,
+            updated.offers@ == output.offers@,
+            updated.time_wakes@ == output.time_wakes@,
+            updated.row_mutations@ == output.row_mutations@,
+            updated.effects.storage_requirement == output.effects.storage_requirement,
+            updated.effects.facts@ == output.effects.facts@,
+            updated.effects.priority_facts@ == output.effects.priority_facts@,
+            updated.effects.incoming_facts@ == output.effects.incoming_facts@,
+            updated.effects.incoming_fact_metadata == output.effects.incoming_fact_metadata,
+            updated.effects.purged_facts@ == output.effects.purged_facts@,
+            updated.effects.row_mutations@ == output.effects.row_mutations@,
+            updated.effects.intents@ == output.effects.intents@,
+            updated.effects.local_intents@ == output.effects.local_intents@.push(intent),
+            updated.effects.version_replay_rebuild == output.effects.version_replay_rebuild,
+    {
+        output.effects.local_intents.push(intent);
         output
     }
 
@@ -5150,13 +5373,20 @@ fn insert_pending_owner_with_options_in_tx(
     Ok(inserted)
 }
 
-fn replay_flag_for_projection_mode(mode: ProjectionMode) -> i64 {
-    if mode.is_replay() {
+verus! {
+fn replay_flag_for_projection_mode(mode: ProjectionMode) -> (flag: i64)
+    ensures
+        flag == 0 <==> mode == ProjectionMode::Normal,
+        flag == 1 <==> mode == ProjectionMode::Replay,
+        flag == 0 || flag == 1,
+{
+    if projection_mode_is_replay(mode) {
         1
     } else {
         0
     }
 }
+} // verus!
 
 pub(crate) fn insert_network_incoming_fact_in_tx(
     store: &Db,
@@ -7934,8 +8164,9 @@ mod tests {
         ContextKey, ContextNeed, ContextOffer, ContextOfferClaim, ContextOfferValue, Role,
     };
     use crate::core::db::{TableInsert, Value};
-    use crate::core::effects::StorageRequirement;
+    use crate::core::effects::{IncomingMetadata, StorageRequirement};
     use crate::core::facts::{Fact, FactId, FactScope};
+    use crate::core::intents::{Intent, IntentKind};
     use crate::core::schema::CORE_SCHEMA_SOURCE;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -7957,6 +8188,17 @@ mod tests {
             retained_fact(&db, &first.id).expect("load fact"),
             Some(first)
         );
+    }
+
+    #[test]
+    fn projection_mode_replay_flag_round_trips() {
+        assert!(!ProjectionMode::Normal.is_replay());
+        assert!(ProjectionMode::Replay.is_replay());
+        assert_eq!(projection_mode_from_replay_flag(0), ProjectionMode::Normal);
+        assert_eq!(projection_mode_from_replay_flag(1), ProjectionMode::Replay);
+        assert_eq!(projection_mode_from_replay_flag(-1), ProjectionMode::Replay);
+        assert_eq!(replay_flag_for_projection_mode(ProjectionMode::Normal), 0);
+        assert_eq!(replay_flag_for_projection_mode(ProjectionMode::Replay), 1);
     }
 
     #[test]
@@ -8368,6 +8610,104 @@ mod tests {
         assert_eq!(output.needs.len(), 1);
         assert_eq!(output.offers.len(), 1);
         assert!(output.effects.intents.is_empty());
+    }
+
+    #[test]
+    fn projection_output_context_and_wake_builders_preserve_work_payload() {
+        let owner = [1; 32];
+        let role = Role::new("builder_context").unwrap();
+        let key = ContextKey::from_bytes([2; 32]);
+        let need = ContextNeed {
+            owner,
+            role: role.clone(),
+            scope: FactScope::Global,
+            start_key: key.clone(),
+            end_key: key.clone(),
+        };
+        let offer = ContextOfferClaim {
+            role,
+            scope: FactScope::Global,
+            start_key: key.clone(),
+            end_key: key,
+            value: ContextOfferValue::from_bytes(b"builder-offer"),
+        };
+        let wake = TimeWake {
+            owner,
+            timeline: Timeline::new("builder_time").unwrap(),
+            at: 42,
+        };
+        let child = Fact::new(FactScope::Global, 11, b"existing child".to_vec());
+        let output = ProjectionOutput::new()
+            .fact(child.clone())
+            .need(need.clone())
+            .offer(offer.clone())
+            .time_wake(wake.clone());
+
+        assert!(output.retain_self);
+        assert_eq!(output.needs, vec![need]);
+        assert_eq!(output.offers, vec![offer]);
+        assert_eq!(output.time_wakes, vec![wake]);
+        assert!(output.row_mutations.is_empty());
+        assert_eq!(output.effects.facts, vec![child]);
+        assert!(output.effects.purged_facts.is_empty());
+        assert!(output.effects.intents.is_empty());
+        assert!(output.effects.local_intents.is_empty());
+    }
+
+    #[test]
+    fn projection_output_effect_builders_preserve_context_payload() {
+        let owner = [1; 32];
+        let role = Role::new("builder_effect").unwrap();
+        let key = ContextKey::from_bytes([2; 32]);
+        let need = ContextNeed {
+            owner,
+            role,
+            scope: FactScope::Global,
+            start_key: key.clone(),
+            end_key: key,
+        };
+        let durable_child = Fact::new(FactScope::Global, 21, b"durable child".to_vec());
+        let incoming_child = Fact::new(FactScope::Local, 22, b"incoming child".to_vec());
+        let incoming_metadata = IncomingMetadata {
+            origin_addr: b"127.0.0.1:20000".to_vec(),
+            received_at_local_ms: 44,
+        };
+        let durable_intent = Intent::new(
+            IntentKind::new("builder_durable_intent").unwrap(),
+            b"key",
+            b"payload",
+        );
+        let local_intent = Intent::new(
+            IntentKind::new("builder_local_intent").unwrap(),
+            b"local-key",
+            b"local-payload",
+        );
+        let output = ProjectionOutput::new()
+            .need(need.clone())
+            .fact(durable_child.clone())
+            .incoming_fact_with_metadata(incoming_child.clone(), incoming_metadata.clone())
+            .purge_self(owner)
+            .intent(durable_intent.clone())
+            .local_intent(local_intent.clone());
+
+        assert!(output.retain_self);
+        assert_eq!(output.needs, vec![need]);
+        assert!(output.offers.is_empty());
+        assert!(output.time_wakes.is_empty());
+        assert!(output.row_mutations.is_empty());
+        assert_eq!(output.effects.facts, vec![durable_child]);
+        assert_eq!(output.effects.incoming_facts, vec![incoming_child]);
+        assert_eq!(
+            output
+                .effects
+                .incoming_fact_metadata
+                .get(&output.effects.incoming_facts[0].id),
+            Some(&incoming_metadata)
+        );
+        assert_eq!(output.effects.purged_facts, vec![owner]);
+        assert!(output.effects.row_mutations.is_empty());
+        assert_eq!(output.effects.intents, vec![durable_intent]);
+        assert_eq!(output.effects.local_intents, vec![local_intent]);
     }
 
     #[test]

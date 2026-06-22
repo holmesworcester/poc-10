@@ -105,44 +105,36 @@ impl RuntimeEffects {
         runtime_effects_with_storage_requirement(self, requirement)
     }
 
-    pub fn fact(mut self, fact: Fact) -> Self {
-        self.facts.push(fact);
-        self
+    pub fn fact(self, fact: Fact) -> Self {
+        runtime_effects_with_fact(self, fact)
     }
 
-    pub fn priority_fact(mut self, fact: Fact) -> Self {
-        self.priority_facts.push(fact);
-        self
+    pub fn priority_fact(self, fact: Fact) -> Self {
+        runtime_effects_with_priority_fact(self, fact)
     }
 
-    pub fn incoming_fact(mut self, fact: Fact) -> Self {
-        self.incoming_facts.push(fact);
-        self
+    pub fn incoming_fact(self, fact: Fact) -> Self {
+        runtime_effects_with_incoming_fact(self, fact)
     }
 
-    pub fn incoming_fact_with_metadata(mut self, fact: Fact, metadata: IncomingMetadata) -> Self {
-        self.incoming_fact_metadata.insert(fact.id, metadata);
-        self.incoming_facts.push(fact);
-        self
+    pub fn incoming_fact_with_metadata(self, fact: Fact, metadata: IncomingMetadata) -> Self {
+        runtime_effects_with_incoming_fact_metadata(self, fact, metadata)
     }
 
-    pub fn purge_fact(mut self, id: FactId) -> Self {
-        self.purged_facts.push(id);
-        self
+    pub fn purge_fact(self, id: FactId) -> Self {
+        runtime_effects_with_purge_fact(self, id)
     }
 
     pub fn row_mutation(self, mutation: IntentRowMutation) -> Self {
         runtime_effects_with_intent_row_mutation(self, mutation)
     }
 
-    pub fn intent(mut self, intent: Intent) -> Self {
-        self.intents.push(intent);
-        self
+    pub fn intent(self, intent: Intent) -> Self {
+        runtime_effects_with_intent(self, intent)
     }
 
-    pub fn local_intent(mut self, intent: Intent) -> Self {
-        self.local_intents.push(intent);
-        self
+    pub fn local_intent(self, intent: Intent) -> Self {
+        runtime_effects_with_local_intent(self, intent)
     }
 
     /// Request the version-upgrade wipe plus retained-fact replay effect.
@@ -152,6 +144,94 @@ impl RuntimeEffects {
 }
 
 verus! {
+/// Append a durable fact without changing any other runtime effect field.
+fn runtime_effects_with_fact(
+    mut effects: RuntimeEffects,
+    fact: Fact,
+) -> (updated: RuntimeEffects)
+    ensures
+        updated.storage_requirement == effects.storage_requirement,
+        updated.facts@ == effects.facts@.push(fact),
+        updated.priority_facts@ == effects.priority_facts@,
+        updated.incoming_facts@ == effects.incoming_facts@,
+        updated.incoming_fact_metadata == effects.incoming_fact_metadata,
+        updated.purged_facts@ == effects.purged_facts@,
+        updated.row_mutations@ == effects.row_mutations@,
+        updated.intents@ == effects.intents@,
+        updated.local_intents@ == effects.local_intents@,
+        updated.version_replay_rebuild == effects.version_replay_rebuild,
+{
+    effects.facts.push(fact);
+    effects
+}
+
+/// Append a priority fact without changing any other runtime effect field.
+fn runtime_effects_with_priority_fact(
+    mut effects: RuntimeEffects,
+    fact: Fact,
+) -> (updated: RuntimeEffects)
+    ensures
+        updated.storage_requirement == effects.storage_requirement,
+        updated.facts@ == effects.facts@,
+        updated.priority_facts@ == effects.priority_facts@.push(fact),
+        updated.incoming_facts@ == effects.incoming_facts@,
+        updated.incoming_fact_metadata == effects.incoming_fact_metadata,
+        updated.purged_facts@ == effects.purged_facts@,
+        updated.row_mutations@ == effects.row_mutations@,
+        updated.intents@ == effects.intents@,
+        updated.local_intents@ == effects.local_intents@,
+        updated.version_replay_rebuild == effects.version_replay_rebuild,
+{
+    effects.priority_facts.push(fact);
+    effects
+}
+
+/// Append an incoming fact without changing any other runtime effect field.
+fn runtime_effects_with_incoming_fact(
+    mut effects: RuntimeEffects,
+    fact: Fact,
+) -> (updated: RuntimeEffects)
+    ensures
+        updated.storage_requirement == effects.storage_requirement,
+        updated.facts@ == effects.facts@,
+        updated.priority_facts@ == effects.priority_facts@,
+        updated.incoming_facts@ == effects.incoming_facts@.push(fact),
+        updated.incoming_fact_metadata == effects.incoming_fact_metadata,
+        updated.purged_facts@ == effects.purged_facts@,
+        updated.row_mutations@ == effects.row_mutations@,
+        updated.intents@ == effects.intents@,
+        updated.local_intents@ == effects.local_intents@,
+        updated.version_replay_rebuild == effects.version_replay_rebuild,
+{
+    effects.incoming_facts.push(fact);
+    effects
+}
+
+/// Append an incoming fact and attach its transport metadata.
+///
+/// This proof covers the vector append and unrelated effect fields. The exact
+/// map update remains ordinary Rust until core has a proof-friendly map helper.
+fn runtime_effects_with_incoming_fact_metadata(
+    mut effects: RuntimeEffects,
+    fact: Fact,
+    metadata: IncomingMetadata,
+) -> (updated: RuntimeEffects)
+    ensures
+        updated.storage_requirement == effects.storage_requirement,
+        updated.facts@ == effects.facts@,
+        updated.priority_facts@ == effects.priority_facts@,
+        updated.incoming_facts@ == effects.incoming_facts@.push(fact),
+        updated.purged_facts@ == effects.purged_facts@,
+        updated.row_mutations@ == effects.row_mutations@,
+        updated.intents@ == effects.intents@,
+        updated.local_intents@ == effects.local_intents@,
+        updated.version_replay_rebuild == effects.version_replay_rebuild,
+{
+    effects.incoming_fact_metadata.insert(fact.id, metadata);
+    effects.incoming_facts.push(fact);
+    effects
+}
+
 /// Override the storage guard carried by a runtime effect batch.
 ///
 /// The production router uses this after selecting a fact route so the route,
@@ -202,6 +282,69 @@ fn runtime_effects_with_intent_row_mutation(
     effects
 }
 
+/// Append a purge request without changing any other runtime effect field.
+fn runtime_effects_with_purge_fact(
+    mut effects: RuntimeEffects,
+    id: FactId,
+) -> (updated: RuntimeEffects)
+    ensures
+        updated.storage_requirement == effects.storage_requirement,
+        updated.facts@ == effects.facts@,
+        updated.priority_facts@ == effects.priority_facts@,
+        updated.incoming_facts@ == effects.incoming_facts@,
+        updated.incoming_fact_metadata == effects.incoming_fact_metadata,
+        updated.purged_facts@ == effects.purged_facts@.push(id),
+        updated.row_mutations@ == effects.row_mutations@,
+        updated.intents@ == effects.intents@,
+        updated.local_intents@ == effects.local_intents@,
+        updated.version_replay_rebuild == effects.version_replay_rebuild,
+{
+    effects.purged_facts.push(id);
+    effects
+}
+
+/// Append a durable intent without changing any other runtime effect field.
+fn runtime_effects_with_intent(
+    mut effects: RuntimeEffects,
+    intent: Intent,
+) -> (updated: RuntimeEffects)
+    ensures
+        updated.storage_requirement == effects.storage_requirement,
+        updated.facts@ == effects.facts@,
+        updated.priority_facts@ == effects.priority_facts@,
+        updated.incoming_facts@ == effects.incoming_facts@,
+        updated.incoming_fact_metadata == effects.incoming_fact_metadata,
+        updated.purged_facts@ == effects.purged_facts@,
+        updated.row_mutations@ == effects.row_mutations@,
+        updated.intents@ == effects.intents@.push(intent),
+        updated.local_intents@ == effects.local_intents@,
+        updated.version_replay_rebuild == effects.version_replay_rebuild,
+{
+    effects.intents.push(intent);
+    effects
+}
+
+/// Append a local intent without changing any other runtime effect field.
+fn runtime_effects_with_local_intent(
+    mut effects: RuntimeEffects,
+    intent: Intent,
+) -> (updated: RuntimeEffects)
+    ensures
+        updated.storage_requirement == effects.storage_requirement,
+        updated.facts@ == effects.facts@,
+        updated.priority_facts@ == effects.priority_facts@,
+        updated.incoming_facts@ == effects.incoming_facts@,
+        updated.incoming_fact_metadata == effects.incoming_fact_metadata,
+        updated.purged_facts@ == effects.purged_facts@,
+        updated.row_mutations@ == effects.row_mutations@,
+        updated.intents@ == effects.intents@,
+        updated.local_intents@ == effects.local_intents@.push(intent),
+        updated.version_replay_rebuild == effects.version_replay_rebuild,
+{
+    effects.local_intents.push(intent);
+    effects
+}
+
 /// Request version-upgrade wipe/replay without changing the effect payload.
 ///
 /// Admission later enforces that this flag is not mixed with emitted facts or
@@ -233,6 +376,7 @@ mod tests {
     use super::*;
     use crate::core::db::{TableInsert, TableName, Value};
     use crate::core::facts::{Fact, FactScope};
+    use crate::core::intents::{Intent, IntentKind};
 
     #[test]
     fn runtime_effects_reports_whether_any_runtime_work_exists() {
@@ -275,6 +419,54 @@ mod tests {
             updated.version_replay_rebuild,
             effects.version_replay_rebuild
         );
+    }
+
+    #[test]
+    fn append_builders_touch_only_their_effect_lists() {
+        let durable = Fact::new(FactScope::Global, 1, b"durable child".to_vec());
+        let priority = Fact::new(FactScope::Global, 2, b"priority child".to_vec());
+        let incoming = Fact::new(FactScope::Local, 3, b"incoming child".to_vec());
+        let incoming_metadata = IncomingMetadata {
+            origin_addr: b"127.0.0.1:20000".to_vec(),
+            received_at_local_ms: 44,
+        };
+        let purge_id = [9; 32];
+        let durable_intent = Intent::new(
+            IntentKind::new("durable_followup").unwrap(),
+            b"key",
+            b"payload",
+        );
+        let local_intent = Intent::new(
+            IntentKind::new("local_followup").unwrap(),
+            b"local-key",
+            b"local-payload",
+        );
+
+        let updated = RuntimeEffects::new()
+            .with_storage_requirement(StorageRequirement::Current(7))
+            .version_replay_rebuild()
+            .fact(durable.clone())
+            .priority_fact(priority.clone())
+            .incoming_fact_with_metadata(incoming.clone(), incoming_metadata.clone())
+            .purge_fact(purge_id)
+            .intent(durable_intent.clone())
+            .local_intent(local_intent.clone());
+
+        assert_eq!(updated.storage_requirement, StorageRequirement::Current(7));
+        assert_eq!(updated.facts, vec![durable]);
+        assert_eq!(updated.priority_facts, vec![priority]);
+        assert_eq!(updated.incoming_facts, vec![incoming]);
+        assert_eq!(
+            updated
+                .incoming_fact_metadata
+                .get(&updated.incoming_facts[0].id),
+            Some(&incoming_metadata)
+        );
+        assert_eq!(updated.purged_facts, vec![purge_id]);
+        assert!(updated.row_mutations.is_empty());
+        assert_eq!(updated.intents, vec![durable_intent]);
+        assert_eq!(updated.local_intents, vec![local_intent]);
+        assert!(updated.version_replay_rebuild);
     }
 
     #[test]
