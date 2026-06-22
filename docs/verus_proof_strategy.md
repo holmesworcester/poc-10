@@ -268,6 +268,12 @@ separate proof work.
 `projection_output_drop_incoming(output)` is verified over the production
 builder and sets only `retain_self = false`, preserving needs, offers, time
 wakes, projected row mutations, and runtime effects.
+`projection_output_with_version_replay_rebuild(output)` is verified over the
+production projector-output builder and sets only the nested
+`RuntimeEffects.version_replay_rebuild` flag while preserving retention, needs,
+offers, time wakes, projected row mutations, and every other runtime-effect
+field. Admission rules for what may coexist with that flag remain the separate
+version replay rebuild shape proofs.
 
 Route-search discovery: do not prove route-table search directly over
 `FactRoute` while it contains the projector function pointer. Cargo-verus does
@@ -778,6 +784,7 @@ prepared_projection_from_validated_output preserves route evidence and validated
 fact_ids_contain(ids, target) accepts if and only if target occurs in the fact-id slice
 projection_retains_fact_after_commit(projection) accepts if and only if the projection does not purge itself and durable-or-retained-incoming source remains retained
 projection_output_drop_incoming(output) clears only retain_self and preserves projection output payload
+projection_output_with_version_replay_rebuild(output) sets only the nested version replay rebuild flag and preserves projection output payload
 version_replay_rebuild_shape_allowed(version_replay_rebuild, needs, offers, wakes) accepts if and only if ordinary projection or empty version replay rebuild output
 version_replay_rebuild_shape_status(version_replay_rebuild, needs, offers, wakes) returns accepted or standing-output exactly from that predicate
 version_replay_rebuild_shape_status_allows_projection(status) accepts if and only if status is VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED

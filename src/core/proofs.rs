@@ -147,6 +147,12 @@
 //!   time wakes, projected row mutations, and runtime effects.
 //!   `ProjectionOutput::drop_incoming` uses this verified production helper.
 //! - Proven in production Rust today:
+//!   `projection_output_with_version_replay_rebuild(output)` sets only the
+//!   nested `RuntimeEffects.version_replay_rebuild` flag while preserving
+//!   retention, needs, offers, time wakes, projected row mutations, and every
+//!   other runtime-effect field. Admission rules for what may coexist with that
+//!   flag are proved separately.
+//! - Proven in production Rust today:
 //!   `runtime_effects_with_intent_row_mutation(effects, mutation)` appends
 //!   exactly one `IntentRowMutation` to `RuntimeEffects.row_mutations` while
 //!   preserving storage requirement, facts, priority facts, incoming facts and

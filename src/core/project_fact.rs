@@ -4340,9 +4340,8 @@ pub mod effects {
         /// it for local version-update facts whose replay-mode projector is a
         /// no-op, so the update record remains auditable without re-triggering
         /// the wipe/replay.
-        pub fn version_replay_rebuild(mut self) -> Self {
-            self.effects.version_replay_rebuild = true;
-            self
+        pub fn version_replay_rebuild(self) -> Self {
+            projection_output_with_version_replay_rebuild(self)
         }
 
         pub fn fact(mut self, fact: Fact) -> Self {
@@ -4398,6 +4397,35 @@ pub mod effects {
             updated.effects == output.effects,
     {
         output.retain_self = false;
+        output
+    }
+
+    /// Request a version-upgrade wipe/replay from projection output.
+    ///
+    /// This builder proof states only what the setter changes. Admission
+    /// separately proves which standing output and follow-up work may coexist
+    /// with the rebuild flag.
+    fn projection_output_with_version_replay_rebuild(
+        mut output: ProjectionOutput,
+    ) -> (updated: ProjectionOutput)
+        ensures
+            updated.retain_self == output.retain_self,
+            updated.needs@ == output.needs@,
+            updated.offers@ == output.offers@,
+            updated.time_wakes@ == output.time_wakes@,
+            updated.row_mutations@ == output.row_mutations@,
+            updated.effects.storage_requirement == output.effects.storage_requirement,
+            updated.effects.facts@ == output.effects.facts@,
+            updated.effects.priority_facts@ == output.effects.priority_facts@,
+            updated.effects.incoming_facts@ == output.effects.incoming_facts@,
+            updated.effects.incoming_fact_metadata == output.effects.incoming_fact_metadata,
+            updated.effects.purged_facts@ == output.effects.purged_facts@,
+            updated.effects.row_mutations@ == output.effects.row_mutations@,
+            updated.effects.intents@ == output.effects.intents@,
+            updated.effects.local_intents@ == output.effects.local_intents@,
+            updated.effects.version_replay_rebuild,
+    {
+        output.effects.version_replay_rebuild = true;
         output
     }
 
@@ -8391,6 +8419,43 @@ mod tests {
         assert_eq!(output.offers.len(), 1);
         assert_eq!(output.row_mutations, vec![mutation]);
         assert_eq!(output.effects.facts, vec![child]);
+    }
+
+    #[test]
+    fn projection_output_version_replay_rebuild_preserves_payload() {
+        let owner = [1; 32];
+        let role = Role::new("version_replay").unwrap();
+        let key = ContextKey::from_bytes([2; 32]);
+        let mutation = ProjectedRowMutation::InsertValues(TableInsert {
+            table: TableName::new("projected_rows"),
+            columns: &["id"],
+            values: vec![Value::Bytes(b"version".to_vec())],
+        });
+        let output = ProjectionOutput::new()
+            .drop_incoming()
+            .need(ContextNeed {
+                owner,
+                role: role.clone(),
+                scope: FactScope::Global,
+                start_key: key.clone(),
+                end_key: key.clone(),
+            })
+            .offer(ContextOfferClaim {
+                role,
+                scope: FactScope::Global,
+                start_key: key.clone(),
+                end_key: key,
+                value: ContextOfferValue::empty(),
+            })
+            .row_mutation(mutation.clone())
+            .version_replay_rebuild();
+
+        assert!(!output.retain_self);
+        assert!(output.effects.version_replay_rebuild);
+        assert_eq!(output.needs.len(), 1);
+        assert_eq!(output.offers.len(), 1);
+        assert_eq!(output.row_mutations, vec![mutation]);
+        assert!(output.effects.row_mutations.is_empty());
     }
 
     #[test]
