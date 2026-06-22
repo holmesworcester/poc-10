@@ -346,6 +346,11 @@ runtime effects, including an unchanged `RuntimeEffects.row_mutations`.
 `runtime_effects_with_intent_row_mutation(effects, mutation)` is verified over
 the actual intent/live-runtime row builder path and appends exactly one
 `IntentRowMutation` while preserving the rest of the effect payload.
+`row_mutation_tables_are_allowed(tables, allowed)` is verified over the table
+names extracted by production validation and accepts if and only if every table
+in that extracted list is registered for that worker. This is table-name
+allowlist proof only; mutation-to-table extraction and raw-SQL confinement
+remain separate proof work.
 `projection_effects_have_no_intent_row_mutations(effects)` is verified over the
 actual `RuntimeEffects` value and accepts if and only if
 `effects.row_mutations` is empty; the projection validation guard uses it for
@@ -759,6 +764,8 @@ version_replay_rebuild_projection_accepts(context, wakes, effects) accepts if an
 version_replay_rebuild_effect_has_no_fact_or_intent_work(effects) accepts if and only if ordinary effects or isolated rebuild effects with no facts or intents
 runtime_effects_with_version_replay_rebuild(effects) sets the version replay rebuild flag and preserves the effect payload
 runtime_effects_with_intent_row_mutation(effects, mutation) appends exactly one IntentRowMutation and preserves the effect payload
+row_mutation_table_is_allowed(table, allowed) accepts if and only if table occurs in the allowed table list
+row_mutation_tables_are_allowed(tables, allowed) accepts if and only if every extracted table name is allowed
 projection_output_with_projected_row_mutation(output, mutation) appends exactly one ProjectedRowMutation and preserves RuntimeEffects.row_mutations
 projection_effects_have_no_intent_row_mutations(effects) accepts if and only if RuntimeEffects.row_mutations is empty
 matched_context_owner_matches_payload(matched) accepts if and only if matched.routed_offer.offer.owner == matched.payload.id

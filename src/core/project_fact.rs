@@ -743,6 +743,19 @@ pub struct ExProjectionOutput(ProjectionOutput);
 #[allow(dead_code)]
 pub struct ExProjectedRowMutation(ProjectedRowMutation);
 
+#[verifier(external_type_specification)]
+#[verifier(external_body)]
+#[allow(dead_code)]
+pub struct ExTableName(TableName);
+
+pub assume_specification[<TableName as std::cmp::PartialEq>::eq](
+    left: &TableName,
+    right: &TableName,
+) -> (out: bool)
+    ensures
+        out <==> *left == *right,
+;
+
 pub assume_specification[<ContextNeed as Clone>::clone](
     need: &ContextNeed,
 ) -> (out: ContextNeed)
@@ -1292,6 +1305,70 @@ fn projection_effects_have_no_intent_row_mutations(effects: &RuntimeEffects) -> 
         accepted <==> effects.row_mutations@.len() == 0,
 {
     effects.row_mutations.len() == 0
+}
+
+spec fn table_name_is_allowed(table: TableName, allowed: Seq<TableName>) -> bool {
+    exists|i: int| 0 <= i < allowed.len() && allowed[i] == table
+}
+
+fn row_mutation_table_is_allowed(
+    table: TableName,
+    allowed: &[TableName],
+) -> (accepted: bool)
+    ensures
+        accepted <==> table_name_is_allowed(table, allowed@),
+{
+    let mut i: usize = 0;
+    while i < allowed.len()
+        invariant
+            i <= allowed@.len(),
+            forall|j: int| 0 <= j < i ==> allowed@[j] != table,
+        decreases allowed@.len() - i,
+    {
+        if allowed[i] == table {
+            assert(table_name_is_allowed(table, allowed@));
+            return true;
+        }
+        i += 1;
+    }
+    assert(!table_name_is_allowed(table, allowed@));
+    false
+}
+
+spec fn row_mutation_tables_allowed_spec(
+    tables: Seq<TableName>,
+    allowed: Seq<TableName>,
+) -> bool {
+    forall|i: int|
+        #![trigger tables[i]]
+        0 <= i < tables.len() ==> table_name_is_allowed(tables[i], allowed)
+}
+
+fn row_mutation_tables_are_allowed(
+    tables: &[TableName],
+    allowed: &[TableName],
+) -> (accepted: bool)
+    ensures
+        accepted <==> row_mutation_tables_allowed_spec(tables@, allowed@),
+{
+    let mut i: usize = 0;
+    while i < tables.len()
+        invariant
+            i <= tables@.len(),
+            forall|j: int|
+                #![trigger tables@[j]]
+                0 <= j < i ==> table_name_is_allowed(tables@[j], allowed@),
+        decreases tables@.len() - i,
+    {
+        if !row_mutation_table_is_allowed(tables[i], allowed) {
+            assert(!table_name_is_allowed(tables@[i as int], allowed@));
+            assert(!row_mutation_tables_allowed_spec(tables@, allowed@));
+            return false;
+        }
+        i += 1;
+    }
+    assert(row_mutation_tables_allowed_spec(tables@, allowed@));
+    true
 }
 
 spec fn offer_is_finalized_claim(
@@ -2024,26 +2101,31 @@ pub(crate) mod commit_effects {
         mutations: &[ProjectedRowMutation],
         projected_row_mutation_tables: &[TableName],
     ) -> Result<(), String> {
-        validate_row_mutation_tables(
-            mutations.iter().map(ProjectedRowMutation::table),
-            projected_row_mutation_tables,
-        )
+        let tables = mutations
+            .iter()
+            .map(ProjectedRowMutation::table)
+            .collect::<Vec<_>>();
+        validate_row_mutation_tables(tables, projected_row_mutation_tables)
     }
 
     fn validate_intent_row_mutations(
         mutations: &[IntentRowMutation],
         intent_row_mutation_tables: &[TableName],
     ) -> Result<(), String> {
-        validate_row_mutation_tables(
-            mutations.iter().map(IntentRowMutation::table),
-            intent_row_mutation_tables,
-        )
+        let tables = mutations
+            .iter()
+            .map(IntentRowMutation::table)
+            .collect::<Vec<_>>();
+        validate_row_mutation_tables(tables, intent_row_mutation_tables)
     }
 
     fn validate_row_mutation_tables(
-        tables: impl IntoIterator<Item = TableName>,
+        tables: Vec<TableName>,
         allowed_tables_for_worker: &[TableName],
     ) -> Result<(), String> {
+        if super::row_mutation_tables_are_allowed(&tables, allowed_tables_for_worker) {
+            return Ok(());
+        }
         tables.into_iter().try_for_each(|table| {
             if allowed_tables_for_worker.contains(&table) {
                 Ok(())
@@ -6414,6 +6496,35 @@ mod contract_tests {
         .expect_err("projector intent row mutation output should fail validation");
 
         assert!(err.contains("projectors must emit projected rows"), "{err}");
+    }
+
+    #[test]
+    fn projection_rejects_unregistered_projected_row_table() {
+        let fact = Fact::new(FactScope::Global, 1, b"projected row mutation".to_vec());
+        let projector = test_projector(|_fact: &Fact, _context: &ProjectionContext| {
+            Ok(
+                ProjectionOutput::new().row_mutation(ProjectedRowMutation::InsertValues(
+                    TableInsert {
+                        table: TableName::new("unregistered_projected_rows"),
+                        columns: &["id"],
+                        values: vec![Value::Bytes(b"bad".to_vec())],
+                    },
+                )),
+            )
+        });
+
+        let err = run_projection_with_registered_intents(
+            &projector,
+            &fact,
+            ProjectionContext::new(Vec::new()),
+            &[],
+        )
+        .expect_err("unregistered projected row table should fail validation");
+
+        assert!(
+            err.contains("row mutation table unregistered_projected_rows is not registered"),
+            "{err}"
+        );
     }
 
     #[test]

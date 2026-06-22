@@ -86,7 +86,7 @@ fn cargo_verus_verifies_production_core_projection_contracts() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        combined.contains("verification results:: 56 verified, 0 errors"),
+        combined.contains("verification results:: 60 verified, 0 errors"),
         "production proof should verify the real core projection contracts:\n{combined}"
     );
 }
@@ -205,6 +205,10 @@ fn core_proofs_make_trust_boundary_explicit() {
         "`runtime_effects_with_intent_row_mutation(effects, mutation)` appends",
         "exactly one `IntentRowMutation`",
         "table allowlist and raw-SQL confinement remain separate proof work",
+        "`row_mutation_table_is_allowed(table, allowed)` accepts if and only if",
+        "`row_mutation_tables_are_allowed(tables, allowed)` accepts if and only if",
+        "every table in the extracted table-name list is allowed",
+        "does not yet prove `ProjectedRowMutation::table`",
         "`runtime_effects_with_version_replay_rebuild(effects)` sets",
         "`RuntimeEffects.version_replay_rebuild`",
         "Admission rules for what may\n//!   coexist with that flag are proved separately",
@@ -434,6 +438,9 @@ fn verus_plan_is_single_core_first_source() {
         "`runtime_effects_with_intent_row_mutation(effects, mutation)` is verified",
         "appends exactly one\n`IntentRowMutation`",
         "preserving the rest of the effect payload",
+        "`row_mutation_tables_are_allowed(tables, allowed)` is verified",
+        "every table\nin that extracted list is registered for that worker",
+        "mutation-to-table extraction and raw-SQL confinement\nremain separate proof work",
         "`projection_effects_have_no_intent_row_mutations(effects)` is verified",
         "`effects.row_mutations` is empty",
         "validation guard uses it for\nthe success branch",
@@ -583,6 +590,8 @@ fn verus_plan_is_single_core_first_source() {
         "version_replay_rebuild_effect_has_no_fact_or_intent_work(effects) accepts if and only if ordinary effects or isolated rebuild effects with no facts or intents",
         "runtime_effects_with_version_replay_rebuild(effects) sets the version replay rebuild flag and preserves the effect payload",
         "runtime_effects_with_intent_row_mutation(effects, mutation) appends exactly one IntentRowMutation and preserves the effect payload",
+        "row_mutation_table_is_allowed(table, allowed) accepts if and only if table occurs in the allowed table list",
+        "row_mutation_tables_are_allowed(tables, allowed) accepts if and only if every extracted table name is allowed",
         "projection_output_with_projected_row_mutation(output, mutation) appends exactly one ProjectedRowMutation and preserves RuntimeEffects.row_mutations",
         "projection_effects_have_no_intent_row_mutations(effects) accepts if and only if RuntimeEffects.row_mutations is empty",
         "matched_context_owner_matches_payload(matched) accepts if and only if matched.routed_offer.offer.owner == matched.payload.id",
