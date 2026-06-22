@@ -42,12 +42,19 @@
 //! - Proven here today: vocabulary consistency and any non-theorem spec helper
 //!   definitions that Verus type-checks.
 //! - Proven in production Rust today:
+//!   `projected_owner_matches(owner, fact_id)` bytewise accepts if and only if
+//!   `owner == fact_id`; `enforce_projected_owner` branches on this verified
+//!   production decision before returning success or a diagnostic error.
+//! - Proven in production Rust today:
 //!   `ContextOfferClaim::into_offer(claim, owner).owner == owner`.
 //! - Proven in production Rust today:
 //!   `ContextOfferClaim::into_offer(claim, owner) preserves role/scope/start/end/value`.
 //! - Proven in production Rust today:
 //!   `owned_offers_from_claims(claims, owner)` returns one offer per claim and
 //!   every returned offer has `owner` plus the same role, scope, start key, end key, and offer value as the same-index claim.
+//! - Proven in production Rust today:
+//!   `context_set_from_projection_parts(needs, claims, owner)` carries needs
+//!   unchanged and builds same-index owned offers from the claims.
 //! - Assumed only to call production code: the Verus contract for the derived
 //!   `ContextOfferClaim::clone` says clone preserves the whole claim. This
 //!   assumption is a Rust trait boundary helper, not a runtime theorem over
@@ -55,6 +62,8 @@
 //! - Not proven here today: every exported `theorem_*` runtime/core property.
 //! - Not proven yet for offer finalization: `ProjectionOutput::context_set`
 //!   normalization or `prepare_projection` call order.
+//! - Not proven yet for owner enforcement: the loops in
+//!   `enforce_owner_is_self` checking every purge, need, and time wake.
 //! - Punted for a later core proof model: the composition stubs that cross
 //!   matcher construction, offer loading, route dispatch, projected-table
 //!   write ownership, context replacement, and commit.

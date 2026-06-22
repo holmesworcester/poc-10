@@ -69,6 +69,7 @@ use crate::core::schema::{
 };
 use crate::core::wire::Writer;
 use rusqlite::{params, OptionalExtension};
+use vstd::prelude::*;
 
 pub use crate::core::effects::IncomingMetadata;
 pub use crate::core::facts::verify_fact_id;
@@ -631,8 +632,37 @@ fn enforce_owner_is_self(fact: &Fact, output: &ProjectionOutput) -> Result<(), S
     Ok(())
 }
 
+verus! {
+/// Bytewise fact-id equality used by the owner guard.
+///
+/// Keeping this comparison explicit lets Verus prove the branch condition that
+/// normal builds execute without assuming the standard-library array equality
+/// implementation.
+fn projected_owner_matches(owner: FactId, fact_id: FactId) -> (accepted: bool)
+    ensures
+        accepted <==> owner == fact_id,
+{
+    let mut i: usize = 0;
+    while i < 32
+        invariant
+            i <= 32,
+            forall|j: int| 0 <= j < i ==> owner[j] == fact_id[j],
+        decreases 32 - i,
+    {
+        if owner[i] != fact_id[i] {
+            assert(owner[i as int] != fact_id[i as int]);
+            assert(owner != fact_id);
+            return false;
+        }
+        i += 1;
+    }
+    assert(owner == fact_id);
+    true
+}
+} // verus!
+
 fn enforce_projected_owner(label: &str, owner: FactId, fact_id: FactId) -> Result<(), String> {
-    if owner == fact_id {
+    if projected_owner_matches(owner, fact_id) {
         Ok(())
     } else {
         Err(format!(
@@ -2612,8 +2642,8 @@ pub mod effects {
     //! Projection effects and time-wake output for fact projectors.
 
     use crate::core::context::{
-        owned_offers_from_claims, ContextKey, ContextNeed, ContextOffer, ContextOfferClaim,
-        ContextOfferValue, ContextSet, Role,
+        context_set_from_projection_parts, ContextKey, ContextNeed, ContextOffer,
+        ContextOfferClaim, ContextOfferValue, ContextSet, Role,
     };
     use crate::core::effects::{IncomingMetadata, RuntimeEffects};
     use crate::core::facts::{Fact, FactId};
@@ -2880,11 +2910,7 @@ pub mod effects {
         }
 
         pub fn context_set(&self, owner: FactId) -> ContextSet {
-            ContextSet {
-                needs: self.needs.clone(),
-                offers: owned_offers_from_claims(&self.offers, owner),
-            }
-            .normalized()
+            context_set_from_projection_parts(self.needs.clone(), &self.offers, owner).normalized()
         }
     }
 
@@ -4764,6 +4790,14 @@ mod contract_tests {
     }
 
     #[test]
+    fn projected_owner_match_decision_accepts_only_self_owner() {
+        let fact_id = [1; 32];
+
+        assert!(projected_owner_matches(fact_id, fact_id));
+        assert!(!projected_owner_matches([9; 32], fact_id));
+    }
+
+    #[test]
     fn projection_run_rejects_purge_owned_by_another_fact() {
         let fact = Fact::new(FactScope::Global, 1, b"owned".to_vec());
         let projector = test_projector(|_fact: &Fact, _context: &ProjectionContext| {
@@ -5790,6 +5824,31 @@ mod tests {
             .need(need.clone());
 
         assert_eq!(output.context_set(id).needs, vec![need]);
+    }
+
+    #[test]
+    fn projection_output_context_set_stamps_offer_owner_and_preserves_value() {
+        let owner = [1; 32];
+        let role = Role::new("valued_offer").unwrap();
+        let key = ContextKey::from_bytes([2; 32]);
+        let claim = ContextOfferClaim {
+            role: role.clone(),
+            scope: FactScope::Global,
+            start_key: key.clone(),
+            end_key: key.clone(),
+            value: ContextOfferValue::from_bytes(b"offer-cert-v1"),
+        };
+
+        let context = ProjectionOutput::new()
+            .offer(claim.clone())
+            .offer(claim)
+            .context_set(owner);
+
+        assert_eq!(context.offers.len(), 1);
+        assert_eq!(context.offers[0].owner, owner);
+        assert_eq!(context.offers[0].role, role);
+        assert_eq!(context.offers[0].start_key, key);
+        assert_eq!(context.offers[0].value.as_bytes(), b"offer-cert-v1");
     }
 
     #[test]

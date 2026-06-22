@@ -86,15 +86,24 @@ function body that normal builds execute. Focused Rust tests cover rejection of
 foreign owners and dropped incoming durable-output attempts; and no
 threat-model checklist item is claimed from this stage alone.
 
-Current production-code foothold: `ContextOfferClaim::into_offer` and
-`owned_offers_from_claims` are real production helpers inside Verus
-verification. Cargo-verus proves that the returned `ContextOffer.owner` equals
-the owner argument for one claim and that role, scope, start key, end key, and
-offer value are copied unchanged. For a slice of claims, Cargo-verus proves the
-same length, owner, role, scope, start key, end key, and value preservation for
-every returned offer. That is not the full offer-finalization theorem yet: the
-`ProjectionOutput::context_set` normalization step and the `prepare_projection`
-call order remain open core proof work.
+Current production-code foothold: `projected_owner_matches`,
+`ContextOfferClaim::into_offer`, `owned_offers_from_claims`, and
+`context_set_from_projection_parts` are real production helpers inside Verus
+verification. Cargo-verus proves that `projected_owner_matches(owner, fact_id)`
+accepts if and only if `owner == fact_id`; `enforce_projected_owner` uses that
+bytewise production decision before producing `Ok(())` or a diagnostic error.
+Cargo-verus also proves that the returned `ContextOffer.owner` equals the owner
+argument for one claim and that role, scope, start key, end key, and offer
+value are copied unchanged. For a slice of claims, Cargo-verus proves the same
+length, owner, role, scope, start key, end key, and value preservation for
+every returned offer. For the pre-normalization context-set construction,
+Cargo-verus proves the input needs are carried unchanged and the constructed
+offers preserve the same owner and claim fields. That is not the full
+offer-finalization theorem yet: the `ProjectionOutput::context_set`
+normalization step and the `prepare_projection` call order remain open core
+proof work. It is also not the full owner-bearing output theorem yet: the loops
+over every purge, need, and time wake in `enforce_owner_is_self` remain open
+core proof work.
 
 ### Stage 3: Routed Projection Witness
 
@@ -540,23 +549,30 @@ theorem_ed25519_verify_binds(evidence)
 Production helper contracts currently proved:
 
 ```text
+projected_owner_matches(owner, fact_id) bytewise accepts if and only if owner == fact_id
 ContextOfferClaim::into_offer(claim, owner).owner == owner
 ContextOfferClaim::into_offer(claim, owner) preserves role/scope/start/end/value
 owned_offers_from_claims(claims, owner).len == claims.len
 forall returned offer: offer.owner == owner
 forall returned offer: offer.role/scope/start/end/value match the same-index claim
+context_set_from_projection_parts(needs, claims, owner) preserves needs
+context_set_from_projection_parts(needs, claims, owner) builds same-index owned offers
 ```
 
 These contracts are proofs over helper Rust code that normal builds execute.
 They are core proof footholds, not threat-model coverage and not completion of
 `offer_claim_finalizes_to_projected_owner`.
 
-The `owned_offers_from_claims` proof uses a narrow Verus
+The `owned_offers_from_claims` and `context_set_from_projection_parts` proofs use a narrow Verus
 `assume_specification` for the derived `ContextOfferClaim::clone` call so Verus
 can call that production clone and reason that clone preserves the whole claim.
-The remaining offer-finalization gap is no longer claim-to-offer field copying;
-it is proving the `ProjectionOutput::context_set` normalization step and
-`prepare_projection` call order over executable helper code.
+The remaining offer-finalization gap is no longer claim-to-offer field copying
+or pre-normalization context-set assembly; it is proving the
+`ProjectionOutput::context_set` normalization step and `prepare_projection`
+call order over executable helper code. The remaining owner-checking gap is no
+longer the equality decision inside `enforce_projected_owner`; it is proving
+that `enforce_owner_is_self` applies that decision to every owner-bearing purge,
+need, and time wake emitted by a projector.
 
 Core proves plumbing only. It must not prove that an admin is valid, an endpoint
 may sign content, a deletion is authorized, a receipt grants authority, or a

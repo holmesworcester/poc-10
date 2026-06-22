@@ -524,6 +524,10 @@ pub struct ExRole(Role);
 pub struct ExContextKey(ContextKey);
 
 #[verifier(external_type_specification)]
+#[allow(dead_code)]
+pub struct ExContextNeed(ContextNeed);
+
+#[verifier(external_type_specification)]
 #[verifier(external_body)]
 #[allow(dead_code)]
 pub struct ExContextOfferValue(ContextOfferValue);
@@ -668,6 +672,49 @@ impl ContextSet {
         }
     }
 }
+
+verus! {
+#[verifier(external_type_specification)]
+#[allow(dead_code)]
+pub struct ExContextSet(ContextSet);
+
+/// Build the unnormalized context set for one projection output.
+///
+/// `ProjectionOutput::context_set` calls this helper and then normalizes the
+/// result. Verus proves the owner-stamping and field-preservation part here;
+/// sorting/deduplication remains ordinary production code and separate proof
+/// work.
+pub fn context_set_from_projection_parts(
+    needs: Vec<ContextNeed>,
+    claims: &[ContextOfferClaim],
+    owner: FactId,
+) -> (context: ContextSet)
+    ensures
+        context.needs@ == needs@,
+        context.offers@.len() == claims@.len(),
+        forall|i: int|
+            #![trigger context.offers@[i]]
+            0 <= i < context.offers@.len() ==> context.offers@[i].owner == owner,
+        forall|i: int|
+            #![trigger context.offers@[i]]
+            0 <= i < context.offers@.len() ==> context.offers@[i].role == claims@[i].role,
+        forall|i: int|
+            #![trigger context.offers@[i]]
+            0 <= i < context.offers@.len() ==> context.offers@[i].scope == claims@[i].scope,
+        forall|i: int|
+            #![trigger context.offers@[i]]
+            0 <= i < context.offers@.len() ==> context.offers@[i].start_key == claims@[i].start_key,
+        forall|i: int|
+            #![trigger context.offers@[i]]
+            0 <= i < context.offers@.len() ==> context.offers@[i].end_key == claims@[i].end_key,
+        forall|i: int|
+            #![trigger context.offers@[i]]
+            0 <= i < context.offers@.len() ==> context.offers@[i].value == claims@[i].value,
+{
+    let offers = owned_offers_from_claims(claims, owner);
+    ContextSet { needs, offers }
+}
+} // verus!
 
 /// Relationships newly visible after replacing one owner's context set.
 ///
