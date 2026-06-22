@@ -51,6 +51,11 @@
 //!   purge id, need owner, or time-wake owner equals the projected fact id;
 //!   `enforce_owner_is_self` branches on these verified production scans.
 //! - Proven in production Rust today:
+//!   `projected_output_owners_are_self` composes the three owner scans and
+//!   accepts if and only if every scanned purge id, need owner, and time-wake
+//!   owner equals the projected fact id; `enforce_owner_is_self` branches on
+//!   this aggregate helper before returning success or a diagnostic error.
+//! - Proven in production Rust today:
 //!   `ContextOfferClaim::into_offer(claim, owner).owner == owner`.
 //! - Proven in production Rust today:
 //!   `ContextOfferClaim::into_offer(claim, owner) preserves role/scope/start/end/value`.
@@ -69,7 +74,7 @@
 //!   normalization or `prepare_projection` call order.
 //! - Not proven yet for owner enforcement: the exported theorem tying
 //!   `enforce_owner_is_self` `Result` behavior and `prepare_projection` call
-//!   order to the verified scan helpers.
+//!   order to the verified aggregate helper.
 //! - Punted for a later core proof model: the composition stubs that cross
 //!   matcher construction, offer loading, route dispatch, projected-table
 //!   write ownership, context replacement, and commit.

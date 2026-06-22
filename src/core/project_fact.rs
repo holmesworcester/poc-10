@@ -616,25 +616,34 @@ fn validate_rebuild_projection_shape(
 /// being projected. Projected offers are ownerless claims; core attaches the
 /// projected fact id when building the committed context set.
 fn enforce_owner_is_self(fact: &Fact, output: &ProjectionOutput) -> Result<(), String> {
-    if !projected_purge_owners_are_self(&output.effects.purged_facts, fact.id) {
+    let purged = &output.effects.purged_facts;
+    let needs = &output.needs;
+    let wakes = &output.time_wakes;
+    if projected_output_owners_are_self(purged, needs, wakes, fact.id) {
+        return Ok(());
+    }
+    if !projected_purge_owners_are_self(purged, fact.id) {
         return Err(enforce_projected_owner_error(
             "projector tried to purge fact",
             fact.id,
         ));
     }
-    if !projected_need_owners_are_self(&output.needs, fact.id) {
+    if !projected_need_owners_are_self(needs, fact.id) {
         return Err(enforce_projected_owner_error(
             "projector emitted need with owner",
             fact.id,
         ));
     }
-    if !projected_time_wake_owners_are_self(&output.time_wakes, fact.id) {
+    if !projected_time_wake_owners_are_self(wakes, fact.id) {
         return Err(enforce_projected_owner_error(
             "projector emitted time wake with owner",
             fact.id,
         ));
     }
-    Ok(())
+    Err(enforce_projected_owner_error(
+        "projector emitted owner-bearing output",
+        fact.id,
+    ))
 }
 
 verus! {
@@ -761,6 +770,55 @@ fn projected_time_wake_owners_are_self(wakes: &[TimeWake], fact_id: FactId) -> (
     assert(forall|j: int|
         #![trigger wakes@[j]]
         0 <= j < wakes@.len() ==> wakes@[j].owner == fact_id);
+    true
+}
+
+fn projected_output_owners_are_self(
+    purged: &[FactId],
+    needs: &[ContextNeed],
+    wakes: &[TimeWake],
+    fact_id: FactId,
+) -> (accepted: bool)
+    ensures
+        accepted <==> (
+            (forall|i: int|
+                #![trigger purged@[i]]
+                0 <= i < purged@.len() ==> purged@[i] == fact_id)
+            && (forall|i: int|
+                #![trigger needs@[i]]
+                0 <= i < needs@.len() ==> needs@[i].owner == fact_id)
+            && (forall|i: int|
+                #![trigger wakes@[i]]
+                0 <= i < wakes@.len() ==> wakes@[i].owner == fact_id)
+        ),
+{
+    if !projected_purge_owners_are_self(purged, fact_id) {
+        assert(!(forall|i: int|
+            #![trigger purged@[i]]
+            0 <= i < purged@.len() ==> purged@[i] == fact_id));
+        return false;
+    }
+    if !projected_need_owners_are_self(needs, fact_id) {
+        assert(!(forall|i: int|
+            #![trigger needs@[i]]
+            0 <= i < needs@.len() ==> needs@[i].owner == fact_id));
+        return false;
+    }
+    if !projected_time_wake_owners_are_self(wakes, fact_id) {
+        assert(!(forall|i: int|
+            #![trigger wakes@[i]]
+            0 <= i < wakes@.len() ==> wakes@[i].owner == fact_id));
+        return false;
+    }
+    assert(forall|i: int|
+        #![trigger purged@[i]]
+        0 <= i < purged@.len() ==> purged@[i] == fact_id);
+    assert(forall|i: int|
+        #![trigger needs@[i]]
+        0 <= i < needs@.len() ==> needs@[i].owner == fact_id);
+    assert(forall|i: int|
+        #![trigger wakes@[i]]
+        0 <= i < wakes@.len() ==> wakes@[i].owner == fact_id);
     true
 }
 } // verus!
@@ -4904,7 +4962,7 @@ mod contract_tests {
         assert!(!projected_need_owners_are_self(
             &[ContextNeed {
                 owner: [9; 32],
-                ..need
+                ..need.clone()
             }],
             fact_id
         ));
@@ -4915,7 +4973,42 @@ mod contract_tests {
         assert!(!projected_time_wake_owners_are_self(
             &[TimeWake {
                 owner: [9; 32],
-                ..wake
+                ..wake.clone()
+            }],
+            fact_id
+        ));
+        assert!(projected_output_owners_are_self(
+            &[fact_id],
+            &[need.clone()],
+            &[wake.clone()],
+            fact_id
+        ));
+        assert!(!projected_output_owners_are_self(
+            &[[9; 32]],
+            &[need.clone()],
+            &[wake.clone()],
+            fact_id
+        ));
+        assert!(!projected_output_owners_are_self(
+            &[fact_id],
+            &[ContextNeed {
+                owner: [9; 32],
+                ..need.clone()
+            }],
+            &[wake.clone()],
+            fact_id
+        ));
+        assert!(!projected_output_owners_are_self(
+            &[fact_id],
+            &[ContextNeed::for_key(
+                fact_id,
+                "scan_need_again",
+                FactScope::Global,
+                [3; 32]
+            )],
+            &[TimeWake {
+                owner: [9; 32],
+                ..wake.clone()
             }],
             fact_id
         ));

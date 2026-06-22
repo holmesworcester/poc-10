@@ -86,7 +86,7 @@ fn cargo_verus_verifies_production_context_offer_owner_contracts() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        combined.contains("verification results:: 12 verified, 0 errors"),
+        combined.contains("verification results:: 13 verified, 0 errors"),
         "production proof should verify the real context offer owner contracts:\n{combined}"
     );
 }
@@ -160,6 +160,9 @@ fn core_proofs_make_trust_boundary_explicit() {
         "`projected_purge_owners_are_self`, `projected_need_owners_are_self`, and",
         "`projected_time_wake_owners_are_self` accept if and only if every scanned",
         "`enforce_owner_is_self` branches on these verified production scans",
+        "`projected_output_owners_are_self` composes the three owner scans",
+        "accepts if and only if every scanned purge id, need owner, and time-wake",
+        "this aggregate helper before returning success",
         "`ContextOfferClaim::into_offer(claim, owner).owner == owner`",
         "ContextOfferClaim::into_offer(claim, owner) preserves role/scope/start/end/value",
         "`owned_offers_from_claims(claims, owner)` returns one offer per claim",
@@ -280,11 +283,11 @@ fn verus_plan_is_single_core_first_source() {
         "not merely mirrored by a separate model function",
         "Model/view proofs are not proof progress, even with a correspondence story.",
         "Current production-code foothold:",
-        "returned `ContextOffer.owner` equals",
-        "owner\nargument for one claim",
-        "slice of claims, Cargo-verus proves the same\nlength",
-        "length, owner, role, scope, start key",
-        "end key, and value preservation",
+        "`ContextOffer.owner` equals the owner argument",
+        "offer value are copied unchanged",
+        "claims, Cargo-verus proves the same length",
+        "owner, role, scope, start key, end",
+        "key, and value preservation",
         "every returned offer",
         "`ProjectionOutput::context_set` normalization step",
         "extract the routing decision inside `RouterProjector::project`",
@@ -399,6 +402,7 @@ fn verus_plan_is_single_core_first_source() {
         "projected_purge_owners_are_self(purged, fact_id) accepts if and only if every purged id is fact_id",
         "projected_need_owners_are_self(needs, fact_id) accepts if and only if every need owner is fact_id",
         "projected_time_wake_owners_are_self(wakes, fact_id) accepts if and only if every wake owner is fact_id",
+        "projected_output_owners_are_self(purged, needs, wakes, fact_id) accepts if and only if all three owner groups are fact_id",
         "ContextOfferClaim::into_offer(claim, owner).owner == owner",
         "ContextOfferClaim::into_offer(claim, owner) preserves role/scope/start/end/value",
         "owned_offers_from_claims(claims, owner).len == claims.len",
@@ -409,6 +413,7 @@ fn verus_plan_is_single_core_first_source() {
         "assume_specification` for the derived `ContextOfferClaim::clone`",
         "clone preserves the whole claim",
         "remaining owner-checking gap",
+        "aggregate owner predicate",
         "`enforce_owner_is_self` `Result` correspondence",
         "projection_context_records_offer_provenance(ctx, graph)",
         "matched_offer_loads_owner_fact(matched)",
