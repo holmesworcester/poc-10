@@ -142,6 +142,11 @@
 //!   decision used before retained context/time rows may publish; it does not
 //!   prove the SQLite writes performed after that decision.
 //! - Proven in production Rust today:
+//!   `projection_output_drop_incoming(output)` sets only
+//!   `ProjectionOutput.retain_self = false` while preserving needs, offers,
+//!   time wakes, projected row mutations, and runtime effects.
+//!   `ProjectionOutput::drop_incoming` uses this verified production helper.
+//! - Proven in production Rust today:
 //!   `runtime_effects_with_intent_row_mutation(effects, mutation)` appends
 //!   exactly one `IntentRowMutation` to `RuntimeEffects.row_mutations` while
 //!   preserving storage requirement, facts, priority facts, incoming facts and

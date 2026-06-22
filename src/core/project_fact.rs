@@ -4299,9 +4299,8 @@ pub mod effects {
         ///
         /// This is for transport wrappers and other one-shot incoming facts. It has
         /// no effect on already retained facts.
-        pub fn drop_incoming(mut self) -> Self {
-            self.retain_self = false;
-            self
+        pub fn drop_incoming(self) -> Self {
+            projection_output_drop_incoming(self)
         }
 
         pub fn need(mut self, need: ContextNeed) -> Self {
@@ -4384,6 +4383,24 @@ pub mod effects {
     }
 
     verus! {
+    /// Mark projection output as a one-shot incoming projection.
+    ///
+    /// This is the proof-facing implementation of
+    /// `ProjectionOutput::drop_incoming`: it clears only the retention bit and
+    /// leaves every output payload unchanged.
+    fn projection_output_drop_incoming(mut output: ProjectionOutput) -> (updated: ProjectionOutput)
+        ensures
+            !updated.retain_self,
+            updated.needs@ == output.needs@,
+            updated.offers@ == output.offers@,
+            updated.time_wakes@ == output.time_wakes@,
+            updated.row_mutations@ == output.row_mutations@,
+            updated.effects == output.effects,
+    {
+        output.retain_self = false;
+        output
+    }
+
     /// Append a projector-owned row mutation to projection output.
     ///
     /// This is the proof-facing implementation of
@@ -8337,6 +8354,43 @@ mod tests {
 
         assert_eq!(output.row_mutations, vec![mutation]);
         assert!(output.effects.row_mutations.is_empty());
+    }
+
+    #[test]
+    fn projection_output_drop_incoming_preserves_payload() {
+        let owner = [1; 32];
+        let role = Role::new("drop_incoming").unwrap();
+        let key = ContextKey::from_bytes([2; 32]);
+        let mutation = ProjectedRowMutation::InsertValues(TableInsert {
+            table: TableName::new("projected_rows"),
+            columns: &["id"],
+            values: vec![Value::Bytes(b"row".to_vec())],
+        });
+        let child = Fact::new(FactScope::Global, 7, b"child".to_vec());
+        let output = ProjectionOutput::new()
+            .need(ContextNeed {
+                owner,
+                role: role.clone(),
+                scope: FactScope::Global,
+                start_key: key.clone(),
+                end_key: key.clone(),
+            })
+            .offer(ContextOfferClaim {
+                role,
+                scope: FactScope::Global,
+                start_key: key.clone(),
+                end_key: key,
+                value: ContextOfferValue::empty(),
+            })
+            .row_mutation(mutation.clone())
+            .fact(child.clone())
+            .drop_incoming();
+
+        assert!(!output.retain_self);
+        assert_eq!(output.needs.len(), 1);
+        assert_eq!(output.offers.len(), 1);
+        assert_eq!(output.row_mutations, vec![mutation]);
+        assert_eq!(output.effects.facts, vec![child]);
     }
 
     #[test]

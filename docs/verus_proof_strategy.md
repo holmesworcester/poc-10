@@ -265,6 +265,9 @@ purge itself and either its source was durable or its source was incoming with
 `retain_self` set. This proves the retain/drop/self-purge decision that gates
 standing context and time-wake publication; SQLite lifecycle writes remain
 separate proof work.
+`projection_output_drop_incoming(output)` is verified over the production
+builder and sets only `retain_self = false`, preserving needs, offers, time
+wakes, projected row mutations, and runtime effects.
 
 Route-search discovery: do not prove route-table search directly over
 `FactRoute` while it contains the projector function pointer. Cargo-verus does
@@ -774,6 +777,7 @@ runtime_effects_with_storage_requirement(effects, requirement) sets the storage 
 prepared_projection_from_validated_output preserves route evidence and validated output pieces in PreparedProjection
 fact_ids_contain(ids, target) accepts if and only if target occurs in the fact-id slice
 projection_retains_fact_after_commit(projection) accepts if and only if the projection does not purge itself and durable-or-retained-incoming source remains retained
+projection_output_drop_incoming(output) clears only retain_self and preserves projection output payload
 version_replay_rebuild_shape_allowed(version_replay_rebuild, needs, offers, wakes) accepts if and only if ordinary projection or empty version replay rebuild output
 version_replay_rebuild_shape_status(version_replay_rebuild, needs, offers, wakes) returns accepted or standing-output exactly from that predicate
 version_replay_rebuild_shape_status_allows_projection(status) accepts if and only if status is VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED
