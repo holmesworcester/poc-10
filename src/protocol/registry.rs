@@ -25,8 +25,9 @@ use crate::core::facts::Fact;
 use crate::core::intents::TypedTableSchema;
 use crate::core::network;
 use crate::core::project_fact::{
-    FactRoute, FactRouteId, FactRouteStamp, ProjectionContext, ProjectionDispatcher,
-    ProjectionOutput, ProjectionRouteEvidence, Projector, RoutedProjection,
+    finalize_dispatched_projection, selected_route_evidence, FactRoute, FactRouteId,
+    FactRouteStamp, ProjectionContext, ProjectionDispatcher, ProjectionOutput,
+    ProjectionRouteEvidence, Projector, RoutedProjection,
 };
 use crate::core::runtime::{HandlerRoute, RecurringIntentSpec};
 use crate::protocol::cli as command;
@@ -1306,14 +1307,7 @@ macro_rules! projector_routes {
                     "no target projector registered for fact tag {effective_tag}"
                 ));
             };
-            Ok(ProjectionRouteEvidence {
-                fact_id,
-                route_id: stamp.route_id,
-                effective_tag,
-                route_tag: stamp.tag,
-                projector_info: stamp.projector_info,
-                storage_requirement: stamp.storage_requirement,
-            })
+            Ok(selected_route_evidence(fact_id, effective_tag, stamp))
         }
 
         fn dispatch_protocol_projection_for_effective_tag(
@@ -1324,23 +1318,17 @@ macro_rules! projector_routes {
             match effective_tag {
                 $($tag => {
                     let output = <$projector>::new().project(fact, context)?;
-                    let output = ProjectionOutput {
-                        effects: output
-                            .effects
-                            .with_storage_requirement($storage_requirement),
-                        ..output
-                    };
-                    Ok(RoutedProjection {
-                        route: ProjectionRouteEvidence {
-                            fact_id: fact.id,
+                    Ok(finalize_dispatched_projection(
+                        fact.id,
+                        effective_tag,
+                        FactRouteStamp {
                             route_id: FactRouteId::from_effective_tag($tag),
-                            effective_tag,
-                            route_tag: $tag,
-                            projector_info: $projector_info,
+                            tag: $tag,
                             storage_requirement: $storage_requirement,
+                            projector_info: $projector_info,
                         },
                         output,
-                    })
+                    ))
                 },)+
                 _ => Err(format!(
                     "no target projector registered for fact tag {effective_tag}"

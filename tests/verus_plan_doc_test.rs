@@ -86,7 +86,7 @@ fn cargo_verus_verifies_production_core_projection_contracts() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        combined.contains("verification results:: 93 verified, 0 errors"),
+        combined.contains("verification results:: 94 verified, 0 errors"),
         "production proof should verify the real core projection contracts:\n{combined}"
     );
 }
@@ -197,6 +197,8 @@ fn core_proofs_make_trust_boundary_explicit() {
         "no stamp in the slice has that tag",
         "`routed_projection_from_selected_route(fact_id, effective_tag, stamp,",
         "preserves the output unchanged",
+        "`finalize_dispatched_projection(fact_id, effective_tag, stamp, output)`",
+        "preserves every other output/effect field",
         "does not prove the generated protocol dispatcher's call-order",
         "`runtime_effects_with_storage_requirement(effects, requirement)` sets",
         "`RuntimeEffects.storage_requirement` to the selected route requirement",
@@ -278,7 +280,8 @@ fn core_proofs_make_trust_boundary_explicit() {
         "direct `match effective_tag` branch",
         "calls\n//!   the named projector in that branch",
         "The route\n//!   metadata search, field-stamping, selected-stamp helper",
-        "generated-dispatcher",
+        "dispatch\n//!   finalizer",
+        "generated-dispatcher branch theorem",
         "`PreparedProjection`",
         "correspondence theorem",
         "Not proven yet for offer finalization",
@@ -452,6 +455,7 @@ fn verus_plan_is_single_core_first_source() {
         "the stable route id",
         "`ProjectionDispatcher::dispatch_projection`",
         "direct `match effective_tag` branch",
+        "`finalize_dispatched_projection`",
         "`ProjectionRouteEvidence`: the route evidence carried with a",
         "`projection_route_evidence(fact_id, route_id, effective_tag, route_tag,",
         "returns route evidence with exactly\nthose same field",
@@ -467,7 +471,7 @@ fn verus_plan_is_single_core_first_source() {
         "preserving emitted facts, priority facts, incoming facts and metadata",
         "`prepared_projection_from_validated_output(...)` is verified",
         "preserves the source, fact, mode, route evidence",
-        "generated dispatch\ncode shape, and prepared-output carry proof",
+        "verified dispatch\nfinalization, generated dispatch code shape",
         "`projection_retains_fact_after_commit(projection)` is verified",
         "retain/drop/self-purge decision that gates\nstanding context",
         "SQLite lifecycle writes remain\nseparate proof work",
@@ -478,8 +482,8 @@ fn verus_plan_is_single_core_first_source() {
         "remain the separate\nversion replay rebuild shape proofs",
         "Leaf projectors\nstill return plain `ProjectionOutput`",
         "Cargo-verus",
-        "generated protocol dispatch branch/call\ntheorem",
-        "larger `prepare_projection` call-order theorem",
+        "protocol dispatch branch/call theorem",
+        "larger `prepare_projection`\ncall-order theorem",
         "Route-search discovery",
         "do not make a function pointer the proof identity",
         "direct dispatcher match from\nthe same declaration list",
@@ -648,6 +652,7 @@ fn verus_plan_is_single_core_first_source() {
         "selected_route_evidence(fact_id, effective_tag, stamp) preserves selected route stamp metadata and gives route_tag == effective_tag when stamp.tag == effective_tag",
         "select_route_stamp(stamps, effective_tag) returns the first matching route stamp or proves no route stamp matches",
         "routed_projection_from_selected_route(fact_id, effective_tag, stamp, output) preserves selected route stamp metadata and preserves output unchanged",
+        "finalize_dispatched_projection(fact_id, effective_tag, stamp, output) applies selected route storage and preserves raw output payload",
         "runtime_effects_with_storage_requirement(effects, requirement) sets the storage requirement and preserves the effect payload",
         "prepared_projection_from_validated_output preserves route evidence and validated output pieces in PreparedProjection",
         "fact_ids_contain(ids, target) accepts if and only if target occurs in the fact-id slice",

@@ -5066,7 +5066,7 @@ pub mod route {
     /// This helper proves the proof-relevant route stamp, not the projector
     /// function pointer. The precondition is the route-selection obligation:
     /// the selected route stamp must be the one matching the effective tag.
-    fn selected_route_evidence(
+    pub fn selected_route_evidence(
         fact_id: FactId,
         effective_tag: u8,
         stamp: FactRouteStamp,
@@ -5194,6 +5194,49 @@ pub mod route {
             output,
         }
     }
+
+    /// Finalize the output returned by the selected dispatch branch.
+    ///
+    /// Protocol dispatch calls the leaf projector first, then hands that raw
+    /// output and the selected route stamp to this helper. Verus proves that
+    /// finalization applies the route's storage requirement, preserves every
+    /// projector output field except that storage guard, and stamps route
+    /// evidence from the same selected route metadata.
+    pub fn finalize_dispatched_projection(
+        fact_id: FactId,
+        effective_tag: u8,
+        stamp: FactRouteStamp,
+        mut output: ProjectionOutput,
+    ) -> (routed: RoutedProjection)
+        requires
+            stamp.tag == effective_tag,
+        ensures
+            routed.route.fact_id == fact_id,
+            routed.route.route_id == stamp.route_id,
+            routed.route.effective_tag == effective_tag,
+            routed.route.route_tag == effective_tag,
+            routed.route.route_tag == stamp.tag,
+            routed.route.projector_info == stamp.projector_info,
+            routed.route.storage_requirement == stamp.storage_requirement,
+            routed.output.retain_self == output.retain_self,
+            routed.output.needs@ == output.needs@,
+            routed.output.offers@ == output.offers@,
+            routed.output.time_wakes@ == output.time_wakes@,
+            routed.output.row_mutations@ == output.row_mutations@,
+            routed.output.effects.storage_requirement == stamp.storage_requirement,
+            routed.output.effects.facts@ == output.effects.facts@,
+            routed.output.effects.priority_facts@ == output.effects.priority_facts@,
+            routed.output.effects.incoming_facts@ == output.effects.incoming_facts@,
+            routed.output.effects.incoming_fact_metadata == output.effects.incoming_fact_metadata,
+            routed.output.effects.purged_facts@ == output.effects.purged_facts@,
+            routed.output.effects.row_mutations@ == output.effects.row_mutations@,
+            routed.output.effects.intents@ == output.effects.intents@,
+            routed.output.effects.local_intents@ == output.effects.local_intents@,
+            routed.output.effects.version_replay_rebuild == output.effects.version_replay_rebuild,
+    {
+        output.effects.storage_requirement = stamp.storage_requirement;
+        routed_projection_from_selected_route(fact_id, effective_tag, stamp, output)
+    }
     } // verus!
 
     #[derive(Debug, Clone, Copy)]
@@ -5209,7 +5252,7 @@ pub mod route {
             fact_id: FactId,
             output: ProjectionOutput,
         ) -> RoutedProjection {
-            routed_projection_from_selected_route(fact_id, self.effective_tag, self.stamp, output)
+            finalize_dispatched_projection(fact_id, self.effective_tag, self.stamp, output)
         }
     }
 
@@ -5343,12 +5386,6 @@ pub mod route {
         ) -> Result<RoutedProjection, String> {
             let selected = self.selected_route(fact)?;
             let output = (selected.projector)(fact, context)?;
-            let output = ProjectionOutput {
-                effects: output
-                    .effects
-                    .with_storage_requirement(selected.stamp.storage_requirement),
-                ..output
-            };
             Ok(selected.into_routed_projection(fact.id, output))
         }
     }
@@ -5363,9 +5400,10 @@ pub use effects::{
     TimeRange, TimeWake, Timeline,
 };
 pub use route::{
-    EffectiveTagFn, EnvelopeRoute, FactAdmissionFn, FactProjectorInfo, FactRoute, FactRouteId,
-    FactRouteStamp, FactRouteTable, ProjectionDispatcher, ProjectionRouteEvidence, Projector,
-    ProjectorFn, RoutedProjection, RouterProjector,
+    finalize_dispatched_projection, selected_route_evidence, EffectiveTagFn, EnvelopeRoute,
+    FactAdmissionFn, FactProjectorInfo, FactRoute, FactRouteId, FactRouteStamp, FactRouteTable,
+    ProjectionDispatcher, ProjectionRouteEvidence, Projector, ProjectorFn, RoutedProjection,
+    RouterProjector,
 };
 
 const OWNER_KEYED_FACT_CLEANUP_TABLES: &[TableName] = &[
@@ -9051,6 +9089,46 @@ mod tests {
         )
         .expect("route projection");
         assert_eq!(output.offers.len(), 1);
+    }
+
+    #[test]
+    fn dispatched_projection_finalizer_stamps_route_and_applies_storage() {
+        let fact = Fact::new(FactScope::Global, 1, vec![200, 5]);
+        let child = Fact::new(FactScope::Global, 2, b"route child".to_vec());
+        let need = ContextNeed::range(fact.id, "route_finalizer", FactScope::Global, b"k", b"k");
+        let claim = ContextOfferClaim::range("route_finalizer", FactScope::Global, b"k", b"k");
+        let output = ProjectionOutput::new()
+            .need(need.clone())
+            .offer(claim.clone())
+            .fact(child.clone());
+        let stamp = FactRouteStamp {
+            route_id: FactRouteId::from_effective_tag(200),
+            tag: 200,
+            storage_requirement: StorageRequirement::Current(7),
+            projector_info: FactProjectorInfo::projector("RouteFinalizerProjector"),
+        };
+
+        let routed = finalize_dispatched_projection(fact.id, 200, stamp, output);
+
+        assert_eq!(routed.route.fact_id, fact.id);
+        assert_eq!(routed.route.route_id, FactRouteId::from_effective_tag(200));
+        assert_eq!(routed.route.effective_tag, 200);
+        assert_eq!(routed.route.route_tag, 200);
+        assert_eq!(
+            routed.route.projector_info,
+            FactProjectorInfo::projector("RouteFinalizerProjector")
+        );
+        assert_eq!(
+            routed.route.storage_requirement,
+            StorageRequirement::Current(7)
+        );
+        assert_eq!(routed.output.needs, vec![need]);
+        assert_eq!(routed.output.offers, vec![claim]);
+        assert_eq!(routed.output.effects.facts, vec![child]);
+        assert_eq!(
+            routed.output.effects.storage_requirement,
+            StorageRequirement::Current(7)
+        );
     }
 
     static ROUTE_EVIDENCE_PROJECTOR_CALLS: AtomicUsize = AtomicUsize::new(0);

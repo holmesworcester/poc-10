@@ -1226,6 +1226,7 @@ fn protocol_dispatch_uses_generated_route_match() {
         "fn dispatch_protocol_projection_for_effective_tag(",
         "match effective_tag",
         "let output = <$projector>::new().project(fact, context)?;",
+        "Ok(finalize_dispatched_projection(",
         "route_id: FactRouteId::from_effective_tag($tag)",
     ] {
         assert!(

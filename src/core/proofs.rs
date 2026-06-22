@@ -119,6 +119,13 @@
 //!   This still does not prove the generated protocol dispatcher's call-order
 //!   theorem.
 //! - Proven in production Rust today:
+//!   `finalize_dispatched_projection(fact_id, effective_tag, stamp, output)`
+//!   applies the selected route's storage requirement to the raw projector
+//!   output, preserves every other output/effect field, and returns a
+//!   `RoutedProjection` whose route evidence is stamped from that same selected
+//!   route stamp. The protocol generated dispatch branch calls this helper
+//!   immediately after the named projector returns.
+//! - Proven in production Rust today:
 //!   `runtime_effects_with_storage_requirement(effects, requirement)` sets
 //!   `RuntimeEffects.storage_requirement` to the selected route requirement
 //!   while preserving emitted facts, priority facts, incoming facts and
@@ -311,10 +318,11 @@
 //!   route declaration list as a direct `match effective_tag` branch that calls
 //!   the named projector in that branch; the generic `RouterProjector`
 //!   function-pointer path remains only for reusable/test dispatch. The route
-//!   metadata search, field-stamping, selected-stamp helper, and routed-output
-//!   constructor are verified, and the validated prepared-output constructor
-//!   preserves that route evidence. The larger generated-dispatcher and
-//!   `prepare_projection` call-order theorems are not complete yet.
+//!   metadata search, field-stamping, selected-stamp helper, dispatch
+//!   finalizer, and routed-output constructor are verified, and the validated
+//!   prepared-output constructor preserves that route evidence. The larger
+//!   generated-dispatcher branch theorem and `prepare_projection` call-order
+//!   theorem are not complete yet.
 //! - Refactored but not yet proved: projected row output and intent row output
 //!   now use separate Rust types, separate `RuntimeDescription` table lists, and
 //!   separate DB apply helpers. This gives

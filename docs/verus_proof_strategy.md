@@ -254,8 +254,9 @@ load, prepare, commit.
 Current production-code foothold: `ProjectionDispatcher::dispatch_projection`
 returns `RoutedProjection`. The poc-10 protocol dispatcher is generated from
 the single route declaration list as a direct `match effective_tag` branch:
-the branch for a tag calls that branch's named projector, applies that route's
-storage requirement, and attaches route evidence from the same declaration.
+the branch for a tag calls that branch's named projector, then hands the raw
+projector output plus that branch's route stamp to
+`finalize_dispatched_projection`.
 `RouterProjector` remains available as a generic/test dispatcher for static
 route tables, but the protocol production path no longer relies on a
 function-pointer route table to decide which projector ran. Leaf projectors
@@ -276,6 +277,11 @@ It also proves that
 `routed_projection_from_selected_route(fact_id, effective_tag, stamp, output)`
 attaches that selected-stamp route evidence to the actual projector output
 value passed to it and preserves the output unchanged.
+Cargo-verus proves
+`finalize_dispatched_projection(fact_id, effective_tag, stamp, output)` over
+the production helper called by generated protocol dispatch: it applies the
+selected route's storage requirement, preserves every other output/effect
+field, and returns route evidence stamped from the same selected route stamp.
 `runtime_effects_with_storage_requirement(effects, requirement)` is verified
 over the production storage-guard overwrite: it sets
 `RuntimeEffects.storage_requirement` to the selected route requirement while
@@ -286,10 +292,11 @@ production constructor used after prepare-stage validation succeeds; it
 preserves the source, fact, mode, route evidence, timing metadata, incoming
 metadata, retention bit, projected context, time wakes, projected row
 mutations, and runtime effects carried into `PreparedProjection`. This is
-selected-route metadata-search, routed-output constructor, generated dispatch
-code shape, and prepared-output carry proof, not the full route theorem:
-Cargo-verus still needs to prove the generated protocol dispatch branch/call
-theorem and the larger `prepare_projection` call-order theorem.
+selected-route metadata-search, routed-output constructor, verified dispatch
+finalization, generated dispatch code shape, and prepared-output carry proof,
+not the full route theorem: Cargo-verus still needs to prove the generated
+protocol dispatch branch/call theorem and the larger `prepare_projection`
+call-order theorem.
 `projection_retains_fact_after_commit(projection)` is verified over the
 production lifecycle decision and accepts if and only if the projection does not
 purge itself and either its source was durable or its source was incoming with
@@ -820,6 +827,7 @@ projection_route_evidence(fact_id, route_id, effective_tag, route_tag, projector
 selected_route_evidence(fact_id, effective_tag, stamp) preserves selected route stamp metadata and gives route_tag == effective_tag when stamp.tag == effective_tag
 select_route_stamp(stamps, effective_tag) returns the first matching route stamp or proves no route stamp matches
 routed_projection_from_selected_route(fact_id, effective_tag, stamp, output) preserves selected route stamp metadata and preserves output unchanged
+finalize_dispatched_projection(fact_id, effective_tag, stamp, output) applies selected route storage and preserves raw output payload
 runtime_effects_with_storage_requirement(effects, requirement) sets the storage requirement and preserves the effect payload
 prepared_projection_from_validated_output preserves route evidence and validated output pieces in PreparedProjection
 projection_mode_from_replay_flag(replay) returns Normal exactly for replay == 0 and Replay exactly for replay != 0
