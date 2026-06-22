@@ -60,6 +60,10 @@
 //!   foreign time-wake exactly according to those owner predicates;
 //!   `enforce_owner_is_self` branches on this verified production status.
 //! - Proven in production Rust today:
+//!   `owner_status_allows_projection(status)` accepts if and only if `status`
+//!   is exactly `OWNER_CHECK_ACCEPTED`, so the success branch is not an
+//!   unproved interpretation of the status byte.
+//! - Proven in production Rust today:
 //!   `ContextOfferClaim::into_offer(claim, owner).owner == owner`.
 //! - Proven in production Rust today:
 //!   `ContextOfferClaim::into_offer(claim, owner) preserves role/scope/start/end/value`.
@@ -77,8 +81,9 @@
 //! - Not proven yet for offer finalization: `ProjectionOutput::context_set`
 //!   normalization or `prepare_projection` call order.
 //! - Not proven yet for owner enforcement: the exported theorem tying
-//!   `enforce_owner_is_self` `Result` wrapper and `prepare_projection` call
-//!   order to the verified status helper.
+//!   `enforce_owner_is_self` `Result` wrapper, diagnostic rejection branches,
+//!   and `prepare_projection` call order to the verified status and allow
+//!   helpers.
 //! - Punted for a later core proof model: the composition stubs that cross
 //!   matcher construction, offer loading, route dispatch, projected-table
 //!   write ownership, context replacement, and commit.

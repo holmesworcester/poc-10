@@ -89,7 +89,8 @@ threat-model checklist item is claimed from this stage alone.
 Current production-code foothold: `projected_owner_matches`,
 `projected_purge_owners_are_self`, `projected_need_owners_are_self`,
 `projected_time_wake_owners_are_self`, `projected_output_owners_are_self`,
-`projected_owner_status`, `ContextOfferClaim::into_offer`,
+`projected_owner_status`, `owner_status_allows_projection`,
+`ContextOfferClaim::into_offer`,
 `owned_offers_from_claims`, and `context_set_from_projection_parts` are real
 production helpers inside Verus verification. Cargo-verus proves that
 `projected_owner_matches(owner, fact_id)`
@@ -101,19 +102,24 @@ owner in the projection output parts equals the projected fact id.
 `projected_owner_status` returns the exact production status class: accepted,
 foreign purge, foreign need, or foreign time wake, with each status tied to the
 same owner predicates; `enforce_owner_is_self` branches on that verified status
-before producing `Ok(())` or a diagnostic error. Cargo-verus also proves that
-the returned `ContextOffer.owner` equals the owner argument for one claim and
-that role, scope, start key, end key, and offer value are copied unchanged. For
-a slice of claims, Cargo-verus proves the same length, owner, role, scope,
-start key, end key, and value preservation for every returned offer. For the
-pre-normalization context-set construction, Cargo-verus proves the input needs
-are carried unchanged and the constructed offers preserve the same owner and
-claim fields. That is not the full offer-finalization theorem yet: the
+before producing `Ok(())` or a diagnostic error.
+`owner_status_allows_projection` accepts if and only if the status is exactly
+the accepted status, so the production success branch has a verified decision
+predicate rather than an informal interpretation of the status byte.
+Cargo-verus also proves that the returned `ContextOffer.owner` equals the
+owner argument for one claim and that role, scope, start key, end key, and
+offer value are copied unchanged. For a slice of claims, Cargo-verus proves
+the same length, owner, role, scope, start key, end key, and value preservation
+for every returned offer. For the pre-normalization context-set construction,
+Cargo-verus proves the input needs are carried unchanged and the constructed
+offers preserve the same owner and claim fields. That is not the full
+offer-finalization theorem yet: the
 `ProjectionOutput::context_set` normalization step and the `prepare_projection`
 call order remain open core proof work. It is also not the full owner-bearing
 output theorem yet: the exported theorem still needs a correspondence proof
-tying the `enforce_owner_is_self` `Result` wrapper and `prepare_projection`
-call order to the verified status helper.
+tying the `enforce_owner_is_self` `Result` wrapper, diagnostic rejection
+branches, and `prepare_projection` call order to the verified status and allow
+helpers.
 
 ### Stage 3: Routed Projection Witness
 
@@ -565,6 +571,7 @@ projected_need_owners_are_self(needs, fact_id) accepts if and only if every need
 projected_time_wake_owners_are_self(wakes, fact_id) accepts if and only if every wake owner is fact_id
 projected_output_owners_are_self(purged, needs, wakes, fact_id) accepts if and only if all three owner groups are fact_id
 projected_owner_status(purged, needs, wakes, fact_id) returns accepted/foreign-purge/foreign-need/foreign-wake exactly from those predicates
+owner_status_allows_projection(status) accepts if and only if status is OWNER_CHECK_ACCEPTED
 ContextOfferClaim::into_offer(claim, owner).owner == owner
 ContextOfferClaim::into_offer(claim, owner) preserves role/scope/start/end/value
 owned_offers_from_claims(claims, owner).len == claims.len
@@ -585,9 +592,10 @@ The remaining offer-finalization gap is no longer claim-to-offer field copying
 or pre-normalization context-set assembly; it is proving the
 `ProjectionOutput::context_set` normalization step and `prepare_projection`
 call order over executable helper code. The remaining owner-checking gap is no
-longer the equality decision, per-slice scans, aggregate owner predicate, or
-status classification; it is proving the `enforce_owner_is_self` `Result`
-wrapper and `prepare_projection` call order over executable helper code.
+longer the equality decision, per-slice scans, aggregate owner predicate,
+status classification, or accept-status decision; it is proving the
+`enforce_owner_is_self` `Result` wrapper, diagnostic rejection branches, and
+`prepare_projection` call order over executable helper code.
 
 Core proves plumbing only. It must not prove that an admin is valid, an endpoint
 may sign content, a deletion is authorized, a receipt grants authority, or a

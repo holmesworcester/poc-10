@@ -619,8 +619,11 @@ fn enforce_owner_is_self(fact: &Fact, output: &ProjectionOutput) -> Result<(), S
     let purged = &output.effects.purged_facts;
     let needs = &output.needs;
     let wakes = &output.time_wakes;
-    match projected_owner_status(purged, needs, wakes, fact.id) {
-        OWNER_CHECK_ACCEPTED => Ok(()),
+    let status = projected_owner_status(purged, needs, wakes, fact.id);
+    if owner_status_allows_projection(status) {
+        return Ok(());
+    }
+    match status {
         OWNER_CHECK_FOREIGN_PURGE => Err(enforce_projected_owner_error(
             "projector tried to purge fact",
             fact.id,
@@ -641,6 +644,10 @@ fn enforce_owner_is_self(fact: &Fact, output: &ProjectionOutput) -> Result<(), S
 }
 
 verus! {
+// Owner-guard status values are a small executable proof boundary. The scan
+// helpers below prove which status production code computes; this final helper
+// proves that the only status allowed to continue projection is the accepted
+// one.
 const OWNER_CHECK_ACCEPTED: u8 = 0;
 const OWNER_CHECK_FOREIGN_PURGE: u8 = 1;
 const OWNER_CHECK_FOREIGN_NEED: u8 = 2;
@@ -915,6 +922,13 @@ fn projected_owner_status(
         #![trigger wakes@[i]]
         0 <= i < wakes@.len() ==> wakes@[i].owner == fact_id);
     OWNER_CHECK_ACCEPTED
+}
+
+fn owner_status_allows_projection(status: u8) -> (accepted: bool)
+    ensures
+        accepted <==> status == OWNER_CHECK_ACCEPTED,
+{
+    status == OWNER_CHECK_ACCEPTED
 }
 } // verus!
 
@@ -5111,10 +5125,12 @@ mod contract_tests {
             projected_owner_status(&[fact_id], &[need.clone()], &[wake.clone()], fact_id),
             OWNER_CHECK_ACCEPTED
         );
+        assert!(owner_status_allows_projection(OWNER_CHECK_ACCEPTED));
         assert_eq!(
             projected_owner_status(&[[9; 32]], &[need.clone()], &[wake.clone()], fact_id),
             OWNER_CHECK_FOREIGN_PURGE
         );
+        assert!(!owner_status_allows_projection(OWNER_CHECK_FOREIGN_PURGE));
         assert_eq!(
             projected_owner_status(
                 &[fact_id],
@@ -5127,6 +5143,7 @@ mod contract_tests {
             ),
             OWNER_CHECK_FOREIGN_NEED
         );
+        assert!(!owner_status_allows_projection(OWNER_CHECK_FOREIGN_NEED));
         assert_eq!(
             projected_owner_status(
                 &[fact_id],
@@ -5144,6 +5161,10 @@ mod contract_tests {
             ),
             OWNER_CHECK_FOREIGN_TIME_WAKE
         );
+        assert!(!owner_status_allows_projection(
+            OWNER_CHECK_FOREIGN_TIME_WAKE
+        ));
+        assert!(!owner_status_allows_projection(99));
     }
 
     #[test]
