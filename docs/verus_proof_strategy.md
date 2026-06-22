@@ -211,11 +211,14 @@ Concrete work: limit database write access before relying on offers as proof
 records.
 `ProjectionWriteTx` is constructible only inside
 `project_fact.rs::commit_projection_effects`; `IntentWriteTx` is constructible
-only inside intent handling; protocol projectors, query modules, and intent
-handlers do not receive a raw `Db`, raw `rusqlite::Connection`, or generic
-write transaction for projected state. Projectors emit values
-(`ContextOfferClaim`, `ContextNeed`, `ProjectedRowMutation`, facts, intents);
-core decides which write authority can commit each value.
+only inside intent handling; protocol projectors and query modules do not
+receive a raw `Db`, raw `rusqlite::Connection`, or generic write transaction
+for projected state. Projectors emit values (`ContextOfferClaim`,
+`ContextNeed`, `ProjectedRowMutation`, facts, intents); core decides which
+write authority can commit each value. Intent handlers are not yet fully sealed:
+`HandlerContext::db()` still exposes transaction-local SQL for handler-owned
+reads and writes, so the proof plan must replace that with read/intent-authority
+accessors before treating handler table confinement as proved.
 
 Win: the code shape makes direct projected-state writes unrepresentable outside
 the projection worker. This is the main security boundary we settled on.
@@ -232,6 +235,18 @@ only through `IntentWriteTx`; query modules have read access only; tests and
 protocol modules cannot bypass the typed write boundary; and
 `projected_table_writes_are_project_fact_only` has a realistic Rust-code proof
 target.
+
+Current production-code foothold: `commit_projection_effects` now constructs a
+`ProjectionWriteTx` inside the SQL transaction and passes it through the
+projection-owned commit stages that settle the selected input, publish retained
+context/time-wake state, wake newly unblocked projection work, and commit
+projector-emitted effects. Intent dispatch now constructs an `IntentWriteTx`
+inside the SQL transaction and passes it through the commit stages that consume
+the selected queue row, load handler context, run the handler savepoint, check
+storage compatibility, and commit validated handler effects. This is not the
+full DB confinement proof yet: the lower SQL helpers still unwrap to `&Db`,
+`HandlerContext::db()` still exposes raw handler SQL, and row mutations have not
+yet been split into projected versus intent-owned wrappers.
 
 ### Stage 5: Projected Versus Intent Row Authority
 

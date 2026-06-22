@@ -367,6 +367,74 @@ fn poc10_pipeline_work_items_live_in_named_core_files() {
 }
 
 #[test]
+fn projection_commit_stages_use_projection_write_capability() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let project_fact = source_text(&root.join("src/core/project_fact.rs"));
+
+    for required in [
+        "struct ProjectionWriteTx",
+        "let tx = ProjectionWriteTx::new(raw_tx)",
+        "fn commit_stale_projection_input_in_tx(\n    tx: &ProjectionWriteTx<'_>",
+        "fn commit_rejected_projection_input_in_tx(\n    tx: &ProjectionWriteTx<'_>",
+        "fn settle_projected_input_lifecycle_in_tx(\n    tx: &ProjectionWriteTx<'_>",
+        "fn publish_retained_projection_state_in_tx(\n    tx: &ProjectionWriteTx<'_>",
+        "fn wake_projection_work_from_new_context_in_tx(\n    tx: &ProjectionWriteTx<'_>",
+        "fn commit_projector_emitted_runtime_effects_in_tx(\n    tx: &ProjectionWriteTx<'_>",
+    ] {
+        assert!(
+            project_fact.contains(required),
+            "projection commit path should expose its write capability boundary: {required:?}"
+        );
+    }
+
+    for forbidden in [
+        "fn publish_retained_projection_state_in_tx(\n    tx: &Db",
+        "fn wake_projection_work_from_new_context_in_tx(\n    tx: &Db",
+        "fn commit_projector_emitted_runtime_effects_in_tx(\n    tx: &Db",
+    ] {
+        assert!(
+            !project_fact.contains(forbidden),
+            "projection-owned commit stage should not take a raw Db transaction: {forbidden:?}"
+        );
+    }
+}
+
+#[test]
+fn intent_commit_stages_use_intent_write_capability() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let handle_intent = source_text(&root.join("src/core/handle_intent.rs"));
+
+    for required in [
+        "struct IntentWriteTx",
+        "let tx = IntentWriteTx::new(raw_tx)",
+        "fn load_handler_context<'a>(\n    tx: &IntentWriteTx<'a>",
+        "fn run_handler_and_validate_effects(\n    tx: &IntentWriteTx<'_>",
+        "fn commit_handler_emitted_runtime_effects_in_tx(\n    tx: &IntentWriteTx<'_>",
+        "fn run_handler_in_savepoint(\n    tx: &IntentWriteTx<'_>",
+        "fn handler_storage_requirement_satisfied(\n    tx: &IntentWriteTx<'_>",
+        "fn consume_queued_intent_in_tx(\n    tx: &IntentWriteTx<'_>",
+    ] {
+        assert!(
+            handle_intent.contains(required),
+            "intent commit path should expose its write capability boundary: {required:?}"
+        );
+    }
+
+    for forbidden in [
+        "fn load_handler_context<'a>(\n    store: &'a Db",
+        "fn run_handler_and_validate_effects(\n    tx: &Db",
+        "fn run_handler_in_savepoint(\n    tx: &Db",
+        "fn handler_storage_requirement_satisfied(\n    tx: &Db",
+        "fn consume_queued_intent_in_tx(\n    db: &Db",
+    ] {
+        assert!(
+            !handle_intent.contains(forbidden),
+            "intent-owned commit stage should not take a raw Db transaction: {forbidden:?}"
+        );
+    }
+}
+
+#[test]
 fn poc10_root_exports_protocol_owned_manifests() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
 
@@ -1217,6 +1285,7 @@ fn poc10_target_root_manifests_are_declarations_only() {
             .into_iter()
             .filter(|line| {
                 !(line.starts_with("#[path = ")
+                    || line.starts_with("#[cfg(")
                     || line.starts_with("pub mod ")
                     || line.starts_with("pub(crate) mod ")
                     || line.starts_with("mod ")

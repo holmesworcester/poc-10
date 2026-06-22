@@ -81,6 +81,25 @@ enum LoadedIntent<'a> {
     TerminalDrop(TerminalIntentDrop),
 }
 
+/// Intent-owned write capability for one open SQL transaction.
+///
+/// Intent dispatch uses this boundary to consume the selected queue row, build
+/// its transaction-local handler context, run the handler savepoint, and publish
+/// validated handler effects atomically.
+struct IntentWriteTx<'a> {
+    db: &'a Db,
+}
+
+impl<'a> IntentWriteTx<'a> {
+    fn new(db: &'a Db) -> Self {
+        Self { db }
+    }
+
+    fn db(&self) -> &'a Db {
+        self.db
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IntentQueue {
     Durable,
@@ -369,21 +388,22 @@ fn run_and_commit_loaded_intent(
         storage_requirement,
     } = input;
     store
-        .write_transaction(|tx| {
+        .write_transaction(|raw_tx| {
+            let tx = IntentWriteTx::new(raw_tx);
             perf::measure_result("intent_commit_tx_body", || {
-                if !handler_storage_requirement_satisfied(tx, storage_requirement)
+                if !handler_storage_requirement_satisfied(&tx, storage_requirement)
                     .map_err(sqlite_string_error)?
                 {
                     // The route targets a storage version this database cannot
                     // currently satisfy. Consume the stale work without allowing the
                     // handler to write rows for an old shape.
-                    return consume_queued_intent_in_tx(tx, queued.queue, &queued.intent_id);
+                    return consume_queued_intent_in_tx(&tx, queued.queue, &queued.intent_id);
                 }
-                if !consume_queued_intent_in_tx(tx, queued.queue, &queued.intent_id)? {
+                if !consume_queued_intent_in_tx(&tx, queued.queue, &queued.intent_id)? {
                     return Ok(false);
                 }
                 let Some(context) = perf::measure_result("intent_load_handler_context", || {
-                    load_handler_context(tx, &queued.intent, queued.mode)
+                    load_handler_context(&tx, &queued.intent, queued.mode)
                 })
                 .map_err(sqlite_string_error)?
                 else {
@@ -393,7 +413,7 @@ fn run_and_commit_loaded_intent(
                 };
                 let Some(effects) = perf::measure_result("intent_handler_and_validate", || {
                     run_handler_and_validate_effects(
-                        tx,
+                        &tx,
                         handler,
                         &queued.intent,
                         context,
@@ -408,8 +428,8 @@ fn run_and_commit_loaded_intent(
                     return Ok(true);
                 };
                 perf::measure_result("intent_commit_runtime_effects", || {
-                    commit_runtime_effects_in_tx(
-                        tx,
+                    commit_handler_emitted_runtime_effects_in_tx(
+                        &tx,
                         &effects,
                         allowed_tables,
                         registered_intent_kinds,
@@ -431,7 +451,10 @@ fn run_and_commit_loaded_intent(
 /// commits only exact row and context-row deletion during Stage 2.
 fn drop_terminal_queued_intent(store: &Db, drop: TerminalIntentDrop) -> Result<bool, String> {
     store
-        .write_transaction(|tx| consume_queued_intent_in_tx(tx, drop.queue, &drop.intent_id))
+        .write_transaction(|raw_tx| {
+            let tx = IntentWriteTx::new(raw_tx);
+            consume_queued_intent_in_tx(&tx, drop.queue, &drop.intent_id)
+        })
         .map_err(|err| format!("drop terminal intent: {err}"))
 }
 
@@ -442,19 +465,19 @@ fn drop_terminal_queued_intent(store: &Db, drop: TerminalIntentDrop) -> Result<b
 /// longer exists, so Stage 2 treats the selected intent as stale and commits
 /// only queue consumption.
 fn load_handler_context<'a>(
-    store: &'a Db,
+    tx: &IntentWriteTx<'a>,
     intent: &Intent,
     mode: HandlerMode,
 ) -> Result<Option<HandlerContext<'a>>, String> {
     let mut facts = Vec::new();
     for id in &intent.context_fact_ids {
-        let Some(fact) = load_retained_fact(store, &id)? else {
+        let Some(fact) = load_retained_fact(tx.db(), &id)? else {
             return Ok(None);
         };
         facts.push(fact);
     }
     Ok(Some(
-        HandlerContext::with_facts(store, facts).with_mode(mode),
+        HandlerContext::with_facts(tx.db(), facts).with_mode(mode),
     ))
 }
 
@@ -481,7 +504,7 @@ fn load_retained_fact(store: &Db, id: &FactId) -> Result<Option<Fact>, String> {
 /// the caller commit only queue consumption. Successful effects are tagged with
 /// the route's storage requirement and validated before the transaction commits.
 fn run_handler_and_validate_effects(
-    tx: &Db,
+    tx: &IntentWriteTx<'_>,
     handler: &dyn IntentHandler,
     intent: &Intent,
     context: HandlerContext<'_>,
@@ -505,24 +528,48 @@ fn run_handler_and_validate_effects(
     }
 }
 
+fn commit_handler_emitted_runtime_effects_in_tx(
+    tx: &IntentWriteTx<'_>,
+    effects: &RuntimeEffects,
+    allowed_tables: &[TableName],
+    registered_intent_kinds: &[&str],
+    fact_admission: Option<FactAdmissionFn>,
+    replay: bool,
+    allow_rebuild: bool,
+) -> rusqlite::Result<crate::core::project_fact::commit_effects::RuntimeEffectCounts> {
+    commit_runtime_effects_in_tx(
+        tx.db(),
+        effects,
+        allowed_tables,
+        registered_intent_kinds,
+        fact_admission,
+        replay,
+        allow_rebuild,
+    )
+}
+
 fn run_handler_in_savepoint(
-    tx: &Db,
+    tx: &IntentWriteTx<'_>,
     run: impl FnOnce() -> crate::core::intents::HandlerResult,
 ) -> Result<crate::core::intents::HandlerResult, String> {
-    tx.conn()
+    tx.db()
+        .conn()
         .execute_batch("SAVEPOINT intent_handler_run")
         .map_err(|err| format!("open handler savepoint: {err}"))?;
     let result = run();
     match &result {
         Ok(_) => tx
+            .db()
             .conn()
             .execute_batch("RELEASE intent_handler_run")
             .map_err(|err| format!("release handler savepoint: {err}"))?,
         Err(_) => {
-            tx.conn()
+            tx.db()
+                .conn()
                 .execute_batch("ROLLBACK TO intent_handler_run")
                 .map_err(|err| format!("rollback handler savepoint: {err}"))?;
-            tx.conn()
+            tx.db()
+                .conn()
                 .execute_batch("RELEASE intent_handler_run")
                 .map_err(|err| format!("release handler savepoint: {err}"))?;
         }
@@ -531,12 +578,13 @@ fn run_handler_in_savepoint(
 }
 
 fn handler_storage_requirement_satisfied(
-    tx: &Db,
+    tx: &IntentWriteTx<'_>,
     requirement: StorageRequirement,
 ) -> Result<bool, String> {
     match requirement {
         StorageRequirement::MaintenanceBypass => Ok(true),
         StorageRequirement::Current(version) => tx
+            .db()
             .current_storage_version()
             .map(|stored| stored == Some(version))
             .map_err(|err| format!("read storage version marker: {err}")),
@@ -552,10 +600,11 @@ fn handler_storage_requirement_satisfied(
 /// Returning `false` means the selected row disappeared before the transaction
 /// reached it, so the caller must not run handler code or commit effects.
 fn consume_queued_intent_in_tx(
-    db: &Db,
+    tx: &IntentWriteTx<'_>,
     queue: IntentQueue,
     intent_id: &[u8],
 ) -> rusqlite::Result<bool> {
+    let db = tx.db();
     if delete_intent_row_in_tx(db, queue, intent_id)? == 0 {
         return Ok(false);
     }
