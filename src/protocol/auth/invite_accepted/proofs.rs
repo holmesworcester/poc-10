@@ -7,8 +7,9 @@
 //! `ProjectionContext`, and `ProjectionOutput` values we execute.
 //!
 //! The first real theorem for this module must be over the actual
-//! `InviteAcceptedProjector::project` path or over a verified view extracted
-//! from its actual Rust inputs and output. Its safety direction should prove:
+//! `InviteAcceptedProjector::project` path and the Rust `Fact`,
+//! `ProjectionContext`, and `ProjectionOutput` values it executes. Its safety
+//! direction should prove:
 //!
 //! ```text
 //! successful invite-accepted projection emits `auth_workspace_accepted`

@@ -100,7 +100,9 @@ fn protocol_proof_modules_do_not_claim_model_only_theorems() {
     ];
     let required = [
         "No theorem in this file currently claims threat-model coverage.",
-        "actual Rust inputs and output",
+        "Rust `Fact`",
+        "`ProjectionContext`",
+        "`ProjectionOutput` values it executes",
     ];
     let forbidden = [
         "SpecSignatureFact",
@@ -109,6 +111,7 @@ fn protocol_proof_modules_do_not_claim_model_only_theorems() {
         "SpecWorkspaceAcceptedOffer",
         "SpecWorkspaceFact",
         "SpecWorkspaceMaterializedOutput",
+        "verified view extracted",
         "theorem_signature_projector_offer_is_valid",
         "theorem_workspace_accepted_projector_offer_is_valid",
         "theorem_workspace_materialization_only_if",

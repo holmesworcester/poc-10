@@ -6,8 +6,8 @@
 //! `ProjectionContext`, and `ProjectionOutput` values we execute.
 //!
 //! The first real theorem for this module must be over the actual
-//! `WorkspaceProjector::project` path or over a verified view extracted from
-//! its actual Rust inputs and output. Its safety direction should prove:
+//! `WorkspaceProjector::project` path and the Rust `Fact`, `ProjectionContext`,
+//! and `ProjectionOutput` values it executes. Its safety direction should prove:
 //!
 //! ```text
 //! successful workspace projection materializes a workspace row,
