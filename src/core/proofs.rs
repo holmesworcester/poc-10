@@ -49,16 +49,16 @@
 //!   `projected_purge_owners_are_self`, `projected_need_owners_are_self`, and
 //!   `projected_time_wake_owners_are_self` accept if and only if every scanned
 //!   purge id, need owner, or time-wake owner equals the projected fact id;
-//!   `enforce_owner_is_self` branches on these verified production scans.
+//!   the unified prepare-stage guard branches on these verified production scans.
 //! - Proven in production Rust today:
 //!   `projected_output_owners_are_self` composes the three owner scans and
 //!   accepts if and only if every scanned purge id, need owner, and time-wake
-//!   owner equals the projected fact id; `enforce_owner_is_self` branches on
-//!   this aggregate helper before returning success or a diagnostic error.
+//!   owner equals the projected fact id.
 //! - Proven in production Rust today:
 //!   `projected_owner_status` returns accepted, foreign purge, foreign need, or
 //!   foreign time-wake exactly according to those owner predicates;
-//!   `enforce_owner_is_self` branches on this verified production status.
+//!   `prepare_projection_output_status` branches on this verified production
+//!   status through the accepted-output helper.
 //! - Proven in production Rust today:
 //!   `owner_status_allows_projection(status)` accepts if and only if `status`
 //!   is exactly `OWNER_CHECK_ACCEPTED`, so the success branch is not an
@@ -66,13 +66,12 @@
 //! - Proven in production Rust today:
 //!   `projection_output_owner_status(output, fact_id)` applies the same
 //!   accepted/foreign-purge/foreign-need/foreign-time-wake classification to
-//!   the actual `ProjectionOutput` object consumed by `enforce_owner_is_self`.
+//!   the actual `ProjectionOutput` object consumed by the prepare-stage guard.
 //! - Proven in production Rust today:
 //!   `projection_output_owner_enforcement_accepts(output, fact_id)` accepts if
 //!   and only if every purge id, need owner, and time-wake owner in the actual
-//!   `ProjectionOutput` is the projected fact id. `enforce_owner_is_self` uses
-//!   this helper for its success branch; diagnostic rejection strings remain
-//!   ordinary Rust.
+//!   `ProjectionOutput` is the projected fact id. The unified prepare-stage
+//!   guard uses this helper for its owner-bearing success branch.
 //! - Proven in production Rust today:
 //!   `ContextOfferClaim::into_offer(claim, owner).owner == owner`.
 //! - Proven in production Rust today:
@@ -89,9 +88,9 @@
 //!   while building same-index owned offers from output claims.
 //! - Proven in production Rust today:
 //!   `projection_context_offers_match_claims(context, claims, owner)` accepts
-//!   only if every final, normalized context offer matches some output claim
-//!   after core stamps `owner` onto that claim's role, scope, range, and value.
-//!   This is a final-output guard, not a semantic role proof.
+//!   if and only if every final, normalized context offer matches some output
+//!   claim after core stamps `owner` onto that claim's role, scope, range, and
+//!   value. This is a final-output guard, not a semantic role proof.
 //! - Proven in production Rust today:
 //!   `projection_route_evidence(fact_id, route_id, effective_tag, route_tag,
 //!   projector_info, storage_requirement)` returns `ProjectionRouteEvidence`
@@ -150,9 +149,15 @@
 //!   scans the exact prepared fields that commit may publish and accepts if and
 //!   only if all context needs, context offers, time wakes, and purges are
 //!   owned by the projected fact and any version replay rebuild has no standing
-//!   context or time wakes. `prepare_projection` calls the corresponding
-//!   validation wrapper after final context construction and before constructing
-//!   `PreparedProjection`.
+//!   context or time wakes.
+//! - Proven in production Rust today:
+//!   `prepare_projection_output_status(fact, output, context)` composes the
+//!   owner-bearing output, final offer-claim, version replay rebuild, and
+//!   commit-facing field guards. It returns accepted if and only if those
+//!   proof-critical prepare predicates all hold for the actual routed output
+//!   and final context. `prepare_projection` calls one ordinary `Result`
+//!   wrapper around this verified status helper after final context
+//!   construction and before runtime-effect admission.
 //! - Proven in production Rust today:
 //!   `projection_mode_from_replay_flag(replay)` returns `Normal` if and only if
 //!   the stored SQL replay flag is `0`, and returns `Replay` if and only if the
@@ -247,14 +252,13 @@
 //! - Proven in production Rust today:
 //!   `version_replay_rebuild_projection_status(context, wakes, effects)`
 //!   applies the same accepted/standing-output classification to the actual
-//!   prepared projection shape consumed by
-//!   `validate_version_replay_rebuild_projection_shape`.
+//!   prepared projection shape consumed by the unified prepare-stage guard.
 //! - Proven in production Rust today:
 //!   `version_replay_rebuild_projection_accepts(context, wakes, effects)`
 //!   accepts if and only if the projection is ordinary, or it is a version
 //!   replay rebuild whose prepared context and time wakes contain no standing
-//!   output. `validate_version_replay_rebuild_projection_shape` uses this
-//!   verified helper for its success branch.
+//!   output. `prepare_projection_output_status` uses this verified helper for
+//!   its rebuild-shape success branch.
 //! - Proven in production Rust today:
 //!   `version_replay_rebuild_effect_has_no_fact_or_intent_work(effects)`
 //!   accepts if and only if a version replay rebuild effect is absent, or it
@@ -335,7 +339,8 @@
 //!   metadata search, field-stamping, selected-stamp helper, dispatch
 //!   finalizer, and routed-output constructor are verified, and the validated
 //!   prepared-output constructor preserves that route evidence. The larger
-//!   `prepare_projection` call-order theorem is not complete yet.
+//!   `prepare_projection` theorem still needs to carry the verified
+//!   prepare-status result through runtime-effect admission and construction.
 //! - Refactored but not yet proved: projected row output and intent row output
 //!   now use separate Rust types, separate `RuntimeDescription` table lists, and
 //!   separate DB apply helpers. This gives
@@ -345,19 +350,18 @@
 //!   The local guard rejecting intent row mutations from projector effects is
 //!   proved.
 //! - Not proven here today: every exported `theorem_*` runtime/core property.
-//! - Not proven yet for offer finalization: full `prepare_projection`
-//!   call-order proof. The unnormalized bridge from `ProjectionOutput` to
-//!   `ContextSet` is proved, the final normalized offers are checked by a
-//!   verified production guard, and the final prepared commit fields are
-//!   checked by a verified production guard.
+//! - Not proven yet for offer finalization: exported theorem correspondence to
+//!   the full `prepare_projection` sequence. The unnormalized bridge from
+//!   `ProjectionOutput` to `ContextSet` is proved, final normalized offers are
+//!   checked by a verified production guard, final prepared commit fields are
+//!   checked by a verified production guard, and those guards are composed by a
+//!   verified prepare-stage status helper.
 //! - Not proven yet for owner enforcement: the exported theorem tying
-//!   `enforce_owner_is_self` `Result` wrapper diagnostic rejection branches and
-//!   `prepare_projection` call order to the verified status and allow helpers.
-//!   The accepted-output decision is proved.
+//!   `prepare_projection` to the unified verified prepare-stage status helper.
 //! - Not proven yet for version replay rebuild admission: the
-//!   remaining work is the full `prepare_projection` call-order proof and the
-//!   diagnostic rejection branch around the verified prepared-shape accept
-//!   helper.
+//!   remaining work is exported theorem correspondence to the full
+//!   `prepare_projection` sequence after the verified prepare-stage guard
+//!   accepts.
 //! - Not fully proven yet for incoming metadata map insertion:
 //!   `incoming_fact_with_metadata` now has verified production helpers for the
 //!   incoming-fact vector append and unrelated-field preservation, and runtime
@@ -773,7 +777,7 @@ pub mod verus_model {
     // These should be replaced before projector proofs claim threat-model
     // coverage. They are smaller than the composition stubs above and track
     // concrete local code paths such as `ProjectionOutput::new().need(...)` and
-    // `enforce_owner_is_self`.
+    // `prepare_projection_output_status`.
     // -------------------------------------------------------------------------
 
     // Near-term trusted core theorem: owner-bearing projector outputs are

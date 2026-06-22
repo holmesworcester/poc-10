@@ -611,22 +611,10 @@ fn prepare_projection(
     })?;
     let route_evidence = routed.route;
     let output = routed.output;
-    enforce_owner_is_self(&fact, &output)?;
     let projected_context = output.context_set(fact.id);
-    validate_projection_context_finalization(&projected_context, &output.offers, fact.id)?;
+    validate_prepare_projection_output(&fact, &output, &projected_context)?;
     let projected_row_mutations = output.row_mutations;
     let runtime_effects = output.effects;
-    validate_version_replay_rebuild_projection_shape(
-        &projected_context,
-        &output.time_wakes,
-        &runtime_effects,
-    )?;
-    validate_prepared_projection_commit_fields(
-        &projected_context,
-        &output.time_wakes,
-        &runtime_effects,
-        fact.id,
-    )?;
     perf::measure_result("projection_validate_effects", || {
         validate_projection_runtime_effects_for_admission(
             &runtime_effects,
@@ -652,76 +640,50 @@ fn prepare_projection(
     ))
 }
 
-fn validate_version_replay_rebuild_projection_shape(
+/// Validate the pure post-dispatch preparation shape before runtime-effect
+/// admission and commit construction.
+///
+/// The verified status helper below is the proof boundary. This wrapper keeps
+/// caller diagnostics readable while making `prepare_projection` call one
+/// guard that covers owner-bearing output, offer finalization, version replay
+/// rebuild shape, and commit-facing prepared fields.
+fn validate_prepare_projection_output(
+    fact: &Fact,
+    output: &ProjectionOutput,
     context: &ContextSet,
-    time_wakes: &[TimeWake],
-    effects: &RuntimeEffects,
 ) -> Result<(), String> {
-    if version_replay_rebuild_projection_accepts(context, time_wakes, effects) {
-        return Ok(());
-    }
-    Err(
-        "version replay rebuild projection cannot publish standing context or time wakes"
-            .to_string(),
-    )
-}
-
-fn validate_prepared_projection_commit_fields(
-    context: &ContextSet,
-    time_wakes: &[TimeWake],
-    effects: &RuntimeEffects,
-    owner: FactId,
-) -> Result<(), String> {
-    if prepared_projection_commit_fields_accept(context, time_wakes, effects, owner) {
-        return Ok(());
-    }
-    Err("prepared projection contains non-committable owner or rebuild fields".to_string())
-}
-
-fn validate_projection_context_finalization(
-    context: &ContextSet,
-    claims: &[ContextOfferClaim],
-    owner: FactId,
-) -> Result<(), String> {
-    if projection_context_offers_match_claims(context, claims, owner) {
-        return Ok(());
-    }
-    Err("projection context contains an offer not finalized from this output".to_string())
-}
-
-/// Reject any projected need, time wake, or purge whose owner is not the fact
-/// being projected. Projected offers are ownerless claims; core attaches the
-/// projected fact id when building the committed context set.
-fn enforce_owner_is_self(fact: &Fact, output: &ProjectionOutput) -> Result<(), String> {
-    if projection_output_owner_enforcement_accepts(output, fact.id) {
-        return Ok(());
-    }
-    let status = projection_output_owner_status(output, fact.id);
-    match status {
-        OWNER_CHECK_FOREIGN_PURGE => Err(enforce_projected_owner_error(
+    match prepare_projection_output_status(fact, output, context) {
+        PREPARE_PROJECTION_ACCEPTED => Ok(()),
+        PREPARE_PROJECTION_FOREIGN_PURGE => Err(enforce_projected_owner_error(
             "projector tried to purge fact",
             fact.id,
         )),
-        OWNER_CHECK_FOREIGN_NEED => Err(enforce_projected_owner_error(
+        PREPARE_PROJECTION_FOREIGN_NEED => Err(enforce_projected_owner_error(
             "projector emitted need with owner",
             fact.id,
         )),
-        OWNER_CHECK_FOREIGN_TIME_WAKE => Err(enforce_projected_owner_error(
+        PREPARE_PROJECTION_FOREIGN_TIME_WAKE => Err(enforce_projected_owner_error(
             "projector emitted time wake with owner",
             fact.id,
         )),
-        _ => Err(enforce_projected_owner_error(
-            "projector emitted owner-bearing output",
-            fact.id,
-        )),
+        PREPARE_PROJECTION_CONTEXT_FINALIZATION => {
+            Err("projection context contains an offer not finalized from this output".to_string())
+        }
+        PREPARE_PROJECTION_VERSION_REPLAY_REBUILD => Err(
+            "version replay rebuild projection cannot publish standing context or time wakes"
+                .to_string(),
+        ),
+        _ => {
+            Err("prepared projection contains non-committable owner or rebuild fields".to_string())
+        }
     }
 }
 
 verus! {
-// Owner-guard status values are a small executable proof boundary. The scan
-// helpers below prove which status production code computes; this final helper
-// proves that the only status allowed to continue projection is the accepted
-// one.
+// These constants are executable status labels, not proofs by themselves. The
+// verified classifier helpers below prove which label production code computes
+// from the actual output fields; the allow helpers then prove that only the
+// accepted label can continue through prepare-stage validation.
 const OWNER_CHECK_ACCEPTED: u8 = 0;
 const OWNER_CHECK_FOREIGN_PURGE: u8 = 1;
 const OWNER_CHECK_FOREIGN_NEED: u8 = 2;
@@ -729,6 +691,14 @@ const OWNER_CHECK_FOREIGN_TIME_WAKE: u8 = 3;
 
 const VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED: u8 = 0;
 const VERSION_REPLAY_REBUILD_SHAPE_STANDING_OUTPUT: u8 = 1;
+
+const PREPARE_PROJECTION_ACCEPTED: u8 = 0;
+const PREPARE_PROJECTION_FOREIGN_PURGE: u8 = 1;
+const PREPARE_PROJECTION_FOREIGN_NEED: u8 = 2;
+const PREPARE_PROJECTION_FOREIGN_TIME_WAKE: u8 = 3;
+const PREPARE_PROJECTION_CONTEXT_FINALIZATION: u8 = 4;
+const PREPARE_PROJECTION_VERSION_REPLAY_REBUILD: u8 = 5;
+const PREPARE_PROJECTION_COMMIT_FIELDS: u8 = 6;
 
 #[verifier(external_type_specification)]
 #[verifier(external_body)]
@@ -1111,7 +1081,7 @@ fn owner_status_allows_projection(status: u8) -> (accepted: bool)
 /// Classify owner-bearing fields on one complete projection output.
 ///
 /// This is the production bridge from the verified slice scans to the
-/// `enforce_owner_is_self` wrapper. Offer claims are intentionally absent:
+/// unified prepare-stage status guard. Offer claims are intentionally absent:
 /// core stamps their owner later through `ProjectionOutput::context_set`.
 fn projection_output_owner_status(output: &ProjectionOutput, fact_id: FactId) -> (status: u8)
     ensures
@@ -1160,7 +1130,7 @@ fn projection_output_owner_status(output: &ProjectionOutput, fact_id: FactId) ->
 
 /// Decide whether owner-bearing projection output may continue.
 ///
-/// This is the proof-facing acceptance branch for `enforce_owner_is_self`.
+/// This is the proof-facing owner branch for `prepare_projection_output_status`.
 /// Diagnostic strings remain ordinary Rust, but success is tied to the verified
 /// predicates over the actual `ProjectionOutput`.
 fn projection_output_owner_enforcement_accepts(
@@ -1185,6 +1155,21 @@ fn projection_output_owner_enforcement_accepts(
 {
     let status = projection_output_owner_status(output, fact_id);
     owner_status_allows_projection(status)
+}
+
+spec fn projection_output_owner_enforcement_spec(
+    output: ProjectionOutput,
+    fact_id: FactId,
+) -> bool {
+    &&& forall|i: int|
+        #![trigger output.effects.purged_facts@[i]]
+        0 <= i < output.effects.purged_facts@.len() ==> output.effects.purged_facts@[i] == fact_id
+    &&& forall|i: int|
+        #![trigger output.needs@[i]]
+        0 <= i < output.needs@.len() ==> output.needs@[i].owner == fact_id
+    &&& forall|i: int|
+        #![trigger output.time_wakes@[i]]
+        0 <= i < output.time_wakes@.len() ==> output.time_wakes@[i].owner == fact_id
 }
 
 /// Decision used before admitting a version replay rebuild effect.
@@ -1291,9 +1276,9 @@ fn version_replay_rebuild_projection_status(
 /// Decide whether a prepared projection may request version wipe-and-replay.
 ///
 /// This is the proof-facing acceptance branch for
-/// `validate_version_replay_rebuild_projection_shape`. Diagnostic strings
-/// remain ordinary Rust, but success is tied to the verified predicate over the
-/// actual prepared context, time wakes, and runtime effects.
+/// `prepare_projection_output_status`. Diagnostic strings remain ordinary Rust,
+/// but success is tied to the verified predicate over the actual prepared
+/// context, time wakes, and runtime effects.
 fn version_replay_rebuild_projection_accepts(
     context: &ContextSet,
     wakes: &[TimeWake],
@@ -1309,6 +1294,15 @@ fn version_replay_rebuild_projection_accepts(
 {
     let status = version_replay_rebuild_projection_status(context, wakes, effects);
     version_replay_rebuild_shape_status_allows_projection(status)
+}
+
+spec fn version_replay_rebuild_projection_spec(
+    context: ContextSet,
+    wakes: Seq<TimeWake>,
+    effects: RuntimeEffects,
+) -> bool {
+    !effects.version_replay_rebuild
+        || (context.needs@.len() == 0 && context.offers@.len() == 0 && wakes.len() == 0)
 }
 
 /// Decide whether a version wipe-and-replay effect is isolated from new work.
@@ -1488,19 +1482,25 @@ fn offer_matches_some_claim(
     owner: FactId,
 ) -> (accepted: bool)
     ensures
-        accepted ==> offer_matches_claims_spec(*offer, claims@, owner),
+        accepted <==> offer_matches_claims_spec(*offer, claims@, owner),
 {
     let mut i: usize = 0;
     while i < claims.len()
         invariant
             i <= claims@.len(),
+            forall|j: int|
+                #![trigger claims@[j]]
+                0 <= j < i ==> !offer_is_finalized_claim(*offer, claims@[j], owner),
         decreases claims@.len() - i,
     {
         if offer_matches_claim(offer, &claims[i], owner) {
+            assert(offer_is_finalized_claim(*offer, claims@[i as int], owner));
             return true;
         }
+        assert(!offer_is_finalized_claim(*offer, claims@[i as int], owner));
         i += 1;
     }
+    assert(!offer_matches_claims_spec(*offer, claims@, owner));
     false
 }
 
@@ -1516,7 +1516,7 @@ fn projection_context_offers_match_claims(
     owner: FactId,
 ) -> (accepted: bool)
     ensures
-        accepted ==> context_offers_match_claims_spec(context.offers@, claims@, owner),
+        accepted <==> context_offers_match_claims_spec(context.offers@, claims@, owner),
 {
     let mut i: usize = 0;
     while i < context.offers.len()
@@ -1526,8 +1526,23 @@ fn projection_context_offers_match_claims(
         decreases context.offers@.len() - i,
     {
         if !offer_matches_some_claim(&context.offers[i], claims, owner) {
+            assert(!offer_matches_claims_spec(
+                context.offers@[i as int],
+                claims@,
+                owner,
+            ));
+            assert(!context_offers_match_claims_spec(
+                context.offers@,
+                claims@,
+                owner,
+            ));
             return false;
         }
+        assert(offer_matches_claims_spec(
+            context.offers@[i as int],
+            claims@,
+            owner,
+        ));
         i += 1;
     }
     assert(i as int == context.offers@.len());
@@ -1589,6 +1604,111 @@ spec fn prepared_projection_commit_fields_spec(
         !effects.version_replay_rebuild
             || (context.needs@.len() == 0 && context.offers@.len() == 0 && wakes.len() == 0)
     )
+}
+
+spec fn prepare_projection_output_accepts_spec(
+    fact: Fact,
+    output: ProjectionOutput,
+    context: ContextSet,
+) -> bool {
+    &&& projection_output_owner_enforcement_spec(output, fact.id)
+    &&& context_offers_match_claims_spec(context.offers@, output.offers@, fact.id)
+    &&& version_replay_rebuild_projection_spec(context, output.time_wakes@, output.effects)
+    &&& prepared_projection_commit_fields_spec(context, output.time_wakes@, output.effects, fact.id)
+}
+
+/// Classify whether post-dispatch projection output has passed every pure
+/// prepare-stage guard before runtime-effect admission and commit construction.
+///
+/// This is the verified production helper that `prepare_projection` calls after
+/// building final context. Accepted means the exact routed output and final
+/// context passed owner enforcement, offer-claim finalization, version replay
+/// rebuild shape, and commit-facing field checks.
+fn prepare_projection_output_status(
+    fact: &Fact,
+    output: &ProjectionOutput,
+    context: &ContextSet,
+) -> (status: u8)
+    ensures
+        status == PREPARE_PROJECTION_ACCEPTED
+            <==> prepare_projection_output_accepts_spec(*fact, *output, *context),
+        status == PREPARE_PROJECTION_ACCEPTED
+            || status == PREPARE_PROJECTION_FOREIGN_PURGE
+            || status == PREPARE_PROJECTION_FOREIGN_NEED
+            || status == PREPARE_PROJECTION_FOREIGN_TIME_WAKE
+            || status == PREPARE_PROJECTION_CONTEXT_FINALIZATION
+            || status == PREPARE_PROJECTION_VERSION_REPLAY_REBUILD
+            || status == PREPARE_PROJECTION_COMMIT_FIELDS,
+{
+    if !projection_output_owner_enforcement_accepts(output, fact.id) {
+        assert(!projection_output_owner_enforcement_spec(*output, fact.id));
+        assert(!prepare_projection_output_accepts_spec(*fact, *output, *context));
+        let owner_status = projection_output_owner_status(output, fact.id);
+        assert(owner_status != OWNER_CHECK_ACCEPTED);
+        if owner_status == OWNER_CHECK_FOREIGN_PURGE {
+            return PREPARE_PROJECTION_FOREIGN_PURGE;
+        }
+        if owner_status == OWNER_CHECK_FOREIGN_NEED {
+            return PREPARE_PROJECTION_FOREIGN_NEED;
+        }
+        assert(owner_status == OWNER_CHECK_FOREIGN_TIME_WAKE);
+        return PREPARE_PROJECTION_FOREIGN_TIME_WAKE;
+    }
+    assert(projection_output_owner_enforcement_spec(*output, fact.id));
+
+    if !projection_context_offers_match_claims(context, &output.offers, fact.id) {
+        assert(!context_offers_match_claims_spec(
+            context.offers@,
+            output.offers@,
+            fact.id,
+        ));
+        assert(!prepare_projection_output_accepts_spec(*fact, *output, *context));
+        return PREPARE_PROJECTION_CONTEXT_FINALIZATION;
+    }
+    assert(context_offers_match_claims_spec(
+        context.offers@,
+        output.offers@,
+        fact.id,
+    ));
+
+    if !version_replay_rebuild_projection_accepts(context, &output.time_wakes, &output.effects) {
+        assert(!version_replay_rebuild_projection_spec(
+            *context,
+            output.time_wakes@,
+            output.effects,
+        ));
+        assert(!prepare_projection_output_accepts_spec(*fact, *output, *context));
+        return PREPARE_PROJECTION_VERSION_REPLAY_REBUILD;
+    }
+    assert(version_replay_rebuild_projection_spec(
+        *context,
+        output.time_wakes@,
+        output.effects,
+    ));
+
+    if !prepared_projection_commit_fields_accept(
+        context,
+        &output.time_wakes,
+        &output.effects,
+        fact.id,
+    ) {
+        assert(!prepared_projection_commit_fields_spec(
+            *context,
+            output.time_wakes@,
+            output.effects,
+            fact.id,
+        ));
+        assert(!prepare_projection_output_accepts_spec(*fact, *output, *context));
+        return PREPARE_PROJECTION_COMMIT_FIELDS;
+    }
+    assert(prepared_projection_commit_fields_spec(
+        *context,
+        output.time_wakes@,
+        output.effects,
+        fact.id,
+    ));
+    assert(prepare_projection_output_accepts_spec(*fact, *output, *context));
+    PREPARE_PROJECTION_ACCEPTED
 }
 
 /// Check the prepared fields that commit may publish.
@@ -7524,13 +7644,6 @@ mod contract_tests {
             &effects,
             fact.id
         ));
-        assert!(validate_prepared_projection_commit_fields(
-            &context,
-            &[wake.clone()],
-            &effects,
-            fact.id
-        )
-        .is_ok());
 
         let foreign_need_context = ContextSet::new()
             .need(ContextNeed {
@@ -7577,6 +7690,83 @@ mod contract_tests {
             &RuntimeEffects::new().version_replay_rebuild(),
             fact.id
         ));
+    }
+
+    #[test]
+    fn prepare_projection_output_status_reads_all_pure_prepare_guards() {
+        let fact = Fact::new(FactScope::Global, 1, b"prepare status".to_vec());
+        let role = Role::new("prepare_status").unwrap();
+        let key = ContextKey::from_bytes([7; 32]);
+        let need = need_for(&fact, &role, &key);
+        let claim = ContextOfferClaim {
+            role: role.clone(),
+            scope: FactScope::Global,
+            start_key: key.clone(),
+            end_key: key.clone(),
+            value: ContextOfferValue::from_bytes(b"status-offer"),
+        };
+        let wake = TimeWake {
+            timeline: Timeline::new("prepare_status").unwrap(),
+            owner: fact.id,
+            at: 11,
+        };
+        let output = ProjectionOutput::new()
+            .need(need.clone())
+            .offer(claim.clone())
+            .time_wake(wake);
+        let context = output.context_set(fact.id);
+
+        assert_eq!(
+            prepare_projection_output_status(&fact, &output, &context),
+            PREPARE_PROJECTION_ACCEPTED
+        );
+        assert!(validate_prepare_projection_output(&fact, &output, &context).is_ok());
+
+        let foreign_need_output = ProjectionOutput::new().need(ContextNeed {
+            owner: [9; 32],
+            ..need.clone()
+        });
+        let foreign_need_context = foreign_need_output.context_set(fact.id);
+        assert_eq!(
+            prepare_projection_output_status(&fact, &foreign_need_output, &foreign_need_context),
+            PREPARE_PROJECTION_FOREIGN_NEED
+        );
+
+        let mutated_offer_context = ContextSet::new().offer(ContextOffer {
+            owner: fact.id,
+            role: role.clone(),
+            scope: FactScope::Global,
+            start_key: key.clone(),
+            end_key: key.clone(),
+            value: ContextOfferValue::from_bytes(b"mutated"),
+        });
+        let offer_output = ProjectionOutput::new().offer(claim.clone());
+        assert_eq!(
+            prepare_projection_output_status(&fact, &offer_output, &mutated_offer_context),
+            PREPARE_PROJECTION_CONTEXT_FINALIZATION
+        );
+
+        let rebuild_with_context = ProjectionOutput::new()
+            .offer(claim)
+            .version_replay_rebuild();
+        let rebuild_context = rebuild_with_context.context_set(fact.id);
+        assert_eq!(
+            prepare_projection_output_status(&fact, &rebuild_with_context, &rebuild_context),
+            PREPARE_PROJECTION_VERSION_REPLAY_REBUILD
+        );
+
+        let mutated_need_context = ContextSet::new().need(ContextNeed {
+            owner: [8; 32],
+            ..need
+        });
+        assert_eq!(
+            prepare_projection_output_status(
+                &fact,
+                &ProjectionOutput::new(),
+                &mutated_need_context
+            ),
+            PREPARE_PROJECTION_COMMIT_FIELDS
+        );
     }
 
     fn assert_version_replay_rebuild_shape_rejected(fact: &Fact, output: ProjectionOutput) {
@@ -9076,7 +9266,8 @@ mod tests {
 
     #[test]
     fn projection_context_finalization_rejects_offer_not_emitted_by_output() {
-        let owner = [1; 32];
+        let fact = Fact::new(FactScope::Global, 1, b"finalization guard".to_vec());
+        let owner = fact.id;
         let role = Role::new("finalized_offer").unwrap();
         let key = ContextKey::from_bytes([2; 32]);
         let claim = ContextOfferClaim {
@@ -9094,8 +9285,9 @@ mod tests {
             end_key: key,
             value: ContextOfferValue::from_bytes(b"mutated-cert-v1"),
         });
+        let output = ProjectionOutput::new().offer(claim);
 
-        let err = validate_projection_context_finalization(&context, &[claim], owner)
+        let err = validate_prepare_projection_output(&fact, &output, &context)
             .expect_err("mutated normalized offer rejected");
 
         assert!(err.contains("not finalized from this output"));

@@ -19,9 +19,9 @@ src/core/project_fact.rs::project_one
   -> evaluate_loaded_projection_input
   -> prepare_projection
        -> dispatcher.dispatch_projection(&fact, &pending_inputs)
-       -> enforce_owner_is_self(&fact, &output)
        -> ProjectionOutput::context_set(fact.id)
-       -> validate_runtime_effects_for_admission(...)
+       -> validate_prepare_projection_output(&fact, &output, &projected_context)
+       -> validate_projection_runtime_effects_for_admission(...)
   -> commit_projection_effects
        -> settle_projected_input_lifecycle_in_tx
        -> publish_retained_projection_state_in_tx
@@ -60,7 +60,7 @@ runtime shape is already visible. `ProjectionOutput::context_set(fact.id)` must
 copy each `ContextOfferClaim` into a `ContextOffer` with the same role, scope,
 key range, and offer value and with `owner = fact.id`.
 `ContextOfferClaim::into_offer` must be part of that proof, not merely mirrored by a separate model function.
-`enforce_owner_is_self` must reject any need, time wake, or purge owned by a
+The prepare-stage guard must reject any need, time wake, or purge owned by a
 different fact. Dropped incoming facts must not leave durable context or time
 wakes behind.
 
@@ -101,20 +101,19 @@ those scans and accepts if and only if every purge id, need owner, and wake
 owner in the projection output parts equals the projected fact id.
 `projected_owner_status` returns the exact production status class: accepted,
 foreign purge, foreign need, or foreign time wake, with each status tied to the
-same owner predicates; `enforce_owner_is_self` branches on that verified status
-before producing `Ok(())` or a diagnostic error.
+same owner predicates; the unified prepare-stage status guard branches on that
+verified status before owner-bearing output can continue.
 `owner_status_allows_projection` accepts if and only if the status is exactly
 the accepted status, so the production success branch has a verified decision
 predicate rather than an informal interpretation of the status byte.
 `projection_output_owner_status(output, fact_id)` applies that same verified
 status classification to the actual `ProjectionOutput` object consumed by
-`enforce_owner_is_self`.
+the prepare-stage guard.
 `projection_output_owner_enforcement_accepts(output, fact_id)` composes that
 classification with the production allow decision: it accepts if and only if
 every purge id, need owner, and time-wake owner in the actual
-`ProjectionOutput` is the projected fact id. `enforce_owner_is_self` uses this
-verified helper for its success branch; diagnostic rejection strings remain
-ordinary Rust.
+`ProjectionOutput` is the projected fact id. `prepare_projection_output_status`
+uses this verified helper for its owner-bearing success branch.
 Cargo-verus proves the local replay-mode bridge: `projection_mode_from_replay_flag`
 decodes SQL replay flags to `ProjectionMode::Normal` exactly for `0` and
 `ProjectionMode::Replay` exactly for nonzero flags, `projection_mode_is_replay`
@@ -134,9 +133,9 @@ pre-normalization construction to the actual `ProjectionOutput` object consumed
 by `ProjectionOutput::context_set`.
 `projection_context_offers_match_claims(context, claims, owner)` then checks
 the final normalized context that `prepare_projection` is about to commit:
-if it accepts, every final offer matches some owner-stamped output claim with
-the same role, scope, start key, end key, and offer value. This guard is about
-core finalization only; it does not prove the role-specific offer is
+it accepts if and only if every final offer matches some owner-stamped output
+claim with the same role, scope, start key, end key, and offer value. This guard
+is about core finalization only; it does not prove the role-specific offer is
 semantically valid. Cargo-verus also proves that the version replay rebuild
 shape decision accepts exactly ordinary projections
 or version replay rebuild projections with empty standing output: no standing needs, offers, or time wakes.
@@ -145,20 +144,24 @@ standing-output exactly from that predicate, and that the allow helper accepts
 only the accepted status.
 `version_replay_rebuild_projection_status(context, wakes, effects)` applies
 that same verified status classification to the actual prepared projection
-shape consumed by `validate_version_replay_rebuild_projection_shape`. That is
-not the full offer-finalization or version replay rebuild admission theorem
-yet: the proof no longer depends on trusting normalization to preserve offer
-fields, because `prepare_projection` validates the final normalized offers
-against the emitted claims.
+shape consumed by the unified prepare-stage guard. That is not the full
+offer-finalization or version replay rebuild admission theorem yet: the proof
+no longer depends on trusting normalization to preserve offer fields, because
+the guard validates the final normalized offers against the emitted claims.
 `prepared_projection_commit_fields_accept(context, wakes, effects, owner)`
 then checks the exact fields that `PreparedProjection` can carry into commit:
 accepted means every context need, context offer, time wake, and purge is owned
 by the projected fact, and a version replay rebuild has no standing context or
-time wakes. `prepare_projection` calls the corresponding validation wrapper
-after final context construction and before `PreparedProjection` construction.
-The remaining call-order work is proving this whole sequence as one executable
-theorem rather than as verified helpers plus ordinary Rust wrapper calls. It is
-also proved that `version_replay_rebuild_effect_has_no_fact_or_intent_work(effects)`
+time wakes.
+`prepare_projection_output_status(fact, output, context)` composes those checks:
+it accepts if and only if owner-bearing output is self-owned, final context
+offers came from output claims, version replay rebuild standing-output rules
+hold, and the exact commit-facing context/time/effect fields are self-owned.
+`prepare_projection` now calls one wrapper around that verified status guard
+after final context construction. The remaining call-order work is proving the
+runtime-effect admission and prepared-constructor sequence around that guard as
+one executable theorem. It is also proved that
+`version_replay_rebuild_effect_has_no_fact_or_intent_work(effects)`
 accepts exactly ordinary effects or isolated rebuild effects with no emitted
 facts, priority facts, incoming facts, durable intents, or local intents; the
 runtime effect validator uses that verified helper for its success branch.
@@ -187,10 +190,10 @@ cover the stored metadata lookup, and a precise `BTreeMap` update theorem still
 needs a separate proof-friendly production helper.
 Projected marker rows remain allowed so the version update fact can record the
 surviving storage-version row after the wipe/replay. It is also
-not the full owner-bearing output theorem yet: the exported theorem still needs a
-correspondence proof tying the `enforce_owner_is_self` `Result` wrapper,
-diagnostic rejection branches, and `prepare_projection` call order to the
-verified status and allow helpers.
+not the full owner-bearing output theorem yet: the exported theorem still needs
+a correspondence proof tying the `validate_prepare_projection_output` `Result`
+wrapper and the rest of `prepare_projection` sequencing to the verified status
+guard.
 For context input, the checked constructors behind `RoutedOffer::new` and
 `MatchedContext::with_route` are verified: the success branches preserve the
 exact offer, route evidence, need, and payload fields, and the resulting matched
@@ -306,7 +309,8 @@ Rust execution, but route/call drift in the generated protocol dispatcher is
 closed by the `RegisteredProjector` API shape because the same projector type
 provides the branch tag, finalizer stamp, storage guard, metadata, and
 `Projector::project` call. Cargo-verus still needs to prove the larger
-`prepare_projection` call-order theorem.
+`prepare_projection` theorem that carries the verified prepare-status result
+through runtime-effect admission and `PreparedProjection` construction.
 `projection_retains_fact_after_commit(projection)` is verified over the
 production lifecycle decision and accepts if and only if the projection does not
 purge itself and either its source was durable or its source was incoming with
@@ -832,7 +836,7 @@ context_set_from_projection_parts(needs, claims, owner) preserves needs
 context_set_from_projection_parts(needs, claims, owner) builds same-index owned offers
 clone_context_needs(needs) preserves the need sequence
 projection_output_context_set_parts(output, owner) preserves output needs and builds same-index owned offers from output claims
-projection_context_offers_match_claims(context, claims, owner) accepts only if every final offer matches an owner-stamped output claim
+projection_context_offers_match_claims(context, claims, owner) accepts if and only if every final offer matches an owner-stamped output claim
 projection_route_evidence(fact_id, route_id, effective_tag, route_tag, projector_info, storage_requirement) preserves every route evidence field
 selected_route_evidence(fact_id, effective_tag, stamp) preserves selected route stamp metadata and gives route_tag == effective_tag when stamp.tag == effective_tag
 select_route_stamp(stamps, effective_tag) returns the first matching route stamp or proves no route stamp matches
@@ -842,6 +846,7 @@ dispatch_registered_projector::<P>(fact, context) is the production dispatch bra
 runtime_effects_with_storage_requirement(effects, requirement) sets the storage requirement and preserves the effect payload
 prepared_projection_from_validated_output preserves route evidence and validated output pieces in PreparedProjection
 prepared_projection_commit_fields_accept(context, wakes, effects, owner) accepts if and only if commit-facing prepared context/time/effect fields are self-owned and version replay rebuild has no standing context or time wakes
+prepare_projection_output_status(fact, output, context) accepts if and only if owner-bearing output is self-owned, final offers match output claims, version replay rebuild shape is legal, and commit-facing prepared fields are self-owned
 projection_mode_from_replay_flag(replay) returns Normal exactly for replay == 0 and Replay exactly for replay != 0
 projection_mode_is_replay(mode) accepts if and only if mode is Replay
 replay_flag_for_projection_mode(mode) returns 0 exactly for Normal and 1 exactly for Replay
@@ -907,20 +912,21 @@ need cloning, pre-normalization context-set assembly, or the bridge from
 `ProjectionOutput` to that assembly. It is also no longer trusting
 normalization for offer-field preservation, because the final normalized offers
 are checked by a verified production guard. The commit-facing prepared fields
-are also checked by a verified production guard. The remaining gap is proving
-the full `prepare_projection` call order over executable helper code. The
-remaining owner-checking gap is no
-longer the equality decision, per-slice scans, aggregate owner predicate,
-status classification, accept-status decision, full-output status bridge, or
-accepted-output enforcement decision; it is proving the
-`enforce_owner_is_self` `Result` wrapper diagnostic rejection branches and
-`prepare_projection` call order over executable helper code.
+are also checked by a verified production guard, and
+`prepare_projection_output_status` composes those guards into one verified
+prepare-stage acceptance predicate. The remaining gap is proving the later
+`prepare_projection` runtime-effect admission and prepared-constructor sequence
+over executable helper code. The remaining owner-checking gap is no longer the
+equality decision, per-slice scans, aggregate owner predicate, status
+classification, accept-status decision, full-output status bridge,
+accepted-output enforcement decision, or unified prepare-stage status decision;
+it is proving the exported theorem correspondence to `prepare_projection`.
 The remaining version replay rebuild admission gap is no longer the
 standing-output decision, status classification, accept-status decision, or
 full prepared-shape status bridge, and it is no longer the success decision
-used by the runtime admission guard. The remaining gap is proving the
-diagnostic rejection branch and full `prepare_projection` call order around the
-verified accept helpers.
+used by the unified prepare-stage guard. The remaining gap is the exported
+theorem correspondence to the full `prepare_projection` sequence after the
+verified guard accepts.
 
 The remaining matched-context provenance gap is no longer the local
 owner/payload equality decision for one `MatchedContext`, the local
