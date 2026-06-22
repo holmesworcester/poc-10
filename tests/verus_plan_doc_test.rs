@@ -86,7 +86,7 @@ fn cargo_verus_verifies_production_core_projection_contracts() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        combined.contains("verification results:: 42 verified, 0 errors"),
+        combined.contains("verification results:: 45 verified, 0 errors"),
         "production proof should verify the real core projection contracts:\n{combined}"
     );
 }
@@ -526,10 +526,12 @@ fn verus_plan_is_single_core_first_source() {
         "matched_context_has_routed_provenance(matched) accepts if and only if matched.routed_offer.offer.owner == matched.payload.id and matched.routed_offer.offer.owner == matched.routed_offer.producer_route.fact_id",
         "RoutedOffer::owner_matches_producer accepts if and only if routed_offer.offer.owner == routed_offer.producer_route.fact_id",
         "MatchedContext::has_routed_provenance accepts if and only if matched.routed_offer.offer.owner == matched.payload.id and matched.routed_offer.offer.owner == matched.routed_offer.producer_route.fact_id",
+        "matched_contexts_all_have_routed_provenance(matched) accepts only if every matched context has routed provenance",
         "`MatchedContext::with_route` rejects mismatched owner/payload/route fixtures at\nruntime",
         "the SQL pending-context loader asks the active `ProjectionDispatcher`\nfor producer route evidence",
         "The production `attested_offer_for` and\n`matched_attested_offers_for` accessors filter on that same local predicate.",
-        "`pending_projection_input_context_for_owner` and the SQL loader construct every",
+        "`prepare_projection` also rejects the whole `ProjectionContext` before\ndispatch",
+        "`pending_projection_input_context_for_owner` and the\nSQL loader construct every",
         "assume_specification`s for the derived `ContextOfferClaim::clone`,",
         "derived equality for `Role`, `FactScope`,\n`ContextKey`, and `ContextOfferValue`",
         "clone/equality preserves the whole value",

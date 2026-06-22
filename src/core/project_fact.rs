@@ -599,6 +599,7 @@ fn prepare_projection(
     let mode = pending_inputs.mode();
     let input_received_at_ms = fact.timestamp;
     let incoming_metadata = pending_inputs.incoming_metadata().cloned();
+    pending_inputs.validate_routed_provenance()?;
     let routed = perf::measure_result("projection_projector_cpu", || {
         projector.dispatch_projection(&fact, &pending_inputs)
     })?;
@@ -2387,6 +2388,36 @@ pub mod context {
     #[allow(dead_code)]
     pub struct ExRoutedOffer(RoutedOffer);
 
+    pub open spec fn matched_context_routed_provenance_spec(matched: MatchedContext) -> bool {
+        matched.routed_offer.offer.owner == matched.payload.id
+            && matched.routed_offer.offer.owner == matched.routed_offer.producer_route.fact_id
+    }
+
+    pub open spec fn matched_contexts_have_routed_provenance_prefix(
+        matched: Seq<MatchedContext>,
+        end: int,
+    ) -> bool {
+        forall|i: int|
+            #![trigger matched[i]]
+            0 <= i < end ==> matched_context_routed_provenance_spec(matched[i])
+    }
+
+    pub open spec fn matched_contexts_have_routed_provenance(matched: Seq<MatchedContext>) -> bool {
+        matched_contexts_have_routed_provenance_prefix(matched, matched.len() as int)
+    }
+
+    proof fn matched_context_provenance_prefix_complete(
+        matched: Seq<MatchedContext>,
+        end: int,
+    )
+        requires
+            matched_contexts_have_routed_provenance_prefix(matched, end),
+            end == matched.len(),
+        ensures
+            matched_contexts_have_routed_provenance(matched),
+    {
+    }
+
     /// Decide the local provenance link between a matched offer and payload.
     ///
     /// This is the production helper future loader proofs should cite: a
@@ -2462,6 +2493,37 @@ pub mod context {
             self.routed_offer.owner_matches_producer()
         }
     }
+
+    /// Decide whether every matched context in a projection input has the local
+    /// core provenance link: offer owner, payload id, and producer route fact id
+    /// all agree.
+    ///
+    /// This is still core provenance only. It does not prove the matched
+    /// offer's protocol meaning.
+    fn matched_contexts_all_have_routed_provenance(
+        matched: &[MatchedContext],
+    ) -> (accepted: bool)
+        ensures
+            accepted ==> matched_contexts_have_routed_provenance(matched@),
+    {
+        let mut i: usize = 0;
+        while i < matched.len()
+            invariant
+                i <= matched@.len(),
+                matched_contexts_have_routed_provenance_prefix(matched@, i as int),
+            decreases matched@.len() - i,
+        {
+            if !matched[i].has_routed_provenance() {
+                return false;
+            }
+            i += 1;
+        }
+        assert(i as int == matched@.len());
+        proof {
+            matched_context_provenance_prefix_complete(matched@, i as int);
+        }
+        true
+    }
     } // verus!
 
     impl ProjectionContext {
@@ -2518,6 +2580,22 @@ pub mod context {
         /// Return receive metadata for the current incoming projection input.
         pub fn incoming_metadata(&self) -> Option<&IncomingMetadata> {
             self.incoming_metadata.as_ref()
+        }
+
+        /// Reject malformed core provenance before a projector sees context.
+        ///
+        /// SQL loading normally builds every matched entry through checked
+        /// constructors. This guard keeps the dispatch boundary explicit: a
+        /// projector receives matched authority context only after core has
+        /// confirmed the local offer-owner/payload/producer-route chain.
+        pub(crate) fn validate_routed_provenance(&self) -> Result<(), String> {
+            if matched_contexts_all_have_routed_provenance(&self.matched) {
+                return Ok(());
+            }
+            Err(
+                "projection context contains a matched offer with invalid route provenance"
+                    .to_string(),
+            )
         }
 
         /// Return all distinct offers visible to this projection run.
@@ -7425,6 +7503,43 @@ mod tests {
             .map(|offer| offer.offer.owner)
             .collect::<Vec<_>>();
         assert_eq!(owners, vec![payload_id]);
+    }
+
+    #[test]
+    fn projection_context_provenance_guard_rejects_manual_payload_mismatch() {
+        let role = Role::new("guarded").unwrap();
+        let key = ContextKey::from_bytes([2; 32]);
+        let producer = Fact::new(FactScope::Global, 1, b"producer".to_vec());
+        let wrong_payload = Fact::new(FactScope::Global, 2, b"wrong payload".to_vec());
+        let offer = ContextOffer {
+            owner: producer.id,
+            role: role.clone(),
+            scope: FactScope::Global,
+            start_key: key.clone(),
+            end_key: key.clone(),
+            value: ContextOfferValue::empty(),
+        };
+        let matched = MatchedContext {
+            need: ContextNeed {
+                owner: [1; 32],
+                role,
+                scope: FactScope::Global,
+                start_key: key.clone(),
+                end_key: key,
+            },
+            routed_offer: RoutedOffer {
+                offer,
+                producer_route: ProjectionRouteEvidence::for_loaded_fact_fixture(&producer),
+            },
+            payload: wrong_payload,
+        };
+        let context = ProjectionContext::from_matches(vec![matched]);
+
+        let err = context
+            .validate_routed_provenance()
+            .expect_err("payload mismatch rejected before projector dispatch");
+
+        assert!(err.contains("invalid route provenance"));
     }
 
     #[test]

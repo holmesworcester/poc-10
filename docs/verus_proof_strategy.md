@@ -143,6 +143,14 @@ not the full owner-bearing output theorem yet: the exported theorem still needs 
 correspondence proof tying the `enforce_owner_is_self` `Result` wrapper,
 diagnostic rejection branches, and `prepare_projection` call order to the
 verified status and allow helpers.
+For context input, `matched_contexts_all_have_routed_provenance(matched)`
+scans the actual matched-context slice and accepts only if every entry has the
+local core provenance link: stored offer owner, loaded payload id, and producer
+route fact id all agree. `prepare_projection` calls the corresponding
+`ProjectionContext::validate_routed_provenance` guard before dispatching to the
+projector. This still does not prove semantic offer validity or the SQL
+loader's whole construction theorem; it proves malformed local provenance is
+rejected before a projector can consume it.
 
 ### Stage 3: Routed Projection Evidence
 
@@ -706,6 +714,7 @@ routed_offer_owner_matches_producer(routed_offer) accepts if and only if routed_
 matched_context_has_routed_provenance(matched) accepts if and only if matched.routed_offer.offer.owner == matched.payload.id and matched.routed_offer.offer.owner == matched.routed_offer.producer_route.fact_id
 RoutedOffer::owner_matches_producer accepts if and only if routed_offer.offer.owner == routed_offer.producer_route.fact_id
 MatchedContext::has_routed_provenance accepts if and only if matched.routed_offer.offer.owner == matched.payload.id and matched.routed_offer.offer.owner == matched.routed_offer.producer_route.fact_id
+matched_contexts_all_have_routed_provenance(matched) accepts only if every matched context has routed provenance
 ```
 
 These contracts are proofs over helper Rust code that normal builds execute.
@@ -746,11 +755,13 @@ for producer route evidence while loading matched offer owners, and Cargo-verus
 proves both production decision helpers plus their combined routed-provenance
 predicate. The production `attested_offer_for` and
 `matched_attested_offers_for` accessors filter on that same local predicate.
-The open core work is proving that
-`pending_projection_input_context_for_owner` and the SQL loader construct every
-projector-visible matched context through that checked path and proving route
-selection through the whole production dispatcher call graph. Semantic
-provenness remains a route-local projector theorem, not a core theorem.
+`prepare_projection` also rejects the whole `ProjectionContext` before
+dispatch unless every matched entry passes the verified slice scan. The open
+core work is proving that `pending_projection_input_context_for_owner` and the
+SQL loader construct every projector-visible matched context through that
+checked path and proving route selection through the whole production
+dispatcher call graph. Semantic provenness remains a route-local projector
+theorem, not a core theorem.
 
 The remaining route-dispatch gap is no longer route-evidence field stamping or
 selected-stamp evidence construction; it is proving that `RouterProjector`
