@@ -659,10 +659,7 @@ fn validate_version_replay_rebuild_projection_shape(
 /// being projected. Projected offers are ownerless claims; core attaches the
 /// projected fact id when building the committed context set.
 fn enforce_owner_is_self(fact: &Fact, output: &ProjectionOutput) -> Result<(), String> {
-    let purged = &output.effects.purged_facts;
-    let needs = &output.needs;
-    let wakes = &output.time_wakes;
-    let status = projected_owner_status(purged, needs, wakes, fact.id);
+    let status = projection_output_owner_status(output, fact.id);
     if owner_status_allows_projection(status) {
         return Ok(());
     }
@@ -707,6 +704,34 @@ pub struct ExTimeline(Timeline);
 #[verifier(external_type_specification)]
 #[allow(dead_code)]
 pub struct ExTimeWake(TimeWake);
+
+#[verifier(external_type_specification)]
+#[allow(dead_code)]
+pub struct ExRuntimeEffects(RuntimeEffects);
+
+#[verifier(external_type_specification)]
+#[verifier(external_body)]
+#[allow(dead_code)]
+pub struct ExIntent(crate::core::intents::Intent);
+
+#[verifier(external_type_specification)]
+#[verifier(external_body)]
+#[allow(dead_code)]
+pub struct ExIntentRowMutation(crate::core::db::IntentRowMutation);
+
+#[verifier(external_type_specification)]
+#[verifier(external_body)]
+#[allow(dead_code)]
+pub struct ExIncomingMetadata(IncomingMetadata);
+
+#[verifier(external_type_specification)]
+#[allow(dead_code)]
+pub struct ExProjectionOutput(ProjectionOutput);
+
+#[verifier(external_type_specification)]
+#[verifier(external_body)]
+#[allow(dead_code)]
+pub struct ExProjectedRowMutation(ProjectedRowMutation);
 
 /// Bytewise fact-id equality used by the owner guard.
 ///
@@ -975,6 +1000,56 @@ fn owner_status_allows_projection(status: u8) -> (accepted: bool)
         accepted <==> status == OWNER_CHECK_ACCEPTED,
 {
     status == OWNER_CHECK_ACCEPTED
+}
+
+/// Classify owner-bearing fields on one complete projection output.
+///
+/// This is the production bridge from the verified slice scans to the
+/// `enforce_owner_is_self` wrapper. Offer claims are intentionally absent:
+/// core stamps their owner later through `ProjectionOutput::context_set`.
+fn projection_output_owner_status(output: &ProjectionOutput, fact_id: FactId) -> (status: u8)
+    ensures
+        status == OWNER_CHECK_ACCEPTED <==> (
+            forall|i: int|
+                #![trigger output.effects.purged_facts@[i]]
+                0 <= i < output.effects.purged_facts@.len()
+                    ==> output.effects.purged_facts@[i] == fact_id
+        ) && (
+            forall|i: int|
+                #![trigger output.needs@[i]]
+                0 <= i < output.needs@.len() ==> output.needs@[i].owner == fact_id
+        ) && (
+            forall|i: int|
+                #![trigger output.time_wakes@[i]]
+                0 <= i < output.time_wakes@.len() ==> output.time_wakes@[i].owner == fact_id
+        ),
+        status == OWNER_CHECK_FOREIGN_PURGE ==> !(
+            forall|i: int|
+                #![trigger output.effects.purged_facts@[i]]
+                0 <= i < output.effects.purged_facts@.len()
+                    ==> output.effects.purged_facts@[i] == fact_id
+        ),
+        status == OWNER_CHECK_FOREIGN_NEED ==> !(
+            forall|i: int|
+                #![trigger output.needs@[i]]
+                0 <= i < output.needs@.len() ==> output.needs@[i].owner == fact_id
+        ),
+        status == OWNER_CHECK_FOREIGN_TIME_WAKE ==> !(
+            forall|i: int|
+                #![trigger output.time_wakes@[i]]
+                0 <= i < output.time_wakes@.len() ==> output.time_wakes@[i].owner == fact_id
+        ),
+        status == OWNER_CHECK_ACCEPTED
+            || status == OWNER_CHECK_FOREIGN_PURGE
+            || status == OWNER_CHECK_FOREIGN_NEED
+            || status == OWNER_CHECK_FOREIGN_TIME_WAKE,
+{
+    projected_owner_status(
+        &output.effects.purged_facts,
+        &output.needs,
+        &output.time_wakes,
+        fact_id,
+    )
 }
 
 /// Decision used before admitting a version replay rebuild effect.
@@ -5989,6 +6064,38 @@ mod contract_tests {
             OWNER_CHECK_FOREIGN_TIME_WAKE
         ));
         assert!(!owner_status_allows_projection(99));
+    }
+
+    #[test]
+    fn projection_output_owner_status_reads_complete_output_shape() {
+        let fact_id = [1; 32];
+        let need = ContextNeed::for_key(fact_id, "output_need", FactScope::Global, [2; 32]);
+        let wake = TimeWake {
+            owner: fact_id,
+            timeline: Timeline::new("output_wake").unwrap(),
+            at: 42,
+        };
+        let accepted = ProjectionOutput::new()
+            .purge_self(fact_id)
+            .need(need.clone())
+            .time_wake(wake.clone());
+
+        assert_eq!(
+            projection_output_owner_status(&accepted, fact_id),
+            OWNER_CHECK_ACCEPTED
+        );
+
+        let foreign_need = ProjectionOutput::new()
+            .purge_self(fact_id)
+            .need(ContextNeed {
+                owner: [9; 32],
+                ..need
+            })
+            .time_wake(wake);
+        assert_eq!(
+            projection_output_owner_status(&foreign_need, fact_id),
+            OWNER_CHECK_FOREIGN_NEED
+        );
     }
 
     #[test]

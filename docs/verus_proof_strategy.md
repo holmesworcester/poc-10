@@ -106,6 +106,9 @@ before producing `Ok(())` or a diagnostic error.
 `owner_status_allows_projection` accepts if and only if the status is exactly
 the accepted status, so the production success branch has a verified decision
 predicate rather than an informal interpretation of the status byte.
+`projection_output_owner_status(output, fact_id)` applies that same verified
+status classification to the actual `ProjectionOutput` object consumed by
+`enforce_owner_is_self`.
 Cargo-verus also proves that the returned `ContextOffer.owner` equals the
 owner argument for one claim and that role, scope, start key, end key, and
 offer value are copied unchanged. For a slice of claims, Cargo-verus proves
@@ -667,6 +670,7 @@ projected_time_wake_owners_are_self(wakes, fact_id) accepts if and only if every
 projected_output_owners_are_self(purged, needs, wakes, fact_id) accepts if and only if all three owner groups are fact_id
 projected_owner_status(purged, needs, wakes, fact_id) returns accepted/foreign-purge/foreign-need/foreign-wake exactly from those predicates
 owner_status_allows_projection(status) accepts if and only if status is OWNER_CHECK_ACCEPTED
+projection_output_owner_status(output, fact_id) returns accepted/foreign-purge/foreign-need/foreign-wake exactly from the output's purges, needs, and time wakes
 ContextOfferClaim::into_offer(claim, owner).owner == owner
 ContextOfferClaim::into_offer(claim, owner) preserves role/scope/start/end/value
 owned_offers_from_claims(claims, owner).len == claims.len
@@ -699,9 +703,9 @@ or pre-normalization context-set assembly; it is proving the
 `ProjectionOutput::context_set` normalization step and `prepare_projection`
 call order over executable helper code. The remaining owner-checking gap is no
 longer the equality decision, per-slice scans, aggregate owner predicate,
-status classification, or accept-status decision; it is proving the
-`enforce_owner_is_self` `Result` wrapper, diagnostic rejection branches, and
-`prepare_projection` call order over executable helper code.
+status classification, accept-status decision, or full-output status bridge; it
+is proving the `enforce_owner_is_self` `Result` wrapper diagnostic rejection
+branches and `prepare_projection` call order over executable helper code.
 The remaining version replay rebuild admission gap is no longer the
 standing-output decision, status classification, or accept-status decision; it
 is proving the `validate_version_replay_rebuild_projection_shape` `Result`

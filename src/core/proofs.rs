@@ -64,6 +64,10 @@
 //!   is exactly `OWNER_CHECK_ACCEPTED`, so the success branch is not an
 //!   unproved interpretation of the status byte.
 //! - Proven in production Rust today:
+//!   `projection_output_owner_status(output, fact_id)` applies the same
+//!   accepted/foreign-purge/foreign-need/foreign-time-wake classification to
+//!   the actual `ProjectionOutput` object consumed by `enforce_owner_is_self`.
+//! - Proven in production Rust today:
 //!   `ContextOfferClaim::into_offer(claim, owner).owner == owner`.
 //! - Proven in production Rust today:
 //!   `ContextOfferClaim::into_offer(claim, owner) preserves role/scope/start/end/value`.
@@ -130,9 +134,8 @@
 //! - Not proven yet for offer finalization: `ProjectionOutput::context_set`
 //!   normalization or `prepare_projection` call order.
 //! - Not proven yet for owner enforcement: the exported theorem tying
-//!   `enforce_owner_is_self` `Result` wrapper, diagnostic rejection branches,
-//!   and `prepare_projection` call order to the verified status and allow
-//!   helpers.
+//!   `enforce_owner_is_self` `Result` wrapper diagnostic rejection branches and
+//!   `prepare_projection` call order to the verified status and allow helpers.
 //! - Not proven yet for version replay rebuild admission: the
 //!   `validate_version_replay_rebuild_projection_shape` `Result` wrapper and
 //!   `prepare_projection` call order around the verified status helper.

@@ -86,7 +86,7 @@ fn cargo_verus_verifies_production_core_projection_contracts() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        combined.contains("verification results:: 31 verified, 0 errors"),
+        combined.contains("verification results:: 32 verified, 0 errors"),
         "production proof should verify the real core projection contracts:\n{combined}"
     );
 }
@@ -210,7 +210,7 @@ fn core_proofs_make_trust_boundary_explicit() {
         "Not proven yet for version replay rebuild admission",
         "`validate_version_replay_rebuild_projection_shape`",
         "exported theorem tying",
-        "`enforce_owner_is_self` `Result` wrapper, diagnostic rejection branches",
+        "`enforce_owner_is_self` `Result` wrapper diagnostic rejection",
         "Not proven here today: every exported `theorem_*` runtime/core property.",
         "First stubs to replace: the near-term core glue stubs",
         "First core proof milestone: remove `external_body` from the core theorem",
@@ -335,6 +335,7 @@ fn verus_plan_is_single_core_first_source() {
         "standing-output exactly from that predicate",
         "allow helper accepts",
         "only the accepted status",
+        "`projection_output_owner_status(output, fact_id)` applies that same verified",
         "`validate_version_replay_rebuild_projection_shape` `Result` wrapper",
         "`ProjectionOutput::context_set` normalization step",
         "keep leaf projectors on the simple `Projector::project` API",
@@ -497,6 +498,7 @@ fn verus_plan_is_single_core_first_source() {
         "projected_output_owners_are_self(purged, needs, wakes, fact_id) accepts if and only if all three owner groups are fact_id",
         "projected_owner_status(purged, needs, wakes, fact_id) returns accepted/foreign-purge/foreign-need/foreign-wake exactly from those predicates",
         "owner_status_allows_projection(status) accepts if and only if status is OWNER_CHECK_ACCEPTED",
+        "projection_output_owner_status(output, fact_id) returns accepted/foreign-purge/foreign-need/foreign-wake exactly from the output's purges, needs, and time wakes",
         "ContextOfferClaim::into_offer(claim, owner).owner == owner",
         "ContextOfferClaim::into_offer(claim, owner) preserves role/scope/start/end/value",
         "owned_offers_from_claims(claims, owner).len == claims.len",
@@ -521,7 +523,7 @@ fn verus_plan_is_single_core_first_source() {
         "assume_specification` for the derived `ContextOfferClaim::clone`",
         "clone preserves the whole claim",
         "remaining owner-checking gap",
-        "accept-status decision",
+        "full-output status bridge",
         "remaining version replay rebuild admission gap",
         "standing-output decision",
         "status classification",
@@ -532,7 +534,7 @@ fn verus_plan_is_single_core_first_source() {
         "selected-stamp evidence construction",
         "route stamp for the effective tag",
         "called that selected\nprojector function pointer",
-        "`enforce_owner_is_self` `Result` wrapper, diagnostic rejection branches",
+        "`enforce_owner_is_self` `Result` wrapper diagnostic rejection",
         "projection_context_records_offer_provenance(ctx, graph)",
         "matched_offer_loads_owner_fact(matched)",
         "matcher_preserves_role_scope_selector(need, matched)",
