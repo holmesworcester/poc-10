@@ -25,9 +25,9 @@ use crate::core::facts::Fact;
 use crate::core::intents::TypedTableSchema;
 use crate::core::network;
 use crate::core::project_fact::{
-    finalize_dispatched_projection, selected_route_evidence, FactRoute, FactRouteId,
-    FactRouteStamp, ProjectionContext, ProjectionDispatcher, ProjectionOutput,
-    ProjectionRouteEvidence, Projector, RoutedProjection,
+    dispatch_registered_projector, registered_projector_route, registered_projector_stamp,
+    selected_route_evidence, FactRoute, FactRouteStamp, ProjectionContext, ProjectionDispatcher,
+    ProjectionOutput, ProjectionRouteEvidence, Projector, RegisteredProjector, RoutedProjection,
 };
 use crate::core::runtime::{HandlerRoute, RecurringIntentSpec};
 use crate::protocol::cli as command;
@@ -1254,7 +1254,7 @@ fn protocol_effective_tag(fact: &Fact) -> Result<u8, String> {
 macro_rules! projector_route {
     ($name:ident, $projector:path) => {
         fn $name(fact: &Fact, context: &ProjectionContext) -> Result<ProjectionOutput, String> {
-            <$projector>::new().project(fact, context)
+            <$projector as RegisteredProjector>::new().project(fact, context)
         }
     };
 }
@@ -1264,36 +1264,34 @@ macro_rules! projector_route {
 // first-class projector metadata.
 macro_rules! projector_routes {
     ($($name:ident => $tag:path, $projector:path, $projector_info:path, $storage_requirement:path ;)+) => {
+        $(
+            impl RegisteredProjector for $projector {
+                const ROUTE_TAG: u8 = $tag;
+                const PROJECTOR_INFO: crate::core::project_fact::FactProjectorInfo = $projector_info;
+                const STORAGE_REQUIREMENT: crate::core::effects::StorageRequirement = $storage_requirement;
+
+                fn new() -> Self {
+                    <$projector>::new()
+                }
+            }
+        )+
+
         $(projector_route!($name, $projector);)+
 
         pub(crate) const FACT_ROUTES: &[FactRoute] = &[
-            $(FactRoute {
-                route_id: FactRouteId::from_effective_tag($tag),
-                tag: $tag,
-                projector: $name,
-                storage_requirement: $storage_requirement,
-                projector_info: $projector_info,
-            },)+
+            $(registered_projector_route::<$projector>($name),)+
         ];
 
         #[cfg(test)]
         pub(crate) const FACT_ROUTE_STAMPS: &[FactRouteStamp] = &[
-            $(FactRouteStamp {
-                route_id: FactRouteId::from_effective_tag($tag),
-                tag: $tag,
-                storage_requirement: $storage_requirement,
-                projector_info: $projector_info,
-            },)+
+            $(registered_projector_stamp::<$projector>(),)+
         ];
 
         fn protocol_route_stamp_for_effective_tag(effective_tag: u8) -> Option<FactRouteStamp> {
             match effective_tag {
-                $($tag => Some(FactRouteStamp {
-                    route_id: FactRouteId::from_effective_tag($tag),
-                    tag: $tag,
-                    storage_requirement: $storage_requirement,
-                    projector_info: $projector_info,
-                }),)+
+                $(<$projector as RegisteredProjector>::ROUTE_TAG => {
+                    Some(registered_projector_stamp::<$projector>())
+                },)+
                 _ => None,
             }
         }
@@ -1316,19 +1314,8 @@ macro_rules! projector_routes {
             context: &ProjectionContext,
         ) -> Result<RoutedProjection, String> {
             match effective_tag {
-                $($tag => {
-                    let output = <$projector>::new().project(fact, context)?;
-                    Ok(finalize_dispatched_projection(
-                        fact.id,
-                        effective_tag,
-                        FactRouteStamp {
-                            route_id: FactRouteId::from_effective_tag($tag),
-                            tag: $tag,
-                            storage_requirement: $storage_requirement,
-                            projector_info: $projector_info,
-                        },
-                        output,
-                    ))
+                $(<$projector as RegisteredProjector>::ROUTE_TAG => {
+                    dispatch_registered_projector::<$projector>(fact, context)
                 },)+
                 _ => Err(format!(
                     "no target projector registered for fact tag {effective_tag}"
@@ -1510,6 +1497,7 @@ mod tests {
     use super::*;
     use crate::core::effects::StorageRequirement;
     use crate::core::facts::FactScope;
+    use crate::core::project_fact::FactRouteId;
     use std::collections::BTreeSet;
 
     #[test]
@@ -1573,6 +1561,30 @@ mod tests {
             evidence.storage_requirement,
             auth::workspace::project::STORAGE_REQUIREMENT
         );
+    }
+
+    #[test]
+    fn protocol_route_evidence_matches_registered_route_for_every_tag() {
+        for route in FACT_ROUTES {
+            let fact = Fact::new(FactScope::Global, 0, vec![route.tag]);
+            let evidence = protocol_route_evidence_for_effective_tag(fact.id, route.tag)
+                .expect("route evidence for registered tag");
+            let stamp = protocol_route_stamp_for_effective_tag(route.tag)
+                .expect("registered route stamp for registered tag");
+
+            assert_eq!(
+                stamp,
+                route.stamp(),
+                "lookup stamp must match executable route for tag {}",
+                route.tag
+            );
+            assert_eq!(evidence.fact_id, fact.id);
+            assert_eq!(evidence.route_id, stamp.route_id);
+            assert_eq!(evidence.effective_tag, route.tag);
+            assert_eq!(evidence.route_tag, stamp.tag);
+            assert_eq!(evidence.projector_info, stamp.projector_info);
+            assert_eq!(evidence.storage_requirement, stamp.storage_requirement);
+        }
     }
 
     #[test]

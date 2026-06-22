@@ -1224,16 +1224,24 @@ fn protocol_dispatch_uses_generated_route_match() {
     for required in [
         "fn protocol_route_stamp_for_effective_tag(effective_tag: u8) -> Option<FactRouteStamp>",
         "fn dispatch_protocol_projection_for_effective_tag(",
+        "impl RegisteredProjector for $projector",
+        "const ROUTE_TAG: u8 = $tag;",
+        "$(registered_projector_route::<$projector>($name),)+",
+        "$(registered_projector_stamp::<$projector>(),)+",
         "match effective_tag",
-        "let output = <$projector>::new().project(fact, context)?;",
-        "Ok(finalize_dispatched_projection(",
-        "route_id: FactRouteId::from_effective_tag($tag)",
+        "<$projector as RegisteredProjector>::ROUTE_TAG =>",
+        "dispatch_registered_projector::<$projector>(fact, context)",
     ] {
         assert!(
             registry.contains(required),
-            "protocol registry should generate a direct route-id dispatch branch: {required:?}"
+            "protocol registry should generate registered-projector route dispatch: {required:?}"
         );
     }
+
+    assert!(
+        !registry.contains("Ok(finalize_dispatched_projection("),
+        "protocol registry branches should not hand-stamp routed output; they should call dispatch_registered_projector"
+    );
 
     let protocol_projector_impl = registry
         .split("impl ProjectionDispatcher for ProtocolProjector")

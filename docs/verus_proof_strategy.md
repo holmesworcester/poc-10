@@ -254,9 +254,10 @@ load, prepare, commit.
 Current production-code foothold: `ProjectionDispatcher::dispatch_projection`
 returns `RoutedProjection`. The poc-10 protocol dispatcher is generated from
 the single route declaration list as a direct `match effective_tag` branch:
-the branch for a tag calls that branch's named projector, then hands the raw
-projector output plus that branch's route stamp to
-`finalize_dispatched_projection`.
+each branch dispatches through `dispatch_registered_projector::<P>`, where the
+registered projector type `P` supplies both the concrete projector call and the
+route stamp used by `finalize_dispatched_projection`. The branch no longer
+constructs a hand-written `FactRouteStamp`.
 `RouterProjector` remains available as a generic/test dispatcher for static
 route tables, but the protocol production path no longer relies on a
 function-pointer route table to decide which projector ran. Leaf projectors
@@ -294,9 +295,12 @@ metadata, retention bit, projected context, time wakes, projected row
 mutations, and runtime effects carried into `PreparedProjection`. This is
 selected-route metadata-search, routed-output constructor, verified dispatch
 finalization, generated dispatch code shape, and prepared-output carry proof,
-not the full route theorem: Cargo-verus still needs to prove the generated
-protocol dispatch branch/call theorem and the larger `prepare_projection`
-call-order theorem.
+not the full route theorem: the concrete projector call itself is still normal
+Rust execution, but route/call drift in the generated protocol dispatcher is
+closed by the `RegisteredProjector` API shape because the same projector type
+provides the branch tag, finalizer stamp, storage guard, metadata, and
+`Projector::project` call. Cargo-verus still needs to prove the larger
+`prepare_projection` call-order theorem.
 `projection_retains_fact_after_commit(projection)` is verified over the
 production lifecycle decision and accepts if and only if the projection does not
 purge itself and either its source was durable or its source was incoming with
@@ -828,6 +832,7 @@ selected_route_evidence(fact_id, effective_tag, stamp) preserves selected route 
 select_route_stamp(stamps, effective_tag) returns the first matching route stamp or proves no route stamp matches
 routed_projection_from_selected_route(fact_id, effective_tag, stamp, output) preserves selected route stamp metadata and preserves output unchanged
 finalize_dispatched_projection(fact_id, effective_tag, stamp, output) applies selected route storage and preserves raw output payload
+dispatch_registered_projector::<P>(fact, context) is the production dispatch branch shape: one registered projector type P supplies the projector call, tag, storage guard, metadata, and finalizer stamp
 runtime_effects_with_storage_requirement(effects, requirement) sets the storage requirement and preserves the effect payload
 prepared_projection_from_validated_output preserves route evidence and validated output pieces in PreparedProjection
 projection_mode_from_replay_flag(replay) returns Normal exactly for replay == 0 and Replay exactly for replay != 0

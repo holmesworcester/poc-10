@@ -116,23 +116,27 @@
 //!   `routed_projection_from_selected_route(fact_id, effective_tag, stamp,
 //!   output)` attaches that selected-stamp route evidence to the actual
 //!   projector output value passed to it and preserves the output unchanged.
-//!   This still does not prove the generated protocol dispatcher's call-order
-//!   theorem.
+//!   This proves value preservation after the projector output exists; the
+//!   concrete projector call remains normal Rust execution.
 //! - Proven in production Rust today:
 //!   `finalize_dispatched_projection(fact_id, effective_tag, stamp, output)`
 //!   applies the selected route's storage requirement to the raw projector
 //!   output, preserves every other output/effect field, and returns a
-//!   `RoutedProjection` whose route evidence is stamped from that same selected
-//!   route stamp. The protocol generated dispatch branch calls this helper
-//!   immediately after the named projector returns.
+//!   `RoutedProjection` whose route evidence is stamped from that same
+//!   selected route stamp.
+//! - Closed by production Rust API shape:
+//!   protocol dispatch branches call `dispatch_registered_projector::<P>`,
+//!   where the same registered projector type `P` supplies the concrete
+//!   `Projector::project` call, route tag, storage guard, projector metadata,
+//!   and finalizer stamp. The generated branch no longer hand-writes a
+//!   `FactRouteStamp` that could drift from the projector it calls.
 //! - Proven in production Rust today:
 //!   `runtime_effects_with_storage_requirement(effects, requirement)` sets
 //!   `RuntimeEffects.storage_requirement` to the selected route requirement
 //!   while preserving emitted facts, priority facts, incoming facts and
 //!   metadata, purges, row mutations, intents, local intents, and the version
 //!   replay rebuild flag. `RuntimeEffects::with_storage_requirement` uses this
-//!   verified production helper; the remaining route gap is proving the
-//!   generated dispatcher applied it to the selected projector output.
+//!   verified production helper.
 //! - Proven in production Rust today:
 //!   `prepared_projection_from_validated_output(...)` constructs the
 //!   `PreparedProjection` that commit consumes and preserves the source, fact,
@@ -315,14 +319,15 @@
 //!   now returns `RoutedProjection`, which is a plain `ProjectionOutput` plus
 //!   route-stamped `ProjectionRouteEvidence` from the same route selection that
 //!   calls the projector. The protocol dispatcher is generated from the single
-//!   route declaration list as a direct `match effective_tag` branch that calls
-//!   the named projector in that branch; the generic `RouterProjector`
+//!   route declaration list as a direct `match effective_tag` branch. Each
+//!   branch uses `dispatch_registered_projector::<P>`, so the projector call
+//!   and final route stamp come from the same registered projector type instead
+//!   of parallel hand-written route fields. The generic `RouterProjector`
 //!   function-pointer path remains only for reusable/test dispatch. The route
 //!   metadata search, field-stamping, selected-stamp helper, dispatch
 //!   finalizer, and routed-output constructor are verified, and the validated
 //!   prepared-output constructor preserves that route evidence. The larger
-//!   generated-dispatcher branch theorem and `prepare_projection` call-order
-//!   theorem are not complete yet.
+//!   `prepare_projection` call-order theorem is not complete yet.
 //! - Refactored but not yet proved: projected row output and intent row output
 //!   now use separate Rust types, separate `RuntimeDescription` table lists, and
 //!   separate DB apply helpers. This gives

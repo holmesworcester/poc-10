@@ -5294,6 +5294,67 @@ pub mod route {
         ) -> Result<ProjectionOutput, String>;
     }
 
+    /// A leaf projector registered for one effective fact tag.
+    ///
+    /// Production protocol dispatch uses this trait to keep the concrete
+    /// projector call and the route stamp on one Rust type. That prevents the
+    /// generated dispatcher from calling one projector while hand-stamping the
+    /// output with another route's tag, storage guard, or metadata.
+    pub trait RegisteredProjector: Projector + Sized {
+        /// Effective fact tag routed to this projector.
+        const ROUTE_TAG: u8;
+        /// Stable human-readable projector metadata for proofs and diagnostics.
+        const PROJECTOR_INFO: FactProjectorInfo;
+        /// Storage version required by this route's committed effects.
+        const STORAGE_REQUIREMENT: StorageRequirement;
+
+        /// Construct the projector for dispatch.
+        fn new() -> Self;
+    }
+
+    /// Build proof-relevant route metadata from the registered projector type.
+    pub const fn registered_projector_stamp<P: RegisteredProjector>() -> FactRouteStamp {
+        FactRouteStamp {
+            route_id: FactRouteId::from_effective_tag(P::ROUTE_TAG),
+            tag: P::ROUTE_TAG,
+            storage_requirement: P::STORAGE_REQUIREMENT,
+            projector_info: P::PROJECTOR_INFO,
+        }
+    }
+
+    /// Build an executable route whose metadata comes from the same registered
+    /// projector type as the function pointer.
+    pub const fn registered_projector_route<P: RegisteredProjector>(
+        projector: ProjectorFn,
+    ) -> FactRoute {
+        FactRoute {
+            route_id: FactRouteId::from_effective_tag(P::ROUTE_TAG),
+            tag: P::ROUTE_TAG,
+            projector,
+            storage_requirement: P::STORAGE_REQUIREMENT,
+            projector_info: P::PROJECTOR_INFO,
+        }
+    }
+
+    /// Dispatch one already-selected registered projector.
+    ///
+    /// The selected projector type supplies both the executable call and the
+    /// final route stamp. Verus proves the finalizer preserves the raw output
+    /// except for the route storage guard; this helper removes the remaining
+    /// hand-written stamp fields from the dispatcher branch.
+    pub fn dispatch_registered_projector<P: RegisteredProjector>(
+        fact: &Fact,
+        context: &ProjectionContext,
+    ) -> Result<RoutedProjection, String> {
+        let output = P::new().project(fact, context)?;
+        Ok(finalize_dispatched_projection(
+            fact.id,
+            P::ROUTE_TAG,
+            registered_projector_stamp::<P>(),
+            output,
+        ))
+    }
+
     /// Route for envelope facts whose outer tag is not the semantic fact tag.
     #[derive(Debug, Clone, Copy)]
     pub struct EnvelopeRoute {
@@ -5400,10 +5461,11 @@ pub use effects::{
     TimeRange, TimeWake, Timeline,
 };
 pub use route::{
-    finalize_dispatched_projection, selected_route_evidence, EffectiveTagFn, EnvelopeRoute,
+    dispatch_registered_projector, finalize_dispatched_projection, registered_projector_route,
+    registered_projector_stamp, selected_route_evidence, EffectiveTagFn, EnvelopeRoute,
     FactAdmissionFn, FactProjectorInfo, FactRoute, FactRouteId, FactRouteStamp, FactRouteTable,
-    ProjectionDispatcher, ProjectionRouteEvidence, Projector, ProjectorFn, RoutedProjection,
-    RouterProjector,
+    ProjectionDispatcher, ProjectionRouteEvidence, Projector, ProjectorFn, RegisteredProjector,
+    RoutedProjection, RouterProjector,
 };
 
 const OWNER_KEYED_FACT_CLEANUP_TABLES: &[TableName] = &[
