@@ -30,11 +30,10 @@ outgoing network rows. Version repair is just recurring protocol work guarded by
 normal storage-version checks; the daemon loop does not own a separate storage
 readiness gate.
 
-Production derived-state rebuild is protocol policy: a protocol-owned update
-fact requests the generic rebuild effect, which wipes resettable state and marks
-retained facts pending in replay mode. Replay order variation remains a
-diagnostic surface for proving idempotence and order independence, not the
-public upgrade command.
+Production version replay rebuild is protocol policy: a protocol-owned update
+fact requests the effect that wipes resettable state and marks retained facts
+pending in replay mode. Replay order variation remains a diagnostic surface for
+proving idempotence and order independence, not the public upgrade command.
 
 ## File Roles
 

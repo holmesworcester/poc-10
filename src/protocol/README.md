@@ -277,8 +277,9 @@ loop, and storage-requirement rules.
 
 - `local_update` is the local repair fact. The recurring version check authors
   it when the schema-declared protocol marker is missing or stale; live
-  projection records update history, advances the marker, requests rebuild, and
-  requeues retained facts for replay. Replaying an old update fact is a no-op.
+  projection records update history, advances the marker, requests version
+  replay rebuild, and requeues retained facts for replay. Replaying an old
+  update fact is a no-op.
 
 ## Invariants
 

@@ -385,7 +385,8 @@ pub struct ReplayTables {
 }
 
 impl ReplayTables {
-    /// Empty rebuild lifecycle declarations for tests and non-rebuild schemas.
+    /// Empty rebuild lifecycle declarations for tests and schemas without
+    /// version replay rebuild lifecycle tables.
     pub const EMPTY: Self = Self {
         protected: &[],
         reset: &[],

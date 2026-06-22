@@ -201,9 +201,10 @@ Add CLI commands that exercise protocol update and rebuild diagnostics without
 making replay a separate public upgrade command:
 
 - `update`: author a local protocol update fact. Its live projection records the
-  current protocol version, requests the generic rebuild effect, and leaves the
-  retained update fact as audit history. Replay-mode projection of update facts
-  is a no-op, so old update facts remain records without re-triggering rebuild.
+  current protocol version, requests the version replay rebuild effect, and
+  leaves the retained update fact as audit history. Replay-mode projection of
+  update facts is a no-op, so old update facts remain records without
+  re-triggering wipe/replay repair.
 - `state-summary`: print a stable hashable summary of rebuild-relevant state:
   retained facts, materialized rows, context edges, semantic time wakes, sync
   indexes, local key-material rows, and connection-maintenance rows. The output

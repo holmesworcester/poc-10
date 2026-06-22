@@ -13,7 +13,7 @@ tables, and protocol query modules run bounded SQL over projected tables.
 - `core/project_fact.rs` owns fact lifecycle SQL and projection commit ordering:
   retained and incoming admission, pending queue selection, context
   replacement, due time wakes, exact fact purges, row mutations, emitted facts,
-  intents, rebuild effect commit, and queue deletion.
+  intents, version replay rebuild effect commit, and queue deletion.
 - `core/handle_intent.rs` owns intent queue SQL, handler input fact loading,
   handler dispatch, retry behavior, and atomic commit of handler output.
 - `core/network.rs` owns TCP and memory-local network queue SQL.

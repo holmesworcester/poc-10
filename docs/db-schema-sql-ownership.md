@@ -12,8 +12,8 @@ table's behavior.
   trusted identifier quoting, and generic typed row mutation mechanics.
 - `core/project_fact.rs` owns retained and incoming fact admission, pending
   projection queue selection, projection commit ordering, exact fact purge
-  cleanup, standing context SQL, due time wake SQL, rebuild effect commit, and
-  row mutation commit.
+  cleanup, standing context SQL, due time wake SQL, version replay rebuild
+  effect commit, and row mutation commit.
 - `core/handle_intent.rs` owns durable and local intent queue SQL plus exact
   handler input fact loading.
 - `core/network.rs` owns network queue SQL.

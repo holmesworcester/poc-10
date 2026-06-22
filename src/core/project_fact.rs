@@ -578,7 +578,11 @@ fn prepare_projection(
     enforce_owner_is_self(&fact, &output)?;
     let projected_context = output.context_set(fact.id);
     let runtime_effects = output.effects;
-    validate_rebuild_projection_shape(&projected_context, &output.time_wakes, &runtime_effects)?;
+    validate_version_replay_rebuild_projection_shape(
+        &projected_context,
+        &output.time_wakes,
+        &runtime_effects,
+    )?;
     perf::measure_result("projection_validate_effects", || {
         validate_runtime_effects_for_admission(
             &runtime_effects,
@@ -602,13 +606,13 @@ fn prepare_projection(
     })
 }
 
-fn validate_rebuild_projection_shape(
+fn validate_version_replay_rebuild_projection_shape(
     context: &ContextSet,
     time_wakes: &[TimeWake],
     effects: &RuntimeEffects,
 ) -> Result<(), String> {
-    if rebuild_projection_shape_allowed(
-        effects.rebuild_derived_state,
+    if version_replay_rebuild_shape_allowed(
+        effects.version_replay_rebuild,
         &context.needs,
         &context.offers,
         time_wakes,
@@ -616,7 +620,7 @@ fn validate_rebuild_projection_shape(
         return Ok(());
     }
     Err(
-        "derived-state rebuild projection cannot publish standing context or time wakes"
+        "version replay rebuild projection cannot publish standing context or time wakes"
             .to_string(),
     )
 }
@@ -940,25 +944,27 @@ fn owner_status_allows_projection(status: u8) -> (accepted: bool)
     status == OWNER_CHECK_ACCEPTED
 }
 
-/// Decision used before admitting a projection-wide rebuild effect.
+/// Decision used before admitting a version replay rebuild effect.
 ///
-/// A rebuild projection may request a reset of derived state, but it must not
-/// simultaneously publish standing context or time wakes. Those outputs would
-/// become visible just before the reset effect is committed and make the core
-/// induction story ambiguous.
-fn rebuild_projection_shape_allowed(
-    rebuild_derived_state: bool,
+/// This effect is used by version-upgrade update facts: core wipes resettable
+/// derived/runtime state and requeues all retained facts in replay mode. A
+/// projection that asks for that wipe/replay must not simultaneously publish
+/// standing context or time wakes. Those outputs would become visible just
+/// before the wipe/replay effect is committed and make the core induction story
+/// ambiguous.
+fn version_replay_rebuild_shape_allowed(
+    version_replay_rebuild: bool,
     needs: &[ContextNeed],
     offers: &[ContextOffer],
     wakes: &[TimeWake],
 ) -> (accepted: bool)
     ensures
         accepted <==> (
-            !rebuild_derived_state
+            !version_replay_rebuild
                 || (needs@.len() == 0 && offers@.len() == 0 && wakes@.len() == 0)
         ),
 {
-    if !rebuild_derived_state {
+    if !version_replay_rebuild {
         return true;
     }
     needs.len() == 0 && offers.len() == 0 && wakes.len() == 0
@@ -1324,8 +1330,8 @@ pub(crate) mod commit_effects {
     //! effect language inside that work.
     //!
     //! Committing effects changes the runtime in five ways. Purged facts remove
-    //! the fact and its core-owned derived rows. A rebuild request clears
-    //! resettable derived state and marks retained facts pending in replay mode.
+    //! the fact and its core-owned derived rows. A version replay rebuild request
+    //! clears resettable derived state and marks retained facts pending in replay mode.
     //! New facts enter `facts`, `local_fact_admissions`, and
     //! `pending_projection`; priority facts use the same storage path but sort
     //! before ordinary projection work. Row mutations update protocol or core IO
@@ -1335,7 +1341,7 @@ pub(crate) mod commit_effects {
     //!
     //! The mechanism is deliberately split in two. `validate_runtime_effects`
     //! checks failures that do not need SQL: unknown intent kinds, invalid
-    //! rebuild batches, and row mutations aimed at tables outside the runtime
+    //! version replay rebuild batches, and row mutations aimed at tables outside the runtime
     //! allowlist. The commit functions then rely on the database for the
     //! state-dependent checks: content-addressed facts must match their ids and
     //! typed-table inserts must be new rows or exact duplicates of the full
@@ -1350,9 +1356,9 @@ pub(crate) mod commit_effects {
     //!
     //! The commit order is part of the contract. Purges run first so stale
     //! core-owned rows disappear before new facts and derived rows become
-    //! visible. A rebuild wipe runs before fact admission and row mutations; that
-    //! lets a control-plane projector request rebuild and then write the version
-    //! or marker row that survives it. New facts are admitted and marked pending
+    //! visible. A version replay rebuild wipe runs before fact admission and row
+    //! mutations; that lets a control-plane projector request wipe/replay and
+    //! then write the version or marker row that survives it. New facts are admitted and marked pending
     //! for projection. Row mutations apply next. Follow-up durable and ephemeral
     //! intents are recorded last, so downstream work is not queued until the data
     //! it depends on has committed.
@@ -1404,7 +1410,7 @@ pub(crate) mod commit_effects {
         validate_intents(&effects.intents, registered_intent_kinds)?;
         validate_intents(&effects.local_intents, registered_intent_kinds)?;
         validate_incoming_fact_metadata(effects)?;
-        validate_rebuild_effect_shape(effects)?;
+        validate_version_replay_rebuild_effect_shape(effects)?;
         validate_row_mutations(&effects.row_mutations, allowed_tables)?;
         Ok(())
     }
@@ -1435,8 +1441,10 @@ pub(crate) mod commit_effects {
             .try_for_each(fact_admission)
     }
 
-    fn validate_rebuild_effect_shape(effects: &RuntimeEffects) -> Result<(), String> {
-        if !effects.rebuild_derived_state {
+    fn validate_version_replay_rebuild_effect_shape(
+        effects: &RuntimeEffects,
+    ) -> Result<(), String> {
+        if !effects.version_replay_rebuild {
             return Ok(());
         }
         if !effects.facts.is_empty()
@@ -1446,7 +1454,7 @@ pub(crate) mod commit_effects {
             || !effects.local_intents.is_empty()
         {
             return Err(
-                "derived-state rebuild effect cannot be mixed with facts or intents".to_string(),
+                "version replay rebuild effect cannot be mixed with facts or intents".to_string(),
             );
         }
         Ok(())
@@ -1580,8 +1588,8 @@ pub(crate) mod commit_effects {
     /// Write all shared effects into an already-open transaction.
     ///
     /// The order is intentional: purges remove stale core-owned rows first,
-    /// rebuild clears resettable state when requested, facts become pending, rows
-    /// mutate, and follow-up intents are recorded last. If any step fails, the
+    /// version replay rebuild clears resettable state when requested, facts become
+    /// pending, rows mutate, and follow-up intents are recorded last. If any step fails, the
     /// caller's transaction rolls the whole batch back.
     ///
     /// This function does not open or close the transaction. The caller owns the
@@ -1606,13 +1614,13 @@ pub(crate) mod commit_effects {
             purge_fact_in_tx(tx, *purged)?;
         }
 
-        if effects.rebuild_derived_state {
+        if effects.version_replay_rebuild {
             if !allow_rebuild {
                 return Err(sqlite_string_error(
-                    "derived-state rebuild effect is only allowed from projection".to_string(),
+                    "version replay rebuild effect is only allowed from projection".to_string(),
                 ));
             }
-            commit_rebuild_effect_in_tx(tx).map_err(sqlite_string_error)?;
+            commit_version_replay_rebuild_effect_in_tx(tx).map_err(sqlite_string_error)?;
         }
 
         let mode = if replay {
@@ -1656,7 +1664,7 @@ pub(crate) mod commit_effects {
         })
     }
 
-    fn commit_rebuild_effect_in_tx(tx: &Db) -> Result<(), String> {
+    fn commit_version_replay_rebuild_effect_in_tx(tx: &Db) -> Result<(), String> {
         clear_resettable_derived_state_in_tx(tx)
             .map_err(|err| format!("clear resettable derived state: {err}"))?;
         enqueue_retained_facts_for_replay_in_tx(tx)?;
@@ -1735,13 +1743,14 @@ pub mod context {
     /// Runtime mode visible while projecting one fact.
     ///
     /// This is not fact-derived context. It is ambient execution state supplied by
-    /// the queue item being processed: normal live projection or replay rebuild.
+    /// the queue item being processed: normal live projection or version replay
+    /// rebuild.
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
     pub enum ProjectionMode {
         /// Normal runtime projection.
         #[default]
         Normal,
-        /// Replay rebuild projection.
+        /// Version replay rebuild projection.
         Replay,
     }
 
@@ -1808,12 +1817,13 @@ pub mod context {
             }
         }
 
-        /// Return whether this projection is a normal live run or a replay rebuild.
+        /// Return whether this projection is a normal live run or a version replay rebuild.
         pub fn mode(&self) -> ProjectionMode {
             self.mode
         }
 
-        /// Return true when this projection is rebuilding from retained facts.
+        /// Return true when this projection is replaying retained facts after a
+        /// version-upgrade wipe.
         pub fn is_replay(&self) -> bool {
             self.mode.is_replay()
         }
@@ -3162,15 +3172,16 @@ pub mod effects {
             self
         }
 
-        /// Request a database-wide rebuild of derived/runtime state.
+        /// Request the version-upgrade wipe plus retained-fact replay effect.
         ///
         /// This is intentionally much broader than `purge_self`: the commit
-        /// boundary clears schema-declared resettable tables and requeues every
-        /// retained fact in replay mode. Protocols should reserve it for local
-        /// control-plane facts whose replay-mode projector is a no-op, so the
-        /// retained record remains auditable without re-triggering the rebuild.
-        pub fn rebuild_derived_state(mut self) -> Self {
-            self.effects.rebuild_derived_state = true;
+        /// boundary clears schema-declared resettable derived/runtime tables and
+        /// requeues every retained fact in replay mode. Protocols should reserve
+        /// it for local version-update facts whose replay-mode projector is a
+        /// no-op, so the update record remains auditable without re-triggering
+        /// the wipe/replay.
+        pub fn version_replay_rebuild(mut self) -> Self {
+            self.effects.version_replay_rebuild = true;
             self
         }
 
@@ -5261,23 +5272,23 @@ mod contract_tests {
     }
 
     #[test]
-    fn rebuild_projection_accepts_empty_standing_output() {
+    fn version_replay_rebuild_accepts_empty_standing_output() {
         let fact = Fact::new(FactScope::Global, 1, b"empty rebuild".to_vec());
         let projector = test_projector(|_fact: &Fact, _context: &ProjectionContext| {
-            Ok(ProjectionOutput::new().rebuild_derived_state())
+            Ok(ProjectionOutput::new().version_replay_rebuild())
         });
 
         let projection = run_projection(&projector, &fact, ProjectionContext::default())
             .expect("empty rebuild projection should validate");
 
-        assert!(projection.runtime_effects.rebuild_derived_state);
+        assert!(projection.runtime_effects.version_replay_rebuild);
         assert!(projection.projected_context.needs.is_empty());
         assert!(projection.projected_context.offers.is_empty());
         assert!(projection.time_wakes.is_empty());
     }
 
     #[test]
-    fn rebuild_projection_rejects_standing_context_or_time_wakes() {
+    fn version_replay_rebuild_rejects_standing_context_or_time_wakes() {
         let role = Role::new("rebuild_guard").unwrap();
         let key = ContextKey::from_bytes([3; 32]);
         let need_fact = Fact::new(FactScope::Global, 1, b"rebuild with need".to_vec());
@@ -5285,8 +5296,8 @@ mod contract_tests {
 
         let need_output = ProjectionOutput::new()
             .need(need_for(&need_fact, &role, &key))
-            .rebuild_derived_state();
-        assert_rebuild_projection_shape_rejected(&need_fact, need_output);
+            .version_replay_rebuild();
+        assert_version_replay_rebuild_shape_rejected(&need_fact, need_output);
 
         let time_output = ProjectionOutput::new()
             .time_wake(TimeWake {
@@ -5294,20 +5305,20 @@ mod contract_tests {
                 owner: time_fact.id,
                 at: 10,
             })
-            .rebuild_derived_state();
-        assert_rebuild_projection_shape_rejected(&time_fact, time_output);
+            .version_replay_rebuild();
+        assert_version_replay_rebuild_shape_rejected(&time_fact, time_output);
     }
 
-    fn assert_rebuild_projection_shape_rejected(fact: &Fact, output: ProjectionOutput) {
+    fn assert_version_replay_rebuild_shape_rejected(fact: &Fact, output: ProjectionOutput) {
         let projector =
             test_projector(move |_fact: &Fact, _context: &ProjectionContext| Ok(output.clone()));
 
         let err = run_projection(&projector, fact, ProjectionContext::default())
-            .expect_err("rebuild with standing output should fail validation");
+            .expect_err("version replay rebuild with standing output should fail validation");
 
         assert!(
             err.contains(
-                "derived-state rebuild projection cannot publish standing context or time wakes"
+                "version replay rebuild projection cannot publish standing context or time wakes"
             ),
             "{err}"
         );

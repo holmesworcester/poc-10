@@ -42,7 +42,7 @@ fn intent_runtime_output_boundary_is_facts_and_followup_intents_only() {
         row_mutations,
         intents,
         local_intents,
-        rebuild_derived_state,
+        version_replay_rebuild,
     } = output;
 
     assert_eq!(
@@ -56,7 +56,7 @@ fn intent_runtime_output_boundary_is_facts_and_followup_intents_only() {
     assert!(purged_facts.is_empty());
     assert!(row_mutations.is_empty());
     assert!(local_intents.is_empty());
-    assert!(!rebuild_derived_state);
+    assert!(!version_replay_rebuild);
     assert_eq!(facts[0].scope, FactScope::Local);
     assert_eq!(facts[0].timestamp, 42);
     assert_eq!(facts[0].bytes, b"handler-produced-fact");

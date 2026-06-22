@@ -2,12 +2,13 @@
 //!
 //! Versioning is a protocol scope, not a fact family. It owns the release
 //! version constant, the recurring check that compares the schema-declared
-//! protocol marker with that constant, and the local update fact that repairs
-//! stale derived state.
+//! protocol marker with that constant, and the local update fact that runs the
+//! version replay rebuild for stale derived state.
 //!
 //! The fact family in this scope is `local_update`. Local update facts are
-//! local facts that record a protocol release marker and request rebuild of
-//! derived state. Keep fact-family role files (`fact.rs`, `encode.rs`,
+//! local facts that record a protocol release marker and request the version
+//! replay rebuild: wipe resettable derived/runtime state and replay retained
+//! facts. Keep fact-family role files (`fact.rs`, `encode.rs`,
 //! `author.rs`, `project.rs`, `api.rs`, `cli.rs`) under
 //! `versioning/local_update/`, not in this scope root.
 //!
@@ -16,11 +17,10 @@
 //! 1. The recurring version check is protocol responsibility. It reads the
 //!    schema-declared protocol marker, compares it with the one
 //!    `CURRENT_PROTOCOL_VERSION` compiled into this release, and emits a local
-//!    update fact when the
-//!    database needs a rebuild. The update fact is the repair trigger: its
-//!    projection requests the generic rebuild effect, records protocol-visible
-//!    update history, and advances the schema-declared protocol marker through a
-//!    normal commit effect.
+//!    update fact when the database needs a version replay rebuild. The update
+//!    fact is the repair trigger: its projection requests the version replay
+//!    rebuild effect, records protocol-visible update history, and advances the
+//!    schema-declared protocol marker through a normal commit effect.
 //!
 //! 2. A projector or query storage requirement is a local safety contract for a
 //!    read or write path. A fact family declares the storage version its

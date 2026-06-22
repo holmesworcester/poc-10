@@ -1,9 +1,10 @@
 //! Projection for local protocol update facts.
 //!
-//! Live projection calls `rebuild_derived_state`, records protocol-visible
-//! update history, and advances the schema-declared protocol marker. Replay projection exits
-//! on `context.is_replay()` so old update facts remain audit history without
-//! rerunning rebuild.
+//! Live projection calls `version_replay_rebuild`, records protocol-visible
+//! update history, and advances the schema-declared protocol marker. That core
+//! effect wipes resettable derived/runtime tables and replays retained facts.
+//! Replay projection exits on `context.is_replay()` so old update facts remain
+//! audit history without rerunning the wipe/replay.
 
 use crate::core::effects::StorageRequirement;
 use crate::core::facts::{Fact, FactScope};
@@ -39,17 +40,17 @@ impl Projector for UpdateProjector {
         let update = adapt::adapt(authenticated, context)?;
 
         // POLICY. Update facts are local release-marker records. Live
-        // projection performs the one repair action; replay keeps old update
-        // facts as history without rerunning rebuild.
-        // 1. Replayed update facts do not materialize or request rebuild.
+        // projection performs the version-upgrade wipe/replay; replay keeps old
+        // update facts as history without rerunning it.
+        // 1. Replayed update facts do not materialize or request wipe/replay.
         if context.is_replay() {
             return Ok(ProjectionOutput::new());
         }
 
-        // 2. Live update facts record the marker and ask core to rebuild
-        // derived state from retained facts.
+        // 2. Live update facts record the marker and ask core to wipe
+        // resettable derived/runtime state, then replay retained facts.
         Ok(ProjectionOutput::new()
-            .rebuild_derived_state()
+            .version_replay_rebuild()
             .row_mutation(crate::core::intents::RowMutation::InsertValues(
                 protocol_version_row(fact.id, &update),
             )))
@@ -103,7 +104,7 @@ mod tests {
     use crate::protocol::versioning::local_update::{author::update_fact, fact::UpdateFact};
 
     #[test]
-    fn projector_records_version_and_requests_rebuild_only_live() {
+    fn projector_records_version_and_requests_version_replay_rebuild_only_live() {
         let fact = update_fact(UpdateFact {
             protocol_version: crate::protocol::versioning::CURRENT_PROTOCOL_VERSION,
             applied_at_ms: 44,
@@ -112,7 +113,7 @@ mod tests {
         let live = UpdateProjector::new()
             .project(&fact, &ProjectionContext::default())
             .expect("project live update");
-        assert!(live.effects.rebuild_derived_state);
+        assert!(live.effects.version_replay_rebuild);
         assert_eq!(live.effects.row_mutations.len(), 1);
 
         let replay = UpdateProjector::new()

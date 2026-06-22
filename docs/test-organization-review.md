@@ -534,8 +534,8 @@ global uniqueness (core dispatch invariant), then storage-gating policy.
 tag has an admission arm and vice versa).
 
 **`versioning/local_update/{project,encode,author,api}.rs`** — `tests` (1) each;
-already-at-bottom. project: live records version + requests rebuild, replay
-no-ops; encode: fixed-width roundtrip; author/api: emit one Local fact at
+already-at-bottom. project: live records version + requests version replay
+rebuild, replay no-ops; encode: fixed-width roundtrip; author/api: emit one Local fact at
 CURRENT_PROTOCOL_VERSION. **Verdict: yes.** Gaps: non-Local-scope/bad-id
 rejection (project), wrong-tag/length decode (encode), receipt-field assertions
 (api).

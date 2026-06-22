@@ -3,7 +3,8 @@
 //! The recurring `check_version` intent compares the schema-declared protocol marker with
 //! `CURRENT_PROTOCOL_VERSION`. A mismatch emits a priority local update fact;
 //! projecting that fact records protocol-visible update history, requests the
-//! generic rebuild effect, and advances the schema-declared protocol marker.
+//! version replay rebuild effect, and advances the schema-declared protocol
+//! marker.
 
 use crate::core::effects::{RuntimeEffects, StorageRequirement};
 use crate::core::intents::{HandlerContext, HandlerResult, Intent, IntentHandler, IntentKind};

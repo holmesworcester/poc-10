@@ -38,8 +38,8 @@ runtime contract.
 The actual fact family is `versioning/local_update/`. Its role files
 (`fact.rs`, `encode.rs`, `author.rs`, `project.rs`, `api.rs`, `cli.rs`) stay
 under that directory. `state-summary` is a diagnostic command owned by the
-local-update family. It hashes schema-declared summary tables so rebuild output
-can be compared without adding protocol meaning to core.
+local-update family. It hashes schema-declared summary tables so version replay
+rebuild output can be compared without adding protocol meaning to core.
 
 ## Update Loop
 
@@ -89,8 +89,9 @@ The recurring update path is concrete:
 3. The `check_version` handler repeats the same check before committing effects.
    If the marker is now current, it emits no work. If it is still stale or
    missing, it creates a priority local update fact for `CURRENT_PROTOCOL_VERSION`.
-4. Live projection of that update fact requests the rebuild effect and commits
-   the rebuild boundary. In that same projection commit, it records
+4. Live projection of that update fact requests the version replay rebuild
+   effect and commits the wipe/replay boundary. In that same projection commit,
+   it records
    protocol-visible update history, advances the schema-declared marker by
    inserting a `protocol_version_rows` row, clears schema-declared resettable
    derived/runtime state, preserves retained facts and other replay-protected
@@ -99,12 +100,12 @@ The recurring update path is concrete:
 5. After that commit, the same runtime turn drains replay projection and replay
    intent work like normal queued work. The storage-requirement guards above
    keep ordinary work from committing stale materialized state while repair is
-   pending. Retained facts are requeued by rebuild, while queued intents remain
-   droppable across upgrade.
+   pending. Retained facts are requeued by version replay rebuild, while queued
+   intents remain droppable across upgrade.
 
-The update fact is retained as history, but its projector does rebuild work only
-during live projection. Replay projection of an old update fact is a no-op, so
-previous updates do not rerun.
+The update fact is retained as history, but its projector does wipe/replay work
+only during live projection. Replay projection of an old update fact is a no-op,
+so previous updates do not rerun that repair.
 
 ## Storage Requirements
 
@@ -132,7 +133,7 @@ compatibility path.
 
 Core does not know release policy, fact-family compatibility, or table meaning.
 It reads the schema-declared protocol marker, enforces the storage requirement
-it is handed, and executes rebuild/update effects mechanically.
+it is handed, and executes version replay rebuild/update effects mechanically.
 
 Protocol modules own the marker table, version number, recurring check, update
 fact, query policy, and per-family compatibility rules. Compatibility with

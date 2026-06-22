@@ -3,9 +3,9 @@
 //! Projection and intent handlers reduce to this structure before the SQL
 //! runtime workers commit their output. The structure is intentionally
 //! mechanical: it names ordinary facts, priority facts, incoming facts, purges,
-//! row mutations, durable intents, ephemeral intents, and database-wide rebuild
-//! requests. It does not contain callbacks, open sockets, command receipts, or
-//! protocol-specific execution state.
+//! row mutations, durable intents, ephemeral intents, and version replay
+//! rebuild requests. It does not contain callbacks, open sockets, command
+//! receipts, or protocol-specific execution state.
 //!
 //! If a new kind of runtime effect needs atomic commit with projection or
 //! intent dispatch, add it here and teach `project_fact::commit_effects` how
@@ -62,8 +62,8 @@ pub struct RuntimeEffects {
     pub intents: Vec<Intent>,
     /// Connection-local queued work, dropped on restart.
     pub local_intents: Vec<Intent>,
-    /// Clear derived/runtime state and requeue all retained facts in replay mode.
-    pub rebuild_derived_state: bool,
+    /// Version-upgrade repair: wipe resettable derived/runtime state and replay all retained facts.
+    pub version_replay_rebuild: bool,
 }
 
 impl Default for RuntimeEffects {
@@ -78,7 +78,7 @@ impl Default for RuntimeEffects {
             row_mutations: Vec::new(),
             intents: Vec::new(),
             local_intents: Vec::new(),
-            rebuild_derived_state: false,
+            version_replay_rebuild: false,
         }
     }
 }
@@ -97,7 +97,7 @@ impl RuntimeEffects {
             && self.row_mutations.is_empty()
             && self.intents.is_empty()
             && self.local_intents.is_empty()
-            && !self.rebuild_derived_state
+            && !self.version_replay_rebuild
     }
 
     pub fn with_storage_requirement(mut self, requirement: StorageRequirement) -> Self {
@@ -146,8 +146,9 @@ impl RuntimeEffects {
         self
     }
 
-    pub fn rebuild_derived_state(mut self) -> Self {
-        self.rebuild_derived_state = true;
+    /// Request the version-upgrade wipe plus retained-fact replay effect.
+    pub fn version_replay_rebuild(mut self) -> Self {
+        self.version_replay_rebuild = true;
         self
     }
 }

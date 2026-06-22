@@ -1,10 +1,11 @@
 //! Local protocol update fact family.
 //!
 //! Update facts are local control-plane facts. Live projection of the current
-//! update fact requests the generic rebuild effect, records protocol-visible
-//! update history, and advances the schema-declared protocol marker. Replay projection of
-//! old update facts is a no-op so past updates remain history without rerunning
-//! rebuild.
+//! update fact requests the version replay rebuild effect, records
+//! protocol-visible update history, and advances the schema-declared protocol
+//! marker. That effect wipes resettable derived/runtime state and replays
+//! retained facts. Replay projection of old update facts is a no-op so past
+//! updates remain history without rerunning the wipe/replay repair.
 
 pub mod api;
 pub mod author;

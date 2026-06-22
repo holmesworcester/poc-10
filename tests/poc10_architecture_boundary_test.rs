@@ -468,7 +468,7 @@ fn poc10_runtime_effects_names_the_common_commit_shape() {
         row_mutations,
         intents,
         local_intents,
-        rebuild_derived_state,
+        version_replay_rebuild,
     } = topo::core::effects::RuntimeEffects::new();
 
     assert_eq!(
@@ -483,7 +483,7 @@ fn poc10_runtime_effects_names_the_common_commit_shape() {
     assert!(row_mutations.is_empty());
     assert!(intents.is_empty());
     assert!(local_intents.is_empty());
-    assert!(!rebuild_derived_state);
+    assert!(!version_replay_rebuild);
 }
 
 #[test]
