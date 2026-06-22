@@ -621,6 +621,12 @@ fn prepare_projection(
         &output.time_wakes,
         &runtime_effects,
     )?;
+    validate_prepared_projection_commit_fields(
+        &projected_context,
+        &output.time_wakes,
+        &runtime_effects,
+        fact.id,
+    )?;
     perf::measure_result("projection_validate_effects", || {
         validate_projection_runtime_effects_for_admission(
             &runtime_effects,
@@ -658,6 +664,18 @@ fn validate_version_replay_rebuild_projection_shape(
         "version replay rebuild projection cannot publish standing context or time wakes"
             .to_string(),
     )
+}
+
+fn validate_prepared_projection_commit_fields(
+    context: &ContextSet,
+    time_wakes: &[TimeWake],
+    effects: &RuntimeEffects,
+    owner: FactId,
+) -> Result<(), String> {
+    if prepared_projection_commit_fields_accept(context, time_wakes, effects, owner) {
+        return Ok(());
+    }
+    Err("prepared projection contains non-committable owner or rebuild fields".to_string())
 }
 
 fn validate_projection_context_finalization(
@@ -1519,6 +1537,99 @@ fn projection_context_offers_match_claims(
     true
 }
 
+fn context_offer_owners_are_self(offers: &[ContextOffer], fact_id: FactId) -> (accepted: bool)
+    ensures
+        accepted <==> forall|i: int|
+            #![trigger offers@[i]]
+            0 <= i < offers@.len() ==> offers@[i].owner == fact_id,
+{
+    let mut i: usize = 0;
+    while i < offers.len()
+        invariant
+            i <= offers@.len(),
+            forall|j: int|
+                #![trigger offers@[j]]
+                0 <= j < i ==> offers@[j].owner == fact_id,
+        decreases offers@.len() - i,
+    {
+        if !projected_owner_matches(offers[i].owner, fact_id) {
+            assert(offers@[i as int].owner != fact_id);
+            assert(!(forall|j: int|
+                #![trigger offers@[j]]
+                0 <= j < offers@.len() ==> offers@[j].owner == fact_id));
+            return false;
+        }
+        i += 1;
+    }
+    assert(forall|j: int|
+        #![trigger offers@[j]]
+        0 <= j < offers@.len() ==> offers@[j].owner == fact_id);
+    true
+}
+
+spec fn prepared_projection_commit_fields_spec(
+    context: ContextSet,
+    wakes: Seq<TimeWake>,
+    effects: RuntimeEffects,
+    owner: FactId,
+) -> bool {
+    &&& forall|i: int|
+        #![trigger context.needs@[i]]
+        0 <= i < context.needs@.len() ==> context.needs@[i].owner == owner
+    &&& forall|i: int|
+        #![trigger context.offers@[i]]
+        0 <= i < context.offers@.len() ==> context.offers@[i].owner == owner
+    &&& forall|i: int|
+        #![trigger wakes[i]]
+        0 <= i < wakes.len() ==> wakes[i].owner == owner
+    &&& forall|i: int|
+        #![trigger effects.purged_facts@[i]]
+        0 <= i < effects.purged_facts@.len() ==> effects.purged_facts@[i] == owner
+    &&& (
+        !effects.version_replay_rebuild
+            || (context.needs@.len() == 0 && context.offers@.len() == 0 && wakes.len() == 0)
+    )
+}
+
+/// Check the prepared fields that commit may publish.
+///
+/// This is the commit-facing local shape proof for `prepare_projection`: after
+/// normalization and finalization, the exact context/time/effect fields that
+/// can reach SQL are self-owned, and a version replay rebuild carries no
+/// standing context or time wakes.
+fn prepared_projection_commit_fields_accept(
+    context: &ContextSet,
+    wakes: &[TimeWake],
+    effects: &RuntimeEffects,
+    owner: FactId,
+) -> (accepted: bool)
+    ensures
+        accepted <==> prepared_projection_commit_fields_spec(*context, wakes@, *effects, owner),
+{
+    if !projected_need_owners_are_self(&context.needs, owner) {
+        assert(!prepared_projection_commit_fields_spec(*context, wakes@, *effects, owner));
+        return false;
+    }
+    if !context_offer_owners_are_self(&context.offers, owner) {
+        assert(!prepared_projection_commit_fields_spec(*context, wakes@, *effects, owner));
+        return false;
+    }
+    if !projected_time_wake_owners_are_self(wakes, owner) {
+        assert(!prepared_projection_commit_fields_spec(*context, wakes@, *effects, owner));
+        return false;
+    }
+    if !projected_purge_owners_are_self(&effects.purged_facts, owner) {
+        assert(!prepared_projection_commit_fields_spec(*context, wakes@, *effects, owner));
+        return false;
+    }
+    if !version_replay_rebuild_projection_accepts(context, wakes, effects) {
+        assert(!prepared_projection_commit_fields_spec(*context, wakes@, *effects, owner));
+        return false;
+    }
+    assert(prepared_projection_commit_fields_spec(*context, wakes@, *effects, owner));
+    true
+}
+
 /// Build the unnormalized context set for one complete projection output.
 ///
 /// `ProjectionOutput::context_set` normalizes this result before commit.
@@ -1635,6 +1746,13 @@ fn prepared_projection_from_validated_output(
         projection.time_wakes@ == time_wakes@,
         projection.projected_row_mutations@ == projected_row_mutations@,
         projection.runtime_effects == runtime_effects,
+        prepared_projection_commit_fields_spec(projected_context, time_wakes@, runtime_effects, fact.id)
+            ==> prepared_projection_commit_fields_spec(
+                projection.projected_context,
+                projection.time_wakes@,
+                projection.runtime_effects,
+                projection.fact.id,
+            ),
 {
     PreparedProjection {
         source,
@@ -7382,6 +7500,82 @@ mod contract_tests {
             &context,
             &[],
             &effects
+        ));
+    }
+
+    #[test]
+    fn prepared_projection_commit_field_guard_reads_complete_commit_shape() {
+        let fact = Fact::new(FactScope::Global, 1, b"prepared guard".to_vec());
+        let role = Role::new("prepared_guard").unwrap();
+        let key = ContextKey::from_bytes([6; 32]);
+        let need = need_for(&fact, &role, &key);
+        let offer = offer_for(&fact, &role, &key);
+        let wake = TimeWake {
+            timeline: Timeline::new("prepared_guard").unwrap(),
+            owner: fact.id,
+            at: 10,
+        };
+        let context = ContextSet::new().need(need.clone()).offer(offer.clone());
+        let effects = RuntimeEffects::new().purge_fact(fact.id);
+
+        assert!(prepared_projection_commit_fields_accept(
+            &context,
+            &[wake.clone()],
+            &effects,
+            fact.id
+        ));
+        assert!(validate_prepared_projection_commit_fields(
+            &context,
+            &[wake.clone()],
+            &effects,
+            fact.id
+        )
+        .is_ok());
+
+        let foreign_need_context = ContextSet::new()
+            .need(ContextNeed {
+                owner: [9; 32],
+                ..need.clone()
+            })
+            .offer(offer.clone());
+        assert!(!prepared_projection_commit_fields_accept(
+            &foreign_need_context,
+            &[wake.clone()],
+            &effects,
+            fact.id
+        ));
+
+        let foreign_offer_context = ContextSet::new().need(need.clone()).offer(ContextOffer {
+            owner: [9; 32],
+            ..offer.clone()
+        });
+        assert!(!prepared_projection_commit_fields_accept(
+            &foreign_offer_context,
+            &[wake.clone()],
+            &effects,
+            fact.id
+        ));
+
+        assert!(!prepared_projection_commit_fields_accept(
+            &context,
+            &[TimeWake {
+                owner: [9; 32],
+                ..wake.clone()
+            }],
+            &effects,
+            fact.id
+        ));
+        assert!(!prepared_projection_commit_fields_accept(
+            &context,
+            &[wake],
+            &RuntimeEffects::new().purge_fact([9; 32]),
+            fact.id
+        ));
+        assert!(!prepared_projection_commit_fields_accept(
+            &context,
+            &[],
+            &RuntimeEffects::new().version_replay_rebuild(),
+            fact.id
         ));
     }
 

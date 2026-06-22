@@ -146,13 +146,19 @@ only the accepted status.
 `version_replay_rebuild_projection_status(context, wakes, effects)` applies
 that same verified status classification to the actual prepared projection
 shape consumed by `validate_version_replay_rebuild_projection_shape`. That is
-not the full offer-finalization or version
-replay rebuild admission theorem yet: the proof no longer depends on trusting
-normalization to preserve offer fields, because `prepare_projection` validates
-the final normalized offers against the emitted claims, but the
-`prepare_projection` call order remains open core proof work, as does the
-`validate_version_replay_rebuild_projection_shape` `Result` wrapper. It is also
-proved that `version_replay_rebuild_effect_has_no_fact_or_intent_work(effects)`
+not the full offer-finalization or version replay rebuild admission theorem
+yet: the proof no longer depends on trusting normalization to preserve offer
+fields, because `prepare_projection` validates the final normalized offers
+against the emitted claims.
+`prepared_projection_commit_fields_accept(context, wakes, effects, owner)`
+then checks the exact fields that `PreparedProjection` can carry into commit:
+accepted means every context need, context offer, time wake, and purge is owned
+by the projected fact, and a version replay rebuild has no standing context or
+time wakes. `prepare_projection` calls the corresponding validation wrapper
+after final context construction and before `PreparedProjection` construction.
+The remaining call-order work is proving this whole sequence as one executable
+theorem rather than as verified helpers plus ordinary Rust wrapper calls. It is
+also proved that `version_replay_rebuild_effect_has_no_fact_or_intent_work(effects)`
 accepts exactly ordinary effects or isolated rebuild effects with no emitted
 facts, priority facts, incoming facts, durable intents, or local intents; the
 runtime effect validator uses that verified helper for its success branch.
@@ -835,6 +841,7 @@ finalize_dispatched_projection(fact_id, effective_tag, stamp, output) applies se
 dispatch_registered_projector::<P>(fact, context) is the production dispatch branch shape: one registered projector type P supplies the projector call, tag, storage guard, metadata, and finalizer stamp
 runtime_effects_with_storage_requirement(effects, requirement) sets the storage requirement and preserves the effect payload
 prepared_projection_from_validated_output preserves route evidence and validated output pieces in PreparedProjection
+prepared_projection_commit_fields_accept(context, wakes, effects, owner) accepts if and only if commit-facing prepared context/time/effect fields are self-owned and version replay rebuild has no standing context or time wakes
 projection_mode_from_replay_flag(replay) returns Normal exactly for replay == 0 and Replay exactly for replay != 0
 projection_mode_is_replay(mode) accepts if and only if mode is Replay
 replay_flag_for_projection_mode(mode) returns 0 exactly for Normal and 1 exactly for Replay
@@ -899,9 +906,10 @@ The remaining offer-finalization gap is no longer claim-to-offer field copying,
 need cloning, pre-normalization context-set assembly, or the bridge from
 `ProjectionOutput` to that assembly. It is also no longer trusting
 normalization for offer-field preservation, because the final normalized offers
-are checked by a verified production guard. The remaining gap is proving the
-`prepare_projection` call order over executable helper code. The remaining
-owner-checking gap is no
+are checked by a verified production guard. The commit-facing prepared fields
+are also checked by a verified production guard. The remaining gap is proving
+the full `prepare_projection` call order over executable helper code. The
+remaining owner-checking gap is no
 longer the equality decision, per-slice scans, aggregate owner predicate,
 status classification, accept-status decision, full-output status bridge, or
 accepted-output enforcement decision; it is proving the
@@ -911,9 +919,8 @@ The remaining version replay rebuild admission gap is no longer the
 standing-output decision, status classification, accept-status decision, or
 full prepared-shape status bridge, and it is no longer the success decision
 used by the runtime admission guard. The remaining gap is proving the
-`validate_version_replay_rebuild_projection_shape` `Result` wrapper diagnostic
-rejection branch and `prepare_projection` call order around the verified accept
-helper.
+diagnostic rejection branch and full `prepare_projection` call order around the
+verified accept helpers.
 
 The remaining matched-context provenance gap is no longer the local
 owner/payload equality decision for one `MatchedContext`, the local

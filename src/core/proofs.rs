@@ -146,6 +146,14 @@
 //!   a proof that route dispatch, owner checks, context finalization, replay
 //!   admission, or runtime-effect validation were called in the right order.
 //! - Proven in production Rust today:
+//!   `prepared_projection_commit_fields_accept(context, wakes, effects, owner)`
+//!   scans the exact prepared fields that commit may publish and accepts if and
+//!   only if all context needs, context offers, time wakes, and purges are
+//!   owned by the projected fact and any version replay rebuild has no standing
+//!   context or time wakes. `prepare_projection` calls the corresponding
+//!   validation wrapper after final context construction and before constructing
+//!   `PreparedProjection`.
+//! - Proven in production Rust today:
 //!   `projection_mode_from_replay_flag(replay)` returns `Normal` if and only if
 //!   the stored SQL replay flag is `0`, and returns `Replay` if and only if the
 //!   flag is nonzero. `projection_mode_is_replay(mode)` accepts if and only if
@@ -337,16 +345,18 @@
 //!   The local guard rejecting intent row mutations from projector effects is
 //!   proved.
 //! - Not proven here today: every exported `theorem_*` runtime/core property.
-//! - Not proven yet for offer finalization: `prepare_projection` call order.
-//!   The unnormalized bridge from `ProjectionOutput` to `ContextSet` is proved,
-//!   and the final normalized offers are checked by a verified production guard.
+//! - Not proven yet for offer finalization: full `prepare_projection`
+//!   call-order proof. The unnormalized bridge from `ProjectionOutput` to
+//!   `ContextSet` is proved, the final normalized offers are checked by a
+//!   verified production guard, and the final prepared commit fields are
+//!   checked by a verified production guard.
 //! - Not proven yet for owner enforcement: the exported theorem tying
 //!   `enforce_owner_is_self` `Result` wrapper diagnostic rejection branches and
 //!   `prepare_projection` call order to the verified status and allow helpers.
 //!   The accepted-output decision is proved.
 //! - Not proven yet for version replay rebuild admission: the
-//!   `validate_version_replay_rebuild_projection_shape` `Result` wrapper and
-//!   `prepare_projection` call order around the verified prepared-shape accept
+//!   remaining work is the full `prepare_projection` call-order proof and the
+//!   diagnostic rejection branch around the verified prepared-shape accept
 //!   helper.
 //! - Not fully proven yet for incoming metadata map insertion:
 //!   `incoming_fact_with_metadata` now has verified production helpers for the
