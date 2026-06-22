@@ -132,11 +132,11 @@ other projectors, run network IO, or update SQLite tables directly.
 The projector's job is to explain what this one fact means under the context
 currently available. A typical projector decodes the fixed layout, checks the
 fact id and scope, validates signatures or encryption/container shape, adapts
-any retained legacy payload form, inspects matched context payload facts, and
-then returns a complete projection output. That output can materialize rows,
-publish context offers, declare future needs, schedule time wakes, emit new
-facts, queue intents, or purge exact facts. Core commits that output
-atomically.
+any retained legacy payload form, inspects matched offer role/scope/key/value
+certificates, and then returns a complete projection output. That output can
+materialize rows, publish context offers, declare future needs, schedule time
+wakes, emit new facts, queue intents, or purge exact facts. Core commits that
+output atomically.
 
 ```text
 fact bytes
@@ -152,8 +152,8 @@ prove its signer, author, key coverage, deletion state, or retention floor, it
 returns needs for exactly those proofs and no final message row. Core records
 those needs and the fact is parked. When an endpoint, user, key-wrap, deletion,
 or retention fact later projects a matching offer, core requeues the message and
-attaches the matched payload as projection context. The message projector then
-validates that payload for the current message before trusting it.
+attaches the matched offer as projection context. The message projector then
+validates that offer contract for the current message before trusting it.
 
 This is why projectors are the narrative center of a fact family. They decide
 which evidence is enough, what missing evidence should wake them later, which
@@ -166,11 +166,11 @@ protocol meaning of the evidence.
 
 Every context row is either a need or an offer. A need says "wake and
 reproject this owner fact when matching context appears." An offer says "this
-owner fact can be loaded as payload context for matching needs." Both have
-the same matching shape: owner fact id, role, fact scope, and an inclusive byte
-range. Core only matches role/scope/range overlap and loads the offer owner as
-payload; the woken projector decides whether that payload actually proves what
-it needs.
+owner fact's projector published this role/scope/key/value certificate for
+matching needs." Both have the same matching shape: owner fact id, role, fact
+scope, and an inclusive byte range. Offers also carry producer-owned value
+bytes. Core only matches role/scope/range overlap; the woken projector decides
+whether that matched offer actually proves what it needs.
 
 Matching is not a separate stage or a background scan. It runs inside each
 projection commit: when a projector's output commits, core matches the needs

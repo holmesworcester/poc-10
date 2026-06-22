@@ -1643,8 +1643,8 @@ pub(crate) mod context_db {
     //! domain-owned key encoders/validators.
 
     use crate::core::context::{
-        context_set_additions, scope_key, ContextKey, ContextNeed, ContextOffer, ContextSet,
-        ContextSetAdditions, Role,
+        context_set_additions, scope_key, ContextKey, ContextNeed, ContextOffer, ContextOfferValue,
+        ContextSet, ContextSetAdditions, Role,
     };
     use crate::core::db::{quoted_table_name, Db, TableName};
     use crate::core::facts::{Fact, FactId, FactScope, ScopeKind};
@@ -1667,6 +1667,7 @@ pub(crate) mod context_db {
         scope: &'a FactScope,
         start_key: &'a [u8],
         end_key: &'a [u8],
+        value: &'a [u8],
     }
 
     impl StoredContextEdge<'_> {
@@ -1688,6 +1689,7 @@ pub(crate) mod context_db {
                 scope: &self.scope,
                 start_key: self.start_key.as_bytes(),
                 end_key: self.end_key.as_bytes(),
+                value: &[],
             }
         }
     }
@@ -1701,6 +1703,7 @@ pub(crate) mod context_db {
                 scope: &self.scope,
                 start_key: self.start_key.as_bytes(),
                 end_key: self.end_key.as_bytes(),
+                value: self.value.as_bytes(),
             }
         }
     }
@@ -1873,11 +1876,11 @@ pub(crate) mod context_db {
             select_exact_context_offers(
                 store,
                 r#"
-        SELECT owner, role, scope_key, key
+        SELECT owner, role, scope_key, key, value
         FROM context_exact_edges
         WHERE owner = :owner
           AND direction = 'offer'
-        ORDER BY owner, role, scope_key, key
+        ORDER BY owner, role, scope_key, key, value
         "#,
                 &[(":owner", bytes(owner))],
             )
@@ -1892,11 +1895,11 @@ pub(crate) mod context_db {
             select_range_context_offers(
                 store,
                 r#"
-        SELECT owner, role, scope_key, start_key, end_key
+        SELECT owner, role, scope_key, start_key, end_key, value
         FROM context_range_edges
         WHERE owner = :owner
           AND direction = 'offer'
-        ORDER BY owner, role, scope_key, start_key, end_key
+        ORDER BY owner, role, scope_key, start_key, end_key, value
         "#,
                 &[(":owner", bytes(owner))],
             )
@@ -1999,14 +2002,15 @@ pub(crate) mod context_db {
             .conn()
             .execute(
                 "INSERT OR IGNORE INTO context_exact_edges
-                (owner, direction, role, scope_key, key)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+                (owner, direction, role, scope_key, key, value)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     edge.owner.as_slice(),
                     edge.direction,
                     edge.role.as_str(),
                     scope_key.as_slice(),
-                    edge.start_key
+                    edge.start_key,
+                    edge.value
                 ],
             )
             .map(|count| count > 0)
@@ -2021,15 +2025,16 @@ pub(crate) mod context_db {
             .conn()
             .execute(
                 "INSERT OR IGNORE INTO context_range_edges
-                (owner, direction, role, scope_key, start_key, end_key)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                (owner, direction, role, scope_key, start_key, end_key, value)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     edge.owner.as_slice(),
                     edge.direction,
                     edge.role.as_str(),
                     scope_key.as_slice(),
                     edge.start_key,
-                    edge.end_key
+                    edge.end_key,
+                    edge.value
                 ],
             )
             .map(|count| count > 0)
@@ -2085,6 +2090,7 @@ pub(crate) mod context_db {
                 .map_err(rusqlite::Error::InvalidParameterName)?,
             start_key: key.clone(),
             end_key: key,
+            value: ContextOfferValue::from_bytes(row.get::<_, Vec<u8>>(4)?),
         })
     }
 
@@ -2097,6 +2103,7 @@ pub(crate) mod context_db {
                 .map_err(rusqlite::Error::InvalidParameterName)?,
             start_key: ContextKey::from_bytes(row.get::<_, Vec<u8>>(3)?),
             end_key: ContextKey::from_bytes(row.get::<_, Vec<u8>>(4)?),
+            value: ContextOfferValue::from_bytes(row.get::<_, Vec<u8>>(5)?),
         })
     }
 
@@ -2182,7 +2189,8 @@ pub(crate) mod context_db {
                        need_end_key,
                        offer_owner,
                        offer_start_key,
-                       offer_end_key
+                       offer_end_key,
+                       offer_value
                 FROM pending_projection_matches
                 WHERE owner = ?1
                 ORDER BY
@@ -2192,7 +2200,8 @@ pub(crate) mod context_db {
                     need_end_key,
                     offer_owner,
                     offer_start_key,
-                    offer_end_key
+                    offer_end_key,
+                    offer_value
                 "#,
                 )
                 .map_err(|err| format!("load pending projection matches: {err}"))?;
@@ -2248,14 +2257,16 @@ pub(crate) mod context_db {
             scope,
             start_key: ContextKey::from_bytes(row.get::<_, Vec<u8>>(5)?),
             end_key: ContextKey::from_bytes(row.get::<_, Vec<u8>>(6)?),
+            value: ContextOfferValue::from_bytes(row.get::<_, Vec<u8>>(7)?),
         };
         Ok((need, offer))
     }
 
     /// Add a matched pair and load the offer owner's payload fact.
     ///
-    /// A missing payload is a storage invariant failure: context offers are only
-    /// useful because their owner fact is the payload exposed to projection.
+    /// Payload loading is legacy projector support. New authority paths should
+    /// consume the matched offer key/value and avoid depending on producer fact
+    /// bytes.
     fn push_stored_matched_context(
         store: &Db,
         need: &ContextNeed,
@@ -2373,13 +2384,13 @@ pub(crate) mod context_db {
             select_exact_context_offers(
                 store,
                 r#"
-        SELECT owner, role, scope_key, key
+        SELECT owner, role, scope_key, key, value
         FROM context_exact_edges
         WHERE direction = 'offer'
           AND role = :role
           AND scope_key = :scope_key
           AND key = :key
-        ORDER BY owner, key
+        ORDER BY owner, key, value
         "#,
                 &[
                     (":role", text(role)),
@@ -2428,14 +2439,14 @@ pub(crate) mod context_db {
             select_exact_context_offers(
                 store,
                 r#"
-        SELECT owner, role, scope_key, key
+        SELECT owner, role, scope_key, key, value
         FROM context_exact_edges
         WHERE direction = 'offer'
           AND role = :role
           AND scope_key = :scope_key
           AND key >= :start_key
           AND key <= :end_key
-        ORDER BY owner, key
+        ORDER BY owner, key, value
         "#,
                 &[
                     (":role", text(role)),
@@ -2488,14 +2499,14 @@ pub(crate) mod context_db {
             select_range_context_offers(
                 store,
                 r#"
-        SELECT owner, role, scope_key, start_key, end_key
+        SELECT owner, role, scope_key, start_key, end_key, value
         FROM context_range_edges
         WHERE direction = 'offer'
           AND role = :role
           AND scope_key = :scope_key
           AND start_key <= :end_key
           AND end_key >= :start_key
-        ORDER BY owner, start_key, end_key
+        ORDER BY owner, start_key, end_key, value
         "#,
                 &[
                     (":role", text(role)),
@@ -2578,8 +2589,9 @@ pub(crate) mod context_db {
                      need_end_key,
                      offer_owner,
                      offer_start_key,
-                     offer_end_key)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                     offer_end_key,
+                     offer_value)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                     params![
                         need.owner.as_slice(),
                         need.role.as_str(),
@@ -2589,6 +2601,7 @@ pub(crate) mod context_db {
                         offer.owner.as_slice(),
                         offer.start_key.as_bytes(),
                         offer.end_key.as_bytes(),
+                        offer.value.as_bytes(),
                     ],
                 )
                 .map_err(|err| format!("record pending projection match: {err}"))
@@ -2600,7 +2613,7 @@ pub mod effects {
 
     use crate::core::context::{
         owned_offers_from_claims, ContextKey, ContextNeed, ContextOffer, ContextOfferClaim,
-        ContextSet, Role,
+        ContextOfferValue, ContextSet, Role,
     };
     use crate::core::effects::{IncomingMetadata, RuntimeEffects};
     use crate::core::facts::{Fact, FactId};
@@ -2611,7 +2624,7 @@ pub mod effects {
     /// Context role used by deletion/retention projectors to wake a target fact.
     ///
     /// Core treats purge keys opaquely. Protocol families choose their own stable
-    /// key shape and validate matched payloads before treating this context as
+    /// key shape and validate matched offers before treating this context as
     /// authority. This context is proof and routing only. The target projector must
     /// still emit `ProjectionOutput::purge_self` after deleting its own rows so
     /// core removes the target fact bytes.
@@ -2669,6 +2682,7 @@ pub mod effects {
             scope,
             start_key,
             end_key,
+            value: ContextOfferValue::empty(),
         }
     }
 
@@ -2682,6 +2696,7 @@ pub mod effects {
             scope,
             start_key,
             end_key,
+            value: ContextOfferValue::empty(),
         }
     }
 
@@ -3728,7 +3743,8 @@ fn u64_column(value: i64, name: &str) -> rusqlite::Result<u64> {
 mod contract_tests {
     use super::*;
     use crate::core::context::{
-        ContextKey, ContextNeed, ContextOffer, ContextOfferClaim, ContextSetAdditions, Role,
+        ContextKey, ContextNeed, ContextOffer, ContextOfferClaim, ContextOfferValue,
+        ContextSetAdditions, Role,
     };
     use crate::core::effects::StorageRequirement;
     use crate::core::facts::{FactId, FactScope};
@@ -3881,6 +3897,7 @@ mod contract_tests {
             scope: target.scope.clone(),
             start_key: key.clone(),
             end_key: key.clone(),
+            value: ContextOfferValue::from_bytes(b"exact-offer-value"),
         };
         crate::core::project_fact::context_db::insert_context_offer_for_test(&store, &offer)
             .expect("insert stored offer");
@@ -3970,7 +3987,7 @@ mod contract_tests {
         let role = Role::new("queued_ctx").unwrap();
         let key = ContextKey::from_bytes(b"queued-key");
         let need = need_for(&target, &role, &key);
-        let offer = offer_for(&offered, &role, &key);
+        let offer = offer_for(&offered, &role, &key).with_value(b"queued-cert".to_vec());
         store
             .write_transaction(|tx| {
                 insert_context_need_in_tx(tx, &need)?;
@@ -3990,6 +4007,14 @@ mod contract_tests {
             .expect("queue match then remove standing offer");
 
         assert_eq!(pending_projection_match_count(&store, target.id), 1);
+        let queued_context =
+            pending_projection_input_context_for_owner(&store, &target.id).expect("queued context");
+        assert_eq!(
+            queued_context
+                .offer_for(&need)
+                .map(|offer| offer.value.as_bytes()),
+            Some(b"queued-cert".as_slice())
+        );
         let projector = need_until_payload(role, key, "queued_context_ready", None);
         let progress =
             drain_projection(&projector, &store, &[], None, 1).expect("drain projection");
@@ -4055,6 +4080,7 @@ mod contract_tests {
             scope: parent.scope.clone(),
             start_key: key.clone(),
             end_key: key.clone(),
+            value: ContextOfferValue::empty(),
         };
         crate::core::project_fact::context_db::insert_context_offer_for_test(&store, &offer)
             .expect("insert stored offer");
@@ -4274,6 +4300,7 @@ mod contract_tests {
             scope: FactScope::Global,
             start_key: key.clone(),
             end_key: key,
+            value: ContextOfferValue::empty(),
         };
 
         let next = run_projection(&projector, &fact, ProjectionContext::new(vec![offer]))
@@ -4308,6 +4335,7 @@ mod contract_tests {
             scope: target.scope.clone(),
             start_key: ContextKey::from_bytes(b"a"),
             end_key: ContextKey::from_bytes(b"z"),
+            value: ContextOfferValue::from_bytes(b"range-offer-value"),
         };
         crate::core::project_fact::context_db::insert_context_offer_for_test(&store, &offer)
             .expect("insert stored offer");
@@ -4473,6 +4501,7 @@ mod contract_tests {
             scope: target.scope.clone(),
             start_key: key.clone(),
             end_key: key.clone(),
+            value: ContextOfferValue::empty(),
         };
         crate::core::project_fact::context_db::insert_context_offer_for_test(&store, &offer)
             .expect("insert stored offer");
@@ -5202,6 +5231,7 @@ mod contract_tests {
             scope: fact.scope.clone(),
             start_key: key.clone(),
             end_key: key.clone(),
+            value: ContextOfferValue::empty(),
         }
     }
 
@@ -5211,6 +5241,7 @@ mod contract_tests {
             scope: fact.scope.clone(),
             start_key: key.clone(),
             end_key: key.clone(),
+            value: ContextOfferValue::empty(),
         }
     }
 
@@ -5563,7 +5594,9 @@ mod contract_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::context::{ContextKey, ContextNeed, ContextOffer, ContextOfferClaim, Role};
+    use crate::core::context::{
+        ContextKey, ContextNeed, ContextOffer, ContextOfferClaim, ContextOfferValue, Role,
+    };
     use crate::core::effects::StorageRequirement;
     use crate::core::facts::{Fact, FactId, FactScope};
     use crate::core::schema::CORE_SCHEMA_SOURCE;
@@ -5777,6 +5810,7 @@ mod tests {
                 scope: FactScope::Global,
                 start_key: key.clone(),
                 end_key: key,
+                value: ContextOfferValue::empty(),
             });
 
         assert_eq!(output.needs.len(), 1);
@@ -5836,6 +5870,7 @@ mod tests {
                 scope: need.scope.clone(),
                 start_key: need.start_key.clone(),
                 end_key: need.end_key.clone(),
+                value: ContextOfferValue::from_bytes(payload_id),
             },
             need,
             payload,
@@ -5880,8 +5915,8 @@ mod tests {
         store.conn().execute(
             "INSERT INTO pending_projection_matches
                 (owner, need_role, need_scope_key, need_start_key, need_end_key,
-                 offer_owner, offer_start_key, offer_end_key)
-             VALUES (?1, 'cleanup_role', ?2, ?3, ?4, ?5, ?3, ?4)",
+                 offer_owner, offer_start_key, offer_end_key, offer_value)
+             VALUES (?1, 'cleanup_role', ?2, ?3, ?4, ?5, ?3, ?4, x'')",
             params![
                 owner.as_slice(),
                 b"scope".as_slice(),

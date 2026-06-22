@@ -58,8 +58,8 @@ the plan splits back into multiple docs or model-only projector proofs return.
 Concrete work: prove the small core helpers over the production Rust code whose
 runtime shape is already visible. `ProjectionOutput::context_set(fact.id)` must
 copy each `ContextOfferClaim` into a `ContextOffer` with the same role, scope,
-and key range and with `owner = fact.id`. `ContextOfferClaim::into_offer` must
-be part of that proof, not merely mirrored by a separate model function.
+key range, and offer value and with `owner = fact.id`.
+`ContextOfferClaim::into_offer` must be part of that proof, not merely mirrored by a separate model function.
 `enforce_owner_is_self` must reject any need, time wake, or purge owned by a
 different fact. Dropped incoming facts must not leave durable context or time
 wakes behind.
@@ -89,11 +89,12 @@ threat-model checklist item is claimed from this stage alone.
 Current production-code foothold: `ContextOfferClaim::into_offer` and
 `owned_offers_from_claims` are real production helpers inside Verus
 verification. Cargo-verus proves that the returned `ContextOffer.owner` equals
-the owner argument for one claim, and that converting a slice of claims returns
-the same number of offers with every offer owner equal to the owner argument.
-That is not the full offer-finalization theorem yet: role, scope, start key,
-end key, the `ProjectionOutput::context_set` normalization step, and the
-`prepare_projection` call order remain open core proof work.
+the owner argument for one claim and that role, scope, start key, end key, and
+offer value are copied unchanged. For a slice of claims, Cargo-verus proves the
+same length, owner, role, scope, start key, end key, and value preservation for
+every returned offer. That is not the full offer-finalization theorem yet: the
+`ProjectionOutput::context_set` normalization step and the `prepare_projection`
+call order remain open core proof work.
 
 ### Stage 3: Routed Projection Witness
 
@@ -540,8 +541,10 @@ Production helper contracts currently proved:
 
 ```text
 ContextOfferClaim::into_offer(claim, owner).owner == owner
+ContextOfferClaim::into_offer(claim, owner) preserves role/scope/start/end/value
 owned_offers_from_claims(claims, owner).len == claims.len
 forall returned offer: offer.owner == owner
+forall returned offer: offer.role/scope/start/end/value match the same-index claim
 ```
 
 These contracts are proofs over helper Rust code that normal builds execute.
@@ -550,10 +553,10 @@ They are core proof footholds, not threat-model coverage and not completion of
 
 The `owned_offers_from_claims` proof uses a narrow Verus
 `assume_specification` for the derived `ContextOfferClaim::clone` call so Verus
-can call that production clone. The assumption gives no preservation theorem
-for role, scope, start key, or end key; those fields remain unproved until the
-clone/spec surface and `ProjectionOutput::context_set` normalization are proved
-with the needed field-level contracts.
+can call that production clone and reason that clone preserves the whole claim.
+The remaining offer-finalization gap is no longer claim-to-offer field copying;
+it is proving the `ProjectionOutput::context_set` normalization step and
+`prepare_projection` call order over executable helper code.
 
 Core proves plumbing only. It must not prove that an admin is valid, an endpoint
 may sign content, a deletion is authorized, a receipt grants authority, or a
@@ -608,8 +611,8 @@ write authority. Migrate one table owner at a time with realistic tests.
 ## Proven Offers
 
 Projectors emit ownerless `ContextOfferClaim`s. Core finalizes them into stored
-`ContextOffer`s with `owner = projected_fact_id`, copying role, scope, and key
-range exactly.
+`ContextOffer`s with `owner = projected_fact_id`, copying role, scope, key
+range, and offer value exactly.
 
 A proven offer is not a free-standing boolean. For authority-bearing use, proof
 status means the whole provenance chain exists:
@@ -620,7 +623,7 @@ stored offer O
   -> F was projected by project_fact
   -> project_fact dispatched F through registered route P
   -> P emitted ownerless claim C
-  -> core finalized C into O without changing role/scope/range
+  -> core finalized C into O without changing role/scope/range/value
   -> P's theorem proves C from F's decoded bytes and proven context
 ```
 

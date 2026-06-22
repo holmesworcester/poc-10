@@ -10,8 +10,8 @@
 //! Read the declarations from most significant to most helper-like:
 //!
 //! 1. Deferred composition stubs describe the runtime facts that make projector
-//!    proofs useful end to end: context construction, matched-payload origin,
-//!    offer-provenance recording, selector preservation, route dispatch,
+//!    proofs useful end to end: context construction, matched-offer provenance,
+//!    selector preservation, route dispatch,
 //!    projected table write confinement, context replacement, and atomic commit. These
 //!    are the theorem interfaces projectors eventually compose through, but
 //!    their bodies are unproven today.
@@ -44,16 +44,19 @@
 //! - Proven in production Rust today:
 //!   `ContextOfferClaim::into_offer(claim, owner).owner == owner`.
 //! - Proven in production Rust today:
+//!   `ContextOfferClaim::into_offer(claim, owner) preserves role/scope/start/end/value`.
+//! - Proven in production Rust today:
 //!   `owned_offers_from_claims(claims, owner)` returns one offer per claim and
-//!   every returned offer has `owner`.
-//! - Assumed only to call production code: the Verus contract for
-//!   `ContextOfferClaim::clone` gives no role/scope/key preservation facts.
+//!   every returned offer has `owner` plus the same role, scope, start key, end key, and offer value as the same-index claim.
+//! - Assumed only to call production code: the Verus contract for the derived
+//!   `ContextOfferClaim::clone` says clone preserves the whole claim. This
+//!   assumption is a Rust trait boundary helper, not a runtime theorem over
+//!   projection.
 //! - Not proven here today: every exported `theorem_*` runtime/core property.
-//! - Not proven yet for offer finalization: role, scope, start key, end key,
-//!   `ProjectionOutput::context_set` normalization, or `prepare_projection`
-//!   call order.
+//! - Not proven yet for offer finalization: `ProjectionOutput::context_set`
+//!   normalization or `prepare_projection` call order.
 //! - Punted for a later core proof model: the composition stubs that cross
-//!   matcher construction, payload loading, route dispatch, projected-table
+//!   matcher construction, offer loading, route dispatch, projected-table
 //!   write ownership, context replacement, and commit.
 //! - First stubs to replace: the near-term core glue stubs over local projection
 //!   output and offer-claim finalization.

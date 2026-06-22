@@ -18,7 +18,7 @@
 //! needs and offers it owns, and `project_fact.rs` records newly satisfiable
 //! range overlaps. The semantic meaning of a role or byte range stays with the
 //! projector that created it and with the projector that later validates the
-//! matched payload.
+//! matched offer.
 //!
 //! Every context edge has a key interval:
 //!
@@ -27,13 +27,16 @@
 //! ```
 //!
 //! `role` and `scope` partition the search space. `start_key` and `end_key` are
-//! inclusive opaque byte endpoints inside that partition. Exact dependencies
-//! should use `ContextNeed::for_key` and `ContextOffer::for_key`; those
-//! constructors store the same key as both endpoints so the exact relationship
-//! remains compatible with true range matches. Composite exact dependencies can
-//! use `for_key_parts` to build one bounded canonical key. Broader dependencies
-//! use `range` and choose an order-preserving byte layout in the protocol domain
-//! so ordinary lexicographic range overlap is enough to find matching offers.
+//! inclusive opaque byte endpoints inside that partition. Offers also carry a
+//! protocol-defined value blob. The value is the public semantic certificate
+//! another projector may consume for this role; it is not parsed by core.
+//! Exact dependencies should use `ContextNeed::for_key` and
+//! `ContextOffer::for_key`; those constructors store the same key as both
+//! endpoints so the exact relationship remains compatible with true range
+//! matches. Composite exact dependencies can use `for_key_parts` to build one
+//! bounded canonical key. Broader dependencies use `range` and choose an
+//! order-preserving byte layout in the protocol domain so ordinary
+//! lexicographic range overlap is enough to find matching offers.
 //!
 //! Core's only matching rule is:
 //!
@@ -44,15 +47,16 @@
 //! offer.start_key <= need.end_key
 //! ```
 //!
-//! Core never parses range bytes. It stores them, indexes them, performs the
-//! overlap query, wakes affected owners, and loads the offer owner's fact as
-//! matched payload. The woken projector must still decode and validate the
-//! matched payload before emitting rows, offers, or intents.
+//! Core never parses range or value bytes. It stores them, indexes the range,
+//! performs the overlap query, wakes affected owners, and returns the matched
+//! offer. Legacy projectors can still ask for matched payload facts during the
+//! migration, but proof-oriented projectors should treat the offer key/value as
+//! the only cross-projector semantic surface.
 //!
 //! `owner` says which fact produced the row so later projection can replace
 //! that fact's context without deleting anyone else's rows. For needs, `owner`
-//! is the fact that should be reprojected. For offers, `owner` is also the
-//! payload fact core loads when the offer overlaps a need.
+//! is the fact that should be reprojected. For offers, `owner` is the fact whose
+//! projector proved the role-specific key/value certificate.
 //!
 //! Needs and offers have different lifecycles. Needs are replacement
 //! subscriptions: when a fact projects, it emits the complete current set of
@@ -131,10 +135,36 @@ impl PartialEq<Role> for &str {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContextKey(Vec<u8>);
 
+/// Protocol-defined offer certificate bytes.
+///
+/// Core persists these bytes with the offer and returns them to matching
+/// projectors, but never interprets them. A role's producer projector owns the
+/// meaning and canonical encoding of the value.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ContextOfferValue(Vec<u8>);
+
+impl ContextOfferValue {
+    pub fn empty() -> Self {
+        Self(Vec::new())
+    }
+
+    pub fn from_bytes(bytes: impl Into<Vec<u8>>) -> Self {
+        Self(bytes.into())
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 /// One part of a core-built canonical context key.
 ///
 /// This is syntax only. Protocol projectors still choose which fields belong in
-/// a key and validate any matched payload semantically.
+/// a key and validate any matched offer semantically.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextKeyPart<'a> {
     Bytes(&'a [u8]),
@@ -303,11 +333,11 @@ impl ContextNeed {
 
 /// A standing statement that one fact can provide context to matching needs.
 ///
-/// The offer's `owner` is the fact that emitted this relationship and the fact
-/// core should load and pass to the woken projector when this offer matches.
+/// The offer's `owner` is the fact that emitted this relationship. The `value`
+/// is the producer projector's public certificate for the relationship.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContextOffer {
-    /// Fact that emitted the offer and provides the payload.
+    /// Fact whose projector emitted this offer.
     pub owner: FactId,
     /// Matching role.
     pub role: Role,
@@ -317,6 +347,8 @@ pub struct ContextOffer {
     pub start_key: ContextKey,
     /// Inclusive end of the opaque byte range this offer provides.
     pub end_key: ContextKey,
+    /// Protocol-defined semantic certificate for this offer.
+    pub value: ContextOfferValue,
 }
 
 impl ContextOffer {
@@ -337,6 +369,7 @@ impl ContextOffer {
             scope,
             start_key: key.clone(),
             end_key: key,
+            value: ContextOfferValue::empty(),
         }
     }
 
@@ -361,6 +394,7 @@ impl ContextOffer {
             scope,
             start_key: key.clone(),
             end_key: key,
+            value: ContextOfferValue::empty(),
         })
     }
 
@@ -381,7 +415,14 @@ impl ContextOffer {
             scope,
             start_key: ContextKey::from_bytes(start_key),
             end_key: ContextKey::from_bytes(end_key),
+            value: ContextOfferValue::empty(),
         }
+    }
+
+    /// Attach protocol-defined certificate bytes to this offer.
+    pub fn with_value(mut self, value: impl Into<Vec<u8>>) -> Self {
+        self.value = ContextOfferValue::from_bytes(value);
+        self
     }
 }
 
@@ -401,6 +442,8 @@ pub struct ContextOfferClaim {
     pub start_key: ContextKey,
     /// Inclusive end of the opaque byte range this offer provides.
     pub end_key: ContextKey,
+    /// Protocol-defined semantic certificate for this offer.
+    pub value: ContextOfferValue,
 }
 
 impl ContextOfferClaim {
@@ -412,6 +455,7 @@ impl ContextOfferClaim {
             scope,
             start_key: key.clone(),
             end_key: key,
+            value: ContextOfferValue::empty(),
         }
     }
 
@@ -431,6 +475,7 @@ impl ContextOfferClaim {
             scope,
             start_key: key.clone(),
             end_key: key,
+            value: ContextOfferValue::empty(),
         })
     }
 
@@ -446,7 +491,15 @@ impl ContextOfferClaim {
             scope,
             start_key: ContextKey::from_bytes(start_key),
             end_key: ContextKey::from_bytes(end_key),
+            value: ContextOfferValue::empty(),
         }
+    }
+
+    /// Attach protocol-defined certificate bytes to this claim before core
+    /// stamps the projected fact owner onto it.
+    pub fn with_value(mut self, value: impl Into<Vec<u8>>) -> Self {
+        self.value = ContextOfferValue::from_bytes(value);
+        self
     }
 }
 
@@ -471,6 +524,11 @@ pub struct ExRole(Role);
 pub struct ExContextKey(ContextKey);
 
 #[verifier(external_type_specification)]
+#[verifier(external_body)]
+#[allow(dead_code)]
+pub struct ExContextOfferValue(ContextOfferValue);
+
+#[verifier(external_type_specification)]
 #[allow(dead_code)]
 pub struct ExContextOffer(ContextOffer);
 
@@ -480,13 +538,21 @@ pub struct ExContextOfferClaim(ContextOfferClaim);
 
 pub assume_specification[<ContextOfferClaim as Clone>::clone](
     claim: &ContextOfferClaim,
-) -> (out: ContextOfferClaim);
+) -> (out: ContextOfferClaim)
+    ensures
+        out == *claim,
+;
 
 impl ContextOfferClaim {
     /// Attach the projected fact owner after core has validated projection.
     pub fn into_offer(self, owner: FactId) -> (offer: ContextOffer)
         ensures
             offer.owner == owner,
+            offer.role == self.role,
+            offer.scope == self.scope,
+            offer.start_key == self.start_key,
+            offer.end_key == self.end_key,
+            offer.value == self.value,
     {
         ContextOffer {
             owner,
@@ -494,6 +560,7 @@ impl ContextOfferClaim {
             scope: self.scope,
             start_key: self.start_key,
             end_key: self.end_key,
+            value: self.value,
         }
     }
 }
@@ -511,6 +578,21 @@ pub fn owned_offers_from_claims(
         forall|i: int|
             #![trigger offers@[i]]
             0 <= i < offers@.len() ==> offers@[i].owner == owner,
+        forall|i: int|
+            #![trigger offers@[i]]
+            0 <= i < offers@.len() ==> offers@[i].role == claims@[i].role,
+        forall|i: int|
+            #![trigger offers@[i]]
+            0 <= i < offers@.len() ==> offers@[i].scope == claims@[i].scope,
+        forall|i: int|
+            #![trigger offers@[i]]
+            0 <= i < offers@.len() ==> offers@[i].start_key == claims@[i].start_key,
+        forall|i: int|
+            #![trigger offers@[i]]
+            0 <= i < offers@.len() ==> offers@[i].end_key == claims@[i].end_key,
+        forall|i: int|
+            #![trigger offers@[i]]
+            0 <= i < offers@.len() ==> offers@[i].value == claims@[i].value,
 {
     let mut offers: Vec<ContextOffer> = Vec::new();
     let mut i: usize = 0;
@@ -521,6 +603,21 @@ pub fn owned_offers_from_claims(
             forall|j: int|
                 #![trigger offers@[j]]
                 0 <= j < offers@.len() ==> offers@[j].owner == owner,
+            forall|j: int|
+                #![trigger offers@[j]]
+                0 <= j < offers@.len() ==> offers@[j].role == claims@[j].role,
+            forall|j: int|
+                #![trigger offers@[j]]
+                0 <= j < offers@.len() ==> offers@[j].scope == claims@[j].scope,
+            forall|j: int|
+                #![trigger offers@[j]]
+                0 <= j < offers@.len() ==> offers@[j].start_key == claims@[j].start_key,
+            forall|j: int|
+                #![trigger offers@[j]]
+                0 <= j < offers@.len() ==> offers@[j].end_key == claims@[j].end_key,
+            forall|j: int|
+                #![trigger offers@[j]]
+                0 <= j < offers@.len() ==> offers@[j].value == claims@[j].value,
         decreases claims@.len() - i,
     {
         let claim = claims[i].clone();
@@ -728,6 +825,7 @@ mod tests {
                 scope: FactScope::Global,
                 start_key: key.clone(),
                 end_key: key,
+                value: ContextOfferValue::empty(),
             })
             .normalized();
 
@@ -756,6 +854,20 @@ mod tests {
         assert!(offers.iter().all(|offer| offer.owner == owner));
         assert_eq!(offers[0].role.as_str(), "first");
         assert_eq!(offers[1].role.as_str(), "second");
+    }
+
+    #[test]
+    fn owned_offers_from_claims_preserves_offer_values() {
+        let owner = [9; 32];
+        let claims = vec![
+            ContextOfferClaim::for_key("valued", FactScope::Global, [1; 32])
+                .with_value(b"certificate-v1".to_vec()),
+        ];
+
+        let offers = owned_offers_from_claims(&claims, owner);
+
+        assert_eq!(offers[0].owner, owner);
+        assert_eq!(offers[0].value.as_bytes(), b"certificate-v1");
     }
 
     #[test]
@@ -848,6 +960,7 @@ mod tests {
                 scope: FactScope::Global,
                 start_key: key.clone(),
                 end_key: key,
+                value: ContextOfferValue::empty(),
             });
 
         assert_eq!(set.needs.len(), 1);

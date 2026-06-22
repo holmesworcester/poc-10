@@ -196,7 +196,9 @@ context, and lets the owning projector decide whether that time proves anything.
   replaces the previous needs and time wakes for that owner, while newly emitted
   offers append as durable evidence until the owner fact is purged.
 - Context matching is protocol-blind range overlap over `(role, scope,
-  start_key, end_key)`. Projectors must decode and validate matched payloads.
+  start_key, end_key)`. Matched offers carry producer-owned value bytes; those
+  role/scope/key/value bytes are the cross-projector semantic surface. Legacy
+  payload loading remains compatibility support, not the proof target.
 - Projectors do not query the database, perform IO, call handlers, or mutate
   process-local state.
 - Each intent queue insert records a distinct row id. `kind` routes to a
@@ -259,7 +261,7 @@ alphabetically.
   rules, purges exact fact-owned state, wakes matched owners, and commits
   emitted effects.
 - `proofs.rs`: protocol-neutral proof certificates for projection plumbing. It
-  names theorem-shaped checks over matched payload ownership, selector matching,
+  names theorem-shaped checks over matched offer provenance, selector matching,
   owner-bearing projector output, offer-claim finalization, and self-only
   purges; it must not prove protocol authority or fact-family semantics.
 - `runtime.rs`: executable engine for one selected protocol description. It
@@ -353,9 +355,9 @@ mode.
 
 - `project_fact.rs::route`: tag route declarations, projector route metadata,
   and the protocol-owned fact admission hook type.
-- `project_fact.rs::context`: in-memory `ProjectionContext`, matched payload
-  facts, projection mode, and due time ranges visible while one fact is being
-  processed.
+- `project_fact.rs::context`: in-memory `ProjectionContext`, matched offers,
+  legacy matched payload facts, projection mode, and due time ranges visible
+  while one fact is being processed.
 - `project_fact.rs::effects`: `ProjectionOutput`, time wakes, and due time
   ranges. Projection output is the complete need/time-wake replacement, new
   append-only offers, plus shared `RuntimeEffects` for one fact.
@@ -432,21 +434,24 @@ incoming fact, the matched context already attached to that pending row, due
 time ranges, and projection mode, then invokes the registered protocol
 projector. A typical projector locally decodes the raw body, validates the fact
 id and cryptographic/container proof, requests missing context as needs,
-validates matched offers when present, adapts any legacy payload shape, and
-projects rows, context, time wakes, purges, or intents.
+validates matched offer role/scope/key/value certificates when present, adapts
+any legacy payload shape, and projects rows, context, time wakes, purges, or
+intents.
 
 Missing context is normal projection output, not a separate core stage. The
 projector emits standing needs; core records those replacement needs and parks
 the fact. When a later offer matches a parked need, core records that offer in
 `pending_projection_matches` for the parked owner and queues the owner again.
 The pending item already carries the context that woke it, so the reprojected
-fact reads the matched payload through `ProjectionContext` instead of
-doing a database search.
+fact reads the matched offer through `ProjectionContext` instead of doing a
+database search. Legacy helpers can still load the offer owner's payload fact,
+but new authority proofs must consume the offer certificate surface.
 
 Detached signature evidence, key material, deletion markers, receipts, and
 other cross-fact proof are ordinary facts that may publish context offers after
 their own projector accepts them. A consumer projector still validates that the
-matched offer applies to the current fact before treating it as authority.
+matched offer contract applies to the current fact before treating it as
+authority.
 
 For a durable fact, one projection commit performs this ordered unit:
 

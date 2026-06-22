@@ -22,7 +22,7 @@ in `src/core` or `src/protocol`.
   projection when their `(role, scope, range)` overlap. Matching is not a
   separate stage or background scan: core matches the needs and offers each
   projection just added during that same projection commit, re-queues the woken
-  owners, and lets projectors decide what the matched payload means.
+  owners, and lets projectors decide what the matched offer means.
 - Core runtime workers own admission, pending projection, projection drain
   (including the context matching done as part of each projection commit), row
   mutations, deferred intent queueing, handler dispatch, and persistence.
@@ -169,13 +169,15 @@ explicitly archived or the user asks for history.
   submit facts, open network sockets, read clocks, mutate process-local state,
   or perform broad scans.
 - A projector that cannot proceed emits a standing context need. A projector
-  that learns useful context emits an offer. Missing context is not a separate
-  "blocked" state in target code.
+  that learns useful context emits an offer whose role, scope, key range, and
+  value form the producer-owned public certificate consumed by other
+  projectors. Missing context is not a separate "blocked" state in target code.
 - Projectors look up matched context by the concrete `ContextNeed` they just
-  constructed, using `ProjectionContext::payload_for`,
-  `payload_for_checked`, or `matched_payloads_for`. Direct
-  `matched_context()` scans are exceptional compatibility code and must be
-  explicitly justified by a guardrail allowlist.
+  constructed, using `ProjectionContext::offer_for` or
+  `matched_offers_for`. Payload helpers are migration debt for legacy
+  authority paths and must not be used in new proof-bearing projector code.
+  Direct `matched_context()` scans are exceptional compatibility code and must
+  be explicitly justified by a guardrail allowlist.
 - Deletion, supersession, connection fact receipts, key availability, and dependency
   availability are context offers or facts, not labels or side channels.
 
@@ -209,7 +211,7 @@ Non-trivial projectors should make their proof shape obvious to a reviewer:
 Deletion is target-owned. A deletion, close, or retirement fact publishes
 context with an offer; a due time wake supplies time context. The target fact
 keeps the matching need or wake in its normal projection output. When that
-context matches, the target projector validates the payload when there is one,
+context matches, the target projector validates the matched offer contract,
 deletes only rows it owns, and then calls `ProjectionOutput::purge_self` for
 its own fact id.
 
@@ -224,16 +226,15 @@ core rejects cross-fact purges from projector output.
 Projectors must read matched context by the exact `ContextNeed` they declared.
 Use:
 
-- `payload_for(&need)` for one exact payload.
-- `payload_for_checked(&need, label)` when the module wants the shared
-  offer/payload consistency check.
-- `matched_payloads_for(&need)` for intentional multi-match roles, such as
+- `offer_for(&need)` for one exact matched offer.
+- `matched_offers_for(&need)` for intentional multi-match roles, such as
   connection fact receipts or range roots.
 
 Do not call `matched_context()` from protocol projectors. Do not scan
 `context.offers()` to infer whether a declared need is satisfied. A matched
-offer's payload is the offer owner's fact; projectors should reach it only
-through the `ProjectionContext` helper anchored to the need they emitted.
+offer's role, scope, key range, and value are the cross-projector surface.
+Legacy payload helpers may remain while old authority paths are migrated, but
+they are not acceptable for new proof-bearing dependencies.
 
 ### Typed Facts And Foreign Context
 

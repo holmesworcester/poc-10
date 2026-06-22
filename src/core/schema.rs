@@ -109,7 +109,8 @@ CREATE TABLE IF NOT EXISTS context_exact_edges (
     role TEXT NOT NULL,
     scope_key BLOB NOT NULL,
     key BLOB NOT NULL,
-    PRIMARY KEY (owner, direction, role, scope_key, key)
+    value BLOB NOT NULL,
+    PRIMARY KEY (owner, direction, role, scope_key, key, value)
 );
 CREATE INDEX IF NOT EXISTS context_exact_edges_by_key
     ON context_exact_edges (direction, role, scope_key, key, owner);
@@ -123,7 +124,8 @@ CREATE TABLE IF NOT EXISTS context_range_edges (
     scope_key BLOB NOT NULL,
     start_key BLOB NOT NULL,
     end_key BLOB NOT NULL,
-    PRIMARY KEY (owner, direction, role, scope_key, start_key, end_key)
+    value BLOB NOT NULL,
+    PRIMARY KEY (owner, direction, role, scope_key, start_key, end_key, value)
 );
 CREATE INDEX IF NOT EXISTS context_range_edges_by_range_start
     ON context_range_edges (direction, role, scope_key, start_key);
@@ -161,6 +163,7 @@ CREATE TABLE IF NOT EXISTS pending_projection_matches (
     offer_owner BLOB NOT NULL,
     offer_start_key BLOB NOT NULL,
     offer_end_key BLOB NOT NULL,
+    offer_value BLOB NOT NULL,
     PRIMARY KEY (
         owner,
         need_role,
@@ -169,7 +172,8 @@ CREATE TABLE IF NOT EXISTS pending_projection_matches (
         need_end_key,
         offer_owner,
         offer_start_key,
-        offer_end_key
+        offer_end_key,
+        offer_value
     )
 );
 CREATE INDEX IF NOT EXISTS pending_projection_matches_by_offer

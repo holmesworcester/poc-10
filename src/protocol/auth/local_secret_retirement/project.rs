@@ -243,6 +243,7 @@ fn exact_local_offer(owner: FactId, role: &'static str, key: FactId) -> ContextO
         scope: FactScope::Local,
         start_key: key.clone(),
         end_key: key,
+        value: crate::core::context::ContextOfferValue::empty(),
     }
 }
 
@@ -253,6 +254,7 @@ fn exact_local_offer_claim(role: &'static str, key: FactId) -> ContextOfferClaim
         scope: FactScope::Local,
         start_key: key.clone(),
         end_key: key,
+        value: crate::core::context::ContextOfferValue::empty(),
     }
 }
 

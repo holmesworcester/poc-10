@@ -356,6 +356,45 @@ pub fn validate_signature_proof_payload(
     Ok(())
 }
 
+pub fn validate_signature_proof_offer(
+    offer: &ContextOffer,
+    need: &ContextNeed,
+    workspace_id: FactId,
+    target_fact_id: FactId,
+    signer_public_key: Ed25519PublicKey,
+    label: &str,
+) -> Result<(), String> {
+    let expected_scope = crate::protocol::auth::workspace::scope(workspace_id);
+    if need.scope != expected_scope {
+        return Err(format!(
+            "{label} signature proof need scope does not match workspace"
+        ));
+    }
+    let expected_need = signature_proof_need(
+        need.owner,
+        expected_scope.clone(),
+        target_fact_id,
+        signer_public_key,
+    )?;
+    if *need != expected_need {
+        return Err(format!(
+            "{label} signature proof need does not match target signer"
+        ));
+    }
+    let expected_offer = signature_proof_offer(
+        offer.owner,
+        expected_scope,
+        target_fact_id,
+        signer_public_key,
+    )?;
+    if *offer != expected_offer {
+        return Err(format!(
+            "{label} signature proof offer does not match target signer"
+        ));
+    }
+    Ok(())
+}
+
 pub fn signature_proof_ready(
     context: &ProjectionContext,
     need: &ContextNeed,
@@ -364,11 +403,11 @@ pub fn signature_proof_ready(
     signer_public_key: Ed25519PublicKey,
     label: &str,
 ) -> Result<bool, String> {
-    let Some(payload) = context.payload_for(need) else {
+    let Some(offer) = context.offer_for(need) else {
         return Ok(false);
     };
-    validate_signature_proof_payload(
-        payload,
+    validate_signature_proof_offer(
+        offer,
         need,
         workspace_id,
         target_fact_id,
@@ -382,8 +421,8 @@ pub fn signature_proof_ready(
 // Ordered most-central-first: the full proof-offer projection leads, then the need/offer key-symmetry guard.
 #[cfg(test)]
 mod tests {
-    use crate::core::facts::FactScope;
-    use crate::core::project_fact::{ProjectionContext, Projector};
+    use crate::core::facts::{Fact, FactScope};
+    use crate::core::project_fact::{MatchedContext, ProjectionContext, Projector};
 
     use super::*;
 
@@ -441,5 +480,60 @@ mod tests {
         assert_eq!(need.role, SIGNATURE_PROOF_ROLE);
         assert_eq!(need.start_key, offer.start_key);
         assert_eq!(need.end_key, offer.end_key);
+    }
+
+    #[test]
+    fn signature_proof_ready_accepts_matching_offer_without_payload_decode() {
+        let workspace_id = [3; 32];
+        let target = [9; 32];
+        let signer_public_key = crate::core::crypto::ed25519_public_key(&PRIVATE_KEY);
+        let scope = crate::protocol::auth::workspace::scope(workspace_id);
+        let need =
+            signature_proof_need([1; 32], scope.clone(), target, signer_public_key).expect("need");
+        let offer = signature_proof_offer([2; 32], scope.clone(), target, signer_public_key)
+            .expect("offer");
+        let context = ProjectionContext::from_matches(vec![MatchedContext {
+            need: need.clone(),
+            offer,
+            payload: Fact::new(scope, 1, b"not a signature fact".to_vec()),
+        }]);
+
+        assert!(signature_proof_ready(
+            &context,
+            &need,
+            workspace_id,
+            target,
+            signer_public_key,
+            "signature test",
+        )
+        .expect("offer-ready check"));
+    }
+
+    #[test]
+    fn signature_proof_ready_rejects_wrong_offer_key() {
+        let workspace_id = [3; 32];
+        let target = [9; 32];
+        let other_target = [8; 32];
+        let signer_public_key = crate::core::crypto::ed25519_public_key(&PRIVATE_KEY);
+        let scope = crate::protocol::auth::workspace::scope(workspace_id);
+        let need =
+            signature_proof_need([1; 32], scope.clone(), target, signer_public_key).expect("need");
+        let offer = signature_proof_offer([2; 32], scope.clone(), other_target, signer_public_key)
+            .expect("offer");
+        let context = ProjectionContext::from_matches(vec![MatchedContext {
+            need: need.clone(),
+            offer,
+            payload: Fact::new(scope, 1, b"not a signature fact".to_vec()),
+        }]);
+
+        assert!(signature_proof_ready(
+            &context,
+            &need,
+            workspace_id,
+            target,
+            signer_public_key,
+            "signature test",
+        )
+        .is_err());
     }
 }
