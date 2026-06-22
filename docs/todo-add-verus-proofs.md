@@ -144,8 +144,8 @@ Core lemmas:
 ```text
 range matcher returns only same role and scope with overlapping selector ranges
 exact matcher is the equal-endpoint case of range matching
-matched payloads are loaded from the offer owner's fact id
-matched payload helpers preserve the need chosen by the projector
+matched offer values are hydrated from the matched offer id
+matched value helpers preserve the need chosen by the projector
 context replacement preserves owner boundaries
 unchanged needs and offers do not create new wake work
 new matching offers wake only matching need owners
@@ -199,7 +199,7 @@ Matcher proof obligations:
 1. A returned match has the requested role.
 2. A returned match has the requested scope.
 3. A returned match satisfies the requested selector relation.
-4. A returned match preserves need owner, offer owner, and offer-owner payload.
+4. A returned match preserves need owner, offer owner, offer id, and offer value.
 5. The matcher does not claim protocol authority.
 ```
 
@@ -229,7 +229,7 @@ For a matcher:
 
 ```text
 need and offer match
-  -> matched context contains the offer owner's fact
+  -> matched context contains the stored offer value
   -> no semantic authority conclusion yet
 ```
 
@@ -566,7 +566,7 @@ Use this template when assigning proof work to a worktree:
 ## Initial Milestones
 
 1. Add the Verus runner and a tiny core proof target for exact/range selector
-   matching and offer-owner payload loading.
+   matching plus offer-id/value hydration.
 2. Prove projection context replacement, stable parking, atomic row/intent
    commit, and self-purge enforcement.
 3. Prove local connection ephemeral-secret offer validity.

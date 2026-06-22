@@ -228,7 +228,7 @@ MatchedOffer {
 }
 ```
 
-`pending_projection_matches` should carry the pending owner, the exact need key,
+`pending_projection_matches` should carry the pending owner, the need selector,
 and the matched `offer_id`. When core loads `ProjectionContext`, it hydrates the
 full offer from SQLite and gives projector code matched offers:
 
@@ -246,27 +246,37 @@ Storage should mirror the exact/range split.
 ```text
 context_needs
   owner
-  owner_fact_type
+  role
+  scope_key
   key
 
 context_exact_offers
   offer_id
   owner
-  owner_fact_type
+  owner_scope_key
+  owner_received_at
+  role
+  scope_key
   key
   value
 
 context_range_offers
   offer_id
   owner
-  owner_fact_type
+  owner_scope_key
+  owner_received_at
+  role
+  scope_key
   start_key
   end_key
   value
 
 pending_projection_matches
   owner
-  need_key
+  need_role
+  need_scope_key
+  need_start_key
+  need_end_key
   offer_id
 ```
 

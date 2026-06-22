@@ -3,8 +3,9 @@
 //! This file intentionally contains only types and pure helpers. The SQLite
 //! tables, overlap queries, pending wake rows, and commit rules live in
 //! `project_fact.rs`. Projectors use these types to say "this fact still needs
-//! matching payload from another fact" (`ContextNeed`) or "this fact can satisfy
-//! matching needs" (`ContextOffer`) without importing SQL or queue machinery.
+//! a matching semantic value" (`ContextNeed`) or "this fact offers a semantic
+//! value for matching needs" (`ContextOffer`) without importing SQL or queue
+//! machinery.
 //!
 //! `context.rs` stays separate from `project_fact.rs` because the types are the
 //! public language shared by protocol projectors and the projection runner.
@@ -18,7 +19,7 @@
 //! needs and offers it owns, and `project_fact.rs` records newly satisfiable
 //! range overlaps. The semantic meaning of a role or byte range stays with the
 //! projector that created it and with the projector that later validates the
-//! matched payload.
+//! matched scalar value.
 //!
 //! Every context edge has a key interval:
 //!
@@ -44,15 +45,15 @@
 //! offer.start_key <= need.end_key
 //! ```
 //!
-//! Core never parses range bytes. It stores them, indexes them, performs the
-//! overlap query, wakes affected owners, and loads the offer owner's fact as
-//! matched payload. The woken projector must still decode and validate the
-//! matched payload before emitting rows, offers, or intents.
+//! Core never parses range bytes or offer values. It stores them, indexes them,
+//! performs the overlap query, wakes affected owners, and hydrates matched
+//! context from the stored offer row. The woken projector must still decode and
+//! validate the matched scalar value before emitting rows, offers, or intents.
 //!
 //! `owner` says which fact produced the row so later projection can replace
 //! that fact's context without deleting anyone else's rows. For needs, `owner`
-//! is the fact that should be reprojected. For offers, `owner` is also the
-//! payload fact core loads when the offer overlaps a need.
+//! is the fact that should be reprojected. For offers, `owner` is provenance for
+//! the stored scalar value; core does not load the owner fact as context.
 //!
 //! Needs and offers have different lifecycles. Needs are replacement
 //! subscriptions: when a fact projects, it emits the complete current set of
@@ -61,16 +62,19 @@
 //! purged. Core wakes only genuinely new need/offer matches and avoids
 //! self-waking loops when stable unmet needs are re-emitted.
 
-use crate::core::facts::{FactId, FactScope};
+use crate::core::facts::{fact_id, FactId, FactScope};
 use crate::core::wire::Writer;
 use std::collections::BTreeSet;
 
 /// Maximum encoded size for a core-built canonical context key.
 pub const CONTEXT_KEY_MAX_BYTES: usize = 512;
+/// Content-derived identity for one stamped context offer.
+pub type ContextOfferId = [u8; 32];
 const CONTEXT_KEY_MAX_PARTS: usize = 32;
 const CONTEXT_KEY_TUPLE_V1: u8 = 1;
 const CONTEXT_KEY_PART_BYTES: u8 = 1;
 const CONTEXT_KEY_PART_U64: u8 = 2;
+const CONTEXT_OFFER_ID_V1: &[u8] = b"topo:context_offer:v1";
 
 // =============================================================================
 // Public Vocabulary
@@ -133,7 +137,7 @@ pub struct ContextKey(Vec<u8>);
 /// One part of a core-built canonical context key.
 ///
 /// This is syntax only. Protocol projectors still choose which fields belong in
-/// a key and validate any matched payload semantically.
+/// a key and validate any matched offer value semantically.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextKeyPart<'a> {
     Bytes(&'a [u8]),
@@ -173,7 +177,7 @@ impl ContextKey {
     ///
     /// Core stores, sorts, and compares these bytes, but never parses them.
     /// Protocol code chooses a canonical byte layout and validates the matched
-    /// payload before giving the match any semantic authority.
+    /// offer value before giving the match any semantic authority.
     pub fn from_bytes(bytes: impl Into<Vec<u8>>) -> Self {
         Self(bytes.into())
     }
@@ -302,11 +306,14 @@ impl ContextNeed {
 
 /// A standing statement that one fact can provide context to matching needs.
 ///
-/// The offer's `owner` is the fact that emitted this relationship and the fact
-/// core should load and pass to the woken projector when this offer matches.
+/// The offer's `owner` is the fact that emitted this relationship. Its `value`
+/// is the scalar semantic data later handed to matched projectors. Empty values
+/// emitted through the legacy constructors are filled from the projected fact's
+/// bytes at commit time so old projectors keep working while they migrate to
+/// explicit semantic values.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContextOffer {
-    /// Fact that emitted the offer and provides the payload.
+    /// Fact that emitted the offer.
     pub owner: FactId,
     /// Matching role.
     pub role: Role,
@@ -316,6 +323,8 @@ pub struct ContextOffer {
     pub start_key: ContextKey,
     /// Inclusive end of the opaque byte range this offer provides.
     pub end_key: ContextKey,
+    /// Single scalar value provided to matched projectors.
+    pub value: Vec<u8>,
 }
 
 impl ContextOffer {
@@ -336,7 +345,19 @@ impl ContextOffer {
             scope,
             start_key: key.clone(),
             end_key: key,
+            value: Vec::new(),
         }
+    }
+
+    /// Build an exact-key offer carrying one scalar semantic value.
+    pub fn for_key_value(
+        owner: FactId,
+        role: impl Into<Role>,
+        scope: FactScope,
+        key: impl Into<Vec<u8>>,
+        value: impl Into<Vec<u8>>,
+    ) -> Self {
+        Self::for_key(owner, role, scope, key).with_value(value)
     }
 
     /// Build an exact-key offer from bounded canonical key parts.
@@ -360,7 +381,23 @@ impl ContextOffer {
             scope,
             start_key: key.clone(),
             end_key: key,
+            value: Vec::new(),
         })
+    }
+
+    /// Build an exact-key offer from bounded canonical key parts with one scalar value.
+    pub fn for_key_parts_value<'a, I, P>(
+        owner: FactId,
+        role: impl Into<Role>,
+        scope: FactScope,
+        parts: I,
+        value: impl Into<Vec<u8>>,
+    ) -> Result<Self, String>
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<ContextKeyPart<'a>>,
+    {
+        Self::for_key_parts(owner, role, scope, parts).map(|offer| offer.with_value(value))
     }
 
     /// Build a true range offer with inclusive byte endpoints.
@@ -380,7 +417,46 @@ impl ContextOffer {
             scope,
             start_key: ContextKey::from_bytes(start_key),
             end_key: ContextKey::from_bytes(end_key),
+            value: Vec::new(),
         }
+    }
+
+    /// Build a true range offer carrying one scalar semantic value.
+    pub fn range_value(
+        owner: FactId,
+        role: impl Into<Role>,
+        scope: FactScope,
+        start_key: impl Into<Vec<u8>>,
+        end_key: impl Into<Vec<u8>>,
+        value: impl Into<Vec<u8>>,
+    ) -> Self {
+        Self::range(owner, role, scope, start_key, end_key).with_value(value)
+    }
+
+    /// Attach the scalar semantic value this offer provides.
+    pub fn with_value(mut self, value: impl Into<Vec<u8>>) -> Self {
+        self.value = value.into();
+        self
+    }
+
+    /// Return true when this offer covers one exact key rather than a range.
+    pub fn is_exact(&self) -> bool {
+        self.start_key == self.end_key
+    }
+
+    /// Derive a stable identity from owner, key/range, scope, role, and value.
+    pub fn id(&self) -> ContextOfferId {
+        let mut out = Writer::new();
+        out.bytes(CONTEXT_OFFER_ID_V1);
+        out.fixed(&self.owner);
+        out.u8(if self.is_exact() { 0 } else { 1 });
+        out.string_u32be(self.role.as_str())
+            .expect("role fits offer id");
+        out.bytes(&scope_key(&self.scope));
+        out.bytes(self.start_key.as_bytes());
+        out.bytes(self.end_key.as_bytes());
+        out.bytes(&self.value);
+        fact_id(&out.finish())
     }
 }
 
@@ -581,6 +657,7 @@ mod tests {
                 scope: FactScope::Global,
                 start_key: key.clone(),
                 end_key: key,
+                value: Vec::new(),
             })
             .normalized();
 
@@ -677,6 +754,7 @@ mod tests {
                 scope: FactScope::Global,
                 start_key: key.clone(),
                 end_key: key,
+                value: Vec::new(),
             });
 
         assert_eq!(set.needs.len(), 1);

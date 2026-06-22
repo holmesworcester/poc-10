@@ -65,7 +65,7 @@ emitted offers as durable evidence; applies allowed row mutations; admits
 emitted facts; queues follow-up intents; and wakes other fact owners whose
 standing needs now overlap newly added offers. Core performs the overlap query
 mechanically when it queues the work, but projectors decide what the matched
-payload proves.
+offer value proves.
 
 Intents are core's bounded stateful work step. A projector or explicit runtime
 operation emits an intent when the next action should not happen inside
@@ -196,7 +196,8 @@ context, and lets the owning projector decide whether that time proves anything.
   replaces the previous needs and time wakes for that owner, while newly emitted
   offers append as durable evidence until the owner fact is purged.
 - Context matching is protocol-blind range overlap over `(role, scope,
-  start_key, end_key)`. Projectors must decode and validate matched payloads.
+  start_key, end_key)`. Projectors must decode and validate matched offer
+  values.
 - Projectors do not query the database, perform IO, call handlers, or mutate
   process-local state.
 - Each intent queue insert records a distinct row id. `kind` routes to a
@@ -349,9 +350,9 @@ mode.
 
 - `project_fact.rs::route`: tag route declarations, projector route metadata,
   and the protocol-owned fact admission hook type.
-- `project_fact.rs::context`: in-memory `ProjectionContext`, matched payload
-  facts, projection mode, and due time ranges visible while one fact is being
-  processed.
+- `project_fact.rs::context`: in-memory `ProjectionContext`, matched offer
+  values plus compatibility payload wrappers, projection mode, and due time
+  ranges visible while one fact is being processed.
 - `project_fact.rs::effects`: `ProjectionOutput`, time wakes, and due time
   ranges. Projection output is the complete need/time-wake replacement, new
   append-only offers, plus shared `RuntimeEffects` for one fact.
@@ -361,10 +362,10 @@ mode.
   facts, row mutations, and queues follow-up intents inside the caller's
   transaction.
 - `project_fact.rs::context_db`: SQL implementation of standing context. It
-  stores need/offer edges, assembles projection context from queued
-  `pending_projection_matches`, computes replacement-need and append-only-offer
-  deltas by owner, and fans out pending projection rows when new needs and
-  offers overlap.
+  stores need edges and exact/range scalar offers, assembles projection context
+  from queued `pending_projection_matches`, computes replacement-need and
+  append-only-offer deltas by owner, and fans out pending projection rows when
+  new needs and offers overlap.
 - `handle_intent.rs`: intent queue worker. It claims one durable or local
   intent, loads only the intent's attached fact inputs, calls the registered
   handler, and commits successful handler output atomically with queue-row
@@ -435,9 +436,9 @@ Missing context is normal projection output, not a separate core stage. The
 projector emits standing needs; core records those replacement needs and parks
 the fact. When a later offer matches a parked need, core records that offer in
 `pending_projection_matches` for the parked owner and queues the owner again.
-The pending item already carries the context that woke it, so the reprojected
-fact reads the matched payload through `ProjectionContext` instead of
-doing a database search.
+The pending item already carries the offer id that woke it, so the reprojected
+fact reads the matched offer value through `ProjectionContext` instead of doing
+a database search.
 
 Detached signature evidence, key material, deletion markers, receipts, and
 other cross-fact proof are ordinary facts that may publish context offers after
@@ -463,9 +464,10 @@ offers or time wakes remain, deletes any old context for that input id, deletes
 the incoming fact row, and applies `RuntimeEffects` through `commit_effects`.
 
 Before that boundary, projector runs are calculation. Durable pending items
-start with the matched context already attached to their queue row. Newly
-declared needs are matched during commit and wake a later queue item; the
-projector does not search the database for more context during the same run.
+start with the matched context already attached to their queue row as offer ids
+and hydrated values. Newly declared needs are matched during commit and wake a
+later queue item; the projector does not search the database for more context
+during the same run.
 
 ### Handler Commit Boundary
 
