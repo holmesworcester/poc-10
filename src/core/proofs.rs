@@ -43,8 +43,13 @@
 //!   definitions that Verus type-checks.
 //! - Proven in production Rust today:
 //!   `projected_owner_matches(owner, fact_id)` bytewise accepts if and only if
-//!   `owner == fact_id`; `enforce_projected_owner` branches on this verified
-//!   production decision before returning success or a diagnostic error.
+//!   `owner == fact_id`; the verified scan helpers use this production
+//!   decision for each owner they inspect.
+//! - Proven in production Rust today:
+//!   `projected_purge_owners_are_self`, `projected_need_owners_are_self`, and
+//!   `projected_time_wake_owners_are_self` accept if and only if every scanned
+//!   purge id, need owner, or time-wake owner equals the projected fact id;
+//!   `enforce_owner_is_self` branches on these verified production scans.
 //! - Proven in production Rust today:
 //!   `ContextOfferClaim::into_offer(claim, owner).owner == owner`.
 //! - Proven in production Rust today:
@@ -62,8 +67,9 @@
 //! - Not proven here today: every exported `theorem_*` runtime/core property.
 //! - Not proven yet for offer finalization: `ProjectionOutput::context_set`
 //!   normalization or `prepare_projection` call order.
-//! - Not proven yet for owner enforcement: the loops in
-//!   `enforce_owner_is_self` checking every purge, need, and time wake.
+//! - Not proven yet for owner enforcement: the exported theorem tying
+//!   `enforce_owner_is_self` `Result` behavior and `prepare_projection` call
+//!   order to the verified scan helpers.
 //! - Punted for a later core proof model: the composition stubs that cross
 //!   matcher construction, offer loading, route dispatch, projected-table
 //!   write ownership, context replacement, and commit.

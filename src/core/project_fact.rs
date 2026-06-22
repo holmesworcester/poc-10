@@ -56,7 +56,7 @@ use self::context_db::{
     wake_context_matches_in_tx,
 };
 use crate::core::command::AuthoredFacts;
-use crate::core::context::{ContextSet, ContextSetAdditions};
+use crate::core::context::{ContextNeed, ContextSet, ContextSetAdditions};
 use crate::core::db::{quoted_identifier, quoted_table_name, Db, TableName};
 use crate::core::effects::RuntimeEffects;
 use crate::core::facts::{
@@ -616,23 +616,37 @@ fn validate_rebuild_projection_shape(
 /// being projected. Projected offers are ownerless claims; core attaches the
 /// projected fact id when building the committed context set.
 fn enforce_owner_is_self(fact: &Fact, output: &ProjectionOutput) -> Result<(), String> {
-    for purged in &output.effects.purged_facts {
-        enforce_projected_owner("projector tried to purge fact", *purged, fact.id)?;
-    }
-    for need in &output.needs {
-        enforce_projected_owner("projector emitted need with owner", need.owner, fact.id)?;
-    }
-    for wake in &output.time_wakes {
-        enforce_projected_owner(
-            "projector emitted time wake with owner",
-            wake.owner,
+    if !projected_purge_owners_are_self(&output.effects.purged_facts, fact.id) {
+        return Err(enforce_projected_owner_error(
+            "projector tried to purge fact",
             fact.id,
-        )?;
+        ));
+    }
+    if !projected_need_owners_are_self(&output.needs, fact.id) {
+        return Err(enforce_projected_owner_error(
+            "projector emitted need with owner",
+            fact.id,
+        ));
+    }
+    if !projected_time_wake_owners_are_self(&output.time_wakes, fact.id) {
+        return Err(enforce_projected_owner_error(
+            "projector emitted time wake with owner",
+            fact.id,
+        ));
     }
     Ok(())
 }
 
 verus! {
+#[verifier(external_type_specification)]
+#[verifier(external_body)]
+#[allow(dead_code)]
+pub struct ExTimeline(Timeline);
+
+#[verifier(external_type_specification)]
+#[allow(dead_code)]
+pub struct ExTimeWake(TimeWake);
+
 /// Bytewise fact-id equality used by the owner guard.
 ///
 /// Keeping this comparison explicit lets Verus prove the branch condition that
@@ -659,17 +673,100 @@ fn projected_owner_matches(owner: FactId, fact_id: FactId) -> (accepted: bool)
     assert(owner == fact_id);
     true
 }
+
+fn projected_purge_owners_are_self(purged: &[FactId], fact_id: FactId) -> (accepted: bool)
+    ensures
+        accepted <==> forall|i: int|
+            #![trigger purged@[i]]
+            0 <= i < purged@.len() ==> purged@[i] == fact_id,
+{
+    let mut i: usize = 0;
+    while i < purged.len()
+        invariant
+            i <= purged@.len(),
+            forall|j: int|
+                #![trigger purged@[j]]
+                0 <= j < i ==> purged@[j] == fact_id,
+        decreases purged@.len() - i,
+    {
+        if !projected_owner_matches(purged[i], fact_id) {
+            assert(purged@[i as int] != fact_id);
+            assert(!(forall|j: int|
+                #![trigger purged@[j]]
+                0 <= j < purged@.len() ==> purged@[j] == fact_id));
+            return false;
+        }
+        i += 1;
+    }
+    assert(forall|j: int|
+        #![trigger purged@[j]]
+        0 <= j < purged@.len() ==> purged@[j] == fact_id);
+    true
+}
+
+fn projected_need_owners_are_self(needs: &[ContextNeed], fact_id: FactId) -> (accepted: bool)
+    ensures
+        accepted <==> forall|i: int|
+            #![trigger needs@[i]]
+            0 <= i < needs@.len() ==> needs@[i].owner == fact_id,
+{
+    let mut i: usize = 0;
+    while i < needs.len()
+        invariant
+            i <= needs@.len(),
+            forall|j: int|
+                #![trigger needs@[j]]
+                0 <= j < i ==> needs@[j].owner == fact_id,
+        decreases needs@.len() - i,
+    {
+        if !projected_owner_matches(needs[i].owner, fact_id) {
+            assert(needs@[i as int].owner != fact_id);
+            assert(!(forall|j: int|
+                #![trigger needs@[j]]
+                0 <= j < needs@.len() ==> needs@[j].owner == fact_id));
+            return false;
+        }
+        i += 1;
+    }
+    assert(forall|j: int|
+        #![trigger needs@[j]]
+        0 <= j < needs@.len() ==> needs@[j].owner == fact_id);
+    true
+}
+
+fn projected_time_wake_owners_are_self(wakes: &[TimeWake], fact_id: FactId) -> (accepted: bool)
+    ensures
+        accepted <==> forall|i: int|
+            #![trigger wakes@[i]]
+            0 <= i < wakes@.len() ==> wakes@[i].owner == fact_id,
+{
+    let mut i: usize = 0;
+    while i < wakes.len()
+        invariant
+            i <= wakes@.len(),
+            forall|j: int|
+                #![trigger wakes@[j]]
+                0 <= j < i ==> wakes@[j].owner == fact_id,
+        decreases wakes@.len() - i,
+    {
+        if !projected_owner_matches(wakes[i].owner, fact_id) {
+            assert(wakes@[i as int].owner != fact_id);
+            assert(!(forall|j: int|
+                #![trigger wakes@[j]]
+                0 <= j < wakes@.len() ==> wakes@[j].owner == fact_id));
+            return false;
+        }
+        i += 1;
+    }
+    assert(forall|j: int|
+        #![trigger wakes@[j]]
+        0 <= j < wakes@.len() ==> wakes@[j].owner == fact_id);
+    true
+}
 } // verus!
 
-fn enforce_projected_owner(label: &str, owner: FactId, fact_id: FactId) -> Result<(), String> {
-    if projected_owner_matches(owner, fact_id) {
-        Ok(())
-    } else {
-        Err(format!(
-            "{label} {:x?} that is not the projected fact {:x?}",
-            owner, fact_id
-        ))
-    }
+fn enforce_projected_owner_error(label: &str, fact_id: FactId) -> String {
+    format!("{label} that is not the projected fact {:x?}", fact_id)
 }
 
 // =============================================================================
@@ -4792,9 +4889,36 @@ mod contract_tests {
     #[test]
     fn projected_owner_match_decision_accepts_only_self_owner() {
         let fact_id = [1; 32];
+        let need = ContextNeed::for_key(fact_id, "scan_need", FactScope::Global, [2; 32]);
+        let wake = TimeWake {
+            owner: fact_id,
+            timeline: Timeline::new("scan_wake").unwrap(),
+            at: 42,
+        };
 
         assert!(projected_owner_matches(fact_id, fact_id));
         assert!(!projected_owner_matches([9; 32], fact_id));
+        assert!(projected_purge_owners_are_self(&[fact_id], fact_id));
+        assert!(!projected_purge_owners_are_self(&[[9; 32]], fact_id));
+        assert!(projected_need_owners_are_self(&[need.clone()], fact_id));
+        assert!(!projected_need_owners_are_self(
+            &[ContextNeed {
+                owner: [9; 32],
+                ..need
+            }],
+            fact_id
+        ));
+        assert!(projected_time_wake_owners_are_self(
+            &[wake.clone()],
+            fact_id
+        ));
+        assert!(!projected_time_wake_owners_are_self(
+            &[TimeWake {
+                owner: [9; 32],
+                ..wake
+            }],
+            fact_id
+        ));
     }
 
     #[test]

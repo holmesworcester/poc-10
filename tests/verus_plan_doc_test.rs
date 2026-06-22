@@ -86,7 +86,7 @@ fn cargo_verus_verifies_production_context_offer_owner_contracts() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        combined.contains("verification results:: 6 verified, 0 errors"),
+        combined.contains("verification results:: 12 verified, 0 errors"),
         "production proof should verify the real context offer owner contracts:\n{combined}"
     );
 }
@@ -156,8 +156,10 @@ fn core_proofs_make_trust_boundary_explicit() {
         "Proven in production Rust today:",
         "`projected_owner_matches(owner, fact_id)` bytewise accepts if and only if",
         "`owner == fact_id`",
-        "`enforce_projected_owner` branches on this verified",
-        "production decision before returning success",
+        "the verified scan helpers use this production",
+        "`projected_purge_owners_are_self`, `projected_need_owners_are_self`, and",
+        "`projected_time_wake_owners_are_self` accept if and only if every scanned",
+        "`enforce_owner_is_self` branches on these verified production scans",
         "`ContextOfferClaim::into_offer(claim, owner).owner == owner`",
         "ContextOfferClaim::into_offer(claim, owner) preserves role/scope/start/end/value",
         "`owned_offers_from_claims(claims, owner)` returns one offer per claim",
@@ -167,7 +169,8 @@ fn core_proofs_make_trust_boundary_explicit() {
         "builds same-index owned offers from the claims",
         "Not proven yet for offer finalization",
         "Not proven yet for owner enforcement",
-        "`enforce_owner_is_self` checking every purge, need, and time wake",
+        "exported theorem tying",
+        "`enforce_owner_is_self` `Result` behavior",
         "Not proven here today: every exported `theorem_*` runtime/core property.",
         "First stubs to replace: the near-term core glue stubs",
         "First core proof milestone: remove `external_body` from the core theorem",
@@ -393,6 +396,9 @@ fn verus_plan_is_single_core_first_source() {
         "Cargo-verus verifies the\nproduction crate path",
         "standalone proof modules",
         "projected_owner_matches(owner, fact_id) bytewise accepts if and only if owner == fact_id",
+        "projected_purge_owners_are_self(purged, fact_id) accepts if and only if every purged id is fact_id",
+        "projected_need_owners_are_self(needs, fact_id) accepts if and only if every need owner is fact_id",
+        "projected_time_wake_owners_are_self(wakes, fact_id) accepts if and only if every wake owner is fact_id",
         "ContextOfferClaim::into_offer(claim, owner).owner == owner",
         "ContextOfferClaim::into_offer(claim, owner) preserves role/scope/start/end/value",
         "owned_offers_from_claims(claims, owner).len == claims.len",
@@ -403,7 +409,7 @@ fn verus_plan_is_single_core_first_source() {
         "assume_specification` for the derived `ContextOfferClaim::clone`",
         "clone preserves the whole claim",
         "remaining owner-checking gap",
-        "`enforce_owner_is_self` applies that decision to every owner-bearing purge",
+        "`enforce_owner_is_self` `Result` correspondence",
         "projection_context_records_offer_provenance(ctx, graph)",
         "matched_offer_loads_owner_fact(matched)",
         "matcher_preserves_role_scope_selector(need, matched)",
