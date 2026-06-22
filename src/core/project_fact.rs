@@ -4724,29 +4724,9 @@ mod contract_tests {
     }
 }
 
-// Core fact lifecycle and SQL-backed runtime projection.
-//
-// This module owns the reusable fact projection contract and queue worker.
-// Core routes raw facts to protocol projectors:
-//
-// ```text
-// route -> project -> effects/needs/offers -> commit
-// ```
-//
-// Core owns queueing, matched context loading, need/offer parking, and commit
-// boundaries. Protocol fact families own raw byte decoding, signature/context
-// validation, legacy adaptation, semantic projection, row construction, and
-// user-facing commands. Keeping the projector contract here lets core
-// projection stay protocol-neutral without teaching it what a workspace, message,
-// invite, key wrap, sync range, or connection fact means.
-//
-// The SQL-backed worker below owns one queued fact at a time: matched context
-// loading, projector execution, incoming retention, context wake fanout,
-// time-wake replacement, and projection effect commit.
-
-// =============================================================================
-// Tests
-// =============================================================================
+// -----------------------------------------------------------------------------
+// Unit Tests
+// -----------------------------------------------------------------------------
 //
 // Unit coverage of the building blocks `contract_tests` composes, ordered
 // most-central first: content-addressed fact identity and the purge/delete
