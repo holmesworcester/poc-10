@@ -86,7 +86,7 @@ fn cargo_verus_verifies_production_core_projection_contracts() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        combined.contains("verification results:: 53 verified, 0 errors"),
+        combined.contains("verification results:: 54 verified, 0 errors"),
         "production proof should verify the real core projection contracts:\n{combined}"
     );
 }
@@ -198,6 +198,10 @@ fn core_proofs_make_trust_boundary_explicit() {
         "`routed_projection_from_selected_route(fact_id, effective_tag, stamp,",
         "preserves the output unchanged",
         "does not prove executable route/stamp alignment",
+        "`runtime_effects_with_storage_requirement(effects, requirement)` sets",
+        "`RuntimeEffects.storage_requirement` to the selected route requirement",
+        "preserving emitted facts, priority facts, incoming facts and\n//!   metadata",
+        "dispatcher applied it to the selected projector output",
         "`version_replay_rebuild_shape_allowed(version_replay_rebuild, needs, offers,",
         "accepts if and only if the projection is ordinary",
         "no standing needs, offers, or time wakes",
@@ -395,6 +399,9 @@ fn verus_plan_is_single_core_first_source() {
         "None` means no stamp in the slice has that tag",
         "`routed_projection_from_selected_route(fact_id, effective_tag, stamp, output)`",
         "preserves the output unchanged",
+        "`runtime_effects_with_storage_requirement(effects, requirement)` is verified",
+        "sets\n`RuntimeEffects.storage_requirement` to the selected route requirement",
+        "preserving emitted facts, priority facts, incoming facts and metadata",
         "This is selected-route\nmetadata-search and routed-output constructor proof",
         "not the full route\ntheorem",
         "Leaf projectors still return plain `ProjectionOutput`",
@@ -556,6 +563,7 @@ fn verus_plan_is_single_core_first_source() {
         "selected_route_evidence(fact_id, effective_tag, stamp) preserves selected route stamp metadata and gives route_tag == effective_tag when stamp.tag == effective_tag",
         "select_route_stamp(stamps, effective_tag) returns the first matching route stamp or proves no route stamp matches",
         "routed_projection_from_selected_route(fact_id, effective_tag, stamp, output) preserves selected route stamp metadata and preserves output unchanged",
+        "runtime_effects_with_storage_requirement(effects, requirement) sets the storage requirement and preserves the effect payload",
         "version_replay_rebuild_shape_allowed(version_replay_rebuild, needs, offers, wakes) accepts if and only if ordinary projection or empty version replay rebuild output",
         "version_replay_rebuild_shape_status(version_replay_rebuild, needs, offers, wakes) returns accepted or standing-output exactly from that predicate",
         "version_replay_rebuild_shape_status_allows_projection(status) accepts if and only if status is VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED",

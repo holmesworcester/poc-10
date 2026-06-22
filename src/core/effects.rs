@@ -15,6 +15,7 @@
 use crate::core::facts::{Fact, FactId};
 use crate::core::intents::{Intent, IntentRowMutation};
 use std::collections::BTreeMap;
+use vstd::prelude::*;
 
 /// Storage version contract carried by one effect batch.
 ///
@@ -100,9 +101,8 @@ impl RuntimeEffects {
             && !self.version_replay_rebuild
     }
 
-    pub fn with_storage_requirement(mut self, requirement: StorageRequirement) -> Self {
-        self.storage_requirement = requirement;
-        self
+    pub fn with_storage_requirement(self, requirement: StorageRequirement) -> Self {
+        runtime_effects_with_storage_requirement(self, requirement)
     }
 
     pub fn fact(mut self, fact: Fact) -> Self {
@@ -153,6 +153,33 @@ impl RuntimeEffects {
     }
 }
 
+verus! {
+/// Override the storage guard carried by a runtime effect batch.
+///
+/// The production router uses this after selecting a fact route so the route,
+/// not the leaf projector, controls the storage-version precondition checked
+/// before commit.
+fn runtime_effects_with_storage_requirement(
+    mut effects: RuntimeEffects,
+    requirement: StorageRequirement,
+) -> (updated: RuntimeEffects)
+    ensures
+        updated.storage_requirement == requirement,
+        updated.facts@ == effects.facts@,
+        updated.priority_facts@ == effects.priority_facts@,
+        updated.incoming_facts@ == effects.incoming_facts@,
+        updated.incoming_fact_metadata == effects.incoming_fact_metadata,
+        updated.purged_facts@ == effects.purged_facts@,
+        updated.row_mutations@ == effects.row_mutations@,
+        updated.intents@ == effects.intents@,
+        updated.local_intents@ == effects.local_intents@,
+        updated.version_replay_rebuild == effects.version_replay_rebuild,
+{
+    effects.storage_requirement = requirement;
+    effects
+}
+} // verus!
+
 // Tests.
 // Ordered most-central-first: this module has one emptiness invariant test.
 #[cfg(test)]
@@ -166,5 +193,40 @@ mod tests {
 
         let fact = Fact::new(FactScope::Global, 1, b"child".to_vec());
         assert!(!RuntimeEffects::new().fact(fact).is_empty());
+    }
+
+    #[test]
+    fn storage_requirement_overwrite_preserves_effect_payload() {
+        let fact = Fact::new(FactScope::Global, 1, b"storage guarded fact".to_vec());
+        let metadata = IncomingMetadata {
+            origin_addr: b"127.0.0.1:10000".to_vec(),
+            received_at_local_ms: 123,
+        };
+        let effects = RuntimeEffects::new()
+            .fact(fact.clone())
+            .incoming_fact_with_metadata(fact.clone(), metadata)
+            .purge_fact([9; 32])
+            .version_replay_rebuild();
+
+        let updated = effects
+            .clone()
+            .with_storage_requirement(StorageRequirement::Current(7));
+
+        assert_eq!(updated.storage_requirement, StorageRequirement::Current(7));
+        assert_eq!(updated.facts, effects.facts);
+        assert_eq!(updated.priority_facts, effects.priority_facts);
+        assert_eq!(updated.incoming_facts, effects.incoming_facts);
+        assert_eq!(
+            updated.incoming_fact_metadata,
+            effects.incoming_fact_metadata
+        );
+        assert_eq!(updated.purged_facts, effects.purged_facts);
+        assert_eq!(updated.row_mutations, effects.row_mutations);
+        assert_eq!(updated.intents, effects.intents);
+        assert_eq!(updated.local_intents, effects.local_intents);
+        assert_eq!(
+            updated.version_replay_rebuild,
+            effects.version_replay_rebuild
+        );
     }
 }

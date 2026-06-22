@@ -237,7 +237,13 @@ proof-relevant route metadata slice: `Some` returns the first stamp with
 It also proves that
 `routed_projection_from_selected_route(fact_id, effective_tag, stamp, output)`
 attaches that selected-stamp route evidence to the actual projector output
-value passed to it and preserves the output unchanged. This is selected-route
+value passed to it and preserves the output unchanged.
+`runtime_effects_with_storage_requirement(effects, requirement)` is verified
+over the production storage-guard overwrite: it sets
+`RuntimeEffects.storage_requirement` to the selected route requirement while
+preserving emitted facts, priority facts, incoming facts and metadata, purges,
+row mutations, intents, local intents, and the version replay rebuild flag.
+This is selected-route
 metadata-search and routed-output constructor proof, not the full route
 theorem: Cargo-verus still needs to prove executable route/stamp alignment, the
 selected projector function call, and the correspondence from
@@ -738,6 +744,7 @@ projection_route_evidence(fact_id, effective_tag, route_tag, projector_info, sto
 selected_route_evidence(fact_id, effective_tag, stamp) preserves selected route stamp metadata and gives route_tag == effective_tag when stamp.tag == effective_tag
 select_route_stamp(stamps, effective_tag) returns the first matching route stamp or proves no route stamp matches
 routed_projection_from_selected_route(fact_id, effective_tag, stamp, output) preserves selected route stamp metadata and preserves output unchanged
+runtime_effects_with_storage_requirement(effects, requirement) sets the storage requirement and preserves the effect payload
 version_replay_rebuild_shape_allowed(version_replay_rebuild, needs, offers, wakes) accepts if and only if ordinary projection or empty version replay rebuild output
 version_replay_rebuild_shape_status(version_replay_rebuild, needs, offers, wakes) returns accepted or standing-output exactly from that predicate
 version_replay_rebuild_shape_status_allows_projection(status) accepts if and only if status is VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED

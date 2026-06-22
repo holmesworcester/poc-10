@@ -118,6 +118,14 @@
 //!   This still does not prove executable route/stamp alignment or the
 //!   projector function pointer call.
 //! - Proven in production Rust today:
+//!   `runtime_effects_with_storage_requirement(effects, requirement)` sets
+//!   `RuntimeEffects.storage_requirement` to the selected route requirement
+//!   while preserving emitted facts, priority facts, incoming facts and
+//!   metadata, purges, row mutations, intents, local intents, and the version
+//!   replay rebuild flag. `RuntimeEffects::with_storage_requirement` uses this
+//!   verified production helper; the remaining route gap is proving the
+//!   dispatcher applied it to the selected projector output.
+//! - Proven in production Rust today:
 //!   `version_replay_rebuild_shape_allowed(version_replay_rebuild, needs, offers,
 //!   wakes)` accepts if and only if the projection is ordinary, or it is a
 //!   version replay rebuild with no standing needs, offers, or time wakes.
