@@ -1560,6 +1560,31 @@ fn clone_context_needs(needs: &[ContextNeed]) -> (out: Vec<ContextNeed>)
     out
 }
 
+spec fn fact_ids_contain_spec(ids: Seq<FactId>, target: FactId) -> bool {
+    exists|i: int| 0 <= i < ids.len() && ids[i] == target
+}
+
+fn fact_ids_contain(ids: &[FactId], target: FactId) -> (contains: bool)
+    ensures
+        contains <==> fact_ids_contain_spec(ids@, target),
+{
+    let mut i: usize = 0;
+    while i < ids.len()
+        invariant
+            i <= ids@.len(),
+            forall|j: int| 0 <= j < i ==> ids@[j] != target,
+        decreases ids@.len() - i,
+    {
+        if projected_owner_matches(ids[i], target) {
+            assert(fact_ids_contain_spec(ids@, target));
+            return true;
+        }
+        i += 1;
+    }
+    assert(!fact_ids_contain_spec(ids@, target));
+    false
+}
+
 /// Build the commit-ready projection object after every prepare-stage guard
 /// has accepted.
 ///
@@ -1610,6 +1635,34 @@ fn prepared_projection_from_validated_output(
         runtime_effects,
     }
 }
+
+/// Decide whether the projected fact remains retained after its commit.
+///
+/// Durable facts remain retained unless they purge themselves. Incoming facts
+/// must additionally request retention; dropped incoming facts are one-shot
+/// inputs and cannot publish standing context or time wakes.
+fn projection_retains_fact_after_commit(projection: &PreparedProjection) -> (retained: bool)
+    ensures
+        retained <==> (
+            !fact_ids_contain_spec(
+                projection.runtime_effects.purged_facts@,
+                projection.fact.id,
+            ) && (
+                projection.source == ProjectionSource::Durable
+                    || (projection.source == ProjectionSource::Incoming && projection.retain_self)
+            )
+        ),
+{
+    let fact_id = projection.fact.id;
+    let purges_self = fact_ids_contain(&projection.runtime_effects.purged_facts, fact_id);
+    if purges_self {
+        return false;
+    }
+    match projection.source {
+        ProjectionSource::Durable => true,
+        ProjectionSource::Incoming => projection.retain_self,
+    }
+}
 } // verus!
 
 fn enforce_projected_owner_error(label: &str, fact_id: FactId) -> String {
@@ -1647,15 +1700,6 @@ fn commit_rejected_projection_input_in_tx(
     match source {
         ProjectionSource::Durable => clear_pending_projection_work_in_tx(tx.db(), fact_id),
         ProjectionSource::Incoming => delete_incoming_fact_in_tx(tx.db(), fact_id).map(|_| ()),
-    }
-}
-
-fn projection_retains_fact_after_commit(projection: &PreparedProjection) -> bool {
-    let fact_id = projection.fact.id;
-    let purges_self = projection.runtime_effects.purged_facts.contains(&fact_id);
-    match projection.source {
-        ProjectionSource::Durable => !purges_self,
-        ProjectionSource::Incoming => projection.retain_self && !purges_self,
     }
 }
 

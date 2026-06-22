@@ -86,7 +86,7 @@ fn cargo_verus_verifies_production_core_projection_contracts() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        combined.contains("verification results:: 67 verified, 0 errors"),
+        combined.contains("verification results:: 70 verified, 0 errors"),
         "production proof should verify the real core projection contracts:\n{combined}"
     );
 }
@@ -205,6 +205,9 @@ fn core_proofs_make_trust_boundary_explicit() {
         "`prepared_projection_from_validated_output(...)` constructs",
         "preserves the source, fact,\n//!   mode, route evidence",
         "not\n//!   a proof that route dispatch",
+        "`fact_ids_contain(ids, target)` accepts if and only if",
+        "`projection_retains_fact_after_commit(projection)` accepts if and only if",
+        "the lifecycle\n//!   decision used before retained context/time rows may publish",
         "`runtime_effects_with_intent_row_mutation(effects, mutation)` appends",
         "exactly one `IntentRowMutation`",
         "`ProjectedRowMutation::table` and `IntentRowMutation::table` return",
@@ -428,6 +431,9 @@ fn verus_plan_is_single_core_first_source() {
         "`prepared_projection_from_validated_output(...)` is verified",
         "preserves the source, fact, mode, route evidence",
         "prepared-output\ncarry proof, not the full route theorem",
+        "`projection_retains_fact_after_commit(projection)` is verified",
+        "retain/drop/self-purge decision that gates\nstanding context",
+        "SQLite lifecycle writes remain\nseparate proof work",
         "Leaf projectors still return plain `ProjectionOutput`",
         "Cargo-verus",
         "still needs to prove\nexecutable route/stamp alignment",
@@ -604,6 +610,8 @@ fn verus_plan_is_single_core_first_source() {
         "routed_projection_from_selected_route(fact_id, effective_tag, stamp, output) preserves selected route stamp metadata and preserves output unchanged",
         "runtime_effects_with_storage_requirement(effects, requirement) sets the storage requirement and preserves the effect payload",
         "prepared_projection_from_validated_output preserves route evidence and validated output pieces in PreparedProjection",
+        "fact_ids_contain(ids, target) accepts if and only if target occurs in the fact-id slice",
+        "projection_retains_fact_after_commit(projection) accepts if and only if the projection does not purge itself and durable-or-retained-incoming source remains retained",
         "version_replay_rebuild_shape_allowed(version_replay_rebuild, needs, offers, wakes) accepts if and only if ordinary projection or empty version replay rebuild output",
         "version_replay_rebuild_shape_status(version_replay_rebuild, needs, offers, wakes) returns accepted or standing-output exactly from that predicate",
         "version_replay_rebuild_shape_status_allows_projection(status) accepts if and only if status is VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED",

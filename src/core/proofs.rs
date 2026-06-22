@@ -134,6 +134,14 @@
 //!   a proof that route dispatch, owner checks, context finalization, replay
 //!   admission, or runtime-effect validation were called in the right order.
 //! - Proven in production Rust today:
+//!   `fact_ids_contain(ids, target)` accepts if and only if the target fact id
+//!   occurs in the scanned slice, and
+//!   `projection_retains_fact_after_commit(projection)` accepts if and only if
+//!   the projection does not purge itself and either its source was durable or
+//!   its source was incoming with `retain_self` set. This proves the lifecycle
+//!   decision used before retained context/time rows may publish; it does not
+//!   prove the SQLite writes performed after that decision.
+//! - Proven in production Rust today:
 //!   `runtime_effects_with_intent_row_mutation(effects, mutation)` appends
 //!   exactly one `IntentRowMutation` to `RuntimeEffects.row_mutations` while
 //!   preserving storage requirement, facts, priority facts, incoming facts and

@@ -259,6 +259,12 @@ selected-route metadata-search, routed-output constructor, and prepared-output
 carry proof, not the full route theorem: Cargo-verus still needs to prove
 executable route/stamp alignment, the selected projector function call, and the
 larger `prepare_projection` call-order theorem.
+`projection_retains_fact_after_commit(projection)` is verified over the
+production lifecycle decision and accepts if and only if the projection does not
+purge itself and either its source was durable or its source was incoming with
+`retain_self` set. This proves the retain/drop/self-purge decision that gates
+standing context and time-wake publication; SQLite lifecycle writes remain
+separate proof work.
 
 Route-search discovery: do not prove route-table search directly over
 `FactRoute` while it contains the projector function pointer. Cargo-verus does
@@ -766,6 +772,8 @@ select_route_stamp(stamps, effective_tag) returns the first matching route stamp
 routed_projection_from_selected_route(fact_id, effective_tag, stamp, output) preserves selected route stamp metadata and preserves output unchanged
 runtime_effects_with_storage_requirement(effects, requirement) sets the storage requirement and preserves the effect payload
 prepared_projection_from_validated_output preserves route evidence and validated output pieces in PreparedProjection
+fact_ids_contain(ids, target) accepts if and only if target occurs in the fact-id slice
+projection_retains_fact_after_commit(projection) accepts if and only if the projection does not purge itself and durable-or-retained-incoming source remains retained
 version_replay_rebuild_shape_allowed(version_replay_rebuild, needs, offers, wakes) accepts if and only if ordinary projection or empty version replay rebuild output
 version_replay_rebuild_shape_status(version_replay_rebuild, needs, offers, wakes) returns accepted or standing-output exactly from that predicate
 version_replay_rebuild_shape_status_allows_projection(status) accepts if and only if status is VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED
