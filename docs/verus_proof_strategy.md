@@ -187,9 +187,23 @@ and cannot self-report a producer route. `prepare_projection` stores the route
 evidence in `PreparedProjection`. Cargo-verus proves the production helper
 `projection_route_evidence(fact_id, effective_tag, route_tag, projector_info,
 storage_requirement)` returns route evidence with exactly those same field
-values. This is field-stamping proof, not the full route theorem: Cargo-verus
-still needs to prove the selection helper and the correspondence from
-`PreparedProjection.route_evidence` to the committed output path.
+values. Cargo-verus also proves that
+`selected_route_evidence(fact_id, effective_tag, stamp)` builds evidence from
+the selected route's proof-relevant `FactRouteStamp`: if the stamp tag is the
+effective tag, the evidence route tag is that same effective tag and the
+projector info/storage requirement come from the stamp. This is selected-route
+metadata proof, not the full route theorem: Cargo-verus still needs to prove
+the route-table search, the selected projector function call, and the
+correspondence from `PreparedProjection.route_evidence` to the committed output
+path.
+
+Route-search discovery: do not try to prove route-table search directly over
+`FactRoute` while it contains the projector function pointer. Cargo-verus does
+not support function pointer types as a proof target. The proof-relevant route
+identity is `FactRouteStamp` (`tag`, `projector_info`, `storage_requirement`);
+the next route-search proof must make the production search loop operate over
+that metadata, or an equivalent production structure, and keep the projector
+function pointer as executable code outside the proof relation.
 
 ### Stage 4: Projection DB Write Boundary
 
@@ -622,6 +636,7 @@ forall returned offer: offer.role/scope/start/end/value match the same-index cla
 context_set_from_projection_parts(needs, claims, owner) preserves needs
 context_set_from_projection_parts(needs, claims, owner) builds same-index owned offers
 projection_route_evidence(fact_id, effective_tag, route_tag, projector_info, storage_requirement) preserves every route evidence field
+selected_route_evidence(fact_id, effective_tag, stamp) preserves selected route stamp metadata and gives route_tag == effective_tag when stamp.tag == effective_tag
 version_replay_rebuild_shape_allowed(version_replay_rebuild, needs, offers, wakes) accepts if and only if ordinary projection or empty version replay rebuild output
 version_replay_rebuild_shape_status(version_replay_rebuild, needs, offers, wakes) returns accepted or standing-output exactly from that predicate
 version_replay_rebuild_shape_status_allows_projection(status) accepts if and only if status is VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED
@@ -648,10 +663,11 @@ standing-output decision, status classification, or accept-status decision; it
 is proving the `validate_version_replay_rebuild_projection_shape` `Result`
 wrapper and `prepare_projection` call order around the verified status helper.
 
-The remaining route-dispatch gap is no longer route-evidence field stamping; it
-is proving that `RouterProjector` selected the registered route for the
-effective tag, called that selected projector, and carried the resulting
-evidence through `prepare_projection` and commit.
+The remaining route-dispatch gap is no longer route-evidence field stamping or
+selected-stamp evidence construction; it is proving that `RouterProjector`
+found the registered route stamp for the effective tag, called that selected
+projector function pointer, and carried the resulting evidence through
+`prepare_projection` and commit.
 
 Core proves plumbing only. It must not prove that an admin is valid, an endpoint
 may sign content, a deletion is authorized, a receipt grants authority, or a

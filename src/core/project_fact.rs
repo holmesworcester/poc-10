@@ -3373,6 +3373,31 @@ pub mod route {
         pub projector_info: FactProjectorInfo,
     }
 
+    /// Proof-relevant part of a fact route.
+    ///
+    /// The projector function pointer is intentionally not part of this stamp.
+    /// Verus proves route evidence over these stable route fields; the projector
+    /// call itself remains ordinary Rust execution selected by the router.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct FactRouteStamp {
+        /// Effective fact tag routed to this projector function.
+        pub tag: u8,
+        /// Storage version required by this route's committed effects.
+        pub storage_requirement: StorageRequirement,
+        /// Stable human-readable projector metadata for proofs and diagnostics.
+        pub projector_info: FactProjectorInfo,
+    }
+
+    impl FactRoute {
+        pub const fn stamp(&self) -> FactRouteStamp {
+            FactRouteStamp {
+                tag: self.tag,
+                storage_requirement: self.storage_requirement,
+                projector_info: self.projector_info,
+            }
+        }
+    }
+
     /// Router-stamped route evidence for one projection output.
     ///
     /// Core does not interpret the route's protocol meaning. The evidence names
@@ -3405,6 +3430,10 @@ pub mod route {
     #[allow(dead_code)]
     pub struct ExProjectionRouteEvidence(ProjectionRouteEvidence);
 
+    #[verifier(external_type_specification)]
+    #[allow(dead_code)]
+    pub struct ExFactRouteStamp(FactRouteStamp);
+
     /// Build the router-stamped route evidence carried with one routed output.
     ///
     /// This is the production constructor used by the router path. Verus proves
@@ -3432,6 +3461,35 @@ pub mod route {
             storage_requirement,
         }
     }
+
+    /// Build route evidence from metadata already selected by the router.
+    ///
+    /// This helper proves the proof-relevant route stamp, not the projector
+    /// function pointer. The precondition is the route-selection obligation:
+    /// the selected route stamp must be the one matching the effective tag.
+    fn selected_route_evidence(
+        fact_id: FactId,
+        effective_tag: u8,
+        stamp: FactRouteStamp,
+    ) -> (evidence: ProjectionRouteEvidence)
+        requires
+            stamp.tag == effective_tag,
+        ensures
+            evidence.fact_id == fact_id,
+            evidence.effective_tag == effective_tag,
+            evidence.route_tag == effective_tag,
+            evidence.route_tag == stamp.tag,
+            evidence.projector_info == stamp.projector_info,
+            evidence.storage_requirement == stamp.storage_requirement,
+    {
+        projection_route_evidence(
+            fact_id,
+            effective_tag,
+            stamp.tag,
+            stamp.projector_info,
+            stamp.storage_requirement,
+        )
+    }
     } // verus!
 
     /// Output from a projector after the router has selected the route that ran.
@@ -3449,7 +3507,8 @@ pub mod route {
     #[derive(Debug, Clone, Copy)]
     struct SelectedFactRoute {
         effective_tag: u8,
-        route: FactRoute,
+        stamp: FactRouteStamp,
+        projector: ProjectorFn,
     }
 
     impl SelectedFactRoute {
@@ -3459,13 +3518,7 @@ pub mod route {
             output: ProjectionOutput,
         ) -> RoutedProjection {
             RoutedProjection {
-                route: projection_route_evidence(
-                    fact_id,
-                    self.effective_tag,
-                    self.route.tag,
-                    self.route.projector_info,
-                    self.route.storage_requirement,
-                ),
+                route: selected_route_evidence(fact_id, self.effective_tag, self.stamp),
                 output,
             }
         }
@@ -3565,7 +3618,8 @@ pub mod route {
             };
             Ok(SelectedFactRoute {
                 effective_tag,
-                route,
+                stamp: route.stamp(),
+                projector: route.projector,
             })
         }
     }
@@ -3588,11 +3642,11 @@ pub mod route {
             context: &ProjectionContext,
         ) -> Result<RoutedProjection, String> {
             let selected = self.selected_route(fact)?;
-            let output = (selected.route.projector)(fact, context)?;
+            let output = (selected.projector)(fact, context)?;
             let output = ProjectionOutput {
                 effects: output
                     .effects
-                    .with_storage_requirement(selected.route.storage_requirement),
+                    .with_storage_requirement(selected.stamp.storage_requirement),
                 ..output
             };
             Ok(selected.into_routed_projection(fact.id, output))
@@ -6653,6 +6707,13 @@ mod tests {
         };
 
         assert_eq!(route.projector_info.project, "ModelProjector");
+        let stamp = route.stamp();
+        assert_eq!(stamp.tag, 200);
+        assert_eq!(
+            stamp.storage_requirement,
+            StorageRequirement::MaintenanceBypass
+        );
+        assert_eq!(stamp.projector_info.project, "ModelProjector");
         let output = (route.projector)(
             &Fact::new(FactScope::Global, 1, vec![200, 5]),
             &ProjectionContext::default(),

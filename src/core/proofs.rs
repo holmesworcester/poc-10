@@ -79,6 +79,13 @@
 //!   with exactly those same field values. This proves route-evidence field
 //!   stamping, not route selection.
 //! - Proven in production Rust today:
+//!   `selected_route_evidence(fact_id, effective_tag, stamp)` builds evidence
+//!   from the selected route's proof-relevant `FactRouteStamp`; when the selected
+//!   stamp tag equals the effective tag, the evidence route tag is that same
+//!   effective tag and the projector info/storage requirement come from the
+//!   stamp. This still does not prove route-table search or the projector
+//!   function pointer call.
+//! - Proven in production Rust today:
 //!   `version_replay_rebuild_shape_allowed(version_replay_rebuild, needs, offers,
 //!   wakes)` accepts if and only if the projection is ordinary, or it is a
 //!   version replay rebuild with no standing needs, offers, or time wakes.
@@ -96,8 +103,9 @@
 //!   now returns `RoutedProjection`, which is a plain `ProjectionOutput` plus
 //!   router-stamped `ProjectionRouteEvidence` from the same route selection that
 //!   calls the projector. `PreparedProjection` carries that route evidence.
-//!   The field-stamping helper is verified, but the route-selection and
-//!   `PreparedProjection` correspondence theorem is not complete yet.
+//!   The field-stamping and selected-stamp helpers are verified, but the
+//!   route-table search/function-call and `PreparedProjection` correspondence
+//!   theorem is not complete yet.
 //! - Not proven here today: every exported `theorem_*` runtime/core property.
 //! - Not proven yet for offer finalization: `ProjectionOutput::context_set`
 //!   normalization or `prepare_projection` call order.
