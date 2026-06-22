@@ -3823,6 +3823,7 @@ pub mod effects {
     use crate::core::effects::{IncomingMetadata, RuntimeEffects};
     use crate::core::facts::{Fact, FactId};
     use crate::core::intents::Intent;
+    use vstd::prelude::*;
 
     const FACT_PURGED_ROLE: &str = "fact_purged";
 
@@ -4029,9 +4030,8 @@ pub mod effects {
             self
         }
 
-        pub fn row_mutation(mut self, mutation: ProjectedRowMutation) -> Self {
-            self.row_mutations.push(mutation);
-            self
+        pub fn row_mutation(self, mutation: ProjectedRowMutation) -> Self {
+            projection_output_with_projected_row_mutation(self, mutation)
         }
 
         /// Purge the projected fact after its projector has removed owned rows.
@@ -4093,6 +4093,31 @@ pub mod effects {
             super::projection_output_context_set_parts(self, owner).normalized()
         }
     }
+
+    verus! {
+    /// Append a projector-owned row mutation to projection output.
+    ///
+    /// This is the proof-facing implementation of
+    /// `ProjectionOutput::row_mutation`. It appends exactly one
+    /// `ProjectedRowMutation` and leaves runtime-effect row mutations untouched,
+    /// so this builder cannot smuggle intent-owned row writes.
+    fn projection_output_with_projected_row_mutation(
+        mut output: ProjectionOutput,
+        mutation: ProjectedRowMutation,
+    ) -> (updated: ProjectionOutput)
+        ensures
+            updated.retain_self == output.retain_self,
+            updated.needs@ == output.needs@,
+            updated.offers@ == output.offers@,
+            updated.time_wakes@ == output.time_wakes@,
+            updated.row_mutations@ == output.row_mutations@.push(mutation),
+            updated.effects == output.effects,
+            updated.effects.row_mutations@ == output.effects.row_mutations@,
+    {
+        output.row_mutations.push(mutation);
+        output
+    }
+    } // verus!
 
     // =========================================================================
     // Tests
@@ -7524,6 +7549,7 @@ mod tests {
     use crate::core::context::{
         ContextKey, ContextNeed, ContextOffer, ContextOfferClaim, ContextOfferValue, Role,
     };
+    use crate::core::db::{TableInsert, Value};
     use crate::core::effects::StorageRequirement;
     use crate::core::facts::{Fact, FactId, FactScope};
     use crate::core::schema::CORE_SCHEMA_SOURCE;
@@ -7958,6 +7984,20 @@ mod tests {
         assert_eq!(output.needs.len(), 1);
         assert_eq!(output.offers.len(), 1);
         assert!(output.effects.intents.is_empty());
+    }
+
+    #[test]
+    fn projection_output_row_mutation_keeps_runtime_effect_rows_empty() {
+        let mutation = ProjectedRowMutation::InsertValues(TableInsert {
+            table: TableName::new("projected_rows"),
+            columns: &["id"],
+            values: vec![Value::Bytes(b"row".to_vec())],
+        });
+
+        let output = ProjectionOutput::new().row_mutation(mutation.clone());
+
+        assert_eq!(output.row_mutations, vec![mutation]);
+        assert!(output.effects.row_mutations.is_empty());
     }
 
     #[test]

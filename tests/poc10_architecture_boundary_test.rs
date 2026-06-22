@@ -495,7 +495,8 @@ fn row_mutation_authority_is_split_by_worker() {
 
     for required in [
         "pub row_mutations: Vec<ProjectedRowMutation>",
-        "pub fn row_mutation(mut self, mutation: ProjectedRowMutation) -> Self",
+        "pub fn row_mutation(self, mutation: ProjectedRowMutation) -> Self",
+        "projection_output_with_projected_row_mutation(self, mutation)",
         "validate_projection_runtime_effects_for_admission(",
         "validate_no_intent_row_mutations_from_projection(effects)",
         "commit_projection_runtime_effects_in_tx(",

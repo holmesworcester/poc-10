@@ -139,6 +139,13 @@
 //!   output. `validate_version_replay_rebuild_projection_shape` uses this
 //!   verified helper for its success branch.
 //! - Proven in production Rust today:
+//!   `projection_output_with_projected_row_mutation(output, mutation)` appends
+//!   exactly one `ProjectedRowMutation` to `ProjectionOutput::row_mutations`,
+//!   preserves needs, offers, time wakes, retention, and effects, and leaves
+//!   `RuntimeEffects.row_mutations` unchanged. `ProjectionOutput::row_mutation`
+//!   uses this verified production helper, so that builder cannot smuggle
+//!   intent-owned row mutations into projector output.
+//! - Proven in production Rust today:
 //!   `projection_effects_have_no_intent_row_mutations(effects)` accepts if and
 //!   only if `RuntimeEffects.row_mutations` is empty.
 //!   `validate_no_intent_row_mutations_from_projection` uses this verified

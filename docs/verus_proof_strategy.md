@@ -324,6 +324,10 @@ Current production-code foothold: `ProjectionOutput::row_mutation` now accepts
 validation rejects non-empty intent row mutations inside projector effects; and
 projection commit calls `apply_projected_row_mutations_in_tx` at the same
 commit position where generic row mutations used to run.
+`projection_output_with_projected_row_mutation(output, mutation)` is verified
+over the actual builder path and appends exactly one projected row mutation
+while preserving the output's needs, offers, time wakes, retention flag, and
+runtime effects, including an unchanged `RuntimeEffects.row_mutations`.
 `projection_effects_have_no_intent_row_mutations(effects)` is verified over the
 actual `RuntimeEffects` value and accepts if and only if
 `effects.row_mutations` is empty; the projection validation guard uses it for
@@ -733,6 +737,7 @@ version_replay_rebuild_shape_status(version_replay_rebuild, needs, offers, wakes
 version_replay_rebuild_shape_status_allows_projection(status) accepts if and only if status is VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED
 version_replay_rebuild_projection_status(context, wakes, effects) returns accepted or standing-output exactly from the prepared context, time wakes, and rebuild effect
 version_replay_rebuild_projection_accepts(context, wakes, effects) accepts if and only if ordinary projection or empty version replay rebuild prepared output
+projection_output_with_projected_row_mutation(output, mutation) appends exactly one ProjectedRowMutation and preserves RuntimeEffects.row_mutations
 projection_effects_have_no_intent_row_mutations(effects) accepts if and only if RuntimeEffects.row_mutations is empty
 matched_context_owner_matches_payload(matched) accepts if and only if matched.routed_offer.offer.owner == matched.payload.id
 routed_offer_owner_matches_producer(routed_offer) accepts if and only if routed_offer.offer.owner == routed_offer.producer_route.fact_id
