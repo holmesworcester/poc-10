@@ -485,7 +485,8 @@ fn row_mutation_authority_is_split_by_worker() {
 
     for required in [
         "pub row_mutations: Vec<IntentRowMutation>",
-        "pub fn row_mutation(mut self, mutation: IntentRowMutation) -> Self",
+        "pub fn row_mutation(self, mutation: IntentRowMutation) -> Self",
+        "runtime_effects_with_intent_row_mutation(self, mutation)",
     ] {
         assert!(
             effects.contains(required),

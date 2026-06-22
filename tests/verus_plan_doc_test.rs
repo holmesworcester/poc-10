@@ -86,7 +86,7 @@ fn cargo_verus_verifies_production_core_projection_contracts() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        combined.contains("verification results:: 54 verified, 0 errors"),
+        combined.contains("verification results:: 55 verified, 0 errors"),
         "production proof should verify the real core projection contracts:\n{combined}"
     );
 }
@@ -202,6 +202,9 @@ fn core_proofs_make_trust_boundary_explicit() {
         "`RuntimeEffects.storage_requirement` to the selected route requirement",
         "preserving emitted facts, priority facts, incoming facts and\n//!   metadata",
         "dispatcher applied it to the selected projector output",
+        "`runtime_effects_with_intent_row_mutation(effects, mutation)` appends",
+        "exactly one `IntentRowMutation`",
+        "table allowlist and raw-SQL confinement remain separate proof work",
         "`version_replay_rebuild_shape_allowed(version_replay_rebuild, needs, offers,",
         "accepts if and only if the projection is ordinary",
         "no standing needs, offers, or time wakes",
@@ -423,6 +426,9 @@ fn verus_plan_is_single_core_first_source() {
         "`projection_output_with_projected_row_mutation(output, mutation)` is verified",
         "appends exactly one projected row mutation",
         "unchanged `RuntimeEffects.row_mutations`",
+        "`runtime_effects_with_intent_row_mutation(effects, mutation)` is verified",
+        "appends exactly one\n`IntentRowMutation`",
+        "preserving the rest of the effect payload",
         "`projection_effects_have_no_intent_row_mutations(effects)` is verified",
         "`effects.row_mutations` is empty",
         "validation guard uses it for\nthe success branch",
@@ -570,6 +576,7 @@ fn verus_plan_is_single_core_first_source() {
         "version_replay_rebuild_projection_status(context, wakes, effects) returns accepted or standing-output exactly from the prepared context, time wakes, and rebuild effect",
         "version_replay_rebuild_projection_accepts(context, wakes, effects) accepts if and only if ordinary projection or empty version replay rebuild prepared output",
         "version_replay_rebuild_effect_has_no_fact_or_intent_work(effects) accepts if and only if ordinary effects or isolated rebuild effects with no facts or intents",
+        "runtime_effects_with_intent_row_mutation(effects, mutation) appends exactly one IntentRowMutation and preserves the effect payload",
         "projection_output_with_projected_row_mutation(output, mutation) appends exactly one ProjectedRowMutation and preserves RuntimeEffects.row_mutations",
         "projection_effects_have_no_intent_row_mutations(effects) accepts if and only if RuntimeEffects.row_mutations is empty",
         "matched_context_owner_matches_payload(matched) accepts if and only if matched.routed_offer.offer.owner == matched.payload.id",

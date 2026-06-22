@@ -131,9 +131,8 @@ impl RuntimeEffects {
         self
     }
 
-    pub fn row_mutation(mut self, mutation: IntentRowMutation) -> Self {
-        self.row_mutations.push(mutation);
-        self
+    pub fn row_mutation(self, mutation: IntentRowMutation) -> Self {
+        runtime_effects_with_intent_row_mutation(self, mutation)
     }
 
     pub fn intent(mut self, intent: Intent) -> Self {
@@ -178,6 +177,31 @@ fn runtime_effects_with_storage_requirement(
     effects.storage_requirement = requirement;
     effects
 }
+
+/// Append an intent/live-runtime row mutation to a runtime effect batch.
+///
+/// Projected rows use `ProjectionOutput::row_mutation`; this helper keeps the
+/// intent-side builder explicit and proof-checks that it only appends to the
+/// intent row-mutation list.
+fn runtime_effects_with_intent_row_mutation(
+    mut effects: RuntimeEffects,
+    mutation: IntentRowMutation,
+) -> (updated: RuntimeEffects)
+    ensures
+        updated.storage_requirement == effects.storage_requirement,
+        updated.facts@ == effects.facts@,
+        updated.priority_facts@ == effects.priority_facts@,
+        updated.incoming_facts@ == effects.incoming_facts@,
+        updated.incoming_fact_metadata == effects.incoming_fact_metadata,
+        updated.purged_facts@ == effects.purged_facts@,
+        updated.row_mutations@ == effects.row_mutations@.push(mutation),
+        updated.intents@ == effects.intents@,
+        updated.local_intents@ == effects.local_intents@,
+        updated.version_replay_rebuild == effects.version_replay_rebuild,
+{
+    effects.row_mutations.push(mutation);
+    effects
+}
 } // verus!
 
 // Tests.
@@ -185,6 +209,7 @@ fn runtime_effects_with_storage_requirement(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::db::{TableInsert, TableName, Value};
     use crate::core::facts::{Fact, FactScope};
 
     #[test]
@@ -222,6 +247,38 @@ mod tests {
         );
         assert_eq!(updated.purged_facts, effects.purged_facts);
         assert_eq!(updated.row_mutations, effects.row_mutations);
+        assert_eq!(updated.intents, effects.intents);
+        assert_eq!(updated.local_intents, effects.local_intents);
+        assert_eq!(
+            updated.version_replay_rebuild,
+            effects.version_replay_rebuild
+        );
+    }
+
+    #[test]
+    fn intent_row_mutation_builder_preserves_effect_payload() {
+        let fact = Fact::new(FactScope::Global, 1, b"intent guarded fact".to_vec());
+        let mutation = IntentRowMutation::InsertValues(TableInsert {
+            table: TableName::new("intent_rows"),
+            columns: &["id"],
+            values: vec![Value::Bytes(b"row".to_vec())],
+        });
+        let effects = RuntimeEffects::new()
+            .fact(fact)
+            .with_storage_requirement(StorageRequirement::Current(7));
+
+        let updated = effects.clone().row_mutation(mutation.clone());
+
+        assert_eq!(updated.storage_requirement, effects.storage_requirement);
+        assert_eq!(updated.facts, effects.facts);
+        assert_eq!(updated.priority_facts, effects.priority_facts);
+        assert_eq!(updated.incoming_facts, effects.incoming_facts);
+        assert_eq!(
+            updated.incoming_fact_metadata,
+            effects.incoming_fact_metadata
+        );
+        assert_eq!(updated.purged_facts, effects.purged_facts);
+        assert_eq!(updated.row_mutations, vec![mutation]);
         assert_eq!(updated.intents, effects.intents);
         assert_eq!(updated.local_intents, effects.local_intents);
         assert_eq!(

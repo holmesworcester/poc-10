@@ -126,6 +126,13 @@
 //!   verified production helper; the remaining route gap is proving the
 //!   dispatcher applied it to the selected projector output.
 //! - Proven in production Rust today:
+//!   `runtime_effects_with_intent_row_mutation(effects, mutation)` appends
+//!   exactly one `IntentRowMutation` to `RuntimeEffects.row_mutations` while
+//!   preserving storage requirement, facts, priority facts, incoming facts and
+//!   metadata, purges, intents, local intents, and the version replay rebuild
+//!   flag. `RuntimeEffects::row_mutation` uses this verified production helper;
+//!   table allowlist and raw-SQL confinement remain separate proof work.
+//! - Proven in production Rust today:
 //!   `version_replay_rebuild_shape_allowed(version_replay_rebuild, needs, offers,
 //!   wakes)` accepts if and only if the projection is ordinary, or it is a
 //!   version replay rebuild with no standing needs, offers, or time wakes.

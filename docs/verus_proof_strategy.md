@@ -340,6 +340,9 @@ commit position where generic row mutations used to run.
 over the actual builder path and appends exactly one projected row mutation
 while preserving the output's needs, offers, time wakes, retention flag, and
 runtime effects, including an unchanged `RuntimeEffects.row_mutations`.
+`runtime_effects_with_intent_row_mutation(effects, mutation)` is verified over
+the actual intent/live-runtime row builder path and appends exactly one
+`IntentRowMutation` while preserving the rest of the effect payload.
 `projection_effects_have_no_intent_row_mutations(effects)` is verified over the
 actual `RuntimeEffects` value and accepts if and only if
 `effects.row_mutations` is empty; the projection validation guard uses it for
@@ -751,6 +754,7 @@ version_replay_rebuild_shape_status_allows_projection(status) accepts if and onl
 version_replay_rebuild_projection_status(context, wakes, effects) returns accepted or standing-output exactly from the prepared context, time wakes, and rebuild effect
 version_replay_rebuild_projection_accepts(context, wakes, effects) accepts if and only if ordinary projection or empty version replay rebuild prepared output
 version_replay_rebuild_effect_has_no_fact_or_intent_work(effects) accepts if and only if ordinary effects or isolated rebuild effects with no facts or intents
+runtime_effects_with_intent_row_mutation(effects, mutation) appends exactly one IntentRowMutation and preserves the effect payload
 projection_output_with_projected_row_mutation(output, mutation) appends exactly one ProjectedRowMutation and preserves RuntimeEffects.row_mutations
 projection_effects_have_no_intent_row_mutations(effects) accepts if and only if RuntimeEffects.row_mutations is empty
 matched_context_owner_matches_payload(matched) accepts if and only if matched.routed_offer.offer.owner == matched.payload.id
