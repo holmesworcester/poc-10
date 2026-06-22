@@ -4151,7 +4151,7 @@ pub mod route {
     use super::effects::ProjectionOutput;
     use crate::core::effects::StorageRequirement;
     use crate::core::facts::{Fact, FactId};
-    use vstd::prelude::verus;
+    use vstd::prelude::*;
 
     /// Function pointer used by static projector route tables.
     pub type ProjectorFn = fn(&Fact, &ProjectionContext) -> Result<ProjectionOutput, String>;
@@ -4211,6 +4211,24 @@ pub mod route {
                 storage_requirement: self.storage_requirement,
                 projector_info: self.projector_info,
             }
+        }
+    }
+
+    /// Executable routes plus the proof-relevant metadata searched by the router.
+    ///
+    /// Verus cannot reason about projector function pointers, so production
+    /// route selection searches `stamps` and then indexes into `routes` at the
+    /// same position. The router checks at runtime that the executable route
+    /// still matches the selected stamp before calling the projector.
+    #[derive(Debug, Clone, Copy)]
+    pub struct FactRouteTable {
+        pub routes: &'static [FactRoute],
+        pub stamps: &'static [FactRouteStamp],
+    }
+
+    impl FactRouteTable {
+        pub const fn new(routes: &'static [FactRoute], stamps: &'static [FactRouteStamp]) -> Self {
+            Self { routes, stamps }
         }
     }
 
@@ -4337,10 +4355,64 @@ pub mod route {
         pub output: ProjectionOutput,
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct SelectedRouteStamp {
+        index: usize,
+        stamp: FactRouteStamp,
+    }
+
     verus! {
     #[verifier(external_type_specification)]
     #[allow(dead_code)]
     pub struct ExRoutedProjection(RoutedProjection);
+
+    #[verifier(external_type_specification)]
+    #[allow(dead_code)]
+    struct ExSelectedRouteStamp(SelectedRouteStamp);
+
+    /// Search the proof-relevant route metadata for the first matching tag.
+    ///
+    /// This is the Verus-facing route selection helper. It deliberately avoids
+    /// `FactRoute` because that type contains the executable projector function
+    /// pointer, which is not a proof object.
+    fn select_route_stamp(
+        stamps: &[FactRouteStamp],
+        effective_tag: u8,
+    ) -> (selected: Option<SelectedRouteStamp>)
+        ensures
+            match selected {
+                Some(sel) => {
+                    &&& sel.index < stamps@.len()
+                    &&& sel.stamp == stamps@[sel.index as int]
+                    &&& sel.stamp.tag == effective_tag
+                    &&& (forall|j: int|
+                        #![trigger stamps@[j]]
+                        0 <= j < sel.index ==> stamps@[j].tag != effective_tag)
+                },
+                None => forall|j: int|
+                    #![trigger stamps@[j]]
+                    0 <= j < stamps@.len() ==> stamps@[j].tag != effective_tag,
+            },
+    {
+        let mut i: usize = 0;
+        while i < stamps.len()
+            invariant
+                i <= stamps@.len(),
+                forall|j: int|
+                    #![trigger stamps@[j]]
+                    0 <= j < i ==> stamps@[j].tag != effective_tag,
+            decreases stamps@.len() - i,
+        {
+            if stamps[i].tag == effective_tag {
+                return Some(SelectedRouteStamp {
+                    index: i,
+                    stamp: stamps[i],
+                });
+            }
+            i += 1;
+        }
+        None
+    }
 
     /// Attach selected-route evidence to the output returned by the selected
     /// projector.
@@ -4444,16 +4516,13 @@ pub mod route {
     /// projector function.
     #[derive(Debug, Clone, Copy)]
     pub struct RouterProjector {
-        routes: &'static [FactRoute],
+        table: FactRouteTable,
         envelopes: &'static [EnvelopeRoute],
     }
 
     impl RouterProjector {
-        pub const fn new(
-            routes: &'static [FactRoute],
-            envelopes: &'static [EnvelopeRoute],
-        ) -> Self {
-            Self { routes, envelopes }
+        pub const fn new(table: FactRouteTable, envelopes: &'static [EnvelopeRoute]) -> Self {
+            Self { table, envelopes }
         }
 
         fn effective_tag(&self, fact: &Fact) -> Result<u8, String> {
@@ -4472,19 +4541,24 @@ pub mod route {
 
         fn selected_route(&self, fact: &Fact) -> Result<SelectedFactRoute, String> {
             let effective_tag = self.effective_tag(fact)?;
-            let Some(route) = self
-                .routes
-                .iter()
-                .find(|route| route.tag == effective_tag)
-                .copied()
-            else {
+            let Some(selected) = select_route_stamp(self.table.stamps, effective_tag) else {
                 return Err(format!(
                     "no target projector registered for fact tag {effective_tag}"
                 ));
             };
+            let Some(route) = self.table.routes.get(selected.index).copied() else {
+                return Err(format!(
+                    "route table metadata has no executable projector for fact tag {effective_tag}"
+                ));
+            };
+            if route.stamp() != selected.stamp {
+                return Err(format!(
+                    "route table metadata disagrees with executable projector for fact tag {effective_tag}"
+                ));
+            }
             Ok(SelectedFactRoute {
                 effective_tag,
-                stamp: route.stamp(),
+                stamp: selected.stamp,
                 projector: route.projector,
             })
         }
@@ -4536,9 +4610,9 @@ pub use effects::{
     TimeRange, TimeWake, Timeline,
 };
 pub use route::{
-    EffectiveTagFn, EnvelopeRoute, FactAdmissionFn, FactProjectorInfo, FactRoute,
-    ProjectionDispatcher, ProjectionRouteEvidence, Projector, ProjectorFn, RoutedProjection,
-    RouterProjector,
+    EffectiveTagFn, EnvelopeRoute, FactAdmissionFn, FactProjectorInfo, FactRoute, FactRouteStamp,
+    FactRouteTable, ProjectionDispatcher, ProjectionRouteEvidence, Projector, ProjectorFn,
+    RoutedProjection, RouterProjector,
 };
 
 const OWNER_KEYED_FACT_CLEANUP_TABLES: &[TableName] = &[
@@ -5341,6 +5415,13 @@ mod contract_tests {
         storage_requirement: StorageRequirement::Current(7),
         projector_info: FactProjectorInfo::projector("version_guard_projector"),
     }];
+    const VERSION_GUARD_STAMPS: &[FactRouteStamp] = &[FactRouteStamp {
+        tag: 201,
+        storage_requirement: StorageRequirement::Current(7),
+        projector_info: FactProjectorInfo::projector("version_guard_projector"),
+    }];
+    const VERSION_GUARD_ROUTE_TABLE: FactRouteTable =
+        FactRouteTable::new(VERSION_GUARD_ROUTES, VERSION_GUARD_STAMPS);
 
     #[test]
     fn projection_drain_revisits_dependent_after_offer_commits() {
@@ -5773,7 +5854,7 @@ mod contract_tests {
 
         let consumed = crate::core::project_fact::project_one(
             &store,
-            &RouterProjector::new(VERSION_GUARD_ROUTES, &[]),
+            &RouterProjector::new(VERSION_GUARD_ROUTE_TABLE, &[]),
             ProjectionSource::Durable,
             &[],
             &[],
@@ -7406,6 +7487,7 @@ mod tests {
     use crate::core::effects::StorageRequirement;
     use crate::core::facts::{Fact, FactId, FactScope};
     use crate::core::schema::CORE_SCHEMA_SOURCE;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn duplicate_fact_bytes_are_idempotent_even_with_different_local_admissions() {
@@ -7870,10 +7952,13 @@ mod tests {
         assert_eq!(output.offers.len(), 1);
     }
 
+    static ROUTE_EVIDENCE_PROJECTOR_CALLS: AtomicUsize = AtomicUsize::new(0);
+
     fn route_evidence_projector(
         _fact: &Fact,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        ROUTE_EVIDENCE_PROJECTOR_CALLS.fetch_add(1, Ordering::SeqCst);
         Ok(ProjectionOutput::new().offer(ContextOfferClaim::range(
             "route_evidence",
             FactScope::Global,
@@ -7900,6 +7985,13 @@ mod tests {
         storage_requirement: ROUTE_EVIDENCE_STORAGE,
         projector_info: ROUTE_EVIDENCE_INFO,
     }];
+    const ROUTE_EVIDENCE_STAMPS: &[FactRouteStamp] = &[FactRouteStamp {
+        tag: ROUTE_EVIDENCE_TAG,
+        storage_requirement: ROUTE_EVIDENCE_STORAGE,
+        projector_info: ROUTE_EVIDENCE_INFO,
+    }];
+    const ROUTE_EVIDENCE_ROUTE_TABLE: FactRouteTable =
+        FactRouteTable::new(ROUTE_EVIDENCE_ROUTES, ROUTE_EVIDENCE_STAMPS);
     const ROUTE_EVIDENCE_ENVELOPES: &[EnvelopeRoute] = &[EnvelopeRoute {
         outer_tag: ROUTE_EVIDENCE_OUTER_TAG,
         effective_tag: route_evidence_effective_tag,
@@ -7907,13 +7999,14 @@ mod tests {
 
     #[test]
     fn routed_projection_records_effective_route_that_ran() {
+        ROUTE_EVIDENCE_PROJECTOR_CALLS.store(0, Ordering::SeqCst);
         let fact = Fact::new(
             FactScope::Global,
             1,
             vec![ROUTE_EVIDENCE_OUTER_TAG, ROUTE_EVIDENCE_TAG],
         );
 
-        let run = RouterProjector::new(ROUTE_EVIDENCE_ROUTES, ROUTE_EVIDENCE_ENVELOPES)
+        let run = RouterProjector::new(ROUTE_EVIDENCE_ROUTE_TABLE, ROUTE_EVIDENCE_ENVELOPES)
             .dispatch_projection(&fact, &ProjectionContext::default())
             .expect("routed projection");
 
@@ -7927,6 +8020,7 @@ mod tests {
             ROUTE_EVIDENCE_STORAGE
         );
         assert_eq!(run.output.offers.len(), 1);
+        assert_eq!(ROUTE_EVIDENCE_PROJECTOR_CALLS.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -7969,7 +8063,7 @@ mod tests {
             })
             .expect("seed matched context");
 
-        let router = RouterProjector::new(ROUTE_EVIDENCE_ROUTES, &[]);
+        let router = RouterProjector::new(ROUTE_EVIDENCE_ROUTE_TABLE, &[]);
         let context = pending_projection_input_context_for_owner(&store, &router, &target.id)
             .expect("load pending context");
         let routed = context
@@ -7988,17 +8082,40 @@ mod tests {
 
     #[test]
     fn router_projector_rejects_unknown_effective_tag_before_projection() {
+        ROUTE_EVIDENCE_PROJECTOR_CALLS.store(0, Ordering::SeqCst);
         let fact = Fact::new(
             FactScope::Global,
             1,
             vec![ROUTE_EVIDENCE_OUTER_TAG, ROUTE_EVIDENCE_TAG + 1],
         );
 
-        let err = RouterProjector::new(ROUTE_EVIDENCE_ROUTES, ROUTE_EVIDENCE_ENVELOPES)
+        let err = RouterProjector::new(ROUTE_EVIDENCE_ROUTE_TABLE, ROUTE_EVIDENCE_ENVELOPES)
             .dispatch_projection(&fact, &ProjectionContext::default())
             .expect_err("unknown effective tag should not project");
 
         assert!(err.contains("no target projector registered for fact tag 43"));
+        assert_eq!(ROUTE_EVIDENCE_PROJECTOR_CALLS.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn router_projector_rejects_route_stamp_mismatch_before_projection() {
+        ROUTE_EVIDENCE_PROJECTOR_CALLS.store(0, Ordering::SeqCst);
+        const MISMATCHED_STAMPS: &[FactRouteStamp] = &[FactRouteStamp {
+            tag: ROUTE_EVIDENCE_TAG,
+            storage_requirement: StorageRequirement::Current(99),
+            projector_info: ROUTE_EVIDENCE_INFO,
+        }];
+        const MISMATCHED_TABLE: FactRouteTable =
+            FactRouteTable::new(ROUTE_EVIDENCE_ROUTES, MISMATCHED_STAMPS);
+
+        let fact = Fact::new(FactScope::Global, 1, vec![ROUTE_EVIDENCE_TAG]);
+
+        let err = RouterProjector::new(MISMATCHED_TABLE, &[])
+            .dispatch_projection(&fact, &ProjectionContext::default())
+            .expect_err("mismatched route metadata should reject before projection");
+
+        assert!(err.contains("route table metadata disagrees"));
+        assert_eq!(ROUTE_EVIDENCE_PROJECTOR_CALLS.load(Ordering::SeqCst), 0);
     }
 
     struct ModelProjector;

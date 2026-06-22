@@ -102,14 +102,21 @@
 //!   from the selected route's proof-relevant `FactRouteStamp`; when the selected
 //!   stamp tag equals the effective tag, the evidence route tag is that same
 //!   effective tag and the projector info/storage requirement come from the
-//!   stamp. This still does not prove route-table search or the projector
-//!   function pointer call.
+//!   stamp. This helper does not, by itself, prove metadata search or the
+//!   projector function pointer call.
+//! - Proven in production Rust today:
+//!   `select_route_stamp(stamps, effective_tag)` searches the actual
+//!   proof-relevant route metadata slice. If it returns `Some`, the selected
+//!   stamp is the first stamp in the slice with `tag == effective_tag`; if it
+//!   returns `None`, no stamp in the slice has that tag. This proves metadata
+//!   search only; executable route/stamp alignment is enforced by runtime check
+//!   and tests, not by Verus today.
 //! - Proven in production Rust today:
 //!   `routed_projection_from_selected_route(fact_id, effective_tag, stamp,
 //!   output)` attaches that selected-stamp route evidence to the actual
 //!   projector output value passed to it and preserves the output unchanged.
-//!   This still does not prove route-table search or the projector function
-//!   pointer call.
+//!   This still does not prove executable route/stamp alignment or the
+//!   projector function pointer call.
 //! - Proven in production Rust today:
 //!   `version_replay_rebuild_shape_allowed(version_replay_rebuild, needs, offers,
 //!   wakes)` accepts if and only if the projection is ordinary, or it is a
@@ -162,9 +169,10 @@
 //!   now returns `RoutedProjection`, which is a plain `ProjectionOutput` plus
 //!   router-stamped `ProjectionRouteEvidence` from the same route selection that
 //!   calls the projector. `PreparedProjection` carries that route evidence.
-//!   The field-stamping and selected-stamp helpers are verified, but the
-//!   route-table search/function-call and `PreparedProjection` correspondence
-//!   theorem is not complete yet. The routed-output constructor is verified.
+//!   The route metadata search, field-stamping, selected-stamp helper, and
+//!   routed-output constructor are verified, but the executable route/stamp
+//!   alignment check, function-pointer call, and `PreparedProjection`
+//!   correspondence theorem are not complete yet.
 //! - Refactored but not yet proved: projected row output and intent row output
 //!   now use separate Rust types, separate `RuntimeDescription` table lists, and
 //!   separate DB apply helpers. This gives

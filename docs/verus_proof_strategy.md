@@ -210,7 +210,9 @@ load, prepare, commit.
 
 Current production-code foothold: `ProjectionDispatcher::dispatch_projection`
 returns `RoutedProjection`. `RouterProjector` implements that dispatcher by
-selecting one route, calling that selected route's projector, applying the
+computing the effective tag, searching a proof-relevant `FactRouteStamp` slice,
+checking that the executable `FactRoute` at the selected index still matches
+the selected stamp, calling that selected route's projector, applying the
 route's storage requirement to the output, and attaching
 `ProjectionRouteEvidence { fact_id, effective_tag, route_tag, projector_info,
 storage_requirement }`. Leaf projectors still return plain `ProjectionOutput`
@@ -222,22 +224,27 @@ values. Cargo-verus also proves that
 `selected_route_evidence(fact_id, effective_tag, stamp)` builds evidence from
 the selected route's proof-relevant `FactRouteStamp`: if the stamp tag is the
 effective tag, the evidence route tag is that same effective tag and the
-projector info/storage requirement come from the stamp. It also proves that
+projector info/storage requirement come from the stamp. Cargo-verus also proves
+that `select_route_stamp(stamps, effective_tag)` searches the actual
+proof-relevant route metadata slice: `Some` returns the first stamp with
+`tag == effective_tag`, and `None` means no stamp in the slice has that tag.
+It also proves that
 `routed_projection_from_selected_route(fact_id, effective_tag, stamp, output)`
 attaches that selected-stamp route evidence to the actual projector output
 value passed to it and preserves the output unchanged. This is selected-route
-metadata and routed-output constructor proof, not the full route theorem:
-Cargo-verus still needs to prove the route-table search, the selected projector
-function call, and the correspondence from `PreparedProjection.route_evidence`
-to the committed output path.
+metadata-search and routed-output constructor proof, not the full route
+theorem: Cargo-verus still needs to prove executable route/stamp alignment, the
+selected projector function call, and the correspondence from
+`PreparedProjection.route_evidence` to the committed output path.
 
-Route-search discovery: do not try to prove route-table search directly over
+Route-search discovery: do not prove route-table search directly over
 `FactRoute` while it contains the projector function pointer. Cargo-verus does
-not support function pointer types as a proof target. The proof-relevant route
-identity is `FactRouteStamp` (`tag`, `projector_info`, `storage_requirement`);
-the next route-search proof must make the production search loop operate over
-that metadata, or an equivalent production structure, and keep the projector
-function pointer as executable code outside the proof relation.
+not support function pointer types as a proof target. The production router
+therefore searches `FactRouteStamp` metadata (`tag`, `projector_info`,
+`storage_requirement`) and keeps the projector function pointer as executable
+code outside the proof relation. The remaining route proof must connect the
+runtime route/stamp alignment check and selected function call to that verified
+metadata search.
 
 ### Stage 4: Projection DB Write Boundary
 
@@ -715,6 +722,7 @@ projection_output_context_set_parts(output, owner) preserves output needs and bu
 projection_context_offers_match_claims(context, claims, owner) accepts only if every final offer matches an owner-stamped output claim
 projection_route_evidence(fact_id, effective_tag, route_tag, projector_info, storage_requirement) preserves every route evidence field
 selected_route_evidence(fact_id, effective_tag, stamp) preserves selected route stamp metadata and gives route_tag == effective_tag when stamp.tag == effective_tag
+select_route_stamp(stamps, effective_tag) returns the first matching route stamp or proves no route stamp matches
 routed_projection_from_selected_route(fact_id, effective_tag, stamp, output) preserves selected route stamp metadata and preserves output unchanged
 version_replay_rebuild_shape_allowed(version_replay_rebuild, needs, offers, wakes) accepts if and only if ordinary projection or empty version replay rebuild output
 version_replay_rebuild_shape_status(version_replay_rebuild, needs, offers, wakes) returns accepted or standing-output exactly from that predicate
@@ -779,8 +787,9 @@ dispatcher call graph. Semantic provenness remains a route-local projector
 theorem, not a core theorem.
 
 The remaining route-dispatch gap is no longer route-evidence field stamping or
-selected-stamp evidence construction; it is proving that `RouterProjector`
-found the registered route stamp for the effective tag, called that selected
+selected-stamp evidence construction, and it is no longer route metadata
+search. It is proving that `RouterProjector`'s runtime route/stamp alignment
+check connects the selected stamp to the executable route, called that selected
 projector function pointer, and carried the resulting evidence through
 `prepare_projection` and commit.
 

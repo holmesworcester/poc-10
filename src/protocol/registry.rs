@@ -25,8 +25,8 @@ use crate::core::facts::Fact;
 use crate::core::intents::TypedTableSchema;
 use crate::core::network;
 use crate::core::project_fact::{
-    FactRoute, ProjectionContext, ProjectionDispatcher, ProjectionOutput, ProjectionRouteEvidence,
-    Projector, RoutedProjection, RouterProjector,
+    FactRoute, FactRouteStamp, FactRouteTable, ProjectionContext, ProjectionDispatcher,
+    ProjectionOutput, ProjectionRouteEvidence, Projector, RoutedProjection, RouterProjector,
 };
 use crate::core::runtime::{HandlerRoute, RecurringIntentSpec};
 use crate::protocol::cli as command;
@@ -1217,13 +1217,13 @@ impl Projector for ProtocolProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        RouterProjector::new(FACT_ROUTES, &[]).project(fact, context)
+        RouterProjector::new(FACT_ROUTE_TABLE, &[]).project(fact, context)
     }
 }
 
 impl ProjectionDispatcher for ProtocolProjector {
     fn route_evidence(&self, fact: &Fact) -> Result<ProjectionRouteEvidence, String> {
-        RouterProjector::new(FACT_ROUTES, &[]).route_evidence(fact)
+        RouterProjector::new(FACT_ROUTE_TABLE, &[]).route_evidence(fact)
     }
 
     fn dispatch_projection(
@@ -1231,7 +1231,7 @@ impl ProjectionDispatcher for ProtocolProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<RoutedProjection, String> {
-        RouterProjector::new(FACT_ROUTES, &[]).dispatch_projection(fact, context)
+        RouterProjector::new(FACT_ROUTE_TABLE, &[]).dispatch_projection(fact, context)
     }
 }
 
@@ -1263,6 +1263,17 @@ macro_rules! projector_routes {
                 projector_info: $projector_info,
             },)+
         ];
+
+        pub(crate) const FACT_ROUTE_STAMPS: &[FactRouteStamp] = &[
+            $(FactRouteStamp {
+                tag: $tag,
+                storage_requirement: $storage_requirement,
+                projector_info: $projector_info,
+            },)+
+        ];
+
+        pub(crate) const FACT_ROUTE_TABLE: FactRouteTable =
+            FactRouteTable::new(FACT_ROUTES, FACT_ROUTE_STAMPS);
     };
 }
 
@@ -1452,6 +1463,23 @@ mod tests {
             duplicates.is_empty(),
             "fact tags must be globally unique so runtime dispatch never guesses between fact types: {duplicates:?}"
         );
+    }
+
+    #[test]
+    fn fact_route_stamps_match_executable_routes() {
+        assert_eq!(
+            FACT_ROUTE_STAMPS.len(),
+            FACT_ROUTES.len(),
+            "proof route metadata must be generated beside executable routes"
+        );
+        for (route, stamp) in FACT_ROUTES.iter().zip(FACT_ROUTE_STAMPS.iter()) {
+            assert_eq!(
+                route.stamp(),
+                *stamp,
+                "proof route metadata must match executable route for tag {}",
+                route.tag
+            );
+        }
     }
 
     #[test]
