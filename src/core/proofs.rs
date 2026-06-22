@@ -56,6 +56,10 @@
 //!   owner equals the projected fact id; `enforce_owner_is_self` branches on
 //!   this aggregate helper before returning success or a diagnostic error.
 //! - Proven in production Rust today:
+//!   `projected_owner_status` returns accepted, foreign purge, foreign need, or
+//!   foreign time-wake exactly according to those owner predicates;
+//!   `enforce_owner_is_self` branches on this verified production status.
+//! - Proven in production Rust today:
 //!   `ContextOfferClaim::into_offer(claim, owner).owner == owner`.
 //! - Proven in production Rust today:
 //!   `ContextOfferClaim::into_offer(claim, owner) preserves role/scope/start/end/value`.
@@ -73,8 +77,8 @@
 //! - Not proven yet for offer finalization: `ProjectionOutput::context_set`
 //!   normalization or `prepare_projection` call order.
 //! - Not proven yet for owner enforcement: the exported theorem tying
-//!   `enforce_owner_is_self` `Result` behavior and `prepare_projection` call
-//!   order to the verified aggregate helper.
+//!   `enforce_owner_is_self` `Result` wrapper and `prepare_projection` call
+//!   order to the verified status helper.
 //! - Punted for a later core proof model: the composition stubs that cross
 //!   matcher construction, offer loading, route dispatch, projected-table
 //!   write ownership, context replacement, and commit.

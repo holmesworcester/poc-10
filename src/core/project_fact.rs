@@ -619,34 +619,33 @@ fn enforce_owner_is_self(fact: &Fact, output: &ProjectionOutput) -> Result<(), S
     let purged = &output.effects.purged_facts;
     let needs = &output.needs;
     let wakes = &output.time_wakes;
-    if projected_output_owners_are_self(purged, needs, wakes, fact.id) {
-        return Ok(());
-    }
-    if !projected_purge_owners_are_self(purged, fact.id) {
-        return Err(enforce_projected_owner_error(
+    match projected_owner_status(purged, needs, wakes, fact.id) {
+        OWNER_CHECK_ACCEPTED => Ok(()),
+        OWNER_CHECK_FOREIGN_PURGE => Err(enforce_projected_owner_error(
             "projector tried to purge fact",
             fact.id,
-        ));
-    }
-    if !projected_need_owners_are_self(needs, fact.id) {
-        return Err(enforce_projected_owner_error(
+        )),
+        OWNER_CHECK_FOREIGN_NEED => Err(enforce_projected_owner_error(
             "projector emitted need with owner",
             fact.id,
-        ));
-    }
-    if !projected_time_wake_owners_are_self(wakes, fact.id) {
-        return Err(enforce_projected_owner_error(
+        )),
+        OWNER_CHECK_FOREIGN_TIME_WAKE => Err(enforce_projected_owner_error(
             "projector emitted time wake with owner",
             fact.id,
-        ));
+        )),
+        _ => Err(enforce_projected_owner_error(
+            "projector emitted owner-bearing output",
+            fact.id,
+        )),
     }
-    Err(enforce_projected_owner_error(
-        "projector emitted owner-bearing output",
-        fact.id,
-    ))
 }
 
 verus! {
+const OWNER_CHECK_ACCEPTED: u8 = 0;
+const OWNER_CHECK_FOREIGN_PURGE: u8 = 1;
+const OWNER_CHECK_FOREIGN_NEED: u8 = 2;
+const OWNER_CHECK_FOREIGN_TIME_WAKE: u8 = 3;
+
 #[verifier(external_type_specification)]
 #[verifier(external_body)]
 #[allow(dead_code)]
@@ -820,6 +819,102 @@ fn projected_output_owners_are_self(
         #![trigger wakes@[i]]
         0 <= i < wakes@.len() ==> wakes@[i].owner == fact_id);
     true
+}
+
+fn projected_owner_status(
+    purged: &[FactId],
+    needs: &[ContextNeed],
+    wakes: &[TimeWake],
+    fact_id: FactId,
+) -> (status: u8)
+    ensures
+        status == OWNER_CHECK_ACCEPTED <==> (
+            (forall|i: int|
+                #![trigger purged@[i]]
+                0 <= i < purged@.len() ==> purged@[i] == fact_id)
+            && (forall|i: int|
+                #![trigger needs@[i]]
+                0 <= i < needs@.len() ==> needs@[i].owner == fact_id)
+            && (forall|i: int|
+                #![trigger wakes@[i]]
+                0 <= i < wakes@.len() ==> wakes@[i].owner == fact_id)
+        ),
+        status == OWNER_CHECK_FOREIGN_PURGE <==> !(forall|i: int|
+            #![trigger purged@[i]]
+            0 <= i < purged@.len() ==> purged@[i] == fact_id),
+        status == OWNER_CHECK_FOREIGN_NEED <==> (
+            (forall|i: int|
+                #![trigger purged@[i]]
+                0 <= i < purged@.len() ==> purged@[i] == fact_id)
+            && !(forall|i: int|
+                #![trigger needs@[i]]
+                0 <= i < needs@.len() ==> needs@[i].owner == fact_id)
+        ),
+        status == OWNER_CHECK_FOREIGN_TIME_WAKE <==> (
+            (forall|i: int|
+                #![trigger purged@[i]]
+                0 <= i < purged@.len() ==> purged@[i] == fact_id)
+            && (forall|i: int|
+                #![trigger needs@[i]]
+                0 <= i < needs@.len() ==> needs@[i].owner == fact_id)
+            && !(forall|i: int|
+                #![trigger wakes@[i]]
+                0 <= i < wakes@.len() ==> wakes@[i].owner == fact_id)
+        ),
+        status == OWNER_CHECK_ACCEPTED
+            || status == OWNER_CHECK_FOREIGN_PURGE
+            || status == OWNER_CHECK_FOREIGN_NEED
+            || status == OWNER_CHECK_FOREIGN_TIME_WAKE,
+{
+    if projected_output_owners_are_self(purged, needs, wakes, fact_id) {
+        assert(forall|i: int|
+            #![trigger purged@[i]]
+            0 <= i < purged@.len() ==> purged@[i] == fact_id);
+        assert(forall|i: int|
+            #![trigger needs@[i]]
+            0 <= i < needs@.len() ==> needs@[i].owner == fact_id);
+        assert(forall|i: int|
+            #![trigger wakes@[i]]
+            0 <= i < wakes@.len() ==> wakes@[i].owner == fact_id);
+        return OWNER_CHECK_ACCEPTED;
+    }
+    if !projected_purge_owners_are_self(purged, fact_id) {
+        assert(!(forall|i: int|
+            #![trigger purged@[i]]
+            0 <= i < purged@.len() ==> purged@[i] == fact_id));
+        return OWNER_CHECK_FOREIGN_PURGE;
+    }
+    if !projected_need_owners_are_self(needs, fact_id) {
+        assert(forall|i: int|
+            #![trigger purged@[i]]
+            0 <= i < purged@.len() ==> purged@[i] == fact_id);
+        assert(!(forall|i: int|
+            #![trigger needs@[i]]
+            0 <= i < needs@.len() ==> needs@[i].owner == fact_id));
+        return OWNER_CHECK_FOREIGN_NEED;
+    }
+    if !projected_time_wake_owners_are_self(wakes, fact_id) {
+        assert(forall|i: int|
+            #![trigger purged@[i]]
+            0 <= i < purged@.len() ==> purged@[i] == fact_id);
+        assert(forall|i: int|
+            #![trigger needs@[i]]
+            0 <= i < needs@.len() ==> needs@[i].owner == fact_id);
+        assert(!(forall|i: int|
+            #![trigger wakes@[i]]
+            0 <= i < wakes@.len() ==> wakes@[i].owner == fact_id));
+        return OWNER_CHECK_FOREIGN_TIME_WAKE;
+    }
+    assert(forall|i: int|
+        #![trigger purged@[i]]
+        0 <= i < purged@.len() ==> purged@[i] == fact_id);
+    assert(forall|i: int|
+        #![trigger needs@[i]]
+        0 <= i < needs@.len() ==> needs@[i].owner == fact_id);
+    assert(forall|i: int|
+        #![trigger wakes@[i]]
+        0 <= i < wakes@.len() ==> wakes@[i].owner == fact_id);
+    OWNER_CHECK_ACCEPTED
 }
 } // verus!
 
@@ -5012,6 +5107,43 @@ mod contract_tests {
             }],
             fact_id
         ));
+        assert_eq!(
+            projected_owner_status(&[fact_id], &[need.clone()], &[wake.clone()], fact_id),
+            OWNER_CHECK_ACCEPTED
+        );
+        assert_eq!(
+            projected_owner_status(&[[9; 32]], &[need.clone()], &[wake.clone()], fact_id),
+            OWNER_CHECK_FOREIGN_PURGE
+        );
+        assert_eq!(
+            projected_owner_status(
+                &[fact_id],
+                &[ContextNeed {
+                    owner: [9; 32],
+                    ..need.clone()
+                }],
+                &[wake.clone()],
+                fact_id
+            ),
+            OWNER_CHECK_FOREIGN_NEED
+        );
+        assert_eq!(
+            projected_owner_status(
+                &[fact_id],
+                &[ContextNeed::for_key(
+                    fact_id,
+                    "scan_need_status",
+                    FactScope::Global,
+                    [4; 32]
+                )],
+                &[TimeWake {
+                    owner: [9; 32],
+                    ..wake
+                }],
+                fact_id
+            ),
+            OWNER_CHECK_FOREIGN_TIME_WAKE
+        );
     }
 
     #[test]
