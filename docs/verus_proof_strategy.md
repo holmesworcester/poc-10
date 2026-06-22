@@ -159,8 +159,11 @@ offers came from output claims, version replay rebuild standing-output rules
 hold, and the exact commit-facing context/time/effect fields are self-owned.
 `prepare_projection` now calls one wrapper around that verified status guard
 after final context construction. The remaining call-order work is proving the
-runtime-effect admission and prepared-constructor sequence around that guard as
-one executable theorem. It is also proved that
+runtime-effect admission sequence around that guard as one executable theorem.
+`prepared_projection_from_accepted_output(...)` then consumes the same routed
+output and final context that were validated, moves the commit-facing fields
+into `PreparedProjection`, and proves the prepare-stage commit-field predicate
+is preserved in the exact object later commit code receives. It is also proved that
 `version_replay_rebuild_effect_has_no_fact_or_intent_work(effects)`
 accepts exactly ordinary effects or isolated rebuild effects with no emitted
 facts, priority facts, incoming facts, durable intents, or local intents; the
@@ -302,6 +305,9 @@ production constructor used after prepare-stage validation succeeds; it
 preserves the source, fact, mode, route evidence, timing metadata, incoming
 metadata, retention bit, projected context, time wakes, projected row
 mutations, and runtime effects carried into `PreparedProjection`. This is
+wrapped by `prepared_projection_from_accepted_output(...)`, which consumes the
+same accepted `ProjectionOutput` and proves accepted prepare-stage commit
+fields survive into `PreparedProjection`. This is
 selected-route metadata-search, routed-output constructor, verified dispatch
 finalization, generated dispatch code shape, and prepared-output carry proof,
 not the full route theorem: the concrete projector call itself is still normal
@@ -310,7 +316,7 @@ closed by the `RegisteredProjector` API shape because the same projector type
 provides the branch tag, finalizer stamp, storage guard, metadata, and
 `Projector::project` call. Cargo-verus still needs to prove the larger
 `prepare_projection` theorem that carries the verified prepare-status result
-through runtime-effect admission and `PreparedProjection` construction.
+through runtime-effect admission.
 `projection_retains_fact_after_commit(projection)` is verified over the
 production lifecycle decision and accepts if and only if the projection does not
 purge itself and either its source was durable or its source was incoming with
@@ -845,6 +851,7 @@ finalize_dispatched_projection(fact_id, effective_tag, stamp, output) applies se
 dispatch_registered_projector::<P>(fact, context) is the production dispatch branch shape: one registered projector type P supplies the projector call, tag, storage guard, metadata, and finalizer stamp
 runtime_effects_with_storage_requirement(effects, requirement) sets the storage requirement and preserves the effect payload
 prepared_projection_from_validated_output preserves route evidence and validated output pieces in PreparedProjection
+prepared_projection_from_accepted_output preserves accepted output fields in PreparedProjection and carries the prepare-stage commit-field predicate into the commit object
 prepared_projection_commit_fields_accept(context, wakes, effects, owner) accepts if and only if commit-facing prepared context/time/effect fields are self-owned and version replay rebuild has no standing context or time wakes
 prepare_projection_output_status(fact, output, context) accepts if and only if owner-bearing output is self-owned, final offers match output claims, version replay rebuild shape is legal, and commit-facing prepared fields are self-owned
 projection_mode_from_replay_flag(replay) returns Normal exactly for replay == 0 and Replay exactly for replay != 0
@@ -914,13 +921,16 @@ normalization for offer-field preservation, because the final normalized offers
 are checked by a verified production guard. The commit-facing prepared fields
 are also checked by a verified production guard, and
 `prepare_projection_output_status` composes those guards into one verified
-prepare-stage acceptance predicate. The remaining gap is proving the later
-`prepare_projection` runtime-effect admission and prepared-constructor sequence
-over executable helper code. The remaining owner-checking gap is no longer the
+prepare-stage acceptance predicate, and
+`prepared_projection_from_accepted_output` carries that accepted commit-field
+predicate into `PreparedProjection`. The remaining gap is proving the later
+`prepare_projection` runtime-effect admission sequence over executable helper
+code. The remaining owner-checking gap is no longer the
 equality decision, per-slice scans, aggregate owner predicate, status
 classification, accept-status decision, full-output status bridge,
-accepted-output enforcement decision, or unified prepare-stage status decision;
-it is proving the exported theorem correspondence to `prepare_projection`.
+accepted-output enforcement decision, unified prepare-stage status decision, or
+accepted-output constructor carry; it is proving the exported theorem
+correspondence to `prepare_projection`.
 The remaining version replay rebuild admission gap is no longer the
 standing-output decision, status classification, accept-status decision, or
 full prepared-shape status bridge, and it is no longer the success decision

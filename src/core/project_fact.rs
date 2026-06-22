@@ -613,18 +613,16 @@ fn prepare_projection(
     let output = routed.output;
     let projected_context = output.context_set(fact.id);
     validate_prepare_projection_output(&fact, &output, &projected_context)?;
-    let projected_row_mutations = output.row_mutations;
-    let runtime_effects = output.effects;
     perf::measure_result("projection_validate_effects", || {
         validate_projection_runtime_effects_for_admission(
-            &runtime_effects,
-            &projected_row_mutations,
+            &output.effects,
+            &output.row_mutations,
             projected_row_mutation_tables,
             registered_intent_kinds,
             fact_admission,
         )
     })?;
-    Ok(prepared_projection_from_validated_output(
+    Ok(prepared_projection_from_accepted_output(
         source,
         fact,
         mode,
@@ -632,11 +630,8 @@ fn prepare_projection(
         input_received_at_ms,
         input_staged_at_ms,
         incoming_metadata,
-        output.retain_self,
         projected_context,
-        output.time_wakes,
-        projected_row_mutations,
-        runtime_effects,
+        output,
     ))
 }
 
@@ -1888,6 +1883,69 @@ fn prepared_projection_from_validated_output(
         projected_row_mutations,
         runtime_effects,
     }
+}
+
+/// Move accepted routed output into the commit-ready projection object.
+///
+/// This helper is the proof bridge after `prepare_projection_output_status`
+/// accepts and runtime-effect admission succeeds. It consumes the same
+/// `ProjectionOutput` value that was validated, moves its commit-facing fields
+/// into `PreparedProjection`, and proves the prepare-stage commit-field
+/// predicate is preserved in the exact object later commit code receives.
+fn prepared_projection_from_accepted_output(
+    source: ProjectionSource,
+    fact: Fact,
+    mode: ProjectionMode,
+    route_evidence: ProjectionRouteEvidence,
+    input_received_at_ms: u64,
+    input_staged_at_ms: Option<u64>,
+    incoming_metadata: Option<IncomingMetadata>,
+    projected_context: ContextSet,
+    output: ProjectionOutput,
+) -> (projection: PreparedProjection)
+    ensures
+        projection.source == source,
+        projection.fact == fact,
+        projection.mode == mode,
+        projection.route_evidence == route_evidence,
+        projection.input_received_at_ms == input_received_at_ms,
+        projection.input_staged_at_ms == input_staged_at_ms,
+        projection.incoming_metadata == incoming_metadata,
+        projection.retain_self == output.retain_self,
+        projection.projected_context == projected_context,
+        projection.time_wakes@ == output.time_wakes@,
+        projection.projected_row_mutations@ == output.row_mutations@,
+        projection.runtime_effects == output.effects,
+        prepare_projection_output_accepts_spec(fact, output, projected_context)
+            ==> prepared_projection_commit_fields_spec(
+                projection.projected_context,
+                projection.time_wakes@,
+                projection.runtime_effects,
+                projection.fact.id,
+    ),
+{
+    let ProjectionOutput {
+        retain_self: output_retain_self,
+        needs: _,
+        offers: _,
+        time_wakes: output_time_wakes,
+        row_mutations: output_row_mutations,
+        effects: output_effects,
+    } = output;
+    prepared_projection_from_validated_output(
+        source,
+        fact,
+        mode,
+        route_evidence,
+        input_received_at_ms,
+        input_staged_at_ms,
+        incoming_metadata,
+        output_retain_self,
+        projected_context,
+        output_time_wakes,
+        output_row_mutations,
+        output_effects,
+    )
 }
 
 /// Decide whether the projected fact remains retained after its commit.
@@ -7767,6 +7825,68 @@ mod contract_tests {
             ),
             PREPARE_PROJECTION_COMMIT_FIELDS
         );
+    }
+
+    #[test]
+    fn accepted_prepare_output_constructor_preserves_commit_payload() {
+        let fact = Fact::new(FactScope::Global, 1, b"accepted prepare".to_vec());
+        let role = Role::new("accepted_prepare").unwrap();
+        let key = ContextKey::from_bytes([8; 32]);
+        let need = need_for(&fact, &role, &key);
+        let wake = TimeWake {
+            timeline: Timeline::new("accepted_prepare").unwrap(),
+            owner: fact.id,
+            at: 12,
+        };
+        let claim = ContextOfferClaim {
+            role,
+            scope: FactScope::Global,
+            start_key: key.clone(),
+            end_key: key,
+            value: ContextOfferValue::from_bytes(b"accepted-offer"),
+        };
+        let row = ProjectedRowMutation::InsertValues(TableInsert {
+            table: TableName::new("accepted_prepare_rows"),
+            columns: &["id"],
+            values: vec![Value::Bytes(fact.id.to_vec())],
+        });
+        let output = ProjectionOutput::new()
+            .need(need)
+            .offer(claim)
+            .time_wake(wake.clone())
+            .row_mutation(row.clone())
+            .purge_self(fact.id);
+        let context = output.context_set(fact.id);
+
+        assert_eq!(
+            prepare_projection_output_status(&fact, &output, &context),
+            PREPARE_PROJECTION_ACCEPTED
+        );
+
+        let route_evidence = ProjectionRouteEvidence::for_loaded_fact_fixture(&fact);
+        let projection = prepared_projection_from_accepted_output(
+            ProjectionSource::Durable,
+            fact.clone(),
+            ProjectionMode::Normal,
+            route_evidence.clone(),
+            fact.timestamp,
+            Some(7),
+            None,
+            context.clone(),
+            output,
+        );
+
+        assert_eq!(projection.source, ProjectionSource::Durable);
+        assert_eq!(projection.fact, fact);
+        assert_eq!(projection.mode, ProjectionMode::Normal);
+        assert_eq!(projection.route_evidence, route_evidence);
+        assert_eq!(projection.input_received_at_ms, fact.timestamp);
+        assert_eq!(projection.input_staged_at_ms, Some(7));
+        assert!(projection.retain_self);
+        assert_eq!(projection.projected_context, context);
+        assert_eq!(projection.time_wakes, vec![wake]);
+        assert_eq!(projection.projected_row_mutations, vec![row]);
+        assert_eq!(projection.runtime_effects.purged_facts, vec![fact.id]);
     }
 
     fn assert_version_replay_rebuild_shape_rejected(fact: &Fact, output: ProjectionOutput) {

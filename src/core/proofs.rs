@@ -159,6 +159,12 @@
 //!   wrapper around this verified status helper after final context
 //!   construction and before runtime-effect admission.
 //! - Proven in production Rust today:
+//!   `prepared_projection_from_accepted_output(...)` consumes the accepted
+//!   routed output and final context, moves the output's retention bit, time
+//!   wakes, projected row mutations, and runtime effects into
+//!   `PreparedProjection`, and proves the accepted prepare-stage commit-field
+//!   predicate is preserved in the exact object commit receives.
+//! - Proven in production Rust today:
 //!   `projection_mode_from_replay_flag(replay)` returns `Normal` if and only if
 //!   the stored SQL replay flag is `0`, and returns `Replay` if and only if the
 //!   flag is nonzero. `projection_mode_is_replay(mode)` accepts if and only if
@@ -340,7 +346,7 @@
 //!   finalizer, and routed-output constructor are verified, and the validated
 //!   prepared-output constructor preserves that route evidence. The larger
 //!   `prepare_projection` theorem still needs to carry the verified
-//!   prepare-status result through runtime-effect admission and construction.
+//!   prepare-status result through runtime-effect admission.
 //! - Refactored but not yet proved: projected row output and intent row output
 //!   now use separate Rust types, separate `RuntimeDescription` table lists, and
 //!   separate DB apply helpers. This gives
@@ -355,7 +361,8 @@
 //!   `ProjectionOutput` to `ContextSet` is proved, final normalized offers are
 //!   checked by a verified production guard, final prepared commit fields are
 //!   checked by a verified production guard, and those guards are composed by a
-//!   verified prepare-stage status helper.
+//!   verified prepare-stage status helper. The accepted-output constructor
+//!   carry into `PreparedProjection` is also proved.
 //! - Not proven yet for owner enforcement: the exported theorem tying
 //!   `prepare_projection` to the unified verified prepare-stage status helper.
 //! - Not proven yet for version replay rebuild admission: the

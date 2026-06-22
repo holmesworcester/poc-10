@@ -86,7 +86,7 @@ fn cargo_verus_verifies_production_core_projection_contracts() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        combined.contains("verification results:: 105 verified, 0 errors"),
+        combined.contains("verification results:: 106 verified, 0 errors"),
         "production proof should verify the real core projection contracts:\n{combined}"
     );
 }
@@ -217,6 +217,9 @@ fn core_proofs_make_trust_boundary_explicit() {
         "`prepare_projection_output_status(fact, output, context)` composes",
         "proof-critical prepare predicates all hold",
         "before runtime-effect admission",
+        "`prepared_projection_from_accepted_output(...)` consumes",
+        "moves the output's retention bit",
+        "commit receives",
         "`projection_mode_from_replay_flag(replay)` returns `Normal` if and only if",
         "`projection_mode_is_replay(mode)` accepts if and only if",
         "`replay_flag_for_projection_mode(mode)` returns",
@@ -450,7 +453,9 @@ fn verus_plan_is_single_core_first_source() {
         "checks the exact fields",
         "`prepare_projection_output_status(fact, output, context)`",
         "accepts if and only if owner-bearing output is self-owned",
-        "runtime-effect admission and prepared-constructor sequence",
+        "`prepared_projection_from_accepted_output(...)` then consumes",
+        "moves the commit-facing fields",
+        "runtime-effect admission sequence",
         "keep leaf projectors on the simple `Projector::project` API",
         "`ProjectionDispatcher` selects",
         "returns a `RoutedProjection`",
@@ -489,6 +494,8 @@ fn verus_plan_is_single_core_first_source() {
         "preserving emitted facts, priority facts, incoming facts and metadata",
         "`prepared_projection_from_validated_output(...)` is verified",
         "preserves the source, fact, mode, route evidence",
+        "wrapped by `prepared_projection_from_accepted_output(...)`",
+        "accepted prepare-stage commit\nfields survive into `PreparedProjection`",
         "`prepared_projection_commit_fields_accept(context, wakes, effects, owner)`",
         "accepted means every context need, context offer",
         "verified dispatch\nfinalization, generated dispatch code shape",
@@ -676,6 +683,7 @@ fn verus_plan_is_single_core_first_source() {
         "dispatch_registered_projector::<P>(fact, context) is the production dispatch branch shape",
         "runtime_effects_with_storage_requirement(effects, requirement) sets the storage requirement and preserves the effect payload",
         "prepared_projection_from_validated_output preserves route evidence and validated output pieces in PreparedProjection",
+        "prepared_projection_from_accepted_output preserves accepted output fields in PreparedProjection",
         "prepared_projection_commit_fields_accept(context, wakes, effects, owner) accepts if and only if commit-facing prepared context/time/effect fields are self-owned",
         "prepare_projection_output_status(fact, output, context) accepts if and only if owner-bearing output is self-owned",
         "fact_ids_contain(ids, target) accepts if and only if target occurs in the fact-id slice",
@@ -720,6 +728,8 @@ fn verus_plan_is_single_core_first_source() {
         "final normalized offers\nare checked by a verified production guard",
         "commit-facing prepared fields\nare also checked by a verified production guard",
         "`prepare_projection_output_status` composes those guards",
+        "`prepared_projection_from_accepted_output` carries that accepted commit-field",
+        "accepted-output constructor carry",
         "remaining version replay rebuild admission gap",
         "standing-output decision",
         "status classification",
