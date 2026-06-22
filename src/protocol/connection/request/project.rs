@@ -837,9 +837,8 @@ pub mod adapt {
 use crate::core::context::{ContextNeed, ContextOffer, ContextOfferClaim};
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::intents::RowMutation;
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, ProjectedRowMutation, ProjectionContext, ProjectionOutput, Projector,
 };
 
 use crate::protocol::auth::{endpoint_shared, workspace};
@@ -1012,7 +1011,7 @@ fn project_sender_request(
     };
     Ok(output
         .offer(connection_request_offer_claim(fact.id))
-        .row_mutation(RowMutation::InsertValues(connection_request_row(
+        .row_mutation(ProjectedRowMutation::InsertValues(connection_request_row(
             fact.id,
             fact.id,
             request.initiator_ephemeral_secret_fact_id,
@@ -1238,7 +1237,6 @@ fn content_signer_need(owner: FactId, workspace_id: FactId, endpoint_id: FactId)
 mod tests {
     use crate::core::crypto;
     use crate::core::facts::{Fact, FactScope};
-    use crate::core::intents::RowMutation;
     use crate::core::project_fact::{
         IncomingMetadata, MatchedContext, ProjectionContext, ProjectionMode, Projector,
     };
@@ -1483,10 +1481,10 @@ mod tests {
             .offers
             .iter()
             .any(|offer| offer.role.as_str() == "connection_request"));
-        assert!(projected.effects.row_mutations.iter().any(|mutation| {
+        assert!(projected.row_mutations.iter().any(|mutation| {
             matches!(
                 mutation,
-                RowMutation::InsertValues(insert) if insert.table == CONNECTION_REQUEST_ROWS
+                ProjectedRowMutation::InsertValues(insert) if insert.table == CONNECTION_REQUEST_ROWS
             )
         }));
 
@@ -1496,7 +1494,7 @@ mod tests {
         assert!(replayed.offers.is_empty());
         assert!(replayed.needs.is_empty());
         assert!(replayed.effects.facts.is_empty());
-        assert!(replayed.effects.row_mutations.is_empty());
+        assert!(replayed.row_mutations.is_empty());
         assert!(replayed.effects.intents.is_empty());
     }
 

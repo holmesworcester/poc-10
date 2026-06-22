@@ -355,7 +355,7 @@ mod tests {
 
         assert_eq!(output.needs, vec![expected_need]);
         assert!(output.offers.is_empty());
-        assert!(output.effects.row_mutations.is_empty());
+        assert!(output.row_mutations.is_empty());
         assert!(output.effects.intents.is_empty());
         assert!(output.effects.purged_facts.is_empty());
         assert!(output.time_wakes.is_empty());
@@ -385,7 +385,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![connection_closed_offer(fact.id, close.connection_id)]
         );
-        assert!(output.effects.row_mutations.is_empty());
+        assert!(output.row_mutations.is_empty());
         assert!(output.effects.intents.is_empty());
         assert!(output.effects.purged_facts.is_empty());
         assert!(output.time_wakes.is_empty());

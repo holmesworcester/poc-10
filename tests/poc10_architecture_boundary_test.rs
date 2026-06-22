@@ -435,6 +435,60 @@ fn intent_commit_stages_use_intent_write_capability() {
 }
 
 #[test]
+fn row_mutation_authority_is_split_by_worker() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let db = source_text(&root.join("src/core/db.rs"));
+    let effects = source_text(&root.join("src/core/effects.rs"));
+    let project_fact = source_text(&root.join("src/core/project_fact.rs"));
+
+    for required in [
+        "pub enum ProjectedRowMutation",
+        "pub enum IntentRowMutation",
+        "fn apply_projected_row_mutations_in_tx(",
+        "fn apply_intent_row_mutations_in_tx(",
+    ] {
+        assert!(
+            db.contains(required),
+            "db row vocabulary should expose split row authority: {required:?}"
+        );
+    }
+
+    for required in [
+        "pub row_mutations: Vec<IntentRowMutation>",
+        "pub fn row_mutation(mut self, mutation: IntentRowMutation) -> Self",
+    ] {
+        assert!(
+            effects.contains(required),
+            "RuntimeEffects should carry intent/live row authority only: {required:?}"
+        );
+    }
+
+    for required in [
+        "pub row_mutations: Vec<ProjectedRowMutation>",
+        "pub fn row_mutation(mut self, mutation: ProjectedRowMutation) -> Self",
+        "validate_projection_runtime_effects_for_admission(",
+        "validate_no_intent_row_mutations_from_projection(effects)",
+        "commit_projection_runtime_effects_in_tx(",
+        "tx.apply_projected_row_mutations_in_tx(projected_row_mutations)",
+    ] {
+        assert!(
+            project_fact.contains(required),
+            "ProjectionOutput and projection commit should carry projected row authority: {required:?}"
+        );
+    }
+
+    for forbidden in [
+        "self.effects.row_mutations.push(mutation)",
+        "commit_runtime_effects_in_tx(\n            tx.db(),\n            &projection.runtime_effects,",
+    ] {
+        assert!(
+            !project_fact.contains(forbidden),
+            "projection should not use the generic intent row path: {forbidden:?}"
+        );
+    }
+}
+
+#[test]
 fn poc10_root_exports_protocol_owned_manifests() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
 
@@ -512,6 +566,7 @@ fn poc10_projector_output_contract_emits_context_time_wakes_and_intents() {
         needs,
         offers,
         time_wakes,
+        row_mutations,
         effects,
     } = topo::core::project_fact::ProjectionOutput::default();
 
@@ -519,6 +574,7 @@ fn poc10_projector_output_contract_emits_context_time_wakes_and_intents() {
     assert!(needs.is_empty());
     assert!(offers.is_empty());
     assert!(time_wakes.is_empty());
+    assert!(row_mutations.is_empty());
     assert!(effects.row_mutations.is_empty());
     assert!(effects.intents.is_empty());
     assert!(effects.local_intents.is_empty());
@@ -1060,7 +1116,7 @@ fn poc10_target_projectors_do_not_write_store_rows_directly() {
 
     assert!(
         offenders.is_empty(),
-        "poc-10 target projectors must not write store rows directly; emit RowMutation values through ProjectionOutput::effects instead:\n{}",
+        "poc-10 target projectors must not write store rows directly; emit ProjectedRowMutation values through ProjectionOutput::row_mutation instead:\n{}",
         offenders.join("\n")
     );
 }

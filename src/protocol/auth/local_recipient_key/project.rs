@@ -197,9 +197,9 @@ pub mod adapt {
 
 use crate::core::context::{ContextNeed, ContextOfferClaim};
 use crate::core::facts::Fact;
-use crate::core::intents::{RowMutation, TableDeleteWhere, TableInsert, Value};
+use crate::core::intents::{TableDeleteWhere, TableInsert, Value};
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, ProjectedRowMutation, ProjectionContext, ProjectionOutput, Projector,
 };
 use crate::protocol::auth::key_wrap::project::{matched_payload_fact, require_local_scope};
 use crate::protocol::auth::recipient_key;
@@ -289,7 +289,7 @@ fn local_recipient_key(
     // 3. Materialize: offer local-recipient context or self-purge.
     if is_superseded {
         return Ok(output
-            .row_mutation(RowMutation::DeleteWhere(TableDeleteWhere {
+            .row_mutation(ProjectedRowMutation::DeleteWhere(TableDeleteWhere {
                 table: LOCAL_RECIPIENT_KEY_ROWS,
                 columns: &["workspace_id", "recipient_key_id"],
                 values: vec![
@@ -301,7 +301,7 @@ fn local_recipient_key(
     }
 
     Ok(output
-        .row_mutation(RowMutation::InsertValues(TableInsert {
+        .row_mutation(ProjectedRowMutation::InsertValues(TableInsert {
             table: LOCAL_RECIPIENT_KEY_ROWS,
             columns: &[
                 "workspace_id",

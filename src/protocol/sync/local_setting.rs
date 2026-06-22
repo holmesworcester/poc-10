@@ -8,9 +8,9 @@ use crate::core::cli::{encode_hex_32, CliArgs, CliOutput};
 use crate::core::command::{AuthoredFacts, CommandClock};
 use crate::core::db::{Db, TableInsert, TableName, TypedTableSchema, Value};
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::intents::RowMutation;
 use crate::core::project_fact::{
-    verify_fact_id, FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    verify_fact_id, FactProjectorInfo, ProjectedRowMutation, ProjectionContext, ProjectionOutput,
+    Projector,
 };
 use rusqlite::{OptionalExtension, Row};
 
@@ -101,8 +101,11 @@ impl Projector for SyncLocalSettingProjector {
         if fact.scope != FactScope::Local {
             return Err("sync local setting fact must have local scope".to_string());
         }
-        Ok(ProjectionOutput::new()
-            .row_mutation(RowMutation::InsertValues(setting_row(fact.id, &setting))))
+        Ok(
+            ProjectionOutput::new().row_mutation(ProjectedRowMutation::InsertValues(setting_row(
+                fact.id, &setting,
+            ))),
+        )
     }
 }
 
@@ -384,11 +387,10 @@ mod tests {
         SyncLocalSettingProjector::new()
             .project(&older, &ProjectionContext::default())
             .expect("project older")
-            .effects
             .row_mutations
             .into_iter()
             .for_each(|mutation| {
-                if let RowMutation::InsertValues(row) = mutation {
+                if let ProjectedRowMutation::InsertValues(row) = mutation {
                     store
                         .write_transaction(|tx| tx.insert_values_in_tx(&row).map(|_| ()))
                         .expect("insert older");
@@ -397,11 +399,10 @@ mod tests {
         SyncLocalSettingProjector::new()
             .project(&newer, &ProjectionContext::default())
             .expect("project newer")
-            .effects
             .row_mutations
             .into_iter()
             .for_each(|mutation| {
-                if let RowMutation::InsertValues(row) = mutation {
+                if let ProjectedRowMutation::InsertValues(row) = mutation {
                     store
                         .write_transaction(|tx| tx.insert_values_in_tx(&row).map(|_| ()))
                         .expect("insert newer");

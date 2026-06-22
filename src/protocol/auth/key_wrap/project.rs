@@ -228,9 +228,8 @@ pub mod adapt {
 
 use crate::core::context::{ContextKey, ContextNeed, ContextOffer, ContextOfferClaim, Role};
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::intents::RowMutation;
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, ProjectedRowMutation, ProjectionContext, ProjectionOutput, Projector,
 };
 use crate::protocol::auth;
 use crate::protocol::auth::key_wrap_recovery::key_wrap_recovery_fact;
@@ -946,11 +945,13 @@ fn key_wrap(
     }
     output = share_fact_with_sync(
         materialized_output
-            .row_mutation(RowMutation::InsertValues(key_wrap_insert(KeyWrapRow {
-                key_wrap_id: fact.id,
-                signer_public_key,
-                wrap: wrap.clone(),
-            })?))
+            .row_mutation(ProjectedRowMutation::InsertValues(key_wrap_insert(
+                KeyWrapRow {
+                    key_wrap_id: fact.id,
+                    signer_public_key,
+                    wrap: wrap.clone(),
+                },
+            )?))
             .offer(ContextOfferClaim::range(
                 "sync_exact_fact",
                 scope.clone(),
@@ -1055,7 +1056,7 @@ mod projector_tests {
             wrap.recipient_key_id,
         )));
         assert!(output.offers.is_empty());
-        assert!(output.effects.row_mutations.is_empty());
+        assert!(output.row_mutations.is_empty());
         assert!(output.effects.facts.is_empty());
     }
 

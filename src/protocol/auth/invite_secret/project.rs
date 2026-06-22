@@ -242,9 +242,8 @@ pub mod adapt {
 //      connection invite-secret context offers.
 
 use crate::core::facts::{Fact, FactScope};
-use crate::core::intents::RowMutation;
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, ProjectedRowMutation, ProjectionContext, ProjectionOutput, Projector,
 };
 
 use super::invite_secret_row;
@@ -281,7 +280,6 @@ impl InviteSecretProjector {
 mod tests {
     use super::*;
     use crate::core::context::ContextOffer;
-    use crate::core::intents::RowMutation;
     use crate::protocol::auth::invite_secret::encode;
     use crate::protocol::auth::invite_secret::fact::InviteSecretFact;
     use crate::protocol::auth::invite_secret::INVITE_SECRET_ROWS;
@@ -330,10 +328,12 @@ mod tests {
             ]
         );
         assert_eq!(
-            output.effects.row_mutations,
-            vec![RowMutation::InsertValues(invite_secret_row(&secret))]
+            output.row_mutations,
+            vec![ProjectedRowMutation::InsertValues(invite_secret_row(
+                &secret
+            ))]
         );
-        let RowMutation::InsertValues(insert) = &output.effects.row_mutations[0] else {
+        let ProjectedRowMutation::InsertValues(insert) = &output.row_mutations[0] else {
             panic!("invite secret projector should insert its row");
         };
         assert_eq!(insert.table, INVITE_SECRET_ROWS);
@@ -396,6 +396,8 @@ impl InviteSecretProjector {
                 fact.id,
                 fact.id,
             ))
-            .row_mutation(RowMutation::InsertValues(invite_secret_row(&invite_secret))))
+            .row_mutation(ProjectedRowMutation::InsertValues(invite_secret_row(
+                &invite_secret,
+            ))))
     }
 }

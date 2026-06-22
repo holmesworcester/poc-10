@@ -236,9 +236,8 @@ pub mod adapt {
 //      response round.
 
 use crate::core::facts::Fact;
-use crate::core::intents::RowMutation;
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, ProjectedRowMutation, ProjectionContext, ProjectionOutput, Projector,
 };
 use crate::protocol::sync::send_compare_response::{
     send_sync_compare_response_intent, SendSyncCompareResponse,
@@ -284,7 +283,7 @@ impl SyncCompareProjector {
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 3. Materialize.
-        let output = ProjectionOutput::new().row_mutation(RowMutation::InsertValues(
+        let output = ProjectionOutput::new().row_mutation(ProjectedRowMutation::InsertValues(
             sync_compare_row(fact.id, &compare),
         ));
         if context.is_replay() {

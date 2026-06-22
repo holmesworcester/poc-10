@@ -37,7 +37,10 @@ use crate::core::facts::{Fact, FactId, FactScope};
 use std::collections::BTreeMap;
 use std::fmt;
 
-pub use crate::core::db::{RowMutation, TableDeleteWhere, TableInsert, TypedTableSchema, Value};
+pub use crate::core::db::{
+    IntentRowMutation, ProjectedRowMutation, RowMutation, TableDeleteWhere, TableInsert,
+    TypedTableSchema, Value,
+};
 
 /// Stable queue routing key for an intent handler.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -287,8 +290,8 @@ mod tests {
         };
 
         let output = RuntimeEffects::new()
-            .row_mutation(RowMutation::InsertValues(insert.clone()))
-            .row_mutation(RowMutation::DeleteWhere(delete.clone()))
+            .row_mutation(IntentRowMutation::InsertValues(insert.clone()))
+            .row_mutation(IntentRowMutation::DeleteWhere(delete.clone()))
             .intent(Intent::new(
                 IntentKind::new("followup").unwrap(),
                 b"key",
@@ -298,8 +301,8 @@ mod tests {
         assert_eq!(
             output.row_mutations,
             vec![
-                RowMutation::InsertValues(insert),
-                RowMutation::DeleteWhere(delete)
+                IntentRowMutation::InsertValues(insert),
+                IntentRowMutation::DeleteWhere(delete)
             ]
         );
         assert_eq!(output.intents.len(), 1);

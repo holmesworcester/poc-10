@@ -220,9 +220,9 @@ pub mod adapt {
 
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::Value;
-use crate::core::intents::{RowMutation, TableDeleteWhere, TableInsert};
+use crate::core::intents::{TableDeleteWhere, TableInsert};
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, ProjectedRowMutation, ProjectionContext, ProjectionOutput, Projector,
 };
 
 use crate::protocol::auth::signature;
@@ -431,7 +431,7 @@ impl ContentReactionProjector {
         Ok(share_fact_with_sync(
             ProjectionOutput::new()
                 .need(target_deletion_need)
-                .row_mutation(RowMutation::InsertValues(row)),
+                .row_mutation(ProjectedRowMutation::InsertValues(row)),
             reaction.workspace_id,
             fact,
             context_have,
@@ -496,7 +496,7 @@ fn validate_author_user(
 }
 
 fn delete_reaction_projection(workspace_id: FactId, reaction_id: FactId) -> ProjectionOutput {
-    ProjectionOutput::new().row_mutation(RowMutation::DeleteWhere(reaction_delete(
+    ProjectionOutput::new().row_mutation(ProjectedRowMutation::DeleteWhere(reaction_delete(
         workspace_id,
         reaction_id,
     )))
@@ -638,7 +638,7 @@ mod tests {
             ])
         );
         assert!(output.offers.is_empty());
-        assert!(output.effects.row_mutations.is_empty());
+        assert!(output.row_mutations.is_empty());
     }
 
     #[test]

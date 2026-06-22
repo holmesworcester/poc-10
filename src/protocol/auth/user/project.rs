@@ -232,9 +232,8 @@ pub mod adapt {
 //      fact with the workspace.
 
 use crate::core::facts::{Fact, FactScope};
-use crate::core::intents::RowMutation;
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, ProjectedRowMutation, ProjectionContext, ProjectionOutput, Projector,
 };
 use crate::protocol::auth::{signature, user_invite};
 use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
@@ -338,7 +337,7 @@ impl UserProjector {
                     fact.id,
                     fact.id,
                 ))
-                .row_mutation(RowMutation::InsertValues(user_row(
+                .row_mutation(ProjectedRowMutation::InsertValues(user_row(
                     fact.id,
                     user_invite_id,
                     &user,

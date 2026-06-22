@@ -14,8 +14,9 @@
 //!
 //! The first exported path below is the one fact families use most often:
 //! declare a `TypedTableSchema`, build `TableInsert` or `TableDeleteWhere`
-//! values from decoded facts, emit `RowMutation`s, and keep direct read SQL in
-//! the owning query module.
+//! values from decoded facts, emit `ProjectedRowMutation` or
+//! `IntentRowMutation` wrappers, and keep direct read SQL in the owning query
+//! module.
 //!
 //! The storage-version marker is protocol-owned state. A `SchemaSource` may
 //! declare a `StorageVersionSource`: the marker table, the version column, and
@@ -34,7 +35,8 @@
 //!
 //! - `Db` is the reusable SQLite handle and transaction boundary.
 //! - `TableName`, `TypedTableSchema`, `TableInsert`, `TableDeleteWhere`,
-//!   `RowMutation`, and `Value` are the typed-row mutation vocabulary.
+//!   `ProjectedRowMutation`, `IntentRowMutation`, `RowMutation`, and `Value`
+//!   are the typed-row mutation vocabulary.
 //! - `SchemaSource`, `StorageVersionSource`, and `ReplayTables` let runtime
 //!   owners declare schema, upgrade-marker, and rebuild lifecycle metadata.
 //! - The crate-visible quoting helpers are for modules that own direct SQL but
@@ -171,16 +173,54 @@ impl TypedTableSchema {
     }
 }
 
-/// Row-level mutations a command, projector, or handler can request.
+/// Raw typed-row mutation vocabulary.
 ///
-/// Core validates the target table against the runtime description before any
-/// mutation commits. The module that constructs the mutation owns the row
-/// layout and semantic meaning.
+/// This is the shared SQLite shape. Production runtime boundaries wrap it as a
+/// projected or intent row mutation before commit, so proofs can tell which
+/// worker had authority to publish the row.
 ///
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RowMutation {
     InsertValues(TableInsert),
     DeleteWhere(TableDeleteWhere),
+}
+
+/// Row mutation emitted by a fact projector.
+///
+/// If a projected row is visible after projection, the proof path should start
+/// from `ProjectionWriteTx` and this type, not from a generic SQL write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectedRowMutation {
+    InsertValues(TableInsert),
+    DeleteWhere(TableDeleteWhere),
+}
+
+impl ProjectedRowMutation {
+    pub(crate) fn table(&self) -> TableName {
+        match self {
+            Self::InsertValues(insert) => insert.table,
+            Self::DeleteWhere(delete) => delete.table,
+        }
+    }
+}
+
+/// Row mutation emitted by intent handling or another live runtime boundary.
+///
+/// These rows may be transactional handler state, but they are not projector
+/// read-model rows unless the handler explicitly owns that table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IntentRowMutation {
+    InsertValues(TableInsert),
+    DeleteWhere(TableDeleteWhere),
+}
+
+impl IntentRowMutation {
+    pub(crate) fn table(&self) -> TableName {
+        match self {
+            Self::InsertValues(insert) => insert.table,
+            Self::DeleteWhere(delete) => delete.table,
+        }
+    }
 }
 
 // =============================================================================
@@ -281,10 +321,11 @@ impl Db {
             .map(|count| count as usize)
     }
 
-    /// Apply validated row mutations inside the caller's transaction.
+    /// Apply raw row mutations inside a test transaction.
     ///
-    /// Projection and dispatch own the larger commit order. Db owns the SQL
-    /// mechanics for typed table inserts/deletes.
+    /// Production commit paths use the projected or intent wrappers below so
+    /// write authority remains visible in the type signature.
+    #[cfg(test)]
     pub(crate) fn apply_row_mutations_in_tx(
         &self,
         mutations: &[RowMutation],
@@ -295,6 +336,42 @@ impl Db {
                     self.insert_values_in_tx(insert)?;
                 }
                 RowMutation::DeleteWhere(delete) => {
+                    self.delete_where_in_tx(delete)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply projection-owned row mutations inside the caller's transaction.
+    pub(crate) fn apply_projected_row_mutations_in_tx(
+        &self,
+        mutations: &[ProjectedRowMutation],
+    ) -> rusqlite::Result<()> {
+        for mutation in mutations {
+            match mutation {
+                ProjectedRowMutation::InsertValues(insert) => {
+                    self.insert_values_in_tx(insert)?;
+                }
+                ProjectedRowMutation::DeleteWhere(delete) => {
+                    self.delete_where_in_tx(delete)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply intent-owned row mutations inside the caller's transaction.
+    pub(crate) fn apply_intent_row_mutations_in_tx(
+        &self,
+        mutations: &[IntentRowMutation],
+    ) -> rusqlite::Result<()> {
+        for mutation in mutations {
+            match mutation {
+                IntentRowMutation::InsertValues(insert) => {
+                    self.insert_values_in_tx(insert)?;
+                }
+                IntentRowMutation::DeleteWhere(delete) => {
                     self.delete_where_in_tx(delete)?;
                 }
             }

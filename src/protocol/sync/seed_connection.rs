@@ -167,7 +167,7 @@ mod tests {
     use crate::core::crypto;
     use crate::core::db::Db;
     use crate::core::facts::{FactScope, ScopeKind};
-    use crate::core::intents::RowMutation;
+    use crate::core::project_fact::ProjectedRowMutation;
     use crate::core::project_fact::{ProjectionContext, Projector};
     use crate::core::schema::CORE_SCHEMA_SOURCE;
     use crate::protocol::auth::endpoint::{self as endpoint_rows, fact::EndpointFact};
@@ -449,11 +449,10 @@ mod tests {
             .project(&fact, &ProjectionContext::default())
             .expect("project setting");
         let rows = output
-            .effects
             .row_mutations
             .into_iter()
             .filter_map(|mutation| match mutation {
-                RowMutation::InsertValues(row) => Some(row),
+                ProjectedRowMutation::InsertValues(row) => Some(row),
                 _ => None,
             })
             .collect::<Vec<_>>();

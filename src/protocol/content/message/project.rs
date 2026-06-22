@@ -264,9 +264,10 @@ pub mod adapt {
 use crate::core::context::{ContextKey, ContextKeyPart, ContextNeed};
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId};
-use crate::core::intents::{RowMutation, TableDeleteWhere, TableInsert, TypedTableSchema, Value};
+use crate::core::intents::{TableDeleteWhere, TableInsert, TypedTableSchema, Value};
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector, TimeWake,
+    FactProjectorInfo, ProjectedRowMutation, ProjectionContext, ProjectionOutput, Projector,
+    TimeWake,
 };
 use crate::protocol::auth;
 use crate::protocol::auth::local_history_node_secret::project as coverage;
@@ -622,10 +623,10 @@ impl ContentMessageProjector {
                     fact.id,
                     fact.id,
                 ))
-                .row_mutation(RowMutation::InsertValues(content_message_row(
+                .row_mutation(ProjectedRowMutation::InsertValues(content_message_row(
                     fact.id, &message,
                 )))
-                .row_mutation(RowMutation::InsertValues(opened_message_row(
+                .row_mutation(ProjectedRowMutation::InsertValues(opened_message_row(
                     OpenedMessageRow {
                         workspace_id: message.workspace_id,
                         message_id: fact.id,
@@ -874,18 +875,18 @@ fn expired_output(
 ) -> ProjectionOutput {
     retract_fact_from_sync(
         ProjectionOutput::new()
-            .row_mutation(RowMutation::InsertValues(message_tombstone_row(
+            .row_mutation(ProjectedRowMutation::InsertValues(message_tombstone_row(
                 message.workspace_id,
                 message_id,
                 message.author_user_id,
                 message.created_at_ms,
             )))
-            .row_mutation(RowMutation::DeleteWhere(message_row_delete(
+            .row_mutation(ProjectedRowMutation::DeleteWhere(message_row_delete(
                 read_models::CONTENT_MESSAGES,
                 message.workspace_id,
                 message_id,
             )))
-            .row_mutation(RowMutation::DeleteWhere(message_row_delete(
+            .row_mutation(ProjectedRowMutation::DeleteWhere(message_row_delete(
                 read_models::OPENED_MESSAGES,
                 message.workspace_id,
                 message_id,
@@ -904,18 +905,20 @@ fn retired_output(
 ) -> ProjectionOutput {
     retract_fact_from_sync(
         ProjectionOutput::new()
-            .row_mutation(RowMutation::InsertValues(message_tombstone_row_at_minute(
-                message.workspace_id,
-                message_id,
-                message.author_user_id,
-                floor_minute.saturating_sub(1),
-            )))
-            .row_mutation(RowMutation::DeleteWhere(message_row_delete(
+            .row_mutation(ProjectedRowMutation::InsertValues(
+                message_tombstone_row_at_minute(
+                    message.workspace_id,
+                    message_id,
+                    message.author_user_id,
+                    floor_minute.saturating_sub(1),
+                ),
+            ))
+            .row_mutation(ProjectedRowMutation::DeleteWhere(message_row_delete(
                 read_models::CONTENT_MESSAGES,
                 message.workspace_id,
                 message_id,
             )))
-            .row_mutation(RowMutation::DeleteWhere(message_row_delete(
+            .row_mutation(ProjectedRowMutation::DeleteWhere(message_row_delete(
                 read_models::OPENED_MESSAGES,
                 message.workspace_id,
                 message_id,
@@ -933,18 +936,18 @@ fn author_deletion_output(
 ) -> ProjectionOutput {
     retract_fact_from_sync(
         ProjectionOutput::new()
-            .row_mutation(RowMutation::InsertValues(message_tombstone_row(
+            .row_mutation(ProjectedRowMutation::InsertValues(message_tombstone_row(
                 message.workspace_id,
                 message_id,
                 message.author_user_id,
                 message.created_at_ms,
             )))
-            .row_mutation(RowMutation::DeleteWhere(message_row_delete(
+            .row_mutation(ProjectedRowMutation::DeleteWhere(message_row_delete(
                 read_models::CONTENT_MESSAGES,
                 message.workspace_id,
                 message_id,
             )))
-            .row_mutation(RowMutation::DeleteWhere(message_row_delete(
+            .row_mutation(ProjectedRowMutation::DeleteWhere(message_row_delete(
                 read_models::OPENED_MESSAGES,
                 message.workspace_id,
                 message_id,
@@ -1050,7 +1053,7 @@ mod projector_tests {
 
     use topo::core::crypto;
     use topo::core::facts::{Fact, FactScope};
-    use topo::core::intents::RowMutation;
+    use topo::core::project_fact::ProjectedRowMutation;
     use topo::core::project_fact::{MatchedContext, ProjectionContext, Projector, TimeRange};
     use topo::protocol::auth::endpoint_shared::{
         encode as endpoint_shared_layout,
@@ -1072,11 +1075,12 @@ mod projector_tests {
     macro_rules! put_row {
         ($output:expr, $table:expr) => {
             $output
-                .effects
                 .row_mutations
                 .iter()
                 .find_map(|mutation| match mutation {
-                    RowMutation::InsertValues(row) if row.table == $table => Some(row.clone()),
+                    ProjectedRowMutation::InsertValues(row) if row.table == $table => {
+                        Some(row.clone())
+                    }
                     _ => None,
                 })
         };
@@ -1085,11 +1089,10 @@ mod projector_tests {
     macro_rules! put_delete {
         ($output:expr, $table:expr) => {
             $output
-                .effects
                 .row_mutations
                 .iter()
                 .find_map(|mutation| match mutation {
-                    RowMutation::DeleteWhere(delete) if delete.table == $table => {
+                    ProjectedRowMutation::DeleteWhere(delete) if delete.table == $table => {
                         Some(delete.clone())
                     }
                     _ => None,
@@ -1158,7 +1161,7 @@ mod projector_tests {
             share.context_have, expected_context_have,
             "sync keeps validated dependency facts without keeping live validation needs"
         );
-        assert_eq!(output.effects.row_mutations.len(), 2);
+        assert_eq!(output.row_mutations.len(), 2);
 
         let row = put_row!(output, read_models::CONTENT_MESSAGE_ROWS).expect("content message row");
         assert_eq!(

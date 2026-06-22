@@ -15,7 +15,8 @@ use std::net::SocketAddr;
 use crate::core::db::Db;
 use crate::core::effects::RuntimeEffects;
 use crate::core::intents::{
-    HandlerContext, HandlerError, HandlerResult, Intent, IntentHandler, IntentKind, RowMutation,
+    HandlerContext, HandlerError, HandlerResult, Intent, IntentHandler, IntentKind,
+    IntentRowMutation,
 };
 use crate::core::network::{self, NetworkTarget, OutgoingFrame};
 use crate::core::runtime::RecurringIntentContext;
@@ -227,7 +228,7 @@ impl IntentHandler for MaintainConnectionsHandler {
             effects = effects
                 .fact(attempt.ephemeral_secret_fact)
                 .fact(attempt.request_fact)
-                .row_mutation(RowMutation::InsertValues(
+                .row_mutation(IntentRowMutation::InsertValues(
                     request::bootstrap_connection_attempt_row(
                         peer.invite_accepted_fact_id,
                         attempt.request_id,
@@ -379,7 +380,7 @@ mod tests {
         assert!(effects.row_mutations.iter().any(|mutation| {
             matches!(
                 mutation,
-                RowMutation::InsertValues(row) if row.table == request::BOOTSTRAP_CONNECTION_ATTEMPT_ROWS
+                IntentRowMutation::InsertValues(row) if row.table == request::BOOTSTRAP_CONNECTION_ATTEMPT_ROWS
             )
         }));
         assert!(effects.local_intents.is_empty());

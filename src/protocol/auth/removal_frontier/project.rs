@@ -183,9 +183,9 @@ pub mod adapt {
 
 use crate::core::context::{ContextNeed, ContextOfferClaim};
 use crate::core::facts::Fact;
-use crate::core::intents::{RowMutation, TableInsert, Value};
+use crate::core::intents::{TableInsert, Value};
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, ProjectedRowMutation, ProjectionContext, ProjectionOutput, Projector,
 };
 use crate::protocol::auth;
 use crate::protocol::auth::key_wrap::project::require_fact_scope;
@@ -299,7 +299,7 @@ impl RemovalFrontierProjector {
             fact,
             context_have,
         )
-        .row_mutation(RowMutation::InsertValues(TableInsert {
+        .row_mutation(ProjectedRowMutation::InsertValues(TableInsert {
             table: REMOVAL_FRONTIER_ROWS,
             columns: &[
                 "workspace_id",

@@ -9,7 +9,8 @@
 use crate::core::effects::StorageRequirement;
 use crate::core::facts::{Fact, FactScope};
 use crate::core::project_fact::{
-    verify_fact_id, FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    verify_fact_id, FactProjectorInfo, ProjectedRowMutation, ProjectionContext, ProjectionOutput,
+    Projector,
 };
 
 use super::fact::UpdateFact;
@@ -51,9 +52,9 @@ impl Projector for UpdateProjector {
         // resettable derived/runtime state, then replay retained facts.
         Ok(ProjectionOutput::new()
             .version_replay_rebuild()
-            .row_mutation(crate::core::intents::RowMutation::InsertValues(
-                protocol_version_row(fact.id, &update),
-            )))
+            .row_mutation(ProjectedRowMutation::InsertValues(protocol_version_row(
+                fact.id, &update,
+            ))))
     }
 }
 
@@ -114,7 +115,7 @@ mod tests {
             .project(&fact, &ProjectionContext::default())
             .expect("project live update");
         assert!(live.effects.version_replay_rebuild);
-        assert_eq!(live.effects.row_mutations.len(), 1);
+        assert_eq!(live.row_mutations.len(), 1);
 
         let replay = UpdateProjector::new()
             .project(

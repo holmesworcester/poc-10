@@ -879,7 +879,7 @@ mod tests {
     use crate::core::effects::{RuntimeEffects, StorageRequirement};
     use crate::core::facts::{Fact, FactScope};
     use crate::core::intents::{
-        HandlerError, HandlerResult, IntentKind, RowMutation, TableInsert, Value,
+        HandlerError, HandlerResult, IntentKind, IntentRowMutation, TableInsert, Value,
     };
     use crate::core::schema::{
         CORE_SCHEMA_SOURCE, INCOMING_FACTS, INTENT_CONTEXT, PENDING_PROJECTION,
@@ -1599,7 +1599,7 @@ mod tests {
     impl IntentHandler for InvalidOutputHandler {
         fn handle(&self, _intent: &Intent, _context: &HandlerContext<'_>) -> HandlerResult {
             Ok(
-                RuntimeEffects::new().row_mutation(RowMutation::InsertValues(TableInsert {
+                RuntimeEffects::new().row_mutation(IntentRowMutation::InsertValues(TableInsert {
                     table: TEST_TABLE,
                     columns: &["owner"],
                     values: vec![Value::Bytes(b"row-key".to_vec())],
@@ -1624,7 +1624,7 @@ mod tests {
                 )
                 .map_err(|err| HandlerError::fatal(format!("write handler state: {err}")))?;
             Ok(
-                RuntimeEffects::new().row_mutation(RowMutation::InsertValues(TableInsert {
+                RuntimeEffects::new().row_mutation(IntentRowMutation::InsertValues(TableInsert {
                     table: TEST_TABLE,
                     columns: &["owner"],
                     values: vec![Value::Bytes(b"row-key".to_vec())],

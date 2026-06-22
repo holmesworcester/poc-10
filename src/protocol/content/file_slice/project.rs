@@ -231,11 +231,11 @@ pub mod adapt {
 use crate::core::context::ContextNeed;
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId};
+use crate::core::intents::TableDeleteWhere;
 use crate::core::intents::TableInsert;
 use crate::core::intents::Value;
-use crate::core::intents::{RowMutation, TableDeleteWhere};
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, ProjectedRowMutation, ProjectionContext, ProjectionOutput, Projector,
 };
 
 use crate::protocol::auth::signature;
@@ -414,11 +414,13 @@ impl ContentFileSliceProjector {
                 ProjectionOutput::new()
                     .need(file_deletion_need)
                     .need(parent_deletion_need)
-                    .row_mutation(RowMutation::DeleteWhere(content_file_slice_delete(
-                        slice.workspace_id,
-                        slice.file_id,
-                        slice.slice_index,
-                    )))
+                    .row_mutation(ProjectedRowMutation::DeleteWhere(
+                        content_file_slice_delete(
+                            slice.workspace_id,
+                            slice.file_id,
+                            slice.slice_index,
+                        ),
+                    ))
                     .purge_self(fact.id),
                 slice.workspace_id,
                 fact.id,
@@ -433,11 +435,13 @@ impl ContentFileSliceProjector {
                 ProjectionOutput::new()
                     .need(file_deletion_need)
                     .need(parent_deletion_need)
-                    .row_mutation(RowMutation::DeleteWhere(content_file_slice_delete(
-                        slice.workspace_id,
-                        slice.file_id,
-                        slice.slice_index,
-                    )))
+                    .row_mutation(ProjectedRowMutation::DeleteWhere(
+                        content_file_slice_delete(
+                            slice.workspace_id,
+                            slice.file_id,
+                            slice.slice_index,
+                        ),
+                    ))
                     .purge_self(fact.id),
                 slice.workspace_id,
                 fact.id,
@@ -460,7 +464,7 @@ impl ContentFileSliceProjector {
             ProjectionOutput::new()
                 .need(file_deletion_need)
                 .need(parent_deletion_need)
-                .row_mutation(RowMutation::InsertValues(content_file_slice_row(
+                .row_mutation(ProjectedRowMutation::InsertValues(content_file_slice_row(
                     fact.id,
                     &slice,
                     verified_ciphertext,
@@ -737,7 +741,7 @@ mod tests {
             roles,
             std::collections::BTreeSet::from(["content_file", "signature_proof"])
         );
-        assert!(output.effects.row_mutations.is_empty());
+        assert!(output.row_mutations.is_empty());
     }
 
     #[test]

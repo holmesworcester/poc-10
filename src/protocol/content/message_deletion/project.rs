@@ -225,9 +225,9 @@ pub mod adapt {
 //      fact_purged offer, and share the deletion fact.
 
 use crate::core::facts::Fact;
-use crate::core::intents::{RowMutation, TableInsert, Value};
+use crate::core::intents::{TableInsert, Value};
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, ProjectedRowMutation, ProjectionContext, ProjectionOutput, Projector,
 };
 
 use crate::protocol::auth::signature;
@@ -374,7 +374,7 @@ impl ContentMessageDeletionProjector {
                         deletion.target_message_id,
                     ),
                 ))
-                .row_mutation(RowMutation::InsertValues(row)),
+                .row_mutation(ProjectedRowMutation::InsertValues(row)),
             deletion.workspace_id,
             fact,
             context_have,
@@ -464,7 +464,7 @@ mod projector_tests {
 
     use topo::core::crypto;
     use topo::core::facts::{Fact, FactId, FactScope};
-    use topo::core::intents::RowMutation;
+    use topo::core::project_fact::ProjectedRowMutation;
     use topo::core::project_fact::{MatchedContext, ProjectionContext, Projector};
     use topo::protocol::auth;
     use topo::protocol::auth::endpoint_shared::{
@@ -528,8 +528,8 @@ mod projector_tests {
         assert_eq!(share.owner_fact_id, fact.id);
         assert_eq!(share.workspace_id, workspace_id);
         assert_eq!(share.context_have, expected_context_have);
-        assert_eq!(output.effects.row_mutations.len(), 1);
-        let RowMutation::InsertValues(stored) = &output.effects.row_mutations[0] else {
+        assert_eq!(output.row_mutations.len(), 1);
+        let ProjectedRowMutation::InsertValues(stored) = &output.row_mutations[0] else {
             panic!("expected insert values mutation");
         };
         assert_eq!(stored.table, MESSAGE_DELETION_ROWS);

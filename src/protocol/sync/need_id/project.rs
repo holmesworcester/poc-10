@@ -189,9 +189,8 @@ pub mod adapt {
 // stale need/have state.
 
 use crate::core::facts::Fact;
-use crate::core::intents::RowMutation;
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, ProjectedRowMutation, ProjectionContext, ProjectionOutput, Projector,
 };
 use crate::protocol::sync::send_requested_fact::{send_requested_fact_intent, SendRequestedFact};
 
@@ -239,7 +238,9 @@ impl SyncNeedIdProjector {
         }
         // 3. Materialize.
         Ok(ProjectionOutput::new()
-            .row_mutation(RowMutation::InsertValues(sync_need_id_row(fact.id, &need)))
+            .row_mutation(ProjectedRowMutation::InsertValues(sync_need_id_row(
+                fact.id, &need,
+            )))
             .intent(send_requested_fact_intent(SendRequestedFact {
                 need_fact_id: fact.id,
             })))
@@ -279,7 +280,7 @@ mod tests {
                 &ProjectionContext::default().with_mode(ProjectionMode::Replay),
             )
             .expect("replay need-id projection");
-        assert!(replayed.effects.row_mutations.is_empty());
+        assert!(replayed.row_mutations.is_empty());
         assert!(replayed.effects.intents.is_empty());
     }
 }

@@ -265,9 +265,8 @@ pub mod adapt {
 //      workspace.
 
 use crate::core::facts::{Fact, FactScope};
-use crate::core::intents::RowMutation;
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, ProjectedRowMutation, ProjectionContext, ProjectionOutput, Projector,
 };
 use crate::protocol::auth;
 use crate::protocol::content::message;
@@ -431,7 +430,7 @@ impl RetentionPolicyProjector {
                 .offer(message::project::retention_floor_offer_claim(
                     policy.workspace_id,
                 ))
-                .row_mutation(RowMutation::InsertValues(row)),
+                .row_mutation(ProjectedRowMutation::InsertValues(row)),
             policy.workspace_id,
             fact,
             context_have,
@@ -529,7 +528,8 @@ mod projector_tests {
 
     use topo::core::crypto;
     use topo::core::facts::{Fact, FactScope};
-    use topo::core::intents::{RowMutation, Value};
+    use topo::core::intents::Value;
+    use topo::core::project_fact::ProjectedRowMutation;
     use topo::core::project_fact::{MatchedContext, ProjectionContext, Projector};
     use topo::protocol::auth;
     use topo::protocol::auth::admin;
@@ -583,14 +583,14 @@ mod projector_tests {
             )
             .expect("project policy");
         assert_eq!(projected.effects.intents.len(), 1);
-        assert_eq!(projected.effects.row_mutations.len(), 1);
+        assert_eq!(projected.row_mutations.len(), 1);
         assert!(projected
             .offers
             .iter()
             .any(|offer| offer.role == "sync_exact_fact"));
         assert_share_intent(&projected.effects.intents, policy.workspace_id, fact.id);
 
-        let row = decode_single_put_row(&projected.effects.row_mutations[0]);
+        let row = decode_single_put_row(&projected.row_mutations[0]);
         assert_eq!(row.workspace_id, policy.workspace_id);
         assert_eq!(row.policy_id, fact.id);
         assert_eq!(row.scope_kind, SCOPE_KIND_WORKSPACE);
@@ -646,7 +646,7 @@ mod projector_tests {
             )
             .expect("matched previous projects");
         assert_share_intent(&projected.effects.intents, policy.workspace_id, fact.id);
-        let row = decode_single_put_row(&projected.effects.row_mutations[0]);
+        let row = decode_single_put_row(&projected.row_mutations[0]);
         assert_eq!(row.scope_kind, SCOPE_KIND_CHANNEL);
         assert_eq!(row.scope_id, [9; 32]);
         assert_eq!(row.supersedes_policy_id, Some(previous_fact.id));
@@ -860,9 +860,9 @@ mod projector_tests {
         }
     }
 
-    fn decode_single_put_row(mutation: &RowMutation) -> queries::RetentionPolicyRow {
+    fn decode_single_put_row(mutation: &ProjectedRowMutation) -> queries::RetentionPolicyRow {
         match mutation {
-            RowMutation::InsertValues(row) if row.table == RETENTION_POLICY_ROWS => {
+            ProjectedRowMutation::InsertValues(row) if row.table == RETENTION_POLICY_ROWS => {
                 queries::RetentionPolicyRow {
                     workspace_id: bytes32(&row.values[0]),
                     scope_kind: u64_value(&row.values[1]) as u8,

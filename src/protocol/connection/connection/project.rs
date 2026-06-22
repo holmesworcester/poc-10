@@ -949,9 +949,9 @@ pub mod adapt {
 use crate::core::context::{ContextNeed, ContextOffer, ContextOfferClaim};
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::intents::{RowMutation, Value};
+use crate::core::intents::Value;
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, ProjectedRowMutation, ProjectionContext, ProjectionOutput, Projector,
 };
 use crate::protocol::connection::close;
 use crate::protocol::connection::connection::{
@@ -1044,7 +1044,7 @@ impl ConnectionProjector {
                 return Err("connection close context must be local".to_string());
             }
             return Ok(ProjectionOutput::new()
-                .row_mutation(RowMutation::DeleteWhere(
+                .row_mutation(ProjectedRowMutation::DeleteWhere(
                     CONNECTION_TABLE.delete_by_key(vec![Value::Bytes(fact.id.to_vec())]),
                 ))
                 .purge_self(fact.id));
@@ -1229,7 +1229,7 @@ fn merge_projection_output(
 fn materialized_output(fact: &Fact, connection: &ConnectionFact) -> ProjectionOutput {
     ProjectionOutput::new()
         .offer(connection_offer_claim(fact.id))
-        .row_mutation(RowMutation::InsertValues(
+        .row_mutation(ProjectedRowMutation::InsertValues(
             connection_row(ConnectionRowFields {
                 connection_id: fact.id,
                 from_endpoint: connection.from_endpoint,
@@ -1541,7 +1541,7 @@ mod tests {
 
         assert!(output.offers.is_empty());
         assert!(output.needs.is_empty());
-        assert!(output.effects.row_mutations.is_empty());
+        assert!(output.row_mutations.is_empty());
         assert!(output.effects.intents.is_empty());
         assert!(output.effects.local_intents.is_empty());
     }

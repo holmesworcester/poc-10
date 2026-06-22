@@ -240,9 +240,9 @@ pub mod adapt {
 
 use crate::core::context::{ContextNeed, ContextOfferClaim};
 use crate::core::facts::Fact;
-use crate::core::intents::{RowMutation, TableInsert, Value};
+use crate::core::intents::{TableInsert, Value};
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, ProjectedRowMutation, ProjectionContext, ProjectionOutput, Projector,
 };
 use crate::protocol::auth::endpoint_shared;
 use crate::protocol::auth::key_wrap::project::{
@@ -411,7 +411,7 @@ fn recipient_key(
         fact,
         context_have,
     );
-    output = output.row_mutation(RowMutation::InsertValues(TableInsert {
+    output = output.row_mutation(ProjectedRowMutation::InsertValues(TableInsert {
         table: RECIPIENT_KEY_ROWS,
         columns: &[
             "workspace_id",

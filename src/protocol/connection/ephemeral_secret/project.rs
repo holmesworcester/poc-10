@@ -241,9 +241,9 @@ pub mod adapt {
 
 use crate::core::context::ContextOfferClaim;
 use crate::core::facts::{Fact, FactScope};
-use crate::core::intents::{RowMutation, Value};
+use crate::core::intents::Value;
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, ProjectedRowMutation, ProjectionContext, ProjectionOutput, Projector,
 };
 
 use super::{connection_ephemeral_secret_row, CONNECTION_EPHEMERAL_SECRET_TABLE};
@@ -310,7 +310,7 @@ impl ConnectionEphemeralSecretProjector {
                 return Err("connection ephemeral close context has empty connection".to_string());
             }
             return Ok(ProjectionOutput::new()
-                .row_mutation(RowMutation::DeleteWhere(
+                .row_mutation(ProjectedRowMutation::DeleteWhere(
                     CONNECTION_EPHEMERAL_SECRET_TABLE
                         .delete_by_key(vec![Value::Bytes(fact.id.to_vec())]),
                 ))
@@ -330,9 +330,9 @@ impl ConnectionEphemeralSecretProjector {
                 FactScope::Local,
                 secret.ephemeral_public_key,
             ))
-            .row_mutation(RowMutation::InsertValues(connection_ephemeral_secret_row(
-                fact.id, &secret,
-            ))))
+            .row_mutation(ProjectedRowMutation::InsertValues(
+                connection_ephemeral_secret_row(fact.id, &secret),
+            )))
     }
 }
 
@@ -420,10 +420,10 @@ mod project_tests {
             vec![close::ephemeral_secret_closed_need(fact.id, fact.id)]
         );
         assert_eq!(
-            output.effects.row_mutations,
-            vec![RowMutation::InsertValues(connection_ephemeral_secret_row(
-                fact.id, &secret,
-            ))]
+            output.row_mutations,
+            vec![ProjectedRowMutation::InsertValues(
+                connection_ephemeral_secret_row(fact.id, &secret,)
+            )]
         );
         assert!(output.effects.intents.is_empty());
         assert!(output.effects.purged_facts.is_empty());
@@ -446,13 +446,13 @@ mod project_tests {
         assert!(output.needs.is_empty());
         assert!(output.offers.is_empty());
         assert_eq!(output.effects.purged_facts, vec![fact.id]);
-        assert_eq!(output.effects.row_mutations.len(), 1);
-        match &output.effects.row_mutations[0] {
-            RowMutation::DeleteWhere(delete) => {
+        assert_eq!(output.row_mutations.len(), 1);
+        match &output.row_mutations[0] {
+            ProjectedRowMutation::DeleteWhere(delete) => {
                 assert_eq!(delete.table, CONNECTION_EPHEMERAL_SECRET_TABLE.table);
                 assert_eq!(delete.values, vec![Value::Bytes(fact.id.to_vec())]);
             }
-            RowMutation::InsertValues(_) => panic!("closed secret should delete its row"),
+            ProjectedRowMutation::InsertValues(_) => panic!("closed secret should delete its row"),
         }
         assert!(output.effects.intents.is_empty());
         assert!(output.time_wakes.is_empty());

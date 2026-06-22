@@ -210,7 +210,7 @@ fn key_wrap_projection_requires_signature_proof_before_shareability() {
             ),
         )
         .expect("project key wrap without signature");
-    assert!(without_signature.effects.row_mutations.is_empty());
+    assert!(without_signature.row_mutations.is_empty());
     assert!(without_signature.effects.intents.is_empty());
     assert!(without_signature
         .needs
@@ -232,7 +232,7 @@ fn key_wrap_projection_requires_signature_proof_before_shareability() {
             ),
         )
         .expect("project key wrap with signature");
-    assert!(!with_signature.effects.row_mutations.is_empty());
+    assert!(!with_signature.row_mutations.is_empty());
     assert!(with_signature
         .offers
         .iter()

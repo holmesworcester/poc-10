@@ -349,9 +349,8 @@ pub mod adapt {
 
 use crate::core::context::{ContextNeed, ContextOffer, ContextOfferClaim};
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::intents::RowMutation;
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, ProjectedRowMutation, ProjectionContext, ProjectionOutput, Projector,
 };
 
 pub fn connection_fact_receipt_for_path(
@@ -443,7 +442,6 @@ impl ConnectionFactReceiptProjector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::intents::RowMutation;
     use crate::protocol::connection::fact_receipt::connection_fact_receipt_row;
     use crate::protocol::connection::fact_receipt::encode;
     use crate::protocol::connection::fact_receipt::fact::{
@@ -493,16 +491,18 @@ mod tests {
             )]
         );
         assert_eq!(
-            output.effects.row_mutations,
-            vec![RowMutation::InsertValues(
+            output.row_mutations,
+            vec![ProjectedRowMutation::InsertValues(
                 connection_fact_receipt_row(fact.id, &receipt).expect("receipt row")
             )]
         );
-        match &output.effects.row_mutations[0] {
-            RowMutation::InsertValues(insert) => {
+        match &output.row_mutations[0] {
+            ProjectedRowMutation::InsertValues(insert) => {
                 assert_eq!(insert.table, CONNECTION_FACT_RECEIPT_ROWS)
             }
-            RowMutation::DeleteWhere(_) => panic!("receipt projection should insert a row"),
+            ProjectedRowMutation::DeleteWhere(_) => {
+                panic!("receipt projection should insert a row")
+            }
         }
         assert!(output.effects.intents.is_empty());
         assert!(output.effects.purged_facts.is_empty());
@@ -552,7 +552,7 @@ impl ConnectionFactReceiptProjector {
             .offer(connection_fact_receipt_offer_claim(
                 received.received_fact_id,
             ))
-            .row_mutation(RowMutation::InsertValues(
+            .row_mutation(ProjectedRowMutation::InsertValues(
                 super::connection_fact_receipt_row(fact.id, &received)?,
             )))
     }

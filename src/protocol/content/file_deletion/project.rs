@@ -214,9 +214,9 @@ pub mod adapt {
 
 use crate::core::context::{ContextKey, ContextKeyPart};
 use crate::core::facts::Fact;
-use crate::core::intents::{RowMutation, TableInsert, Value};
+use crate::core::intents::{TableInsert, Value};
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, ProjectedRowMutation, ProjectionContext, ProjectionOutput, Projector,
 };
 
 use crate::protocol::auth::signature;
@@ -366,7 +366,7 @@ impl ContentFileDeletionProjector {
                     scope,
                     file_purged_key(deletion.target_file_id),
                 ))
-                .row_mutation(RowMutation::InsertValues(row)),
+                .row_mutation(ProjectedRowMutation::InsertValues(row)),
             deletion.workspace_id,
             fact,
             context_have,
@@ -482,7 +482,7 @@ mod tests {
         assert_eq!(share.owner_fact_id, fact.id);
         assert_eq!(share.workspace_id, workspace_id);
         assert_eq!(share.context_have, expected_context_have);
-        assert_eq!(output.effects.row_mutations.len(), 1);
+        assert_eq!(output.row_mutations.len(), 1);
     }
 
     #[test]

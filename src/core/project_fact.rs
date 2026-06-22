@@ -44,8 +44,8 @@
 //! Runtime later drains that work like any other queued fact.
 
 use self::commit_effects::{
-    commit_runtime_effects_in_tx, sqlite_string_error, storage_requirement_satisfied,
-    validate_runtime_effects_for_admission,
+    commit_projection_runtime_effects_in_tx, sqlite_string_error, storage_requirement_satisfied,
+    validate_projection_runtime_effects_for_admission,
 };
 #[cfg(test)]
 use self::context_db::{
@@ -57,6 +57,7 @@ use self::context_db::{
 };
 use crate::core::command::AuthoredFacts;
 use crate::core::context::{ContextNeed, ContextOffer, ContextSet, ContextSetAdditions};
+pub use crate::core::db::ProjectedRowMutation;
 use crate::core::db::{quoted_identifier, quoted_table_name, Db, TableName};
 use crate::core::effects::RuntimeEffects;
 use crate::core::facts::{
@@ -123,6 +124,7 @@ struct PreparedProjection {
     retain_self: bool,
     projected_context: ContextSet,
     time_wakes: Vec<TimeWake>,
+    projected_row_mutations: Vec<ProjectedRowMutation>,
     runtime_effects: RuntimeEffects,
 }
 
@@ -597,6 +599,7 @@ fn prepare_projection(
     let output = routed.output;
     enforce_owner_is_self(&fact, &output)?;
     let projected_context = output.context_set(fact.id);
+    let projected_row_mutations = output.row_mutations;
     let runtime_effects = output.effects;
     validate_version_replay_rebuild_projection_shape(
         &projected_context,
@@ -604,8 +607,9 @@ fn prepare_projection(
         &runtime_effects,
     )?;
     perf::measure_result("projection_validate_effects", || {
-        validate_runtime_effects_for_admission(
+        validate_projection_runtime_effects_for_admission(
             &runtime_effects,
+            &projected_row_mutations,
             allowed_tables,
             registered_intent_kinds,
             fact_admission,
@@ -622,6 +626,7 @@ fn prepare_projection(
         retain_self: output.retain_self,
         projected_context,
         time_wakes: output.time_wakes,
+        projected_row_mutations,
         runtime_effects,
     })
 }
@@ -1293,9 +1298,10 @@ fn commit_projector_emitted_runtime_effects_in_tx(
     fact_admission: Option<FactAdmissionFn>,
 ) -> rusqlite::Result<()> {
     perf::measure_result("projection_commit_runtime_effects", || {
-        commit_runtime_effects_in_tx(
+        commit_projection_runtime_effects_in_tx(
             tx.db(),
             &projection.runtime_effects,
+            &projection.projected_row_mutations,
             allowed_tables,
             registered_intent_kinds,
             fact_admission,
@@ -1441,10 +1447,10 @@ pub(crate) mod commit_effects {
         insert_facts_and_record_matches_with_mode_in_tx, insert_incoming_fact_with_metadata_in_tx,
         insert_priority_facts_and_record_matches_with_mode_in_tx, purge_fact_in_tx,
     };
-    use crate::core::db::{Db, TableName};
+    use crate::core::db::{Db, IntentRowMutation, ProjectedRowMutation, TableName};
     use crate::core::effects::{IncomingMetadata, RuntimeEffects, StorageRequirement};
     use crate::core::facts::Fact;
-    use crate::core::intents::{Intent, RowMutation};
+    use crate::core::intents::Intent;
 
     /// Counts of follow-up work recorded after an effect commit.
     ///
@@ -1475,7 +1481,21 @@ pub(crate) mod commit_effects {
         validate_intents(&effects.local_intents, registered_intent_kinds)?;
         validate_incoming_fact_metadata(effects)?;
         validate_version_replay_rebuild_effect_shape(effects)?;
-        validate_row_mutations(&effects.row_mutations, allowed_tables)?;
+        validate_intent_row_mutations(&effects.row_mutations, allowed_tables)?;
+        Ok(())
+    }
+
+    pub(crate) fn validate_projection_runtime_effects_for_admission(
+        effects: &RuntimeEffects,
+        projected_row_mutations: &[ProjectedRowMutation],
+        allowed_tables: &[TableName],
+        registered_intent_kinds: &[&str],
+        fact_admission: Option<FactAdmissionFn>,
+    ) -> Result<(), String> {
+        validate_runtime_effects(effects, allowed_tables, registered_intent_kinds)?;
+        validate_no_intent_row_mutations_from_projection(effects)?;
+        validate_projected_row_mutations(projected_row_mutations, allowed_tables)?;
+        validate_fact_admissions(effects, fact_admission)?;
         Ok(())
     }
 
@@ -1563,15 +1583,44 @@ pub(crate) mod commit_effects {
     /// A row mutation can only name tables declared by the runtime description; the
     /// module that constructed the mutation still owns column meaning and payload
     /// validation.
-    fn validate_row_mutations(
-        mutations: &[RowMutation],
+    fn validate_no_intent_row_mutations_from_projection(
+        effects: &RuntimeEffects,
+    ) -> Result<(), String> {
+        if effects.row_mutations.is_empty() {
+            Ok(())
+        } else {
+            Err(
+                "projectors must emit projected rows through ProjectionOutput::row_mutation"
+                    .to_string(),
+            )
+        }
+    }
+
+    fn validate_projected_row_mutations(
+        mutations: &[ProjectedRowMutation],
         allowed_tables: &[TableName],
     ) -> Result<(), String> {
-        mutations.iter().try_for_each(|mutation| {
-            let table = match mutation {
-                RowMutation::InsertValues(insert) => insert.table,
-                RowMutation::DeleteWhere(delete) => delete.table,
-            };
+        validate_row_mutation_tables(
+            mutations.iter().map(ProjectedRowMutation::table),
+            allowed_tables,
+        )
+    }
+
+    fn validate_intent_row_mutations(
+        mutations: &[IntentRowMutation],
+        allowed_tables: &[TableName],
+    ) -> Result<(), String> {
+        validate_row_mutation_tables(
+            mutations.iter().map(IntentRowMutation::table),
+            allowed_tables,
+        )
+    }
+
+    fn validate_row_mutation_tables(
+        tables: impl IntoIterator<Item = TableName>,
+        allowed_tables: &[TableName],
+    ) -> Result<(), String> {
+        tables.into_iter().try_for_each(|table| {
             if allowed_tables.contains(&table) {
                 Ok(())
             } else {
@@ -1674,6 +1723,43 @@ pub(crate) mod commit_effects {
         enforce_storage_requirement(tx, effects.storage_requirement)
             .map_err(sqlite_string_error)?;
         validate_fact_admissions(effects, fact_admission).map_err(sqlite_string_error)?;
+        commit_runtime_effects_after_validation_in_tx(tx, effects, replay, allow_rebuild, |tx| {
+            tx.apply_intent_row_mutations_in_tx(&effects.row_mutations)
+        })
+    }
+
+    pub(crate) fn commit_projection_runtime_effects_in_tx(
+        tx: &Db,
+        effects: &RuntimeEffects,
+        projected_row_mutations: &[ProjectedRowMutation],
+        allowed_tables: &[TableName],
+        registered_intent_kinds: &[&str],
+        fact_admission: Option<FactAdmissionFn>,
+        replay: bool,
+        allow_rebuild: bool,
+    ) -> rusqlite::Result<RuntimeEffectCounts> {
+        validate_projection_runtime_effects_for_admission(
+            effects,
+            projected_row_mutations,
+            allowed_tables,
+            registered_intent_kinds,
+            fact_admission,
+        )
+        .map_err(sqlite_string_error)?;
+        enforce_storage_requirement(tx, effects.storage_requirement)
+            .map_err(sqlite_string_error)?;
+        commit_runtime_effects_after_validation_in_tx(tx, effects, replay, allow_rebuild, |tx| {
+            tx.apply_projected_row_mutations_in_tx(projected_row_mutations)
+        })
+    }
+
+    fn commit_runtime_effects_after_validation_in_tx(
+        tx: &Db,
+        effects: &RuntimeEffects,
+        replay: bool,
+        allow_rebuild: bool,
+        apply_row_mutations: impl FnOnce(&Db) -> rusqlite::Result<()>,
+    ) -> rusqlite::Result<RuntimeEffectCounts> {
         for purged in &effects.purged_facts {
             purge_fact_in_tx(tx, *purged)?;
         }
@@ -1704,9 +1790,7 @@ pub(crate) mod commit_effects {
             insert_incoming_fact_with_metadata_in_tx(tx, fact, metadata)?;
         }
 
-        validate_row_mutations(&effects.row_mutations, allowed_tables)
-            .map_err(sqlite_string_error)?;
-        tx.apply_row_mutations_in_tx(&effects.row_mutations)?;
+        apply_row_mutations(tx)?;
 
         let intents = insert_intents_in_tx(
             tx,
@@ -3016,9 +3100,10 @@ pub mod effects {
         context_set_from_projection_parts, ContextKey, ContextNeed, ContextOffer,
         ContextOfferClaim, ContextOfferValue, ContextSet, Role,
     };
+    use crate::core::db::ProjectedRowMutation;
     use crate::core::effects::{IncomingMetadata, RuntimeEffects};
     use crate::core::facts::{Fact, FactId};
-    use crate::core::intents::{Intent, RowMutation};
+    use crate::core::intents::Intent;
 
     const FACT_PURGED_ROLE: &str = "fact_purged";
 
@@ -3162,8 +3247,9 @@ pub mod effects {
     ///
     /// `needs` and `time_wakes` are replacement sets owned by the projected fact.
     /// `offers` are append-only claims that core stores with the projected fact
-    /// id as owner. `effects` are ordinary runtime effects that commit in the
-    /// same transaction after ownership checks pass.
+    /// id as owner. `row_mutations` are projected rows derived by this projector.
+    /// `effects` are the remaining runtime effects that commit in the same
+    /// transaction after ownership checks pass.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct ProjectionOutput {
         /// Whether an incoming input should become a retained fact after successful
@@ -3176,7 +3262,9 @@ pub mod effects {
         pub offers: Vec<ContextOfferClaim>,
         /// Complete replacement time wakes for the projected fact.
         pub time_wakes: Vec<TimeWake>,
-        /// Child facts, self-purge, row mutations, and intents to commit with this projection.
+        /// Projector-owned rows to commit with this projection.
+        pub row_mutations: Vec<ProjectedRowMutation>,
+        /// Child facts, self-purge, and intents to commit with this projection.
         pub effects: RuntimeEffects,
     }
 
@@ -3187,6 +3275,7 @@ pub mod effects {
                 needs: Vec::new(),
                 offers: Vec::new(),
                 time_wakes: Vec::new(),
+                row_mutations: Vec::new(),
                 effects: RuntimeEffects::default(),
             }
         }
@@ -3221,8 +3310,8 @@ pub mod effects {
             self
         }
 
-        pub fn row_mutation(mut self, mutation: RowMutation) -> Self {
-            self.effects.row_mutations.push(mutation);
+        pub fn row_mutation(mut self, mutation: ProjectedRowMutation) -> Self {
+            self.row_mutations.push(mutation);
             self
         }
 

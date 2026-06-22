@@ -220,9 +220,8 @@ pub mod adapt {
 
 use crate::core::context::ContextOfferClaim;
 use crate::core::facts::{Fact, FactScope};
-use crate::core::intents::RowMutation;
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, ProjectedRowMutation, ProjectionContext, ProjectionOutput, Projector,
 };
 use crate::protocol::auth::{invite_accepted, signature};
 use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
@@ -311,7 +310,7 @@ impl WorkspaceProjector {
                     fact.id,
                     fact.id,
                 ))
-                .row_mutation(RowMutation::InsertValues(super::workspace_insert(
+                .row_mutation(ProjectedRowMutation::InsertValues(super::workspace_insert(
                     fact.id, &workspace,
                 ))),
             fact.id,
@@ -370,7 +369,7 @@ mod projector_tests {
             .project(&fact, &ProjectionContext::default())
             .expect("project workspace without context");
 
-        assert!(projected.effects.row_mutations.is_empty());
+        assert!(projected.row_mutations.is_empty());
         assert!(projected.offers.is_empty());
         assert_eq!(projected.needs.len(), 2);
         assert!(projected

@@ -13,7 +13,7 @@
 //! in that command's receipt instead.
 
 use crate::core::facts::{Fact, FactId};
-use crate::core::intents::{Intent, RowMutation};
+use crate::core::intents::{Intent, IntentRowMutation};
 use std::collections::BTreeMap;
 
 /// Storage version contract carried by one effect batch.
@@ -56,8 +56,8 @@ pub struct RuntimeEffects {
     pub incoming_fact_metadata: BTreeMap<FactId, IncomingMetadata>,
     /// Existing facts to remove with their derived core-owned rows.
     pub purged_facts: Vec<FactId>,
-    /// Protocol or core table mutations validated against the runtime allowlist.
-    pub row_mutations: Vec<RowMutation>,
+    /// Intent or live-runtime table mutations validated against the runtime allowlist.
+    pub row_mutations: Vec<IntentRowMutation>,
     /// Durable queued work for handlers.
     pub intents: Vec<Intent>,
     /// Connection-local queued work, dropped on restart.
@@ -131,7 +131,7 @@ impl RuntimeEffects {
         self
     }
 
-    pub fn row_mutation(mut self, mutation: RowMutation) -> Self {
+    pub fn row_mutation(mut self, mutation: IntentRowMutation) -> Self {
         self.row_mutations.push(mutation);
         self
     }

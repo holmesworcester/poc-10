@@ -287,9 +287,8 @@ pub mod adapt {
 
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactScope};
-use crate::core::intents::RowMutation;
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, ProjectedRowMutation, ProjectionContext, ProjectionOutput, Projector,
 };
 use crate::protocol::auth::device_invite;
 use crate::protocol::auth::invite_server;
@@ -385,7 +384,7 @@ impl EndpointSharedProjector {
                     fact.id,
                     fact.id,
                 ))
-                .row_mutation(RowMutation::InsertValues(endpoint_shared_row(
+                .row_mutation(ProjectedRowMutation::InsertValues(endpoint_shared_row(
                     fact.id, &shared,
                 ))),
             shared.workspace_id,
@@ -480,7 +479,6 @@ mod tests {
     use super::*;
     use crate::core::context::ContextOffer;
     use crate::core::facts::FactScope;
-    use crate::core::intents::RowMutation;
     use crate::core::project_fact::{MatchedContext, Projector};
     use crate::protocol::auth::endpoint_shared::fact::EndpointRole;
     use crate::protocol::sync::share_fact_with_sync::decode_share_fact_with_sync;
@@ -516,7 +514,7 @@ mod tests {
             shared_body.signer_id
         )));
         assert!(output.offers.is_empty());
-        assert!(output.effects.row_mutations.is_empty());
+        assert!(output.row_mutations.is_empty());
     }
 
     #[test]
@@ -536,10 +534,10 @@ mod tests {
         assert!(output.offers.iter().any(|offer| {
             offer.role.as_str() == "auth_endpoint_shared" && offer.scope == FactScope::Global
         }));
-        assert_eq!(output.effects.row_mutations.len(), 1);
+        assert_eq!(output.row_mutations.len(), 1);
         assert!(matches!(
-            &output.effects.row_mutations[0],
-            RowMutation::InsertValues(insert) if insert.table == super::super::ENDPOINT_SHARED_ROWS
+            &output.row_mutations[0],
+            ProjectedRowMutation::InsertValues(insert) if insert.table == super::super::ENDPOINT_SHARED_ROWS
         ));
         let share = decode_share_fact_with_sync(&output.effects.intents[0]).expect("share intent");
         assert_eq!(share.workspace_id, WORKSPACE_ID);

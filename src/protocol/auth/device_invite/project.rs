@@ -232,9 +232,8 @@ pub mod adapt {
 
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::intents::RowMutation;
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, ProjectedRowMutation, ProjectionContext, ProjectionOutput, Projector,
 };
 use crate::protocol::auth::device_invite::fact::DeviceInviteFact;
 use crate::protocol::auth::{endpoint_shared, signature, user, user_invite, workspace};
@@ -538,7 +537,7 @@ fn materialized_output(
     let device_invite_key = device_invite_key(invite.user_authority_fact_id, invite.public_key);
     Ok(share_fact_with_sync(
         output
-            .row_mutation(RowMutation::InsertValues(device_invite_row(
+            .row_mutation(ProjectedRowMutation::InsertValues(device_invite_row(
                 fact.id, invite,
             )))
             .offer(crate::core::context::ContextOfferClaim::range(
@@ -580,7 +579,6 @@ mod tests {
     use super::*;
     use crate::core::context::ContextOffer;
     use crate::core::facts::FactScope;
-    use crate::core::intents::RowMutation;
     use crate::core::project_fact::{MatchedContext, Projector};
     use crate::protocol::auth::workspace::author::create_workspace;
     use crate::protocol::sync::share_fact_with_sync::decode_share_fact_with_sync;
@@ -611,7 +609,7 @@ mod tests {
             .expect("signature need")
         );
         assert!(output.offers.is_empty());
-        assert!(output.effects.row_mutations.is_empty());
+        assert!(output.row_mutations.is_empty());
     }
 
     #[test]
@@ -634,10 +632,10 @@ mod tests {
             offer.role.as_str() == "auth_device_invite_key"
                 && offer.scope == workspace::scope(workspace.id)
         }));
-        assert_eq!(output.effects.row_mutations.len(), 1);
+        assert_eq!(output.row_mutations.len(), 1);
         assert!(matches!(
-            &output.effects.row_mutations[0],
-            RowMutation::InsertValues(insert) if insert.table == super::super::DEVICE_INVITE_ROWS
+            &output.row_mutations[0],
+            ProjectedRowMutation::InsertValues(insert) if insert.table == super::super::DEVICE_INVITE_ROWS
         ));
         let share = decode_share_fact_with_sync(&output.effects.intents[0]).expect("share intent");
         assert_eq!(share.workspace_id, workspace.id);

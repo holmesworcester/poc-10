@@ -301,9 +301,9 @@ pub mod adapt {
 
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::Value;
-use crate::core::intents::{RowMutation, TableDeleteWhere, TableInsert};
+use crate::core::intents::{TableDeleteWhere, TableInsert};
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, ProjectedRowMutation, ProjectionContext, ProjectionOutput, Projector,
 };
 
 use crate::protocol::auth::signature;
@@ -530,7 +530,9 @@ impl ContentFileProjector {
                     fact.id,
                     fact.id,
                 ))
-                .row_mutation(RowMutation::InsertValues(content_file_row(fact.id, &file))),
+                .row_mutation(ProjectedRowMutation::InsertValues(content_file_row(
+                    fact.id, &file,
+                ))),
             file.workspace_id,
             fact,
             context_have,
@@ -556,7 +558,7 @@ fn output_with_needs(
 }
 
 fn delete_file_projection(workspace_id: FactId, file_fact_id: FactId) -> ProjectionOutput {
-    ProjectionOutput::new().row_mutation(RowMutation::DeleteWhere(content_file_delete(
+    ProjectionOutput::new().row_mutation(ProjectedRowMutation::DeleteWhere(content_file_delete(
         workspace_id,
         file_fact_id,
     )))
@@ -767,7 +769,7 @@ mod tests {
             ])
         );
         assert!(output.offers.is_empty());
-        assert!(output.effects.row_mutations.is_empty());
+        assert!(output.row_mutations.is_empty());
     }
 
     #[test]

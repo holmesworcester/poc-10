@@ -335,7 +335,7 @@ mod tests {
                 observed.frame_fact_id,
             )]
         );
-        assert!(output.effects.row_mutations.is_empty());
+        assert!(output.row_mutations.is_empty());
         assert!(output.effects.intents.is_empty());
         assert!(output.effects.purged_facts.is_empty());
         assert!(output.time_wakes.is_empty());

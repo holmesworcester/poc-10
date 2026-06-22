@@ -265,9 +265,8 @@ pub mod adapt {
 //      intent-handler work.
 
 use crate::core::facts::{Fact, FactScope};
-use crate::core::intents::RowMutation;
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, ProjectedRowMutation, ProjectionContext, ProjectionOutput, Projector,
 };
 
 use super::{derived_invite_secret_fact_id, invite_accepted_row};
@@ -323,7 +322,7 @@ impl InviteAcceptedProjector {
                 invite_secret_id,
                 invite_secret_id,
             ))
-            .row_mutation(RowMutation::InsertValues(invite_accepted_row(
+            .row_mutation(ProjectedRowMutation::InsertValues(invite_accepted_row(
                 fact.id, &accepted,
             )?));
         if accepted.identity_scope {

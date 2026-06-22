@@ -227,9 +227,9 @@ pub mod adapt {
 
 use crate::core::context::{ContextKey, ContextNeed, ContextOffer, ContextOfferClaim, Role};
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::intents::{RowMutation, TableDeleteWhere, TableInsert, Value};
+use crate::core::intents::{TableDeleteWhere, TableInsert, Value};
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, ProjectedRowMutation, ProjectionContext, ProjectionOutput, Projector,
 };
 use crate::protocol::auth::key_wrap::project::{
     history_node_wrap_source_offer_claims, require_local_scope,
@@ -544,7 +544,7 @@ fn project_local_history_node_secret(
     if let Some(retirement_fact) = projection_context.payload_for(&retirement_need) {
         validate_history_retirement(retirement_fact, fact.id, &node)?;
         return Ok(ProjectionOutput::new()
-            .row_mutation(RowMutation::DeleteWhere(TableDeleteWhere {
+            .row_mutation(ProjectedRowMutation::DeleteWhere(TableDeleteWhere {
                 table: LOCAL_HISTORY_NODE_SECRET_ROWS,
                 columns: &["workspace_id", "frontier_id", "secret_id"],
                 values: vec![
@@ -553,7 +553,7 @@ fn project_local_history_node_secret(
                     Value::Bytes(fact.id.to_vec()),
                 ],
             }))
-            .row_mutation(RowMutation::DeleteWhere(TableDeleteWhere {
+            .row_mutation(ProjectedRowMutation::DeleteWhere(TableDeleteWhere {
                 table: LOCAL_HISTORY_NODE_TOMBSTONE_ROWS,
                 columns: &["tombstone_node_id", "secret_id"],
                 values: vec![
@@ -634,7 +634,7 @@ fn project_local_history_node_secret(
             local_secret_retirement::project::secret_retired_offer_claim(node.tombstone_node_id),
         );
     }
-    output = output.row_mutation(RowMutation::InsertValues(TableInsert {
+    output = output.row_mutation(ProjectedRowMutation::InsertValues(TableInsert {
         table: LOCAL_HISTORY_NODE_SECRET_ROWS,
         columns: &[
             "workspace_id",
@@ -664,7 +664,7 @@ fn project_local_history_node_secret(
         ],
     }));
     if node.tombstone_node_id != [0; 32] {
-        output = output.row_mutation(RowMutation::InsertValues(TableInsert {
+        output = output.row_mutation(ProjectedRowMutation::InsertValues(TableInsert {
             table: LOCAL_HISTORY_NODE_TOMBSTONE_ROWS,
             columns: &["tombstone_node_id", "secret_id"],
             values: vec![
@@ -955,7 +955,7 @@ mod coverage_tests {
             ])
         );
         assert!(output.offers.is_empty());
-        assert!(output.effects.row_mutations.is_empty());
+        assert!(output.row_mutations.is_empty());
     }
 
     #[test]

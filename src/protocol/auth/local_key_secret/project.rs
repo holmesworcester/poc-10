@@ -194,9 +194,9 @@ pub mod adapt {
 
 use crate::core::context::{ContextNeed, ContextOfferClaim};
 use crate::core::facts::{Fact, FactScope};
-use crate::core::intents::{RowMutation, TableDeleteWhere, TableInsert, Value};
+use crate::core::intents::{TableDeleteWhere, TableInsert, Value};
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, ProjectedRowMutation, ProjectionContext, ProjectionOutput, Projector,
 };
 use crate::protocol::auth::key_wrap::project::{
     frontier_root_wrap_source_offer_claims, require_local_scope,
@@ -261,7 +261,7 @@ fn project_local_key_secret(
     if let Some(retirement_fact) = projection_context.payload_for(&retirement_need) {
         validate_local_key_retirement(retirement_fact, fact.id, &secret)?;
         return Ok(ProjectionOutput::new()
-            .row_mutation(RowMutation::DeleteWhere(TableDeleteWhere {
+            .row_mutation(ProjectedRowMutation::DeleteWhere(TableDeleteWhere {
                 table: LOCAL_KEY_SECRET_ROWS,
                 columns: &["workspace_id", "frontier_id", "secret_id"],
                 values: vec![
@@ -301,7 +301,7 @@ fn project_local_key_secret(
         output = output.offer(offer);
     }
     Ok(output
-        .row_mutation(RowMutation::InsertValues(TableInsert {
+        .row_mutation(ProjectedRowMutation::InsertValues(TableInsert {
             table: LOCAL_KEY_SECRET_ROWS,
             columns: &[
                 "workspace_id",

@@ -245,17 +245,21 @@ inside the SQL transaction and passes it through the commit stages that consume
 the selected queue row, load handler context, run the handler savepoint, check
 storage compatibility, and commit validated handler effects. This is not the
 full DB confinement proof yet: the lower SQL helpers still unwrap to `&Db`,
-`HandlerContext::db()` still exposes raw handler SQL, and row mutations have not
-yet been split into projected versus intent-owned wrappers.
+`HandlerContext::db()` still exposes raw handler SQL, and the split row
+wrappers still rely on a shared table allowlist until table ownership is
+classified.
 
 ### Stage 5: Projected Versus Intent Row Authority
 
-Concrete work: split the current generic `RuntimeEffects.row_mutations:
-Vec<RowMutation>` surface. `ProjectionOutput::row_mutation` should accept a
-`ProjectedRowMutation`; intent handlers should emit `IntentRowMutation`; and
-`Db` should expose separate crate-private commit helpers for projection rows and
-intent rows. Internally both wrappers can reuse `TableInsert`,
-`TableDeleteWhere`, and the existing SQL application helpers.
+Concrete work: keep the shared SQL vocabulary (`TableInsert`,
+`TableDeleteWhere`, and the raw test-only `RowMutation`) but split production
+authority into `ProjectedRowMutation` and `IntentRowMutation`.
+`ProjectionOutput` carries `Vec<ProjectedRowMutation>` beside its needs,
+offers, and time wakes; `RuntimeEffects.row_mutations` carries
+`Vec<IntentRowMutation>` for intent handlers and live runtime boundaries; and
+`Db` exposes separate crate-private apply helpers for projection rows and
+intent rows. Internally both wrappers reuse the same typed insert/delete
+mechanics.
 
 Win: the Rust API makes it impossible for an intent handler to write a
 projected table or for a projector to write an intent-owned table by accident.
@@ -272,6 +276,16 @@ table family; handlers cannot construct projected row mutations; projectors
 cannot construct intent row mutations; current row-mutation tests are migrated
 to the split API; and code review can still follow the commit path without a
 generic capability framework.
+
+Current production-code foothold: `ProjectionOutput::row_mutation` now accepts
+`ProjectedRowMutation` and stores those rows outside `RuntimeEffects`;
+`RuntimeEffects::row_mutation` now accepts `IntentRowMutation`; projection
+validation rejects non-empty intent row mutations inside projector effects; and
+projection commit calls `apply_projected_row_mutations_in_tx` at the same commit
+position where generic row mutations used to run. The remaining proof gap is
+table classification: the runtime still has one `row_mutation_tables` allowlist,
+so a later step must split or certify which tables are projector-owned,
+intent-owned, or both.
 
 ### Stage 6: Proven Context Loading
 

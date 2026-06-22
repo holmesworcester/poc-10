@@ -227,9 +227,8 @@ pub mod adapt {
 //      by the endpoint id for bootstrap receive projection.
 
 use crate::core::facts::{Fact, FactScope};
-use crate::core::intents::RowMutation;
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, ProjectedRowMutation, ProjectionContext, ProjectionOutput, Projector,
 };
 
 use super::local_endpoint_insert;
@@ -301,7 +300,6 @@ impl EndpointProjector {
 mod tests {
     use super::*;
     use crate::core::context::ContextOffer;
-    use crate::core::intents::RowMutation;
     use crate::protocol::auth::endpoint::author::{create_local_endpoint, endpoint_fact};
     use crate::protocol::auth::endpoint::LOCAL_ENDPOINT_ROWS;
 
@@ -339,12 +337,18 @@ mod tests {
             ]
         );
         assert_eq!(
-            output.effects.row_mutations,
-            vec![RowMutation::InsertValues(local_endpoint_insert(&endpoint))]
+            output.row_mutations,
+            vec![ProjectedRowMutation::InsertValues(local_endpoint_insert(
+                &endpoint
+            ))]
         );
-        match &output.effects.row_mutations[0] {
-            RowMutation::InsertValues(insert) => assert_eq!(insert.table, LOCAL_ENDPOINT_ROWS),
-            RowMutation::DeleteWhere(_) => panic!("endpoint projection should insert a row"),
+        match &output.row_mutations[0] {
+            ProjectedRowMutation::InsertValues(insert) => {
+                assert_eq!(insert.table, LOCAL_ENDPOINT_ROWS)
+            }
+            ProjectedRowMutation::DeleteWhere(_) => {
+                panic!("endpoint projection should insert a row")
+            }
         }
         assert!(output.effects.intents.is_empty());
         assert!(output.effects.purged_facts.is_empty());
@@ -401,7 +405,9 @@ impl EndpointProjector {
             endpoint.endpoint,
         ));
         output = output.offer(daemon_endpoint_offer_claim());
-        output = output.row_mutation(RowMutation::InsertValues(local_endpoint_insert(&endpoint)));
+        output = output.row_mutation(ProjectedRowMutation::InsertValues(local_endpoint_insert(
+            &endpoint,
+        )));
         Ok(output)
     }
 }
