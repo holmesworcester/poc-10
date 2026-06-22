@@ -193,6 +193,17 @@
 //!   helper for its success branch, so projector runtime effects cannot carry
 //!   intent-owned row mutations past projection admission.
 //! - Proven in production Rust today:
+//!   `routed_offer_parts_accept(offer, producer_route)` accepts if and only if
+//!   the offer owner equals the producer-route fact id, and
+//!   `routed_offer_from_checked_parts` returns exactly those fields after that
+//!   check. `matched_context_parts_accept(offer, payload, producer_route)`
+//!   accepts if and only if the offer owner, payload fact id, and producer-route
+//!   fact id all agree; `matched_context_from_checked_parts` returns exactly
+//!   the checked need, routed offer, and payload while satisfying the local
+//!   routed-provenance predicate. `RoutedOffer::new` and
+//!   `MatchedContext::with_route` use these verified production helpers for
+//!   their success branches; diagnostic strings remain ordinary Rust.
+//! - Proven in production Rust today:
 //!   `matched_context_owner_matches_payload(matched)` accepts if and only if
 //!   the routed matched offer owner equals the loaded payload fact id, and
 //!   `routed_offer_owner_matches_producer(routed_offer)` accepts if and only if

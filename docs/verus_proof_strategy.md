@@ -158,10 +158,14 @@ not the full owner-bearing output theorem yet: the exported theorem still needs 
 correspondence proof tying the `enforce_owner_is_self` `Result` wrapper,
 diagnostic rejection branches, and `prepare_projection` call order to the
 verified status and allow helpers.
-For context input, `matched_contexts_all_have_routed_provenance(matched)`
-scans the actual matched-context slice and accepts if and only if every entry
-has the local core provenance link: stored offer owner, loaded payload id, and
-producer route fact id all agree. `prepare_projection` calls the corresponding
+For context input, the checked constructors behind `RoutedOffer::new` and
+`MatchedContext::with_route` are verified: the success branches preserve the
+exact offer, route evidence, need, and payload fields, and the resulting matched
+context satisfies the local provenance predicate. The scan helper
+`matched_contexts_all_have_routed_provenance(matched)` scans the actual
+matched-context slice and accepts if and only if every entry has that local
+core provenance link: stored offer owner, loaded payload id, and producer route
+fact id all agree. `prepare_projection` calls the corresponding
 `ProjectionContext::validate_routed_provenance` guard before dispatching to the
 projector. This still does not prove semantic offer validity or the SQL
 loader's whole construction theorem; it proves malformed local provenance is
@@ -773,6 +777,10 @@ projection_effects_have_no_intent_row_mutations(effects) accepts if and only if 
 matched_context_owner_matches_payload(matched) accepts if and only if matched.routed_offer.offer.owner == matched.payload.id
 routed_offer_owner_matches_producer(routed_offer) accepts if and only if routed_offer.offer.owner == routed_offer.producer_route.fact_id
 matched_context_has_routed_provenance(matched) accepts if and only if matched.routed_offer.offer.owner == matched.payload.id and matched.routed_offer.offer.owner == matched.routed_offer.producer_route.fact_id
+routed_offer_parts_accept(offer, producer_route) accepts if and only if offer owner equals producer route fact id
+routed_offer_from_checked_parts preserves the checked offer and route evidence
+matched_context_parts_accept(offer, payload, producer_route) accepts if and only if offer owner, payload id, and producer route fact id agree
+matched_context_from_checked_parts preserves the checked need, offer, route evidence, and payload and satisfies local routed provenance
 RoutedOffer::owner_matches_producer accepts if and only if routed_offer.offer.owner == routed_offer.producer_route.fact_id
 MatchedContext::has_routed_provenance accepts if and only if matched.routed_offer.offer.owner == matched.payload.id and matched.routed_offer.offer.owner == matched.routed_offer.producer_route.fact_id
 matched_contexts_all_have_routed_provenance(matched) accepts if and only if every matched context has routed provenance
@@ -811,13 +819,13 @@ rejection branch and `prepare_projection` call order around the verified accept
 helper.
 
 The remaining matched-context provenance gap is no longer the local
-owner/payload equality decision for one `MatchedContext` or the local
-offer-owner/producer-route equality decision for one `RoutedOffer`:
-`MatchedContext::with_route` rejects mismatched owner/payload/route fixtures at
-runtime, the SQL pending-context loader asks the active `ProjectionDispatcher`
-for producer route evidence while loading matched offer owners, and Cargo-verus
-proves both production decision helpers plus their combined routed-provenance
-predicate. The production `attested_offer_for` and
+owner/payload equality decision for one `MatchedContext`, the local
+offer-owner/producer-route equality decision for one `RoutedOffer`, or the
+checked construction of those objects after those decisions pass. The SQL
+pending-context loader asks the active `ProjectionDispatcher` for producer
+route evidence while loading matched offer owners, and Cargo-verus proves the
+production decision helpers, checked object builders, and combined
+routed-provenance predicate. The production `attested_offer_for` and
 `matched_attested_offers_for` accessors filter on that same local predicate.
 `prepare_projection` also rejects the whole `ProjectionContext` before
 dispatch unless every matched entry passes the verified slice scan. The open

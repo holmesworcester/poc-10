@@ -86,7 +86,7 @@ fn cargo_verus_verifies_production_core_projection_contracts() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        combined.contains("verification results:: 62 verified, 0 errors"),
+        combined.contains("verification results:: 66 verified, 0 errors"),
         "production proof should verify the real core projection contracts:\n{combined}"
     );
 }
@@ -233,6 +233,15 @@ fn core_proofs_make_trust_boundary_explicit() {
         "`projection_effects_have_no_intent_row_mutations(effects)` accepts",
         "`RuntimeEffects.row_mutations` is empty",
         "`validate_no_intent_row_mutations_from_projection` uses this",
+        "`routed_offer_parts_accept(offer, producer_route)` accepts if and only if",
+        "`routed_offer_from_checked_parts` returns exactly those fields",
+        "`matched_context_parts_accept(offer, payload, producer_route)`",
+        "`matched_context_from_checked_parts` returns exactly",
+        "`RoutedOffer::new` and\n//!   `MatchedContext::with_route` use these verified production helpers",
+        "`matched_context_owner_matches_payload(matched)` accepts if and only if",
+        "`routed_offer_owner_matches_producer(routed_offer)` accepts if and only if",
+        "`matched_context_has_routed_provenance(matched)` accepts if and only if",
+        "`matched_contexts_all_have_routed_provenance(matched)` accepts",
         "Refactored but not yet proved",
         "`ProjectionDispatcher::dispatch_projection`",
         "`RoutedProjection`",
@@ -456,6 +465,9 @@ fn verus_plan_is_single_core_first_source() {
         "intake, pending queues",
         "`ProjectionContext::attested_offer_for`",
         "`ProjectionContext::matched_attested_offers_for`",
+        "the checked constructors behind `RoutedOffer::new` and\n`MatchedContext::with_route` are verified",
+        "success branches preserve the\nexact offer, route evidence, need, and payload fields",
+        "resulting matched\ncontext satisfies the local provenance predicate",
         "validity proof record is the stored offer",
         "not a separate proof row",
         "Do not expose a raw `Fact` as a",
@@ -602,11 +614,15 @@ fn verus_plan_is_single_core_first_source() {
         "matched_context_owner_matches_payload(matched) accepts if and only if matched.routed_offer.offer.owner == matched.payload.id",
         "routed_offer_owner_matches_producer(routed_offer) accepts if and only if routed_offer.offer.owner == routed_offer.producer_route.fact_id",
         "matched_context_has_routed_provenance(matched) accepts if and only if matched.routed_offer.offer.owner == matched.payload.id and matched.routed_offer.offer.owner == matched.routed_offer.producer_route.fact_id",
+        "routed_offer_parts_accept(offer, producer_route) accepts if and only if offer owner equals producer route fact id",
+        "routed_offer_from_checked_parts preserves the checked offer and route evidence",
+        "matched_context_parts_accept(offer, payload, producer_route) accepts if and only if offer owner, payload id, and producer route fact id agree",
+        "matched_context_from_checked_parts preserves the checked need, offer, route evidence, and payload and satisfies local routed provenance",
         "RoutedOffer::owner_matches_producer accepts if and only if routed_offer.offer.owner == routed_offer.producer_route.fact_id",
         "MatchedContext::has_routed_provenance accepts if and only if matched.routed_offer.offer.owner == matched.payload.id and matched.routed_offer.offer.owner == matched.routed_offer.producer_route.fact_id",
         "matched_contexts_all_have_routed_provenance(matched) accepts if and only if every matched context has routed provenance",
-        "`MatchedContext::with_route` rejects mismatched owner/payload/route fixtures at\nruntime",
-        "the SQL pending-context loader asks the active `ProjectionDispatcher`\nfor producer route evidence",
+        "checked construction of those objects after those decisions pass",
+        "pending-context loader asks the active `ProjectionDispatcher` for producer\nroute evidence",
         "The production `attested_offer_for` and\n`matched_attested_offers_for` accessors filter on that same local predicate.",
         "`prepare_projection` also rejects the whole `ProjectionContext` before\ndispatch",
         "`pending_projection_input_context_for_owner` and the\nSQL loader construct every",

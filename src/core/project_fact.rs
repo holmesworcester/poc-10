@@ -2448,13 +2448,10 @@ pub mod context {
             offer: ContextOffer,
             producer_route: ProjectionRouteEvidence,
         ) -> Result<Self, String> {
-            if offer.owner != producer_route.fact_id {
+            if !routed_offer_parts_accept(&offer, &producer_route) {
                 return Err("routed offer producer route does not match offer owner".to_string());
             }
-            Ok(Self {
-                offer,
-                producer_route,
-            })
+            Ok(routed_offer_from_checked_parts(offer, producer_route))
         }
 
         pub fn offer(&self) -> &ContextOffer {
@@ -2495,15 +2492,18 @@ pub mod context {
             payload: Fact,
             producer_route: ProjectionRouteEvidence,
         ) -> Result<Self, String> {
-            let routed_offer = RoutedOffer::new(offer, producer_route)?;
-            if routed_offer.offer.owner != payload.id {
+            if !routed_offer_parts_accept(&offer, &producer_route) {
+                return Err("routed offer producer route does not match offer owner".to_string());
+            }
+            if !matched_context_parts_accept(&offer, &payload, &producer_route) {
                 return Err("matched context offer owner does not match payload fact".to_string());
             }
-            Ok(Self {
+            Ok(matched_context_from_checked_parts(
                 need,
-                routed_offer,
+                offer,
                 payload,
-            })
+                producer_route,
+            ))
         }
 
         /// Build a matched context fixture with synthetic route evidence.
@@ -2552,6 +2552,90 @@ pub mod context {
     pub open spec fn matched_context_routed_provenance_spec(matched: MatchedContext) -> bool {
         matched.routed_offer.offer.owner == matched.payload.id
             && matched.routed_offer.offer.owner == matched.routed_offer.producer_route.fact_id
+    }
+
+    /// Decide whether a routed offer can be constructed from these parts.
+    ///
+    /// This is the verified success condition behind `RoutedOffer::new`.
+    fn routed_offer_parts_accept(
+        offer: &ContextOffer,
+        producer_route: &ProjectionRouteEvidence,
+    ) -> (accepted: bool)
+        ensures
+            accepted <==> offer.owner == producer_route.fact_id,
+    {
+        super::projected_owner_matches(offer.owner, producer_route.fact_id)
+    }
+
+    /// Construct a routed offer after the runtime gate has checked provenance.
+    ///
+    /// Verus proves the returned object carries exactly the offered edge and
+    /// route evidence passed into the constructor.
+    fn routed_offer_from_checked_parts(
+        offer: ContextOffer,
+        producer_route: ProjectionRouteEvidence,
+    ) -> (routed_offer: RoutedOffer)
+        requires
+            offer.owner == producer_route.fact_id,
+        ensures
+            routed_offer.offer == offer,
+            routed_offer.producer_route == producer_route,
+            routed_offer.offer.owner == routed_offer.producer_route.fact_id,
+    {
+        RoutedOffer {
+            offer,
+            producer_route,
+        }
+    }
+
+    /// Decide whether a full matched context can be constructed from these
+    /// parts: the offer owner, loaded payload fact id, and producer route fact
+    /// id must all name the same fact.
+    fn matched_context_parts_accept(
+        offer: &ContextOffer,
+        payload: &Fact,
+        producer_route: &ProjectionRouteEvidence,
+    ) -> (accepted: bool)
+        ensures
+            accepted <==> (
+                offer.owner == payload.id
+                    && offer.owner == producer_route.fact_id
+            ),
+    {
+        if !super::projected_owner_matches(offer.owner, payload.id) {
+            return false;
+        }
+        super::projected_owner_matches(offer.owner, producer_route.fact_id)
+    }
+
+    /// Construct a matched context after the runtime gate has checked the local
+    /// provenance chain.
+    ///
+    /// This proves checked construction only. It does not prove the SQL loader
+    /// found the right payload, and it does not prove protocol meaning for the
+    /// matched offer.
+    fn matched_context_from_checked_parts(
+        need: ContextNeed,
+        offer: ContextOffer,
+        payload: Fact,
+        producer_route: ProjectionRouteEvidence,
+    ) -> (matched: MatchedContext)
+        requires
+            offer.owner == payload.id,
+            offer.owner == producer_route.fact_id,
+        ensures
+            matched.need == need,
+            matched.routed_offer.offer == offer,
+            matched.routed_offer.producer_route == producer_route,
+            matched.payload == payload,
+            matched_context_routed_provenance_spec(matched),
+    {
+        let routed_offer = routed_offer_from_checked_parts(offer, producer_route);
+        MatchedContext {
+            need,
+            routed_offer,
+            payload,
+        }
     }
 
     pub open spec fn matched_contexts_have_routed_provenance_prefix(

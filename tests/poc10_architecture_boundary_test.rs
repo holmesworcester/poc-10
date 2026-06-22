@@ -543,8 +543,15 @@ fn matched_context_uses_checked_construction() {
     for path in rust_files(root) {
         let relative = path.strip_prefix(root).unwrap().display().to_string();
         let text = source_text(&path);
-        for (line_number, line) in text.lines().enumerate() {
-            if line.trim() == "MatchedContext {" {
+        let lines = text.lines().collect::<Vec<_>>();
+        for (line_number, line) in lines.iter().enumerate() {
+            if line.trim() == "MatchedContext {"
+                && !surrounding_lines_contain(
+                    &lines,
+                    line_number,
+                    "fn matched_context_from_checked_parts",
+                )
+            {
                 offenders.push(format!("{relative}:{}", line_number + 1));
             }
         }
@@ -552,7 +559,7 @@ fn matched_context_uses_checked_construction() {
 
     assert!(
         offenders.is_empty(),
-        "MatchedContext carries the core offer-owner/payload-id provenance link; construct it with MatchedContext::new:\n{}",
+        "MatchedContext carries the core offer-owner/payload-id provenance link; construct it with MatchedContext::new or the verified checked-parts helper:\n{}",
         offenders.join("\n")
     );
 }
@@ -565,8 +572,15 @@ fn routed_offer_uses_checked_construction() {
     for path in rust_files(root) {
         let relative = path.strip_prefix(root).unwrap().display().to_string();
         let text = source_text(&path);
-        for (line_number, line) in text.lines().enumerate() {
-            if line.trim() == "RoutedOffer {" {
+        let lines = text.lines().collect::<Vec<_>>();
+        for (line_number, line) in lines.iter().enumerate() {
+            if line.trim() == "RoutedOffer {"
+                && !surrounding_lines_contain(
+                    &lines,
+                    line_number,
+                    "fn routed_offer_from_checked_parts",
+                )
+            {
                 offenders.push(format!("{relative}:{}", line_number + 1));
             }
         }
@@ -574,9 +588,16 @@ fn routed_offer_uses_checked_construction() {
 
     assert!(
         offenders.is_empty(),
-        "RoutedOffer carries the offer-owner/producer-route provenance link; construct it with RoutedOffer::new:\n{}",
+        "RoutedOffer carries the offer-owner/producer-route provenance link; construct it with RoutedOffer::new or the verified checked-parts helper:\n{}",
         offenders.join("\n")
     );
+}
+
+fn surrounding_lines_contain(lines: &[&str], line_number: usize, needle: &str) -> bool {
+    let start = line_number.saturating_sub(20);
+    lines[start..=line_number]
+        .iter()
+        .any(|line| line.contains(needle))
 }
 
 #[test]
