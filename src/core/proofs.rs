@@ -77,6 +77,11 @@
 //!   `ContextOfferClaim::clone` says clone preserves the whole claim. This
 //!   assumption is a Rust trait boundary helper, not a runtime theorem over
 //!   projection.
+//! - Refactored but not yet proved: `Projector::project_with_witness` and
+//!   `RouterProjector` now produce `ProjectionRouteWitness` in the same route
+//!   selection that calls the projector, and `PreparedProjection` carries that
+//!   witness. This is a real Rust-code target for the route theorem, not a
+//!   completed Verus proof yet.
 //! - Not proven here today: every exported `theorem_*` runtime/core property.
 //! - Not proven yet for offer finalization: `ProjectionOutput::context_set`
 //!   normalization or `prepare_projection` call order.

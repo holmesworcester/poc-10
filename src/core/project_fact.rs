@@ -113,6 +113,10 @@ struct PreparedProjection {
     source: ProjectionSource,
     fact: Fact,
     mode: ProjectionMode,
+    // Proof-facing route evidence; produced now, consumed by later proven-offer
+    // context construction.
+    #[allow(dead_code)]
+    route_witness: Option<ProjectionRouteWitness>,
     input_received_at_ms: u64,
     input_staged_at_ms: Option<u64>,
     incoming_metadata: Option<IncomingMetadata>,
@@ -566,9 +570,11 @@ fn prepare_projection(
     let mode = pending_inputs.mode();
     let input_received_at_ms = fact.timestamp;
     let incoming_metadata = pending_inputs.incoming_metadata().cloned();
-    let output = perf::measure_result("projection_projector_cpu", || {
-        projector.project(&fact, &pending_inputs)
+    let run = perf::measure_result("projection_projector_cpu", || {
+        projector.project_with_witness(&fact, &pending_inputs)
     })?;
+    let route_witness = run.route_witness;
+    let output = run.output;
     enforce_owner_is_self(&fact, &output)?;
     let projected_context = output.context_set(fact.id);
     let runtime_effects = output.effects;
@@ -585,6 +591,7 @@ fn prepare_projection(
         source,
         fact,
         mode,
+        route_witness,
         input_received_at_ms,
         input_staged_at_ms,
         incoming_metadata,
@@ -3246,7 +3253,7 @@ pub mod route {
     use super::context::ProjectionContext;
     use super::effects::ProjectionOutput;
     use crate::core::effects::StorageRequirement;
-    use crate::core::facts::Fact;
+    use crate::core::facts::{Fact, FactId};
 
     /// Function pointer used by static projector route tables.
     pub type ProjectorFn = fn(&Fact, &ProjectionContext) -> Result<ProjectionOutput, String>;
@@ -3280,6 +3287,55 @@ pub mod route {
         pub projector_info: FactProjectorInfo,
     }
 
+    /// Route evidence produced by the router in the same step that calls a
+    /// projector.
+    ///
+    /// Core does not interpret the route's protocol meaning. The witness names
+    /// the owner fact, effective tag, stable route tag, route metadata, and
+    /// storage requirement used for the actual projector call.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct ProjectionRouteWitness {
+        pub fact_id: FactId,
+        pub effective_tag: u8,
+        pub route_tag: u8,
+        pub projector_info: FactProjectorInfo,
+        pub storage_requirement: StorageRequirement,
+    }
+
+    /// The result of one projector call plus optional route evidence.
+    #[derive(Debug)]
+    pub struct ProjectorRun {
+        pub output: ProjectionOutput,
+        pub route_witness: Option<ProjectionRouteWitness>,
+    }
+
+    impl ProjectorRun {
+        pub fn without_route_witness(output: ProjectionOutput) -> Self {
+            Self {
+                output,
+                route_witness: None,
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct SelectedFactRoute {
+        effective_tag: u8,
+        route: FactRoute,
+    }
+
+    impl SelectedFactRoute {
+        fn witness(self, fact_id: FactId) -> ProjectionRouteWitness {
+            ProjectionRouteWitness {
+                fact_id,
+                effective_tag: self.effective_tag,
+                route_tag: self.route.tag,
+                projector_info: self.route.projector_info,
+                storage_requirement: self.route.storage_requirement,
+            }
+        }
+    }
+
     /// The protocol-facing projection entry point.
     pub trait Projector {
         fn project(
@@ -3287,6 +3343,15 @@ pub mod route {
             fact: &Fact,
             context: &ProjectionContext,
         ) -> Result<ProjectionOutput, String>;
+
+        fn project_with_witness(
+            &self,
+            fact: &Fact,
+            context: &ProjectionContext,
+        ) -> Result<ProjectorRun, String> {
+            self.project(fact, context)
+                .map(ProjectorRun::without_route_witness)
+        }
     }
 
     /// Route for envelope facts whose outer tag is not the semantic fact tag.
@@ -3330,6 +3395,24 @@ pub mod route {
             }
             Ok(tag)
         }
+
+        fn selected_route(&self, fact: &Fact) -> Result<SelectedFactRoute, String> {
+            let effective_tag = self.effective_tag(fact)?;
+            let Some(route) = self
+                .routes
+                .iter()
+                .find(|route| route.tag == effective_tag)
+                .copied()
+            else {
+                return Err(format!(
+                    "no target projector registered for fact tag {effective_tag}"
+                ));
+            };
+            Ok(SelectedFactRoute {
+                effective_tag,
+                route,
+            })
+        }
     }
 
     impl Projector for RouterProjector {
@@ -3338,16 +3421,26 @@ pub mod route {
             fact: &Fact,
             context: &ProjectionContext,
         ) -> Result<ProjectionOutput, String> {
-            let tag = self.effective_tag(fact)?;
-            let Some(route) = self.routes.iter().find(|route| route.tag == tag) else {
-                return Err(format!("no target projector registered for fact tag {tag}"));
-            };
-            let output = (route.projector)(fact, context)?;
-            Ok(ProjectionOutput {
+            self.project_with_witness(fact, context)
+                .map(|run| run.output)
+        }
+
+        fn project_with_witness(
+            &self,
+            fact: &Fact,
+            context: &ProjectionContext,
+        ) -> Result<ProjectorRun, String> {
+            let selected = self.selected_route(fact)?;
+            let output = (selected.route.projector)(fact, context)?;
+            let output = ProjectionOutput {
                 effects: output
                     .effects
-                    .with_storage_requirement(route.storage_requirement),
+                    .with_storage_requirement(selected.route.storage_requirement),
                 ..output
+            };
+            Ok(ProjectorRun {
+                output,
+                route_witness: Some(selected.witness(fact.id)),
             })
         }
     }
@@ -3360,8 +3453,8 @@ pub use effects::{
     TimeRange, TimeWake, Timeline,
 };
 pub use route::{
-    EffectiveTagFn, EnvelopeRoute, FactAdmissionFn, FactProjectorInfo, FactRoute, Projector,
-    ProjectorFn, RouterProjector,
+    EffectiveTagFn, EnvelopeRoute, FactAdmissionFn, FactProjectorInfo, FactRoute,
+    ProjectionRouteWitness, Projector, ProjectorFn, ProjectorRun, RouterProjector,
 };
 
 const OWNER_KEYED_FACT_CLEANUP_TABLES: &[TableName] = &[
@@ -6270,6 +6363,81 @@ mod tests {
         )
         .expect("route projection");
         assert_eq!(output.offers.len(), 1);
+    }
+
+    fn route_witness_projector(
+        _fact: &Fact,
+        _context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
+        Ok(ProjectionOutput::new().offer(ContextOfferClaim::range(
+            "route_witness",
+            FactScope::Global,
+            vec![1],
+            vec![1],
+        )))
+    }
+
+    fn route_witness_effective_tag(fact: &Fact) -> Result<u8, String> {
+        fact.bytes
+            .get(1)
+            .copied()
+            .ok_or_else(|| "route witness envelope missing semantic tag".to_string())
+    }
+
+    const ROUTE_WITNESS_TAG: u8 = 42;
+    const ROUTE_WITNESS_OUTER_TAG: u8 = 99;
+    const ROUTE_WITNESS_STORAGE: StorageRequirement = StorageRequirement::Current(42);
+    const ROUTE_WITNESS_INFO: FactProjectorInfo =
+        FactProjectorInfo::projector("RouteWitnessProjector");
+    const ROUTE_WITNESS_ROUTES: &[FactRoute] = &[FactRoute {
+        tag: ROUTE_WITNESS_TAG,
+        projector: route_witness_projector,
+        storage_requirement: ROUTE_WITNESS_STORAGE,
+        projector_info: ROUTE_WITNESS_INFO,
+    }];
+    const ROUTE_WITNESS_ENVELOPES: &[EnvelopeRoute] = &[EnvelopeRoute {
+        outer_tag: ROUTE_WITNESS_OUTER_TAG,
+        effective_tag: route_witness_effective_tag,
+    }];
+
+    #[test]
+    fn router_projector_witness_records_effective_route_that_ran() {
+        let fact = Fact::new(
+            FactScope::Global,
+            1,
+            vec![ROUTE_WITNESS_OUTER_TAG, ROUTE_WITNESS_TAG],
+        );
+
+        let run = RouterProjector::new(ROUTE_WITNESS_ROUTES, ROUTE_WITNESS_ENVELOPES)
+            .project_with_witness(&fact, &ProjectionContext::default())
+            .expect("route projection with witness");
+
+        let witness = run.route_witness.expect("router should return witness");
+        assert_eq!(witness.fact_id, fact.id);
+        assert_eq!(witness.effective_tag, ROUTE_WITNESS_TAG);
+        assert_eq!(witness.route_tag, ROUTE_WITNESS_TAG);
+        assert_eq!(witness.projector_info, ROUTE_WITNESS_INFO);
+        assert_eq!(witness.storage_requirement, ROUTE_WITNESS_STORAGE);
+        assert_eq!(
+            run.output.effects.storage_requirement,
+            ROUTE_WITNESS_STORAGE
+        );
+        assert_eq!(run.output.offers.len(), 1);
+    }
+
+    #[test]
+    fn router_projector_rejects_unknown_effective_tag_before_projection() {
+        let fact = Fact::new(
+            FactScope::Global,
+            1,
+            vec![ROUTE_WITNESS_OUTER_TAG, ROUTE_WITNESS_TAG + 1],
+        );
+
+        let err = RouterProjector::new(ROUTE_WITNESS_ROUTES, ROUTE_WITNESS_ENVELOPES)
+            .project_with_witness(&fact, &ProjectionContext::default())
+            .expect_err("unknown effective tag should not project");
+
+        assert!(err.contains("no target projector registered for fact tag 43"));
     }
 
     struct ModelProjector;

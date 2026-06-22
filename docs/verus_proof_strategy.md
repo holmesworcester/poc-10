@@ -18,7 +18,7 @@ src/core/project_fact.rs::project_one
   -> load_one_projection_input
   -> evaluate_loaded_projection_input
   -> prepare_projection
-       -> projector.project(&fact, &pending_inputs)
+       -> projector.project_with_witness(&fact, &pending_inputs)
        -> enforce_owner_is_self(&fact, &output)
        -> ProjectionOutput::context_set(fact.id)
        -> validate_runtime_effects_for_admission(...)
@@ -148,6 +148,16 @@ semantic route, and the route witness carried into `PreparedProjection` matches
 the stable route tag that ran; the route-tag to producer-theorem table is named
 explicitly as a proof obligation; and the runtime code still reads as load,
 prepare, commit.
+
+Current production-code foothold: `Projector::project_with_witness` returns a
+`ProjectorRun` containing the existing `ProjectionOutput` plus optional route
+evidence. Ordinary projectors use the default unwitnessed path. `RouterProjector`
+overrides that path so the same selected route both calls the projector and
+creates `ProjectionRouteWitness { fact_id, effective_tag, route_tag,
+projector_info, storage_requirement }`. `prepare_projection` stores that
+witness in `PreparedProjection`. This is not yet the route theorem:
+Cargo-verus still needs to prove the selection helper and the correspondence
+from `PreparedProjection.route_witness` to the committed output path.
 
 ### Stage 4: Projection DB Write Boundary
 
