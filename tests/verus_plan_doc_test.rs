@@ -86,7 +86,7 @@ fn cargo_verus_verifies_production_core_projection_contracts() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        combined.contains("verification results:: 45 verified, 0 errors"),
+        combined.contains("verification results:: 46 verified, 0 errors"),
         "production proof should verify the real core projection contracts:\n{combined}"
     );
 }
@@ -341,6 +341,7 @@ fn verus_plan_is_single_core_first_source() {
         "only the accepted status",
         "`version_replay_rebuild_projection_status(context, wakes, effects)` applies",
         "`projection_output_owner_status(output, fact_id)` applies that same verified",
+        "`projection_output_owner_enforcement_accepts(output, fact_id)` composes",
         "`validate_version_replay_rebuild_projection_shape` `Result` wrapper",
         "proof no longer depends on trusting\nnormalization to preserve offer fields",
         "`prepare_projection` call order remains open core proof work",
@@ -505,6 +506,7 @@ fn verus_plan_is_single_core_first_source() {
         "projected_owner_status(purged, needs, wakes, fact_id) returns accepted/foreign-purge/foreign-need/foreign-wake exactly from those predicates",
         "owner_status_allows_projection(status) accepts if and only if status is OWNER_CHECK_ACCEPTED",
         "projection_output_owner_status(output, fact_id) returns accepted/foreign-purge/foreign-need/foreign-wake exactly from the output's purges, needs, and time wakes",
+        "projection_output_owner_enforcement_accepts(output, fact_id) accepts if and only if the output's purges, needs, and time wakes are self-owned",
         "ContextOfferClaim::into_offer(claim, owner).owner == owner",
         "ContextOfferClaim::into_offer(claim, owner) preserves role/scope/start/end/value",
         "owned_offers_from_claims(claims, owner).len == claims.len",
@@ -537,6 +539,7 @@ fn verus_plan_is_single_core_first_source() {
         "clone/equality preserves the whole value",
         "remaining\nowner-checking gap",
         "full-output status bridge",
+        "accepted-output enforcement decision",
         "bridge from\n`ProjectionOutput` to that assembly",
         "final normalized offers\nare checked by a verified production guard",
         "remaining version replay rebuild admission gap",

@@ -670,10 +670,10 @@ fn validate_projection_context_finalization(
 /// being projected. Projected offers are ownerless claims; core attaches the
 /// projected fact id when building the committed context set.
 fn enforce_owner_is_self(fact: &Fact, output: &ProjectionOutput) -> Result<(), String> {
-    let status = projection_output_owner_status(output, fact.id);
-    if owner_status_allows_projection(status) {
+    if projection_output_owner_enforcement_accepts(output, fact.id) {
         return Ok(());
     }
+    let status = projection_output_owner_status(output, fact.id);
     match status {
         OWNER_CHECK_FOREIGN_PURGE => Err(enforce_projected_owner_error(
             "projector tried to purge fact",
@@ -1100,6 +1100,35 @@ fn projection_output_owner_status(output: &ProjectionOutput, fact_id: FactId) ->
         &output.time_wakes,
         fact_id,
     )
+}
+
+/// Decide whether owner-bearing projection output may continue.
+///
+/// This is the proof-facing acceptance branch for `enforce_owner_is_self`.
+/// Diagnostic strings remain ordinary Rust, but success is tied to the verified
+/// predicates over the actual `ProjectionOutput`.
+fn projection_output_owner_enforcement_accepts(
+    output: &ProjectionOutput,
+    fact_id: FactId,
+) -> (accepted: bool)
+    ensures
+        accepted <==> (
+            forall|i: int|
+                #![trigger output.effects.purged_facts@[i]]
+                0 <= i < output.effects.purged_facts@.len()
+                    ==> output.effects.purged_facts@[i] == fact_id
+        ) && (
+            forall|i: int|
+                #![trigger output.needs@[i]]
+                0 <= i < output.needs@.len() ==> output.needs@[i].owner == fact_id
+        ) && (
+            forall|i: int|
+                #![trigger output.time_wakes@[i]]
+                0 <= i < output.time_wakes@.len() ==> output.time_wakes@[i].owner == fact_id
+        ),
+{
+    let status = projection_output_owner_status(output, fact_id);
+    owner_status_allows_projection(status)
 }
 
 /// Decision used before admitting a version replay rebuild effect.
@@ -6443,6 +6472,9 @@ mod contract_tests {
             projection_output_owner_status(&accepted, fact_id),
             OWNER_CHECK_ACCEPTED
         );
+        assert!(projection_output_owner_enforcement_accepts(
+            &accepted, fact_id
+        ));
 
         let foreign_need = ProjectionOutput::new()
             .purge_self(fact_id)
@@ -6455,6 +6487,10 @@ mod contract_tests {
             projection_output_owner_status(&foreign_need, fact_id),
             OWNER_CHECK_FOREIGN_NEED
         );
+        assert!(!projection_output_owner_enforcement_accepts(
+            &foreign_need,
+            fact_id
+        ));
     }
 
     #[test]

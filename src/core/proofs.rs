@@ -68,6 +68,12 @@
 //!   accepted/foreign-purge/foreign-need/foreign-time-wake classification to
 //!   the actual `ProjectionOutput` object consumed by `enforce_owner_is_self`.
 //! - Proven in production Rust today:
+//!   `projection_output_owner_enforcement_accepts(output, fact_id)` accepts if
+//!   and only if every purge id, need owner, and time-wake owner in the actual
+//!   `ProjectionOutput` is the projected fact id. `enforce_owner_is_self` uses
+//!   this helper for its success branch; diagnostic rejection strings remain
+//!   ordinary Rust.
+//! - Proven in production Rust today:
 //!   `ContextOfferClaim::into_offer(claim, owner).owner == owner`.
 //! - Proven in production Rust today:
 //!   `ContextOfferClaim::into_offer(claim, owner) preserves role/scope/start/end/value`.
@@ -160,6 +166,7 @@
 //! - Not proven yet for owner enforcement: the exported theorem tying
 //!   `enforce_owner_is_self` `Result` wrapper diagnostic rejection branches and
 //!   `prepare_projection` call order to the verified status and allow helpers.
+//!   The accepted-output decision is proved.
 //! - Not proven yet for version replay rebuild admission: the
 //!   `validate_version_replay_rebuild_projection_shape` `Result` wrapper and
 //!   `prepare_projection` call order around the verified prepared-shape status
