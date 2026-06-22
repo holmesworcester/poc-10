@@ -118,8 +118,14 @@ Cargo-verus proves the input needs are carried unchanged and the constructed
 offers preserve the same owner and claim fields.
 `projection_output_context_set_parts(output, owner)` applies that
 pre-normalization construction to the actual `ProjectionOutput` object consumed
-by `ProjectionOutput::context_set`. Cargo-verus also proves that the version
-replay rebuild shape decision accepts exactly ordinary projections
+by `ProjectionOutput::context_set`.
+`projection_context_offers_match_claims(context, claims, owner)` then checks
+the final normalized context that `prepare_projection` is about to commit:
+if it accepts, every final offer matches some owner-stamped output claim with
+the same role, scope, start key, end key, and offer value. This guard is about
+core finalization only; it does not prove the role-specific offer is
+semantically valid. Cargo-verus also proves that the version replay rebuild
+shape decision accepts exactly ordinary projections
 or version replay rebuild projections with empty standing output: no standing needs, offers, or time wakes.
 It also proves that the production status helper returns accepted or
 standing-output exactly from that predicate, and that the allow helper accepts
@@ -128,9 +134,10 @@ only the accepted status.
 that same verified status classification to the actual prepared projection
 shape consumed by `validate_version_replay_rebuild_projection_shape`. That is
 not the full offer-finalization or version
-replay rebuild admission theorem yet: the
-`ProjectionOutput::context_set` normalization step and the `prepare_projection`
-call order remain open core proof work, as does the
+replay rebuild admission theorem yet: the proof no longer depends on trusting
+normalization to preserve offer fields, because `prepare_projection` validates
+the final normalized offers against the emitted claims, but the
+`prepare_projection` call order remains open core proof work, as does the
 `validate_version_replay_rebuild_projection_shape` `Result` wrapper. It is also
 not the full owner-bearing output theorem yet: the exported theorem still needs a
 correspondence proof tying the `enforce_owner_is_self` `Result` wrapper,
@@ -687,6 +694,7 @@ context_set_from_projection_parts(needs, claims, owner) preserves needs
 context_set_from_projection_parts(needs, claims, owner) builds same-index owned offers
 clone_context_needs(needs) preserves the need sequence
 projection_output_context_set_parts(output, owner) preserves output needs and builds same-index owned offers from output claims
+projection_context_offers_match_claims(context, claims, owner) accepts only if every final offer matches an owner-stamped output claim
 projection_route_evidence(fact_id, effective_tag, route_tag, projector_info, storage_requirement) preserves every route evidence field
 selected_route_evidence(fact_id, effective_tag, stamp) preserves selected route stamp metadata and gives route_tag == effective_tag when stamp.tag == effective_tag
 version_replay_rebuild_shape_allowed(version_replay_rebuild, needs, offers, wakes) accepts if and only if ordinary projection or empty version replay rebuild output
@@ -705,16 +713,20 @@ They are core proof footholds, not threat-model coverage and not completion of
 `offer_claim_finalizes_to_projected_owner` or
 `project_fact_dispatches_owner_route`.
 
-The `owned_offers_from_claims`, `clone_context_needs`, and
-`context_set_from_projection_parts` proofs use narrow Verus
-`assume_specification`s for the derived `ContextOfferClaim::clone` and
-`ContextNeed::clone` calls so Verus can call those production clones and reason
-that clone preserves the whole value.
+The `owned_offers_from_claims`, `clone_context_needs`,
+`context_set_from_projection_parts`, and
+`projection_context_offers_match_claims` proofs use narrow Verus
+`assume_specification`s for the derived `ContextOfferClaim::clone`,
+`ContextNeed::clone`, and derived equality for `Role`, `FactScope`,
+`ContextKey`, and `ContextOfferValue` so Verus can call those production trait
+implementations and reason that clone/equality preserves the whole value.
 The remaining offer-finalization gap is no longer claim-to-offer field copying,
 need cloning, pre-normalization context-set assembly, or the bridge from
-`ProjectionOutput` to that assembly; it is proving the
-`ProjectionOutput::context_set` normalization step and `prepare_projection`
-call order over executable helper code. The remaining owner-checking gap is no
+`ProjectionOutput` to that assembly. It is also no longer trusting
+normalization for offer-field preservation, because the final normalized offers
+are checked by a verified production guard. The remaining gap is proving the
+`prepare_projection` call order over executable helper code. The remaining
+owner-checking gap is no
 longer the equality decision, per-slice scans, aggregate owner predicate,
 status classification, accept-status decision, or full-output status bridge; it
 is proving the `enforce_owner_is_self` `Result` wrapper diagnostic rejection

@@ -86,7 +86,7 @@ fn cargo_verus_verifies_production_core_projection_contracts() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        combined.contains("verification results:: 36 verified, 0 errors"),
+        combined.contains("verification results:: 42 verified, 0 errors"),
         "production proof should verify the real core projection contracts:\n{combined}"
     );
 }
@@ -177,6 +177,8 @@ fn core_proofs_make_trust_boundary_explicit() {
         "ContextOfferClaim::into_offer(claim, owner) preserves role/scope/start/end/value",
         "`clone_context_needs(needs)` preserves the need sequence",
         "`projection_output_context_set_parts(output, owner)` preserves output needs",
+        "`projection_context_offers_match_claims(context, claims, owner)` accepts",
+        "final, normalized context offer matches some output claim",
         "`owned_offers_from_claims(claims, owner)` returns one offer per claim",
         "every returned offer has `owner`",
         "same role, scope, start key, end key, and offer value",
@@ -330,7 +332,7 @@ fn verus_plan_is_single_core_first_source() {
         "owner, role, scope",
         "start key, end key, and value preservation",
         "every returned offer",
-        "replay rebuild shape decision accepts exactly ordinary projections",
+        "shape decision accepts exactly ordinary projections",
         "version replay rebuild projections",
         "no standing needs, offers, or time wakes",
         "production status helper returns accepted or",
@@ -340,7 +342,8 @@ fn verus_plan_is_single_core_first_source() {
         "`version_replay_rebuild_projection_status(context, wakes, effects)` applies",
         "`projection_output_owner_status(output, fact_id)` applies that same verified",
         "`validate_version_replay_rebuild_projection_shape` `Result` wrapper",
-        "`ProjectionOutput::context_set` normalization step",
+        "proof no longer depends on trusting\nnormalization to preserve offer fields",
+        "`prepare_projection` call order remains open core proof work",
         "keep leaf projectors on the simple `Projector::project` API",
         "`ProjectionDispatcher` selects",
         "returns a `RoutedProjection`",
@@ -511,6 +514,7 @@ fn verus_plan_is_single_core_first_source() {
         "context_set_from_projection_parts(needs, claims, owner) builds same-index owned offers",
         "clone_context_needs(needs) preserves the need sequence",
         "projection_output_context_set_parts(output, owner) preserves output needs and builds same-index owned offers from output claims",
+        "projection_context_offers_match_claims(context, claims, owner) accepts only if every final offer matches an owner-stamped output claim",
         "projection_route_evidence(fact_id, effective_tag, route_tag, projector_info, storage_requirement) preserves every route evidence field",
         "selected_route_evidence(fact_id, effective_tag, stamp) preserves selected route stamp metadata and gives route_tag == effective_tag when stamp.tag == effective_tag",
         "version_replay_rebuild_shape_allowed(version_replay_rebuild, needs, offers, wakes) accepts if and only if ordinary projection or empty version replay rebuild output",
@@ -526,11 +530,13 @@ fn verus_plan_is_single_core_first_source() {
         "the SQL pending-context loader asks the active `ProjectionDispatcher`\nfor producer route evidence",
         "The production `attested_offer_for` and\n`matched_attested_offers_for` accessors filter on that same local predicate.",
         "`pending_projection_input_context_for_owner` and the SQL loader construct every",
-        "assume_specification`s for the derived `ContextOfferClaim::clone` and",
-        "that clone preserves the whole value",
-        "remaining owner-checking gap",
+        "assume_specification`s for the derived `ContextOfferClaim::clone`,",
+        "derived equality for `Role`, `FactScope`,\n`ContextKey`, and `ContextOfferValue`",
+        "clone/equality preserves the whole value",
+        "remaining\nowner-checking gap",
         "full-output status bridge",
         "bridge from\n`ProjectionOutput` to that assembly",
+        "final normalized offers\nare checked by a verified production guard",
         "remaining version replay rebuild admission gap",
         "standing-output decision",
         "status classification",

@@ -82,6 +82,11 @@
 //!   `projection_output_context_set_parts(output, owner)` preserves output needs
 //!   while building same-index owned offers from output claims.
 //! - Proven in production Rust today:
+//!   `projection_context_offers_match_claims(context, claims, owner)` accepts
+//!   only if every final, normalized context offer matches some output claim
+//!   after core stamps `owner` onto that claim's role, scope, range, and value.
+//!   This is a final-output guard, not a semantic role proof.
+//! - Proven in production Rust today:
 //!   `projection_route_evidence(fact_id, effective_tag, route_tag,
 //!   projector_info, storage_requirement)` returns `ProjectionRouteEvidence`
 //!   with exactly those same field values. This proves route-evidence field
@@ -124,8 +129,10 @@
 //!   whole-loader theorem are still open.
 //! - Assumed only to call production code: the Verus contracts for the derived
 //!   `ContextOfferClaim::clone` and `ContextNeed::clone` calls say clone
-//!   preserves the whole value. These assumptions are Rust trait boundary
-//!   helpers, not runtime theorems over projection.
+//!   preserves the whole value. The contracts for derived equality on `Role`,
+//!   `FactScope`, `ContextKey`, and `ContextOfferValue` say equality returns
+//!   value equality. These assumptions are Rust trait boundary helpers, not
+//!   runtime theorems over projection.
 //! - Refactored but not yet proved: `ProjectionDispatcher::dispatch_projection`
 //!   now returns `RoutedProjection`, which is a plain `ProjectionOutput` plus
 //!   router-stamped `ProjectionRouteEvidence` from the same route selection that
@@ -140,9 +147,9 @@
 //!   target, but it is not the theorem yet; the proof must still tie
 //!   validation, commit routing, and raw-SQL confinement to the split lists.
 //! - Not proven here today: every exported `theorem_*` runtime/core property.
-//! - Not proven yet for offer finalization: `ProjectionOutput::context_set`
-//!   normalization or `prepare_projection` call order. The unnormalized bridge
-//!   from `ProjectionOutput` to `ContextSet` is proved.
+//! - Not proven yet for offer finalization: `prepare_projection` call order.
+//!   The unnormalized bridge from `ProjectionOutput` to `ContextSet` is proved,
+//!   and the final normalized offers are checked by a verified production guard.
 //! - Not proven yet for owner enforcement: the exported theorem tying
 //!   `enforce_owner_is_self` `Result` wrapper diagnostic rejection branches and
 //!   `prepare_projection` call order to the verified status and allow helpers.

@@ -58,7 +58,8 @@ use self::context_db::{
 };
 use crate::core::command::AuthoredFacts;
 use crate::core::context::{
-    context_set_from_projection_parts, ContextNeed, ContextOffer, ContextSet, ContextSetAdditions,
+    context_set_from_projection_parts, ContextNeed, ContextOffer, ContextOfferClaim, ContextSet,
+    ContextSetAdditions,
 };
 pub use crate::core::db::ProjectedRowMutation;
 use crate::core::db::{quoted_identifier, quoted_table_name, Db, TableName};
@@ -605,6 +606,7 @@ fn prepare_projection(
     let output = routed.output;
     enforce_owner_is_self(&fact, &output)?;
     let projected_context = output.context_set(fact.id);
+    validate_projection_context_finalization(&projected_context, &output.offers, fact.id)?;
     let projected_row_mutations = output.row_mutations;
     let runtime_effects = output.effects;
     validate_version_replay_rebuild_projection_shape(
@@ -650,6 +652,17 @@ fn validate_version_replay_rebuild_projection_shape(
         "version replay rebuild projection cannot publish standing context or time wakes"
             .to_string(),
     )
+}
+
+fn validate_projection_context_finalization(
+    context: &ContextSet,
+    claims: &[ContextOfferClaim],
+    owner: FactId,
+) -> Result<(), String> {
+    if projection_context_offers_match_claims(context, claims, owner) {
+        return Ok(());
+    }
+    Err("projection context contains an offer not finalized from this output".to_string())
 }
 
 /// Reject any projected need, time wake, or purge whose owner is not the fact
@@ -735,6 +748,38 @@ pub assume_specification[<ContextNeed as Clone>::clone](
 ) -> (out: ContextNeed)
     ensures
         out == *need,
+;
+
+pub assume_specification[<crate::core::context::Role as std::cmp::PartialEq>::eq](
+    left: &crate::core::context::Role,
+    right: &crate::core::context::Role,
+) -> (out: bool)
+    ensures
+        out <==> *left == *right,
+;
+
+pub assume_specification[<crate::core::facts::FactScope as std::cmp::PartialEq>::eq](
+    left: &crate::core::facts::FactScope,
+    right: &crate::core::facts::FactScope,
+) -> (out: bool)
+    ensures
+        out <==> *left == *right,
+;
+
+pub assume_specification[<crate::core::context::ContextKey as std::cmp::PartialEq>::eq](
+    left: &crate::core::context::ContextKey,
+    right: &crate::core::context::ContextKey,
+) -> (out: bool)
+    ensures
+        out <==> *left == *right,
+;
+
+pub assume_specification[<crate::core::context::ContextOfferValue as std::cmp::PartialEq>::eq](
+    left: &crate::core::context::ContextOfferValue,
+    right: &crate::core::context::ContextOfferValue,
+) -> (out: bool)
+    ensures
+        out <==> *left == *right,
 ;
 
 /// Bytewise fact-id equality used by the owner guard.
@@ -1155,6 +1200,128 @@ fn version_replay_rebuild_projection_status(
         &context.offers,
         wakes,
     )
+}
+
+spec fn offer_is_finalized_claim(
+    offer: ContextOffer,
+    claim: ContextOfferClaim,
+    owner: FactId,
+) -> bool {
+    offer.owner == owner && offer.role == claim.role && offer.scope == claim.scope
+        && offer.start_key == claim.start_key && offer.end_key == claim.end_key
+        && offer.value == claim.value
+}
+
+spec fn offer_matches_claims_spec(
+    offer: ContextOffer,
+    claims: Seq<ContextOfferClaim>,
+    owner: FactId,
+) -> bool {
+    exists|i: int|
+        #![trigger claims[i]]
+        0 <= i < claims.len() && offer_is_finalized_claim(offer, claims[i], owner)
+}
+
+spec fn context_offers_match_claims_prefix(
+    offers: Seq<ContextOffer>,
+    claims: Seq<ContextOfferClaim>,
+    owner: FactId,
+    end: int,
+) -> bool {
+    forall|i: int|
+        #![trigger offers[i]]
+        0 <= i < end ==> offer_matches_claims_spec(offers[i], claims, owner)
+}
+
+spec fn context_offers_match_claims_spec(
+    offers: Seq<ContextOffer>,
+    claims: Seq<ContextOfferClaim>,
+    owner: FactId,
+) -> bool {
+    context_offers_match_claims_prefix(offers, claims, owner, offers.len() as int)
+}
+
+proof fn context_offer_prefix_complete(
+    offers: Seq<ContextOffer>,
+    claims: Seq<ContextOfferClaim>,
+    owner: FactId,
+    end: int,
+)
+    requires
+        context_offers_match_claims_prefix(offers, claims, owner, end),
+        end == offers.len(),
+    ensures
+        context_offers_match_claims_spec(offers, claims, owner),
+{
+}
+
+fn offer_matches_claim(
+    offer: &ContextOffer,
+    claim: &ContextOfferClaim,
+    owner: FactId,
+) -> (accepted: bool)
+    ensures
+        accepted <==> offer_is_finalized_claim(*offer, *claim, owner),
+{
+    let owner_matches = projected_owner_matches(offer.owner, owner);
+    owner_matches && offer.role == claim.role && offer.scope == claim.scope
+        && offer.start_key == claim.start_key && offer.end_key == claim.end_key
+        && offer.value == claim.value
+}
+
+fn offer_matches_some_claim(
+    offer: &ContextOffer,
+    claims: &[ContextOfferClaim],
+    owner: FactId,
+) -> (accepted: bool)
+    ensures
+        accepted ==> offer_matches_claims_spec(*offer, claims@, owner),
+{
+    let mut i: usize = 0;
+    while i < claims.len()
+        invariant
+            i <= claims@.len(),
+        decreases claims@.len() - i,
+    {
+        if offer_matches_claim(offer, &claims[i], owner) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Check the final normalized offers against the output claims they came from.
+///
+/// This is a proof-friendly guard over the actual post-normalization context:
+/// accepted output means normalization did not introduce, mutate, or restamp an
+/// offer. The guard is intentionally about core finalization only; it does not
+/// prove that a projector's role-specific offer is semantically valid.
+fn projection_context_offers_match_claims(
+    context: &ContextSet,
+    claims: &[ContextOfferClaim],
+    owner: FactId,
+) -> (accepted: bool)
+    ensures
+        accepted ==> context_offers_match_claims_spec(context.offers@, claims@, owner),
+{
+    let mut i: usize = 0;
+    while i < context.offers.len()
+        invariant
+            i <= context.offers@.len(),
+            context_offers_match_claims_prefix(context.offers@, claims@, owner, i as int),
+        decreases context.offers@.len() - i,
+    {
+        if !offer_matches_some_claim(&context.offers[i], claims, owner) {
+            return false;
+        }
+        i += 1;
+    }
+    assert(i as int == context.offers@.len());
+    proof {
+        context_offer_prefix_complete(context.offers@, claims@, owner, i as int);
+    }
+    true
 }
 
 /// Build the unnormalized context set for one complete projection output.
@@ -7398,6 +7565,33 @@ mod tests {
         assert_eq!(context.offers[0].role, role);
         assert_eq!(context.offers[0].start_key, key);
         assert_eq!(context.offers[0].value.as_bytes(), b"parts-cert-v1");
+    }
+
+    #[test]
+    fn projection_context_finalization_rejects_offer_not_emitted_by_output() {
+        let owner = [1; 32];
+        let role = Role::new("finalized_offer").unwrap();
+        let key = ContextKey::from_bytes([2; 32]);
+        let claim = ContextOfferClaim {
+            role: role.clone(),
+            scope: FactScope::Global,
+            start_key: key.clone(),
+            end_key: key.clone(),
+            value: ContextOfferValue::from_bytes(b"expected-cert-v1"),
+        };
+        let context = ContextSet::new().offer(ContextOffer {
+            owner,
+            role,
+            scope: FactScope::Global,
+            start_key: key.clone(),
+            end_key: key,
+            value: ContextOfferValue::from_bytes(b"mutated-cert-v1"),
+        });
+
+        let err = validate_projection_context_finalization(&context, &[claim], owner)
+            .expect_err("mutated normalized offer rejected");
+
+        assert!(err.contains("not finalized from this output"));
     }
 
     #[test]
