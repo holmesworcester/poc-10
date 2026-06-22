@@ -25,8 +25,8 @@ use crate::core::facts::Fact;
 use crate::core::intents::TypedTableSchema;
 use crate::core::network;
 use crate::core::project_fact::{
-    FactRoute, ProjectionContext, ProjectionDispatcher, ProjectionOutput, Projector,
-    RoutedProjection, RouterProjector,
+    FactRoute, ProjectionContext, ProjectionDispatcher, ProjectionOutput, ProjectionRouteEvidence,
+    Projector, RoutedProjection, RouterProjector,
 };
 use crate::core::runtime::{HandlerRoute, RecurringIntentSpec};
 use crate::protocol::cli as command;
@@ -1222,6 +1222,10 @@ impl Projector for ProtocolProjector {
 }
 
 impl ProjectionDispatcher for ProtocolProjector {
+    fn route_evidence(&self, fact: &Fact) -> Result<ProjectionRouteEvidence, String> {
+        RouterProjector::new(FACT_ROUTES, &[]).route_evidence(fact)
+    }
+
     fn dispatch_projection(
         &self,
         fact: &Fact,

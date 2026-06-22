@@ -938,7 +938,7 @@ mod tests {
     use crate::core::intents::{HandlerContext, HandlerResult, IntentHandler, IntentKind};
     use crate::core::network::{NetworkTarget, OutgoingFrame};
     use crate::core::project_fact::{
-        ProjectionContext, ProjectionOutput, Projector, RoutedProjection,
+        ProjectionContext, ProjectionOutput, ProjectionRouteEvidence, Projector, RoutedProjection,
     };
     use std::io::Read;
     use std::net::{TcpListener, TcpStream};
@@ -958,6 +958,10 @@ mod tests {
     }
 
     impl ProjectionDispatcher for NoopProjector {
+        fn route_evidence(&self, fact: &Fact) -> Result<ProjectionRouteEvidence, String> {
+            Ok(ProjectionRouteEvidence::for_loaded_fact_fixture(fact))
+        }
+
         fn dispatch_projection(
             &self,
             fact: &Fact,

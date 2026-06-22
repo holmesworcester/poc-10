@@ -34,9 +34,10 @@
 //! pending row already carries the context that woke it. During the migration to
 //! offer-carried authority, `ProjectionContext` still loads legacy payload facts
 //! from matched offer owners, but new authority paths should consume matched
-//! offers and future proven-offer accessors instead. Newly emitted needs may
-//! match stored offers during commit, but those matches queue a later projection
-//! item.
+//! `RoutedOffer`s as core provenance and combine them with route-local producer
+//! theorems before treating an offer as semantic authority. Newly emitted needs
+//! may match stored offers during commit, but those matches queue a later
+//! projection item.
 //!
 //! Queue recursion is explicit outside this item. If projection emits child
 //! facts, shared effect commit stores them in `pending_projection`; if a later
@@ -189,7 +190,7 @@ pub(crate) fn project_one(
     registered_intent_kinds: &[&str],
     fact_admission: Option<FactAdmissionFn>,
 ) -> Result<bool, String> {
-    let load = match load_one_projection_input(store, source)? {
+    let load = match load_one_projection_input(store, projector, source)? {
         None => return Ok(false),
         Some(load) => load,
     };
@@ -232,6 +233,7 @@ pub(crate) fn project_one(
 /// whose backing bytes disappeared before load.
 fn load_one_projection_input(
     store: &Db,
+    projector: &(impl ProjectionDispatcher + ?Sized),
     source: ProjectionSource,
 ) -> Result<Option<ProjectionLoad>, String> {
     let Some(item) =
@@ -241,7 +243,7 @@ fn load_one_projection_input(
     };
 
     let Some(input) = perf::measure_result("projection_load_pending_fact", || {
-        load_pending_fact(store, source, item.owner, item.mode)
+        load_pending_fact(store, projector, source, item.owner, item.mode)
     })?
     else {
         return Ok(Some(ProjectionLoad::Stale {
@@ -268,6 +270,7 @@ fn load_one_projection_input(
 /// context matches yet; the context only carries incoming origin metadata.
 pub(crate) fn load_pending_fact(
     store: &Db,
+    projector: &(impl ProjectionDispatcher + ?Sized),
     source: ProjectionSource,
     fact_id: FactId,
     mode: ProjectionMode,
@@ -277,7 +280,7 @@ pub(crate) fn load_pending_fact(
         return Ok(None);
     };
     let input_staged_at_ms = source.input_staged_at(store, fact_id)?;
-    let pending_inputs = source.load_pending_inputs(store, fact_id, mode)?;
+    let pending_inputs = source.load_pending_inputs(store, projector, fact_id, mode)?;
     Ok(Some(ProjectionInput {
         source,
         fact,
@@ -474,6 +477,7 @@ impl ProjectionSource {
     fn load_pending_inputs(
         self,
         store: &Db,
+        projector: &(impl ProjectionDispatcher + ?Sized),
         fact_id: FactId,
         mode: ProjectionMode,
     ) -> Result<ProjectionContext, String> {
@@ -485,7 +489,7 @@ impl ProjectionSource {
                     })?;
                 let context =
                     perf::measure_result("projection_load_pending_context_inputs", || {
-                        pending_projection_input_context_for_owner(store, &fact_id)
+                        pending_projection_input_context_for_owner(store, projector, &fact_id)
                     })?
                     .with_time_ranges(time_ranges)
                     .with_mode(mode);
@@ -1883,6 +1887,7 @@ pub mod context {
     //! Projection context visible while processing one fact.
 
     use super::effects::{TimeRange, Timeline};
+    use super::route::ProjectionRouteEvidence;
     use super::IncomingMetadata;
     use crate::core::context::{ContextNeed, ContextOffer};
     use crate::core::facts::Fact;
@@ -1923,18 +1928,57 @@ pub mod context {
         incoming_metadata: Option<IncomingMetadata>,
     }
 
+    /// A matched offer plus the route evidence for the fact that produced it.
+    ///
+    /// This is core provenance, not protocol authority by itself. A projector
+    /// proof must still cite the producer route's theorem for the accepted offer
+    /// contract before treating the offer as semantic authority.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct RoutedOffer {
+        /// The stored offer edge.
+        pub offer: ContextOffer,
+        /// Route evidence for the offer owner fact.
+        pub producer_route: ProjectionRouteEvidence,
+    }
+
+    impl RoutedOffer {
+        /// Build a routed offer after checking that route evidence names the
+        /// same owner fact as the stored offer.
+        pub fn new(
+            offer: ContextOffer,
+            producer_route: ProjectionRouteEvidence,
+        ) -> Result<Self, String> {
+            if offer.owner != producer_route.fact_id {
+                return Err("routed offer producer route does not match offer owner".to_string());
+            }
+            Ok(Self {
+                offer,
+                producer_route,
+            })
+        }
+
+        pub fn offer(&self) -> &ContextOffer {
+            &self.offer
+        }
+
+        pub fn producer_route(&self) -> &ProjectionRouteEvidence {
+            &self.producer_route
+        }
+    }
+
     /// One matched need/offer pair plus the legacy owner payload fact.
     ///
     /// Core constructs this from standing context rows before calling the
-    /// projector. New authority paths should consume the offer fields or future
-    /// proven-offer records rather than decoding this payload. Construction is
-    /// checked: the offer owner must be the loaded payload fact id.
+    /// projector. New authority paths should consume the routed offer fields
+    /// rather than decoding this payload. Construction is
+    /// checked: the routed offer owner, producer route fact id, and loaded
+    /// payload fact id must all name the same fact.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct MatchedContext {
         /// The need owned by the fact currently being projected.
         pub need: ContextNeed,
-        /// The offer that satisfied the need.
-        pub offer: ContextOffer,
+        /// The offer that satisfied the need, plus producer route provenance.
+        pub routed_offer: RoutedOffer,
         /// Migration-only payload fact loaded from the offer owner.
         pub payload: Fact,
     }
@@ -1942,19 +1986,35 @@ pub mod context {
     impl MatchedContext {
         /// Build a matched context record after checking the core provenance link.
         ///
-        /// A matched offer is only useful as a proof record if its owner is the
-        /// fact whose bytes were loaded as the context payload. This constructor
-        /// enforces that local invariant before a `ProjectionContext` can carry
-        /// the match.
-        pub fn new(need: ContextNeed, offer: ContextOffer, payload: Fact) -> Result<Self, String> {
-            if offer.owner != payload.id {
+        /// A matched offer is useful as proof evidence only when its owner is
+        /// the fact whose bytes were loaded as the context payload and whose
+        /// route evidence was recorded by core.
+        pub fn with_route(
+            need: ContextNeed,
+            offer: ContextOffer,
+            payload: Fact,
+            producer_route: ProjectionRouteEvidence,
+        ) -> Result<Self, String> {
+            let routed_offer = RoutedOffer::new(offer, producer_route)?;
+            if routed_offer.offer.owner != payload.id {
                 return Err("matched context offer owner does not match payload fact".to_string());
             }
             Ok(Self {
                 need,
-                offer,
+                routed_offer,
                 payload,
             })
+        }
+
+        /// Build a matched context fixture with synthetic route evidence.
+        ///
+        /// Production context loading calls `with_route` after routing the
+        /// loaded owner fact. This constructor keeps tests and legacy projector
+        /// fixtures concise; it is not enough for an authority proof unless the
+        /// fixture's synthetic producer route is part of that test's premise.
+        pub fn new(need: ContextNeed, offer: ContextOffer, payload: Fact) -> Result<Self, String> {
+            let producer_route = ProjectionRouteEvidence::for_loaded_fact_fixture(&payload);
+            Self::with_route(need, offer, payload, producer_route)
         }
 
         pub fn need(&self) -> &ContextNeed {
@@ -1962,7 +2022,11 @@ pub mod context {
         }
 
         pub fn offer(&self) -> &ContextOffer {
-            &self.offer
+            &self.routed_offer.offer
+        }
+
+        pub fn routed_offer(&self) -> &RoutedOffer {
+            &self.routed_offer
         }
 
         /// Return the legacy payload fact for projectors not yet migrated to
@@ -1981,6 +2045,10 @@ pub mod context {
     #[allow(dead_code)]
     pub struct ExMatchedContext(MatchedContext);
 
+    #[verifier(external_type_specification)]
+    #[allow(dead_code)]
+    pub struct ExRoutedOffer(RoutedOffer);
+
     /// Decide the local provenance link between a matched offer and payload.
     ///
     /// This is the production helper future loader proofs should cite: a
@@ -1989,9 +2057,22 @@ pub mod context {
     #[allow(dead_code)]
     fn matched_context_owner_matches_payload(matched: &MatchedContext) -> (accepted: bool)
         ensures
-            accepted <==> matched.offer.owner == matched.payload.id,
+            accepted <==> matched.routed_offer.offer.owner == matched.payload.id,
     {
-        super::projected_owner_matches(matched.offer.owner, matched.payload.id)
+        super::projected_owner_matches(matched.routed_offer.offer.owner, matched.payload.id)
+    }
+
+    /// Decide the local provenance link between an offer and the route evidence
+    /// for the owner fact that produced it.
+    #[allow(dead_code)]
+    fn routed_offer_owner_matches_producer(routed_offer: &RoutedOffer) -> (accepted: bool)
+        ensures
+            accepted <==> routed_offer.offer.owner == routed_offer.producer_route.fact_id,
+    {
+        super::projected_owner_matches(
+            routed_offer.offer.owner,
+            routed_offer.producer_route.fact_id,
+        )
     }
     } // verus!
 
@@ -2010,7 +2091,7 @@ pub mod context {
         pub fn from_matches(matched: Vec<MatchedContext>) -> Self {
             let mut offers = matched
                 .iter()
-                .map(|matched| matched.offer.clone())
+                .map(|matched| matched.routed_offer.offer.clone())
                 .collect::<Vec<_>>();
             offers.sort();
             offers.dedup();
@@ -2096,7 +2177,7 @@ pub mod context {
             let Some(matched) = self.matched_entries_for(need).next() else {
                 return Ok(None);
             };
-            if matched.offer.owner != matched.payload.id {
+            if matched.routed_offer.offer.owner != matched.payload.id {
                 return Err(format!("{label} context offer payload mismatch"));
             }
             Ok(Some(&matched.payload))
@@ -2109,7 +2190,7 @@ pub mod context {
         pub fn offer_for(&self, need: &ContextNeed) -> Option<&ContextOffer> {
             self.matched_entries_for(need)
                 .next()
-                .map(|matched| &matched.offer)
+                .map(|matched| &matched.routed_offer.offer)
         }
 
         /// Return every offer that satisfied a need, without exposing payload facts.
@@ -2117,7 +2198,28 @@ pub mod context {
             &'a self,
             need: &'a ContextNeed,
         ) -> impl Iterator<Item = &'a ContextOffer> + 'a {
-            self.matched_entries_for(need).map(|matched| &matched.offer)
+            self.matched_entries_for(need)
+                .map(|matched| &matched.routed_offer.offer)
+        }
+
+        /// Return the first matched offer with core route provenance.
+        ///
+        /// This is still core provenance only. A protocol proof must combine it
+        /// with an accepted offer contract and the producer route theorem before
+        /// using the offer as authority.
+        pub fn routed_offer_for(&self, need: &ContextNeed) -> Option<&RoutedOffer> {
+            self.matched_entries_for(need)
+                .next()
+                .map(|matched| &matched.routed_offer)
+        }
+
+        /// Return every matched offer with core route provenance.
+        pub fn matched_routed_offers_for<'a>(
+            &'a self,
+            need: &'a ContextNeed,
+        ) -> impl Iterator<Item = &'a RoutedOffer> + 'a {
+            self.matched_entries_for(need)
+                .map(|matched| &matched.routed_offer)
         }
 
         /// Return every matched payload for a need, preserving its offer metadata.
@@ -2129,7 +2231,7 @@ pub mod context {
             need: &'a ContextNeed,
         ) -> impl Iterator<Item = (&'a ContextOffer, &'a Fact)> + 'a {
             self.matched_entries_for(need)
-                .map(|matched| (&matched.offer, &matched.payload))
+                .map(|matched| (&matched.routed_offer.offer, &matched.payload))
         }
 
         fn matched_entries_for<'a>(
@@ -2198,6 +2300,7 @@ pub(crate) mod context_db {
 
     use super::{
         insert_pending_owner_in_tx, perf, retained_fact, MatchedContext, ProjectionContext,
+        ProjectionDispatcher,
     };
 
     const CONTEXT_NEED_DIRECTION: &str = "need";
@@ -2719,6 +2822,7 @@ pub(crate) mod context_db {
     /// owner's old needs before the first projector run.
     pub(crate) fn pending_projection_input_context_for_owner(
         store: &Db,
+        projector: &(impl ProjectionDispatcher + ?Sized),
         owner: &FactId,
     ) -> Result<ProjectionContext, String> {
         let pairs = perf::measure_result("context_pending_matches_select", || {
@@ -2763,6 +2867,7 @@ pub(crate) mod context_db {
         for (need, offer) in pairs {
             push_stored_matched_context(
                 store,
+                projector,
                 &need,
                 offer,
                 &mut seen,
@@ -2812,6 +2917,7 @@ pub(crate) mod context_db {
     /// bytes.
     fn push_stored_matched_context(
         store: &Db,
+        projector: &(impl ProjectionDispatcher + ?Sized),
         need: &ContextNeed,
         offer: ContextOffer,
         seen: &mut BTreeSet<(ContextNeed, ContextOffer)>,
@@ -2831,7 +2937,13 @@ pub(crate) mod context_db {
             payloads.insert(offer.owner, payload.clone());
             payload
         };
-        matched.push(MatchedContext::new(need.clone(), offer, payload)?);
+        let producer_route = projector.route_evidence(&payload)?;
+        matched.push(MatchedContext::with_route(
+            need.clone(),
+            offer,
+            payload,
+            producer_route,
+        )?);
         Ok(())
     }
 
@@ -3580,6 +3692,23 @@ pub mod route {
         pub storage_requirement: StorageRequirement,
     }
 
+    impl ProjectionRouteEvidence {
+        /// Synthetic route evidence for hand-built context fixtures.
+        ///
+        /// Production context loading does not call this. It asks the active
+        /// `ProjectionDispatcher` to route the loaded owner fact and records the
+        /// real route evidence for that owner.
+        pub fn for_loaded_fact_fixture(fact: &Fact) -> Self {
+            Self {
+                fact_id: fact.id,
+                effective_tag: fact.bytes.first().copied().unwrap_or_default(),
+                route_tag: fact.bytes.first().copied().unwrap_or_default(),
+                projector_info: FactProjectorInfo::projector("test_projector"),
+                storage_requirement: StorageRequirement::MaintenanceBypass,
+            }
+        }
+    }
+
     verus! {
     #[verifier(external_type_specification)]
     #[allow(dead_code)]
@@ -3691,13 +3820,7 @@ pub mod route {
     impl RoutedProjection {
         pub(crate) fn for_test(fact: &Fact, output: ProjectionOutput) -> Self {
             Self {
-                route: ProjectionRouteEvidence {
-                    fact_id: fact.id,
-                    effective_tag: fact.bytes.first().copied().unwrap_or_default(),
-                    route_tag: fact.bytes.first().copied().unwrap_or_default(),
-                    projector_info: FactProjectorInfo::projector("test_projector"),
-                    storage_requirement: StorageRequirement::MaintenanceBypass,
-                },
+                route: ProjectionRouteEvidence::for_loaded_fact_fixture(fact),
                 output,
             }
         }
@@ -3709,6 +3832,12 @@ pub mod route {
     /// directly. That keeps route evidence stamped by the router/core boundary,
     /// not self-reported by a projector.
     pub trait ProjectionDispatcher {
+        /// Return route evidence for a fact without running its projector.
+        ///
+        /// Context loading uses this for matched offer owners so the projector
+        /// receiving context can later check which route produced that offer.
+        fn route_evidence(&self, fact: &Fact) -> Result<ProjectionRouteEvidence, String>;
+
         fn dispatch_projection(
             &self,
             fact: &Fact,
@@ -3799,6 +3928,15 @@ pub mod route {
     }
 
     impl ProjectionDispatcher for RouterProjector {
+        fn route_evidence(&self, fact: &Fact) -> Result<ProjectionRouteEvidence, String> {
+            let selected = self.selected_route(fact)?;
+            Ok(selected_route_evidence(
+                fact.id,
+                selected.effective_tag,
+                selected.stamp,
+            ))
+        }
+
         fn dispatch_projection(
             &self,
             fact: &Fact,
@@ -3817,7 +3955,7 @@ pub mod route {
     }
 }
 
-pub use context::{MatchedContext, ProjectionContext, ProjectionMode};
+pub use context::{MatchedContext, ProjectionContext, ProjectionMode, RoutedOffer};
 pub use effects::{
     fact_purged_need, fact_purged_offer, fact_purged_offer_claim, fact_purged_range_need,
     fact_purged_range_offer, fact_purged_range_offer_claim, fact_purged_role, ProjectionOutput,
@@ -4566,6 +4704,10 @@ mod contract_tests {
     }
 
     impl<P: Projector + ?Sized> ProjectionDispatcher for TestProjectionDispatcher<'_, P> {
+        fn route_evidence(&self, fact: &Fact) -> Result<ProjectionRouteEvidence, String> {
+            Ok(ProjectionRouteEvidence::for_loaded_fact_fixture(fact))
+        }
+
         fn dispatch_projection(
             &self,
             fact: &Fact,
@@ -4798,15 +4940,19 @@ mod contract_tests {
             .expect("queue match then remove standing offer");
 
         assert_eq!(pending_projection_match_count(&store, target.id), 1);
+        let projector = need_until_payload(role.clone(), key.clone(), "queued_context_ready", None);
+        let dispatcher = TestProjectionDispatcher {
+            projector: &projector,
+        };
         let queued_context =
-            pending_projection_input_context_for_owner(&store, &target.id).expect("queued context");
+            pending_projection_input_context_for_owner(&store, &dispatcher, &target.id)
+                .expect("queued context");
         assert_eq!(
             queued_context
                 .offer_for(&need)
                 .map(|offer| offer.value.as_bytes()),
             Some(b"queued-cert".as_slice())
         );
-        let projector = need_until_payload(role, key, "queued_context_ready", None);
         let progress =
             drain_projection(&projector, &store, &[], None, 1).expect("drain projection");
 
@@ -5437,13 +5583,13 @@ mod contract_tests {
             Err("projector rejected durable fact".to_string())
         });
 
-        let input = expect_loaded(
-            load_one_projection_input(&store, ProjectionSource::Durable)
-                .expect("load projection input"),
-        );
         let dispatcher = TestProjectionDispatcher {
             projector: &projector,
         };
+        let input = expect_loaded(
+            load_one_projection_input(&store, &dispatcher, ProjectionSource::Durable)
+                .expect("load projection input"),
+        );
         let outcome = evaluate_loaded_projection_input(&dispatcher, input, &[], &[], None)
             .expect("evaluate projection");
 
@@ -5479,13 +5625,13 @@ mod contract_tests {
             Err("projector rejected incoming fact".to_string())
         });
 
-        let input = expect_loaded(
-            load_one_projection_input(&store, ProjectionSource::Incoming)
-                .expect("load projection input"),
-        );
         let dispatcher = TestProjectionDispatcher {
             projector: &projector,
         };
+        let input = expect_loaded(
+            load_one_projection_input(&store, &dispatcher, ProjectionSource::Incoming)
+                .expect("load projection input"),
+        );
         let outcome = evaluate_loaded_projection_input(&dispatcher, input, &[], &[], None)
             .expect("evaluate projection");
 
@@ -5854,8 +6000,13 @@ mod contract_tests {
         store
             .write_transaction(|tx| insert_network_incoming_fact_in_tx(tx, &parent, &metadata))
             .expect("insert incoming fact with metadata");
+        let noop_projector = test_projector(|_fact, _context| Ok(ProjectionOutput::new()));
+        let noop_dispatcher = TestProjectionDispatcher {
+            projector: &noop_projector,
+        };
         let incoming = load_pending_fact(
             &store,
+            &noop_dispatcher,
             ProjectionSource::Incoming,
             parent.id,
             ProjectionMode::Normal,
@@ -5876,6 +6027,7 @@ mod contract_tests {
             .is_none());
         let input = load_pending_fact(
             &store,
+            &noop_dispatcher,
             ProjectionSource::Durable,
             parent.id,
             ProjectionMode::Normal,
@@ -5921,6 +6073,9 @@ mod contract_tests {
 
         let child_input = load_pending_fact(
             &store,
+            &TestProjectionDispatcher {
+                projector: &projector,
+            },
             ProjectionSource::Incoming,
             child.id,
             ProjectionMode::Normal,
@@ -6808,11 +6963,45 @@ mod tests {
             timestamp: 1,
             bytes: b"test payload".to_vec(),
         };
+        let producer = Fact {
+            id: [2; 32],
+            scope: FactScope::Global,
+            timestamp: 1,
+            bytes: b"producer".to_vec(),
+        };
+        let producer_route = ProjectionRouteEvidence::for_loaded_fact_fixture(&producer);
 
-        let err = MatchedContext::new(need, offer, payload).expect_err("mismatch rejected");
+        let err = MatchedContext::with_route(need, offer, payload, producer_route)
+            .expect_err("mismatch rejected");
         assert_eq!(
             err,
             "matched context offer owner does not match payload fact"
+        );
+    }
+
+    #[test]
+    fn routed_offer_rejects_offer_owner_route_mismatch() {
+        let role = Role::new("exact").unwrap();
+        let offer = ContextOffer {
+            owner: [2; 32],
+            role,
+            scope: FactScope::Global,
+            start_key: ContextKey::from_bytes([10; 32]),
+            end_key: ContextKey::from_bytes([10; 32]),
+            value: ContextOfferValue::empty(),
+        };
+        let producer = Fact {
+            id: [3; 32],
+            scope: FactScope::Global,
+            timestamp: 1,
+            bytes: b"producer".to_vec(),
+        };
+        let route = ProjectionRouteEvidence::for_loaded_fact_fixture(&producer);
+
+        let err = RoutedOffer::new(offer, route).expect_err("mismatch rejected");
+        assert_eq!(
+            err,
+            "routed offer producer route does not match offer owner"
         );
     }
 
@@ -6974,6 +7163,63 @@ mod tests {
             ROUTE_EVIDENCE_STORAGE
         );
         assert_eq!(run.output.offers.len(), 1);
+    }
+
+    #[test]
+    fn pending_context_records_matched_offer_route_evidence() {
+        let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
+        let offered = Fact::new(FactScope::Global, 1, vec![ROUTE_EVIDENCE_TAG, 7]);
+        let target = Fact::new(FactScope::Global, 2, b"route-context-target".to_vec());
+        let role = Role::new("route_ctx").unwrap();
+        let key = ContextKey::from_bytes(b"route-key");
+        let need = ContextNeed {
+            owner: target.id,
+            role: role.clone(),
+            scope: target.scope.clone(),
+            start_key: key.clone(),
+            end_key: key.clone(),
+        };
+        let offer = ContextOffer {
+            owner: offered.id,
+            role,
+            scope: target.scope.clone(),
+            start_key: key.clone(),
+            end_key: key,
+            value: ContextOfferValue::empty(),
+        };
+
+        store
+            .write_transaction(|tx| {
+                insert_fact_and_pending_in_tx(tx, &offered)?;
+                insert_fact_and_pending_in_tx(tx, &target)?;
+                insert_context_need_in_tx(tx, &need)?;
+                insert_context_offer_in_tx(tx, &offer)?;
+                wake_context_matches_in_tx(
+                    tx,
+                    &ContextSetAdditions {
+                        offers: vec![offer.clone()],
+                        ..ContextSetAdditions::default()
+                    },
+                )
+                .map_err(sqlite_string_error)
+            })
+            .expect("seed matched context");
+
+        let router = RouterProjector::new(ROUTE_EVIDENCE_ROUTES, &[]);
+        let context = pending_projection_input_context_for_owner(&store, &router, &target.id)
+            .expect("load pending context");
+        let routed = context
+            .routed_offer_for(&need)
+            .expect("matched routed offer");
+
+        assert_eq!(routed.offer().owner, offered.id);
+        assert_eq!(routed.producer_route().fact_id, offered.id);
+        assert_eq!(routed.producer_route().route_tag, ROUTE_EVIDENCE_TAG);
+        assert_eq!(routed.producer_route().projector_info, ROUTE_EVIDENCE_INFO);
+        assert_eq!(
+            routed.producer_route().storage_requirement,
+            ROUTE_EVIDENCE_STORAGE
+        );
     }
 
     #[test]

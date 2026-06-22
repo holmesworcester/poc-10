@@ -149,7 +149,8 @@ mod tests {
     use crate::core::effects::StorageRequirement;
     use crate::core::intents::IntentHandler;
     use crate::core::project_fact::{
-        ProjectionContext, ProjectionDispatcher, ProjectionOutput, Projector, RoutedProjection,
+        ProjectionContext, ProjectionDispatcher, ProjectionOutput, ProjectionRouteEvidence,
+        Projector, RoutedProjection,
     };
     use crate::core::runtime::{HandlerRoute, Runtime, RuntimeDescription};
     use crate::core::schema::CORE_SCHEMA_SOURCE;
@@ -287,6 +288,13 @@ mod tests {
     }
 
     impl ProjectionDispatcher for NoopProjector {
+        fn route_evidence(
+            &self,
+            fact: &crate::core::facts::Fact,
+        ) -> Result<ProjectionRouteEvidence, String> {
+            Ok(ProjectionRouteEvidence::for_loaded_fact_fixture(fact))
+        }
+
         fn dispatch_projection(
             &self,
             fact: &crate::core::facts::Fact,

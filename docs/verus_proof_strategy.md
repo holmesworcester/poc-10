@@ -674,7 +674,8 @@ selected_route_evidence(fact_id, effective_tag, stamp) preserves selected route 
 version_replay_rebuild_shape_allowed(version_replay_rebuild, needs, offers, wakes) accepts if and only if ordinary projection or empty version replay rebuild output
 version_replay_rebuild_shape_status(version_replay_rebuild, needs, offers, wakes) returns accepted or standing-output exactly from that predicate
 version_replay_rebuild_shape_status_allows_projection(status) accepts if and only if status is VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED
-matched_context_owner_matches_payload(matched) accepts if and only if matched.offer.owner == matched.payload.id
+matched_context_owner_matches_payload(matched) accepts if and only if matched.routed_offer.offer.owner == matched.payload.id
+routed_offer_owner_matches_producer(routed_offer) accepts if and only if routed_offer.offer.owner == routed_offer.producer_route.fact_id
 ```
 
 These contracts are proofs over helper Rust code that normal builds execute.
@@ -699,12 +700,16 @@ is proving the `validate_version_replay_rebuild_projection_shape` `Result`
 wrapper and `prepare_projection` call order around the verified status helper.
 
 The remaining matched-context provenance gap is no longer the local
-owner/payload equality decision for one `MatchedContext`: `MatchedContext::new`
-rejects mismatched owner/payload fixtures at runtime, and Cargo-verus proves
-the production decision helper. The open core work is proving that
+owner/payload equality decision for one `MatchedContext` or the local
+offer-owner/producer-route equality decision for one `RoutedOffer`:
+`MatchedContext::with_route` rejects mismatched owner/payload/route fixtures at
+runtime, the SQL pending-context loader asks the active `ProjectionDispatcher`
+for producer route evidence while loading matched offer owners, and Cargo-verus
+proves both production decision helpers. The open core work is proving that
 `pending_projection_input_context_for_owner` and the SQL loader construct every
-projector-visible matched context through that checked path, and then extending
-that record with producer route/proof identity.
+projector-visible matched context through that checked path and proving route
+selection through the whole production dispatcher call graph. Semantic
+provenness remains a route-local projector theorem, not a core theorem.
 
 The remaining route-dispatch gap is no longer route-evidence field stamping or
 selected-stamp evidence construction; it is proving that `RouterProjector`
