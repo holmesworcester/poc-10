@@ -1892,6 +1892,8 @@ fn prepared_projection_from_validated_output(
 /// `ProjectionOutput` value that was validated, moves its commit-facing fields
 /// into `PreparedProjection`, and proves the prepare-stage commit-field
 /// predicate is preserved in the exact object later commit code receives.
+/// The helper does not run those admission checks itself; callers must do that
+/// before using the conditional proof.
 fn prepared_projection_from_accepted_output(
     source: ProjectionSource,
     fact: Fact,
@@ -7884,6 +7886,73 @@ mod contract_tests {
         assert_eq!(projection.input_staged_at_ms, Some(7));
         assert!(projection.retain_self);
         assert_eq!(projection.projected_context, context);
+        assert_eq!(projection.time_wakes, vec![wake]);
+        assert_eq!(projection.projected_row_mutations, vec![row]);
+        assert_eq!(projection.runtime_effects.purged_facts, vec![fact.id]);
+    }
+
+    #[test]
+    fn prepare_projection_carries_admitted_output_to_prepared_projection() {
+        let fact = Fact::new(FactScope::Global, 1, b"accepted prepare path".to_vec());
+        let role = Role::new("accepted_prepare_path").unwrap();
+        let key = ContextKey::from_bytes([9; 32]);
+        let need = need_for(&fact, &role, &key);
+        let wake = TimeWake {
+            timeline: Timeline::new("accepted_prepare_path").unwrap(),
+            owner: fact.id,
+            at: 21,
+        };
+        let claim = ContextOfferClaim {
+            role,
+            scope: FactScope::Global,
+            start_key: key.clone(),
+            end_key: key,
+            value: ContextOfferValue::from_bytes(b"accepted-path-offer"),
+        };
+        let projected_table = TableName::new("accepted_prepare_path_rows");
+        let row = ProjectedRowMutation::InsertValues(TableInsert {
+            table: projected_table.clone(),
+            columns: &["id"],
+            values: vec![Value::Bytes(fact.id.to_vec())],
+        });
+        let output = ProjectionOutput::new()
+            .need(need)
+            .offer(claim)
+            .time_wake(wake.clone())
+            .row_mutation(row.clone())
+            .purge_self(fact.id);
+        let expected_context = output.context_set(fact.id);
+        let projector =
+            test_projector(move |_fact: &Fact, _context: &ProjectionContext| Ok(output.clone()));
+        let dispatcher = TestProjectionDispatcher {
+            projector: &projector,
+        };
+
+        let projection = prepare_projection(
+            &dispatcher,
+            ProjectionInput {
+                source: ProjectionSource::Durable,
+                fact: fact.clone(),
+                input_staged_at_ms: Some(11),
+                pending_inputs: ProjectionContext::default(),
+            },
+            &[projected_table],
+            &[],
+            None,
+        )
+        .expect("accepted projection output should prepare");
+
+        assert_eq!(projection.source, ProjectionSource::Durable);
+        assert_eq!(projection.fact, fact);
+        assert_eq!(projection.mode, ProjectionMode::Normal);
+        assert_eq!(
+            projection.route_evidence,
+            ProjectionRouteEvidence::for_loaded_fact_fixture(&fact)
+        );
+        assert_eq!(projection.input_received_at_ms, fact.timestamp);
+        assert_eq!(projection.input_staged_at_ms, Some(11));
+        assert!(projection.retain_self);
+        assert_eq!(projection.projected_context, expected_context);
         assert_eq!(projection.time_wakes, vec![wake]);
         assert_eq!(projection.projected_row_mutations, vec![row]);
         assert_eq!(projection.runtime_effects.purged_facts, vec![fact.id]);
