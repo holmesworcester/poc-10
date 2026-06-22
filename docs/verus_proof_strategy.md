@@ -179,21 +179,19 @@ generic capability framework.
 ### Stage 6: Proven Context Loading
 
 Concrete work: extend `pending_projection_input_context_for_owner` and
-`MatchedContext` so authority-bearing context is a `ProvenOffer` or
-`ProvenContext` record, not a bare `ContextOffer`. Split the proof-facing state
-into core provenance and semantic provenness. Core provenance says the matched
-offer was finalized from an owner fact, through an attested route witness, and
-loaded from the owner fact named by the offer. Semantic provenness additionally
-requires the producer route theorem for that offer kind. That record carries the
-matched offer fields, offer owner fact id, producer route identity, output kind
-or index when needed to disambiguate route output. It may also carry owner fact
-bytes for audit and for the producer projector theorem, but consumers should
-depend on the standard offer boundary plus provenance and then cite the
-producer theorem for semantic authority. Prefer
+`ProjectionContext` so authority-bearing context is a `ProvenOffer` or
+`ProvenContext` record, not a payload fact. Split the proof-facing state into
+core provenance and semantic provenness. Core provenance says the matched offer
+was finalized from an owner fact through an attested route witness. Semantic
+provenness additionally requires the producer route theorem for that offer kind.
+That record carries the matched offer fields, offer owner fact id, producer
+route identity, output kind or index when needed to disambiguate route output,
+and stable offer-carried values where selector/range fields are not expressive
+enough. Consumers must depend on the standard offer boundary plus provenance
+and then cite the producer theorem for semantic authority. Prefer
 `ProjectionContext::proven_offers_for` and
 `ProjectionContext::matched_proven_offers_for`; do not expose a raw `Fact` as a
-proven authority accessor unless it is wrapped in a `ProvenContext` record that
-also carries the proven offer boundary and provenance. This stage
+projector authority surface. This stage
 deliberately precedes query rewiring: projection context loading is core input
 plumbing, while user-facing queries are later consumers of projected/proven
 state.
@@ -262,7 +260,7 @@ stable offer only when the current predicate is proved. Other projectors see
 only that current proven offer, not the producer's historical fact graph.
 
 Success criteria: `projection_context_records_offer_provenance` and
-`matched_payloads_are_offer_owner_facts` lose `external_body`; candidate
+`matched_offer_loads_owner_fact` lose `external_body`; candidate
 accessors are not used in authority-bearing projector proofs; tests cover a
 matched unproven offer being visible for wakeup but rejected by
 `proven_offers_for`; producer proof walkthroughs show
@@ -289,15 +287,15 @@ small helpers first, then the cross-helper facts:
 `project_fact_dispatches_owner_route`, `offer_claim_finalizes_to_projected_owner`,
 `projected_table_writes_are_project_fact_only`,
 `projection_context_records_offer_provenance`,
-`matched_payloads_are_offer_owner_facts`,
+`matched_offer_loads_owner_fact`,
 `context_replacement_preserves_owner_boundaries`, and
 `atomic_projection_commit_sound`. `wake_context_matches_in_tx` must record
-matches whose payload fact is the matched offer owner and whose match is
-sufficient for wakeup, but matcher role/scope/selector semantics are liveness
-plumbing, not authority. `replace_context_for_owner_in_tx` deletes and replaces
-only the current owner's needs while appending that owner's finalized offers;
-and `commit_projection_effects` commits lifecycle, context, wake, row, fact,
-purge, intent, and projected-output writes as one transaction.
+matches whose offer owner is the fact named by the matched offer and whose
+match is sufficient for wakeup, but matcher role/scope/selector semantics are
+liveness plumbing, not authority. `replace_context_for_owner_in_tx` deletes and
+replaces only the current owner's needs while appending that owner's finalized
+offers; and `commit_projection_effects` commits lifecycle, context, wake, row,
+fact, purge, intent, and projected-output writes as one transaction.
 This pass verifies the actual call graph: every `*_in_tx` helper shares the
 same SQLite transaction, no effect commits on a separate connection or
 autocommit path, and external wake/channel notifications cannot become
@@ -524,7 +522,7 @@ Core predicates and theorem names:
 ```text
 projection_context_sound(ctx, graph)
 projection_context_records_offer_provenance(ctx, graph)
-matched_payloads_are_offer_owner_facts(matched)
+matched_offer_loads_owner_fact(matched)
 matcher_preserves_role_scope_selector(need, matched)
 project_fact_dispatches_owner_route(fact, route)
 projected_table_writes_are_project_fact_only(before, after)
@@ -639,7 +637,8 @@ route and predicate version is never authority.
 accessors for authority:
 
 ```rust
-matched_payloads_for(...)
+offer_for(...)
+matched_offers_for(...)
 proven_offers_for(...)
 matched_proven_offers_for(...)
 ```
@@ -647,8 +646,8 @@ matched_proven_offers_for(...)
 Projector proofs must use proven offers for authority-bearing dependencies.
 Producer projector theorems connect those offers to decoded/adapted owner fact
 bytes. Consumer projectors check the stable offer boundary and should not know
-every producer fact version. Candidate payloads may be used for wakeup or
-non-authority discovery only.
+every producer fact version. Candidate payload access is migration debt and
+must be removed from projector authority paths.
 
 Each projector should name accepted proven offer contracts separately from the
 needs it emits. Needs describe what can wake the projector; accepted offer

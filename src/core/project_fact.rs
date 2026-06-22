@@ -30,10 +30,13 @@
 //! If SQLite rolls back, the old queue state remains. If it commits, the
 //! projector output is visible as a complete unit.
 //!
-//! Projectors do not query the database for missing context during a run. Matched
-//! payload facts arrive through `ProjectionContext` because the pending row
-//! already carries the context that woke it. Newly emitted needs may match
-//! stored offers during commit, but those matches queue a later projection item.
+//! Projectors do not query the database for missing context during a run. The
+//! pending row already carries the context that woke it. During the migration to
+//! offer-carried authority, `ProjectionContext` still loads legacy payload facts
+//! from matched offer owners, but new authority paths should consume matched
+//! offers and future proven-offer accessors instead. Newly emitted needs may
+//! match stored offers during commit, but those matches queue a later projection
+//! item.
 //!
 //! Queue recursion is explicit outside this item. If projection emits child
 //! facts, shared effect commit stores them in `pending_projection`; if a later
@@ -1435,26 +1438,25 @@ pub mod context {
         incoming_metadata: Option<IncomingMetadata>,
     }
 
-    /// One matched need/offer pair plus the offer owner's payload fact.
+    /// One matched need/offer pair plus the legacy owner payload fact.
     ///
     /// Core constructs this from standing context rows before calling the
-    /// projector. A projector may inspect the payload, but it must not assume core
-    /// has validated the protocol semantics of that payload.
+    /// projector. New authority paths should consume the offer fields or future
+    /// proven-offer records rather than decoding this payload.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct MatchedContext {
         /// The need owned by the fact currently being projected.
         pub need: ContextNeed,
         /// The offer that satisfied the need.
         pub offer: ContextOffer,
-        /// Payload fact loaded from the offer owner.
+        /// Migration-only payload fact loaded from the offer owner.
         pub payload: Fact,
     }
 
     impl ProjectionContext {
         /// Build context containing only unmatched standing offers.
         ///
-        /// This shape is mainly used for facts with no needs; protocol code should
-        /// prefer the matched-payload helpers when a proof depends on a need.
+        /// This shape is mainly used for facts with no needs.
         pub fn new(offers: Vec<ContextOffer>) -> Self {
             Self {
                 offers,
@@ -1533,6 +1535,10 @@ pub mod context {
         ///
         /// This is a lookup over context core already matched and loaded before
         /// projection. It does not query storage or run overlap queries.
+        ///
+        /// Migration debt: projectors should consume offer-carried semantics
+        /// instead of decoding matched payload facts. Prefer `offer_for` or
+        /// `matched_offers_for` when the offer edge itself is enough.
         pub fn payload_for(&self, need: &ContextNeed) -> Option<&Fact> {
             self.matched_entries_for(need)
                 .next()
@@ -1553,7 +1559,28 @@ pub mod context {
             Ok(Some(&matched.payload))
         }
 
+        /// Return the first offer that satisfied an exact need, if any.
+        ///
+        /// This is the proof-oriented context surface: it exposes the matched
+        /// offer edge without exposing the owner fact bytes.
+        pub fn offer_for(&self, need: &ContextNeed) -> Option<&ContextOffer> {
+            self.matched_entries_for(need)
+                .next()
+                .map(|matched| &matched.offer)
+        }
+
+        /// Return every offer that satisfied a need, without exposing payload facts.
+        pub fn matched_offers_for<'a>(
+            &'a self,
+            need: &'a ContextNeed,
+        ) -> impl Iterator<Item = &'a ContextOffer> + 'a {
+            self.matched_entries_for(need).map(|matched| &matched.offer)
+        }
+
         /// Return every matched payload for a need, preserving its offer metadata.
+        ///
+        /// Migration debt: this keeps legacy projectors working while offer
+        /// values/keys are made expressive enough to remove payload access.
         pub fn matched_payloads_for<'a>(
             &'a self,
             need: &'a ContextNeed,
@@ -1602,11 +1629,12 @@ pub(crate) mod context_db {
     //! and fan out wakeups to facts that may now make progress.
     //!
     //! Exact rows and true-range rows are stored separately. The `owner` column is
-    //! always the fact whose projection emitted the row. For offers, that same owner
-    //! is also the payload fact loaded into matched projection context. Needs are
-    //! current subscriptions: when a fact projects again, its new output replaces the
-    //! old need rows it owned. Offers are append-only evidence: once inserted, an
-    //! offer remains until the owner fact is purged.
+    //! always the fact whose projection emitted the row. For offers, that owner is
+    //! provenance. Legacy context loading can still resolve it to the owner fact,
+    //! but authority should move through offer-carried semantics. Needs are current
+    //! subscriptions: when a fact projects again, its new output replaces the old
+    //! need rows it owned. Offers are append-only evidence: once inserted, an offer
+    //! remains until the owner fact is purged.
     //!
     //! The invariant is replacement needs plus append-only offers. Projection
     //! output is the complete need set and new offer set for one fact, and wake
@@ -5698,6 +5726,15 @@ mod tests {
             .map(|(_offer, payload)| payload.id)
             .collect::<Vec<_>>();
         assert_eq!(payload_ids, vec![[11; 32], [33; 32]]);
+        let offer_ids = context
+            .matched_offers_for(&need_a)
+            .map(|offer| offer.owner)
+            .collect::<Vec<_>>();
+        assert_eq!(offer_ids, vec![[11; 32], [33; 32]]);
+        assert_eq!(
+            context.offer_for(&need_b).map(|offer| offer.owner),
+            Some([22; 32])
+        );
         assert_eq!(
             context.payload_for(&need_b).map(|payload| payload.id),
             Some([22; 32])

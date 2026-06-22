@@ -1143,7 +1143,7 @@ fn attach_request_observation_if_available(
     output: ProjectionOutput,
 ) -> Result<ProjectionOutput, String> {
     let need = frame_observation::project::connection_frame_observation_need(fact.id, fact.id);
-    if context.incoming_metadata().is_none() && context.payload_for(&need).is_none() {
+    if context.incoming_metadata().is_none() && context.offer_for(&need).is_none() {
         return Ok(output);
     }
     let observation = request_observation(fact, context)?;

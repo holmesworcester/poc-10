@@ -282,7 +282,7 @@ fn local_recipient_key(
         local.recipient_key_id,
         local.recipient_key_id,
     );
-    let is_superseded = projection_context.payload_for(&superseded_need).is_some();
+    let is_superseded = projection_context.offer_for(&superseded_need).is_some();
     let output = ProjectionOutput::new()
         .need(recipient_need)
         .need(superseded_need);

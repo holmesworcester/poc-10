@@ -359,7 +359,7 @@ pub mod authenticate {
             }
             let invite_need = bootstrap_invite_need(fact.id, &request);
             if let Some(invite_need) = &invite_need {
-                if context.payload_for(invite_need).is_none() {
+                if context.offer_for(invite_need).is_none() {
                     return Ok(Authentication::NeedsContext(vec![
                         request_need.clone(),
                         request_opener_need.clone(),
@@ -423,7 +423,7 @@ pub mod authenticate {
                 };
             let invite_need = bootstrap_invite_need(fact.id, &request);
             if let Some(invite_need) = &invite_need {
-                if context.payload_for(invite_need).is_none() {
+                if context.offer_for(invite_need).is_none() {
                     return Ok(Authentication::NeedsContext(vec![
                         request_need.clone(),
                         request_opener_need.clone(),
@@ -1163,7 +1163,7 @@ fn attach_connection_observation_if_available(
     output: ProjectionOutput,
 ) -> Result<ProjectionOutput, String> {
     let need = frame_observation::project::connection_frame_observation_need(fact.id, fact.id);
-    if context.incoming_metadata().is_none() && context.payload_for(&need).is_none() {
+    if context.incoming_metadata().is_none() && context.offer_for(&need).is_none() {
         return Ok(output);
     }
     let observation = connection_observation(fact, context)?;

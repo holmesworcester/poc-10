@@ -388,9 +388,39 @@ fn target_projectors_use_typed_context_lookups_not_direct_match_scans() {
 
     assert!(
         offenders.is_empty() && stale_allowlist.is_empty(),
-        "source projectors must look up context by concrete ContextNeed with ProjectionContext::payload_for, payload_for_checked, or matched_payloads_for. Direct matched_context scans are exceptional and must not spread.\nnew offenders:\n{}\nstale allowlist entries to remove:\n{}",
+        "source projectors must look up context by concrete ContextNeed. Prefer offer_for, matched_offers_for, and later proven offer accessors. Payload helpers are migration debt only; direct matched_context scans are exceptional and must not spread.\nnew offenders:\n{}\nstale allowlist entries to remove:\n{}",
         offenders.join("\n"),
         stale_allowlist.join("\n")
+    );
+}
+
+#[test]
+fn target_projectors_do_not_use_payload_lookup_as_offer_presence_check() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+
+    for path in projector_implementation_files(root) {
+        let relative = path.strip_prefix(root).unwrap().display().to_string();
+        let text = source_text(&path);
+        let production = strip_line_comments(&production_text_before_unit_tests(&text));
+        for line in production.lines() {
+            if line.contains("payload_for(")
+                && (line.contains(").is_some()") || line.contains(").is_none()"))
+            {
+                offenders.push(format!(
+                    "{relative} contains payload_for presence check: {}",
+                    line.trim()
+                ));
+            }
+        }
+    }
+
+    offenders.sort();
+    offenders.dedup();
+    assert!(
+        offenders.is_empty(),
+        "projectors should check offer presence with offer_for or matched_offers_for, not by loading payload facts:\n{}",
+        offenders.join("\n")
     );
 }
 
@@ -442,7 +472,7 @@ fn target_projectors_do_not_read_raw_context_offer_storage_fields() {
 
     assert!(
         offenders.is_empty(),
-        "projectors should consume typed matched payloads, not raw standing context rows. Keep offer owner checks in core ProjectionContext helpers and range decoding beside the validating domain:\n{}",
+        "projectors should consume offer-carried context through core ProjectionContext helpers, not raw standing context rows. Payload facts are migration debt while offer values/keys are made expressive enough:\n{}",
         offenders.join("\n")
     );
 }

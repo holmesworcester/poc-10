@@ -133,7 +133,7 @@ pub mod verus_model {
     pub struct SpecMatchedContext {
         pub need: SpecContextNeed,
         pub offer: SpecContextOffer,
-        pub payload_fact_id: int,
+        pub loaded_fact_id: int,
     }
 
     #[derive(Copy, Clone)]
@@ -189,10 +189,10 @@ pub mod verus_model {
     // the shape of the future core proof, not completed proof coverage.
     // -------------------------------------------------------------------------
 
-    pub open spec fn matched_payloads_are_offer_owner_facts(
+    pub open spec fn matched_offer_loads_owner_fact(
         matched: SpecMatchedContext,
     ) -> bool {
-        matched.payload_fact_id == matched.offer.owner
+        matched.loaded_fact_id == matched.offer.owner
     }
 
     pub open spec fn projection_context_sound(
@@ -389,13 +389,12 @@ pub mod verus_model {
     {
     }
 
-    // Deferred trusted core theorem: matched payload bytes are loaded from the
-    // matched offer owner fact.
+    // Deferred trusted core theorem: matched offer loading resolves the owner fact.
     #[verifier::external_body]
-    pub proof fn theorem_matched_payloads_are_offer_owner_facts(
+    pub proof fn theorem_matched_offer_loads_owner_fact(
         matched: SpecMatchedContext,
     )
-        ensures matched_payloads_are_offer_owner_facts(matched)
+        ensures matched_offer_loads_owner_fact(matched)
     {
     }
 
