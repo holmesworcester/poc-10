@@ -120,6 +120,12 @@
 //!   prepared projection shape consumed by
 //!   `validate_version_replay_rebuild_projection_shape`.
 //! - Proven in production Rust today:
+//!   `version_replay_rebuild_projection_accepts(context, wakes, effects)`
+//!   accepts if and only if the projection is ordinary, or it is a version
+//!   replay rebuild whose prepared context and time wakes contain no standing
+//!   output. `validate_version_replay_rebuild_projection_shape` uses this
+//!   verified helper for its success branch.
+//! - Proven in production Rust today:
 //!   `matched_context_owner_matches_payload(matched)` accepts if and only if
 //!   the routed matched offer owner equals the loaded payload fact id, and
 //!   `routed_offer_owner_matches_producer(routed_offer)` accepts if and only if
@@ -169,7 +175,7 @@
 //!   The accepted-output decision is proved.
 //! - Not proven yet for version replay rebuild admission: the
 //!   `validate_version_replay_rebuild_projection_shape` `Result` wrapper and
-//!   `prepare_projection` call order around the verified prepared-shape status
+//!   `prepare_projection` call order around the verified prepared-shape accept
 //!   helper.
 //! - Punted for a later core proof model: the composition stubs that cross
 //!   matcher construction, offer loading, route dispatch, projected-table

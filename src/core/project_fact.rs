@@ -645,8 +645,7 @@ fn validate_version_replay_rebuild_projection_shape(
     time_wakes: &[TimeWake],
     effects: &RuntimeEffects,
 ) -> Result<(), String> {
-    let status = version_replay_rebuild_projection_status(context, time_wakes, effects);
-    if version_replay_rebuild_shape_status_allows_projection(status) {
+    if version_replay_rebuild_projection_accepts(context, time_wakes, effects) {
         return Ok(());
     }
     Err(
@@ -1230,6 +1229,29 @@ fn version_replay_rebuild_projection_status(
         &context.offers,
         wakes,
     )
+}
+
+/// Decide whether a prepared projection may request version wipe-and-replay.
+///
+/// This is the proof-facing acceptance branch for
+/// `validate_version_replay_rebuild_projection_shape`. Diagnostic strings
+/// remain ordinary Rust, but success is tied to the verified predicate over the
+/// actual prepared context, time wakes, and runtime effects.
+fn version_replay_rebuild_projection_accepts(
+    context: &ContextSet,
+    wakes: &[TimeWake],
+    effects: &RuntimeEffects,
+) -> (accepted: bool)
+    ensures
+        accepted <==> (
+            !effects.version_replay_rebuild
+                || (context.needs@.len() == 0
+                    && context.offers@.len() == 0
+                    && wakes@.len() == 0)
+        ),
+{
+    let status = version_replay_rebuild_projection_status(context, wakes, effects);
+    version_replay_rebuild_shape_status_allows_projection(status)
 }
 
 spec fn offer_is_finalized_claim(
@@ -6291,10 +6313,20 @@ mod contract_tests {
             version_replay_rebuild_projection_status(&ContextSet::new(), &[], &effects),
             VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED
         );
+        assert!(version_replay_rebuild_projection_accepts(
+            &ContextSet::new(),
+            &[],
+            &effects
+        ));
         assert_eq!(
             version_replay_rebuild_projection_status(&context, &[], &effects),
             VERSION_REPLAY_REBUILD_SHAPE_STANDING_OUTPUT
         );
+        assert!(!version_replay_rebuild_projection_accepts(
+            &context,
+            &[],
+            &effects
+        ));
     }
 
     fn assert_version_replay_rebuild_shape_rejected(fact: &Fact, output: ProjectionOutput) {

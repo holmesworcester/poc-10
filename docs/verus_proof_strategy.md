@@ -716,6 +716,7 @@ version_replay_rebuild_shape_allowed(version_replay_rebuild, needs, offers, wake
 version_replay_rebuild_shape_status(version_replay_rebuild, needs, offers, wakes) returns accepted or standing-output exactly from that predicate
 version_replay_rebuild_shape_status_allows_projection(status) accepts if and only if status is VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED
 version_replay_rebuild_projection_status(context, wakes, effects) returns accepted or standing-output exactly from the prepared context, time wakes, and rebuild effect
+version_replay_rebuild_projection_accepts(context, wakes, effects) accepts if and only if ordinary projection or empty version replay rebuild prepared output
 matched_context_owner_matches_payload(matched) accepts if and only if matched.routed_offer.offer.owner == matched.payload.id
 routed_offer_owner_matches_producer(routed_offer) accepts if and only if routed_offer.offer.owner == routed_offer.producer_route.fact_id
 matched_context_has_routed_provenance(matched) accepts if and only if matched.routed_offer.offer.owner == matched.payload.id and matched.routed_offer.offer.owner == matched.routed_offer.producer_route.fact_id
@@ -750,9 +751,11 @@ accepted-output enforcement decision; it is proving the
 `prepare_projection` call order over executable helper code.
 The remaining version replay rebuild admission gap is no longer the
 standing-output decision, status classification, accept-status decision, or
-full prepared-shape status bridge; it is proving the
-`validate_version_replay_rebuild_projection_shape` `Result` wrapper and
-`prepare_projection` call order around the verified status helper.
+full prepared-shape status bridge, and it is no longer the success decision
+used by the runtime admission guard. The remaining gap is proving the
+`validate_version_replay_rebuild_projection_shape` `Result` wrapper diagnostic
+rejection branch and `prepare_projection` call order around the verified accept
+helper.
 
 The remaining matched-context provenance gap is no longer the local
 owner/payload equality decision for one `MatchedContext` or the local
