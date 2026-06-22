@@ -50,7 +50,7 @@ fn verus_projector_proof_modules_verify() {
 }
 
 #[test]
-fn cargo_verus_verifies_production_context_offer_owner_contracts() {
+fn cargo_verus_verifies_production_core_projection_contracts() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let cargo_verus =
         std::env::var("CARGO_VERUS").unwrap_or_else(|_| DEFAULT_CARGO_VERUS_PATH.to_string());
@@ -86,8 +86,8 @@ fn cargo_verus_verifies_production_context_offer_owner_contracts() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        combined.contains("verification results:: 19 verified, 0 errors"),
-        "production proof should verify the real context offer owner contracts:\n{combined}"
+        combined.contains("verification results:: 20 verified, 0 errors"),
+        "production proof should verify the real core projection contracts:\n{combined}"
     );
 }
 
@@ -177,13 +177,19 @@ fn core_proofs_make_trust_boundary_explicit() {
         "same role, scope, start key, end key, and offer value",
         "`context_set_from_projection_parts(needs, claims, owner)` carries needs",
         "builds same-index owned offers from the claims",
+        "`projection_route_evidence(fact_id, effective_tag, route_tag,",
+        "returns `ProjectionRouteEvidence`",
+        "with exactly those same field values",
+        "not route selection",
         "Refactored but not yet proved",
         "`ProjectionDispatcher::dispatch_projection`",
         "`RoutedProjection`",
         "`ProjectionRouteEvidence`",
         "same route selection",
         "calls the projector",
-        "real Rust-code target for the route theorem",
+        "field-stamping helper is verified",
+        "route-selection and",
+        "`PreparedProjection` correspondence theorem is not complete yet",
         "Not proven yet for offer finalization",
         "Not proven yet for owner enforcement",
         "exported theorem tying",
@@ -326,8 +332,12 @@ fn verus_plan_is_single_core_first_source() {
         "`ProjectionDispatcher::dispatch_projection`",
         "`RouterProjector` implements that dispatcher",
         "`ProjectionRouteEvidence { fact_id, effective_tag, route_tag,",
+        "`projection_route_evidence(fact_id, effective_tag, route_tag, projector_info,",
+        "returns route evidence with exactly those same field",
+        "This is field-stamping proof, not the full route theorem",
         "Leaf projectors still return plain `ProjectionOutput`",
-        "Cargo-verus still needs to prove the selection helper",
+        "Cargo-verus",
+        "still needs to prove the selection helper",
         "limit database write access before relying on offers as proof",
         "`ProjectionWriteTx` is constructible only inside",
         "`project_fact.rs::commit_projection_effects`; `IntentWriteTx`",
@@ -457,10 +467,14 @@ fn verus_plan_is_single_core_first_source() {
         "forall returned offer: offer.role/scope/start/end/value match the same-index claim",
         "context_set_from_projection_parts(needs, claims, owner) preserves needs",
         "context_set_from_projection_parts(needs, claims, owner) builds same-index owned offers",
+        "projection_route_evidence(fact_id, effective_tag, route_tag, projector_info, storage_requirement) preserves every route evidence field",
         "assume_specification` for the derived `ContextOfferClaim::clone`",
         "clone preserves the whole claim",
         "remaining owner-checking gap",
         "accept-status decision",
+        "remaining route-dispatch gap",
+        "route-evidence field stamping",
+        "called that selected projector",
         "`enforce_owner_is_self` `Result` wrapper, diagnostic rejection branches",
         "projection_context_records_offer_provenance(ctx, graph)",
         "matched_offer_loads_owner_fact(matched)",

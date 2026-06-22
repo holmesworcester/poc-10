@@ -73,6 +73,11 @@
 //! - Proven in production Rust today:
 //!   `context_set_from_projection_parts(needs, claims, owner)` carries needs
 //!   unchanged and builds same-index owned offers from the claims.
+//! - Proven in production Rust today:
+//!   `projection_route_evidence(fact_id, effective_tag, route_tag,
+//!   projector_info, storage_requirement)` returns `ProjectionRouteEvidence`
+//!   with exactly those same field values. This proves route-evidence field
+//!   stamping, not route selection.
 //! - Assumed only to call production code: the Verus contract for the derived
 //!   `ContextOfferClaim::clone` says clone preserves the whole claim. This
 //!   assumption is a Rust trait boundary helper, not a runtime theorem over
@@ -81,8 +86,8 @@
 //!   now returns `RoutedProjection`, which is a plain `ProjectionOutput` plus
 //!   router-stamped `ProjectionRouteEvidence` from the same route selection that
 //!   calls the projector. `PreparedProjection` carries that route evidence.
-//!   This is a real Rust-code target for the route theorem, not a completed
-//!   Verus proof yet.
+//!   The field-stamping helper is verified, but the route-selection and
+//!   `PreparedProjection` correspondence theorem is not complete yet.
 //! - Not proven here today: every exported `theorem_*` runtime/core property.
 //! - Not proven yet for offer finalization: `ProjectionOutput::context_set`
 //!   normalization or `prepare_projection` call order.

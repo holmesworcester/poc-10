@@ -3254,6 +3254,7 @@ pub mod route {
     use super::effects::ProjectionOutput;
     use crate::core::effects::StorageRequirement;
     use crate::core::facts::{Fact, FactId};
+    use vstd::prelude::verus;
 
     /// Function pointer used by static projector route tables.
     pub type ProjectorFn = fn(&Fact, &ProjectionContext) -> Result<ProjectionOutput, String>;
@@ -3310,6 +3311,48 @@ pub mod route {
         pub storage_requirement: StorageRequirement,
     }
 
+    verus! {
+    #[verifier(external_type_specification)]
+    #[allow(dead_code)]
+    pub struct ExFactProjectorInfo(FactProjectorInfo);
+
+    #[verifier(external_type_specification)]
+    #[allow(dead_code)]
+    pub struct ExStorageRequirement(StorageRequirement);
+
+    #[verifier(external_type_specification)]
+    #[allow(dead_code)]
+    pub struct ExProjectionRouteEvidence(ProjectionRouteEvidence);
+
+    /// Build the router-stamped route evidence carried with one routed output.
+    ///
+    /// This is the production constructor used by the router path. Verus proves
+    /// that it copies the selected route facts exactly; it does not prove that
+    /// route selection itself was correct.
+    fn projection_route_evidence(
+        fact_id: FactId,
+        effective_tag: u8,
+        route_tag: u8,
+        projector_info: FactProjectorInfo,
+        storage_requirement: StorageRequirement,
+    ) -> (evidence: ProjectionRouteEvidence)
+        ensures
+            evidence.fact_id == fact_id,
+            evidence.effective_tag == effective_tag,
+            evidence.route_tag == route_tag,
+            evidence.projector_info == projector_info,
+            evidence.storage_requirement == storage_requirement,
+    {
+        ProjectionRouteEvidence {
+            fact_id,
+            effective_tag,
+            route_tag,
+            projector_info,
+            storage_requirement,
+        }
+    }
+    } // verus!
+
     /// Output from a projector after the router has selected the route that ran.
     ///
     /// Leaf projectors return plain [`ProjectionOutput`]. A `RoutedProjection`
@@ -3335,13 +3378,13 @@ pub mod route {
             output: ProjectionOutput,
         ) -> RoutedProjection {
             RoutedProjection {
-                route: ProjectionRouteEvidence {
+                route: projection_route_evidence(
                     fact_id,
-                    effective_tag: self.effective_tag,
-                    route_tag: self.route.tag,
-                    projector_info: self.route.projector_info,
-                    storage_requirement: self.route.storage_requirement,
-                },
+                    self.effective_tag,
+                    self.route.tag,
+                    self.route.projector_info,
+                    self.route.storage_requirement,
+                ),
                 output,
             }
         }

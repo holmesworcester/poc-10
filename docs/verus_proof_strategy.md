@@ -178,9 +178,12 @@ route's storage requirement to the output, and attaching
 `ProjectionRouteEvidence { fact_id, effective_tag, route_tag, projector_info,
 storage_requirement }`. Leaf projectors still return plain `ProjectionOutput`
 and cannot self-report a producer route. `prepare_projection` stores the route
-evidence in `PreparedProjection`. This is not yet the route theorem:
-Cargo-verus still needs to prove the selection helper and the correspondence
-from `PreparedProjection.route_evidence` to the committed output path.
+evidence in `PreparedProjection`. Cargo-verus proves the production helper
+`projection_route_evidence(fact_id, effective_tag, route_tag, projector_info,
+storage_requirement)` returns route evidence with exactly those same field
+values. This is field-stamping proof, not the full route theorem: Cargo-verus
+still needs to prove the selection helper and the correspondence from
+`PreparedProjection.route_evidence` to the committed output path.
 
 ### Stage 4: Projection DB Write Boundary
 
@@ -612,11 +615,13 @@ forall returned offer: offer.owner == owner
 forall returned offer: offer.role/scope/start/end/value match the same-index claim
 context_set_from_projection_parts(needs, claims, owner) preserves needs
 context_set_from_projection_parts(needs, claims, owner) builds same-index owned offers
+projection_route_evidence(fact_id, effective_tag, route_tag, projector_info, storage_requirement) preserves every route evidence field
 ```
 
 These contracts are proofs over helper Rust code that normal builds execute.
 They are core proof footholds, not threat-model coverage and not completion of
-`offer_claim_finalizes_to_projected_owner`.
+`offer_claim_finalizes_to_projected_owner` or
+`project_fact_dispatches_owner_route`.
 
 The `owned_offers_from_claims` and `context_set_from_projection_parts` proofs use a narrow Verus
 `assume_specification` for the derived `ContextOfferClaim::clone` call so Verus
@@ -629,6 +634,11 @@ longer the equality decision, per-slice scans, aggregate owner predicate,
 status classification, or accept-status decision; it is proving the
 `enforce_owner_is_self` `Result` wrapper, diagnostic rejection branches, and
 `prepare_projection` call order over executable helper code.
+
+The remaining route-dispatch gap is no longer route-evidence field stamping; it
+is proving that `RouterProjector` selected the registered route for the
+effective tag, called that selected projector, and carried the resulting
+evidence through `prepare_projection` and commit.
 
 Core proves plumbing only. It must not prove that an admin is valid, an endpoint
 may sign content, a deletion is authorized, a receipt grants authority, or a
