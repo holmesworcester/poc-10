@@ -2571,7 +2571,8 @@ pub mod effects {
     //! Projection effects and time-wake output for fact projectors.
 
     use crate::core::context::{
-        ContextKey, ContextNeed, ContextOffer, ContextOfferClaim, ContextSet, Role,
+        owned_offers_from_claims, ContextKey, ContextNeed, ContextOffer, ContextOfferClaim,
+        ContextSet, Role,
     };
     use crate::core::effects::{IncomingMetadata, RuntimeEffects};
     use crate::core::facts::{Fact, FactId};
@@ -2838,12 +2839,7 @@ pub mod effects {
         pub fn context_set(&self, owner: FactId) -> ContextSet {
             ContextSet {
                 needs: self.needs.clone(),
-                offers: self
-                    .offers
-                    .iter()
-                    .cloned()
-                    .map(|claim| claim.into_offer(owner))
-                    .collect(),
+                offers: owned_offers_from_claims(&self.offers, owner),
             }
             .normalized()
         }

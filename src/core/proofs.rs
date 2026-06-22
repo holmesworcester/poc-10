@@ -43,9 +43,15 @@
 //!   definitions that Verus type-checks.
 //! - Proven in production Rust today:
 //!   `ContextOfferClaim::into_offer(claim, owner).owner == owner`.
+//! - Proven in production Rust today:
+//!   `owned_offers_from_claims(claims, owner)` returns one offer per claim and
+//!   every returned offer has `owner`.
+//! - Assumed only to call production code: the Verus contract for
+//!   `ContextOfferClaim::clone` gives no role/scope/key preservation facts.
 //! - Not proven here today: every exported `theorem_*` runtime/core property.
 //! - Not proven yet for offer finalization: role, scope, start key, end key,
-//!   `ProjectionOutput::context_set`, or `prepare_projection` call order.
+//!   `ProjectionOutput::context_set` normalization, or `prepare_projection`
+//!   call order.
 //! - Punted for a later core proof model: the composition stubs that cross
 //!   matcher construction, payload loading, route dispatch, projected-table
 //!   write ownership, context replacement, and commit.

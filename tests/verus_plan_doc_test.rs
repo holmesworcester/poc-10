@@ -50,7 +50,7 @@ fn verus_projector_proof_modules_verify() {
 }
 
 #[test]
-fn cargo_verus_verifies_production_context_offer_owner() {
+fn cargo_verus_verifies_production_context_offer_owner_contracts() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let cargo_verus =
         std::env::var("CARGO_VERUS").unwrap_or_else(|_| DEFAULT_CARGO_VERUS_PATH.to_string());
@@ -86,8 +86,8 @@ fn cargo_verus_verifies_production_context_offer_owner() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        combined.contains("verification results:: 1 verified, 0 errors"),
-        "production proof should verify the real ContextOfferClaim::into_offer owner contract:\n{combined}"
+        combined.contains("verification results:: 3 verified, 0 errors"),
+        "production proof should verify the real context offer owner contracts:\n{combined}"
     );
 }
 
@@ -155,6 +155,9 @@ fn core_proofs_make_trust_boundary_explicit() {
         "It is an explicit proof debt",
         "Proven in production Rust today:",
         "`ContextOfferClaim::into_offer(claim, owner).owner == owner`",
+        "`owned_offers_from_claims(claims, owner)` returns one offer per claim",
+        "every returned offer has `owner`",
+        "`ContextOfferClaim::clone` gives no role/scope/key preservation facts",
         "Not proven yet for offer finalization",
         "Not proven here today: every exported `theorem_*` runtime/core property.",
         "First stubs to replace: the near-term core glue stubs",
@@ -265,9 +268,12 @@ fn verus_plan_is_single_core_first_source() {
         "not merely mirrored by a separate model function",
         "Model/view proofs are not proof progress, even with a correspondence story.",
         "Current production-code foothold:",
-        "returned `ContextOffer.owner` equals the owner argument",
-        "role, scope, start key, end key",
-        "`ProjectionOutput::context_set` map over every claim",
+        "returned `ContextOffer.owner` equals",
+        "the owner argument for one claim",
+        "converting a slice of claims returns\nthe same number of offers",
+        "every offer owner equal to the owner argument",
+        "role, scope, start key,\nend key",
+        "`ProjectionOutput::context_set` normalization step",
         "extract the routing decision inside `RouterProjector::project`",
         "Carry that route witness through",
         "proof identity is the stable route tag",
@@ -370,6 +376,10 @@ fn verus_plan_is_single_core_first_source() {
         "Cargo-verus verifies the\nproduction crate path",
         "standalone proof modules",
         "ContextOfferClaim::into_offer(claim, owner).owner == owner",
+        "owned_offers_from_claims(claims, owner).len == claims.len",
+        "forall returned offer: offer.owner == owner",
+        "assume_specification` for the derived `ContextOfferClaim::clone`",
+        "gives no preservation theorem\nfor role, scope, start key, or end key",
         "projection_context_records_offer_provenance(ctx, graph)",
         "matched_payloads_are_offer_owner_facts(matched)",
         "matcher_preserves_role_scope_selector(need, matched)",

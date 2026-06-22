@@ -478,6 +478,10 @@ pub struct ExContextOffer(ContextOffer);
 #[allow(dead_code)]
 pub struct ExContextOfferClaim(ContextOfferClaim);
 
+pub assume_specification[<ContextOfferClaim as Clone>::clone](
+    claim: &ContextOfferClaim,
+) -> (out: ContextOfferClaim);
+
 impl ContextOfferClaim {
     /// Attach the projected fact owner after core has validated projection.
     pub fn into_offer(self, owner: FactId) -> (offer: ContextOffer)
@@ -492,6 +496,38 @@ impl ContextOfferClaim {
             end_key: self.end_key,
         }
     }
+}
+
+/// Attach one projected fact owner to every ownerless offer claim.
+///
+/// Projection output uses this as the single production conversion from
+/// projector-emitted claims to owner-bearing context offers.
+pub fn owned_offers_from_claims(
+    claims: &[ContextOfferClaim],
+    owner: FactId,
+) -> (offers: Vec<ContextOffer>)
+    ensures
+        offers@.len() == claims@.len(),
+        forall|i: int|
+            #![trigger offers@[i]]
+            0 <= i < offers@.len() ==> offers@[i].owner == owner,
+{
+    let mut offers: Vec<ContextOffer> = Vec::new();
+    let mut i: usize = 0;
+    while i < claims.len()
+        invariant
+            i <= claims@.len(),
+            offers@.len() == i,
+            forall|j: int|
+                #![trigger offers@[j]]
+                0 <= j < offers@.len() ==> offers@[j].owner == owner,
+        decreases claims@.len() - i,
+    {
+        let claim = claims[i].clone();
+        offers.push(claim.into_offer(owner));
+        i += 1;
+    }
+    offers
 }
 } // verus!
 
@@ -696,6 +732,30 @@ mod tests {
             .normalized();
 
         assert!(context_set_additions(&set, &set).is_empty());
+    }
+
+    #[test]
+    fn owned_offers_from_claims_attaches_owner_to_every_claim() {
+        let owner = [9; 32];
+        let other = [7; 32];
+        let claims = vec![
+            ContextOfferClaim::for_key("first", FactScope::Global, [1; 32]),
+            ContextOfferClaim::for_key(
+                "second",
+                FactScope::Scoped {
+                    kind: ScopeKind::new("workspace").expect("scope kind"),
+                    id: other,
+                },
+                [2; 32],
+            ),
+        ];
+
+        let offers = owned_offers_from_claims(&claims, owner);
+
+        assert_eq!(offers.len(), claims.len());
+        assert!(offers.iter().all(|offer| offer.owner == owner));
+        assert_eq!(offers[0].role.as_str(), "first");
+        assert_eq!(offers[1].role.as_str(), "second");
     }
 
     #[test]

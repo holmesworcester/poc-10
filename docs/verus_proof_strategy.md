@@ -86,11 +86,13 @@ function body that normal builds execute. Focused Rust tests cover rejection of
 foreign owners and dropped incoming durable-output attempts; and no
 threat-model checklist item is claimed from this stage alone.
 
-Current production-code foothold: `ContextOfferClaim::into_offer` is now a
-real production helper inside Verus verification. Cargo-verus proves that the
-returned `ContextOffer.owner` equals the owner argument. That is not the full
-offer-finalization theorem yet: role, scope, start key, end key, the
-`ProjectionOutput::context_set` map over every claim, and the
+Current production-code foothold: `ContextOfferClaim::into_offer` and
+`owned_offers_from_claims` are real production helpers inside Verus
+verification. Cargo-verus proves that the returned `ContextOffer.owner` equals
+the owner argument for one claim, and that converting a slice of claims returns
+the same number of offers with every offer owner equal to the owner argument.
+That is not the full offer-finalization theorem yet: role, scope, start key,
+end key, the `ProjectionOutput::context_set` normalization step, and the
 `prepare_projection` call order remain open core proof work.
 
 ### Stage 3: Routed Projection Witness
@@ -540,11 +542,20 @@ Production helper contracts currently proved:
 
 ```text
 ContextOfferClaim::into_offer(claim, owner).owner == owner
+owned_offers_from_claims(claims, owner).len == claims.len
+forall returned offer: offer.owner == owner
 ```
 
-This contract is proof over the helper Rust code that normal builds execute.
-It is a core proof foothold, not threat-model coverage and not completion of
+These contracts are proofs over helper Rust code that normal builds execute.
+They are core proof footholds, not threat-model coverage and not completion of
 `offer_claim_finalizes_to_projected_owner`.
+
+The `owned_offers_from_claims` proof uses a narrow Verus
+`assume_specification` for the derived `ContextOfferClaim::clone` call so Verus
+can call that production clone. The assumption gives no preservation theorem
+for role, scope, start key, or end key; those fields remain unproved until the
+clone/spec surface and `ProjectionOutput::context_set` normalization are proved
+with the needed field-level contracts.
 
 Core proves plumbing only. It must not prove that an admin is valid, an endpoint
 may sign content, a deletion is authorized, a receipt grants authority, or a
