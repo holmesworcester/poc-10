@@ -239,7 +239,6 @@ fn exact_local_offer(owner: FactId, role: &'static str, key: FactId) -> ContextO
         scope: FactScope::Local,
         start_key: key.clone(),
         end_key: key,
-        value: Vec::new(),
     }
 }
 

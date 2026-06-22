@@ -243,7 +243,6 @@ pub fn connection_frame_observation_offer(owner: FactId, frame_fact_id: FactId) 
         scope: FactScope::Local,
         start_key: ContextKey::from_bytes(frame_fact_id),
         end_key: ContextKey::from_bytes(frame_fact_id),
-        value: Vec::new(),
     }
 }
 

@@ -335,25 +335,11 @@ fn poc10_pipeline_work_items_live_in_named_core_files() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let project_fact = source_text(&root.join("src/core/project_fact.rs"));
     let handle_intent = source_text(&root.join("src/core/handle_intent.rs"));
-    let project_fact_context_db = root.join("src/core/project_fact/context_db.rs");
 
     assert!(
         !root.join("src/core/pipeline.rs").exists(),
         "src/core/pipeline.rs is retired; keep projection and intent workers in named core files"
     );
-    assert!(
-        !root.join("src/core/context_db.rs").exists(),
-        "standing context SQL belongs under project_fact::context_db, not a top-level core sink"
-    );
-    assert!(
-        project_fact_context_db.is_file(),
-        "standing context SQL should live in the project_fact child module"
-    );
-    assert!(
-        project_fact.contains("pub(crate) mod context_db;"),
-        "src/core/project_fact.rs should declare the standing-context child module explicitly"
-    );
-    let context_db = source_text(&project_fact_context_db);
 
     for required in [
         "Run and commit one queued projection item",
@@ -364,18 +350,6 @@ fn poc10_pipeline_work_items_live_in_named_core_files() {
         assert!(
             project_fact.contains(required),
             "src/core/project_fact.rs is missing projection work-item detail {required:?}"
-        );
-    }
-
-    for required in [
-        "context_exact_offers",
-        "context_range_offers",
-        "pending_projection_matches",
-        "delete_pending_matches_for_offer_owner_in_tx",
-    ] {
-        assert!(
-            context_db.contains(required),
-            "project_fact::context_db is missing standing-context SQL detail {required:?}"
         );
     }
 

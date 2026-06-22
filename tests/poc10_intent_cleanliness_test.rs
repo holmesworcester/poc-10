@@ -388,7 +388,7 @@ fn target_projectors_use_typed_context_lookups_not_direct_match_scans() {
 
     assert!(
         offenders.is_empty() && stale_allowlist.is_empty(),
-        "source projectors must look up context by concrete ContextNeed with ProjectionContext::value_for, matched_values_for, or legacy payload helpers. Direct matched_context scans are exceptional and must not spread.\nnew offenders:\n{}\nstale allowlist entries to remove:\n{}",
+        "source projectors must look up context by concrete ContextNeed with ProjectionContext::payload_for, payload_for_checked, or matched_payloads_for. Direct matched_context scans are exceptional and must not spread.\nnew offenders:\n{}\nstale allowlist entries to remove:\n{}",
         offenders.join("\n"),
         stale_allowlist.join("\n")
     );
@@ -442,7 +442,7 @@ fn target_projectors_do_not_read_raw_context_offer_storage_fields() {
 
     assert!(
         offenders.is_empty(),
-        "projectors should consume typed matched offer values, not raw standing context rows. Keep offer owner checks in core ProjectionContext helpers and range decoding beside the validating domain:\n{}",
+        "projectors should consume typed matched payloads, not raw standing context rows. Keep offer owner checks in core ProjectionContext helpers and range decoding beside the validating domain:\n{}",
         offenders.join("\n")
     );
 }

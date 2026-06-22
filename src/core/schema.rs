@@ -11,8 +11,7 @@
 //! `project_fact.rs`.
 //! `facts` and `local_fact_admissions` store immutable inputs and their local
 //! visibility metadata. `context_exact_edges`, `context_range_edges`,
-//! `context_exact_offers`, `context_range_offers`, `time_wakes`,
-//! `pending_projection`, and `pending_projection_matches` drive
+//! `time_wakes`, `pending_projection`, and `pending_projection_matches` drive
 //! fact projection. `intents`, `intent_context`, `local_intents`, and
 //! `local_intent_context` drive handler dispatch.
 //!
@@ -34,12 +33,8 @@ pub(crate) const FACTS: TableName = TableName::new("facts");
 pub(crate) const LOCAL_FACT_ADMISSIONS: TableName = TableName::new("local_fact_admissions");
 /// Standing exact context edge table.
 pub(crate) const CONTEXT_EXACT_EDGES: TableName = TableName::new("context_exact_edges");
-/// Standing exact context offer table.
-pub(crate) const CONTEXT_EXACT_OFFERS: TableName = TableName::new("context_exact_offers");
 /// Standing true-range context edge table.
 pub(crate) const CONTEXT_RANGE_EDGES: TableName = TableName::new("context_range_edges");
-/// Standing true-range context offer table.
-pub(crate) const CONTEXT_RANGE_OFFERS: TableName = TableName::new("context_range_offers");
 /// Semantic time wake table.
 pub(crate) const TIME_WAKES: TableName = TableName::new("time_wakes");
 /// Pending projection queue table.
@@ -65,9 +60,7 @@ const CORE_REPLAY_PROTECTED_TABLES: &[TableName] = &[FACTS, LOCAL_FACT_ADMISSION
 
 const CORE_REPLAY_RESET_TABLES: &[TableName] = &[
     CONTEXT_EXACT_EDGES,
-    CONTEXT_EXACT_OFFERS,
     CONTEXT_RANGE_EDGES,
-    CONTEXT_RANGE_OFFERS,
     TIME_WAKES,
     PENDING_PROJECTION,
     PENDING_PROJECTION_MATCHES,
@@ -80,14 +73,8 @@ const CORE_REPLAY_RESET_TABLES: &[TableName] = &[
     PROJECTION_TIMINGS,
 ];
 
-const CORE_REPLAY_SUMMARY_TABLES: &[TableName] = &[
-    FACTS,
-    CONTEXT_EXACT_EDGES,
-    CONTEXT_EXACT_OFFERS,
-    CONTEXT_RANGE_EDGES,
-    CONTEXT_RANGE_OFFERS,
-    TIME_WAKES,
-];
+const CORE_REPLAY_SUMMARY_TABLES: &[TableName] =
+    &[FACTS, CONTEXT_EXACT_EDGES, CONTEXT_RANGE_EDGES, TIME_WAKES];
 
 /// The core SQLite schema source applied to every runtime database.
 ///
@@ -129,21 +116,6 @@ CREATE INDEX IF NOT EXISTS context_exact_edges_by_key
 CREATE INDEX IF NOT EXISTS context_exact_edges_by_owner
     ON context_exact_edges (owner);
 
-CREATE TABLE IF NOT EXISTS context_exact_offers (
-    offer_id BLOB PRIMARY KEY NOT NULL,
-    owner BLOB NOT NULL,
-    owner_scope_key BLOB NOT NULL,
-    owner_received_at INTEGER NOT NULL,
-    role TEXT NOT NULL,
-    scope_key BLOB NOT NULL,
-    key BLOB NOT NULL,
-    value BLOB NOT NULL
-);
-CREATE INDEX IF NOT EXISTS context_exact_offers_by_key
-    ON context_exact_offers (role, scope_key, key, owner);
-CREATE INDEX IF NOT EXISTS context_exact_offers_by_owner
-    ON context_exact_offers (owner);
-
 CREATE TABLE IF NOT EXISTS context_range_edges (
     owner BLOB NOT NULL,
     direction TEXT NOT NULL,
@@ -159,24 +131,6 @@ CREATE INDEX IF NOT EXISTS context_range_edges_by_range_end
     ON context_range_edges (direction, role, scope_key, end_key);
 CREATE INDEX IF NOT EXISTS context_range_edges_by_owner
     ON context_range_edges (owner);
-
-CREATE TABLE IF NOT EXISTS context_range_offers (
-    offer_id BLOB PRIMARY KEY NOT NULL,
-    owner BLOB NOT NULL,
-    owner_scope_key BLOB NOT NULL,
-    owner_received_at INTEGER NOT NULL,
-    role TEXT NOT NULL,
-    scope_key BLOB NOT NULL,
-    start_key BLOB NOT NULL,
-    end_key BLOB NOT NULL,
-    value BLOB NOT NULL
-);
-CREATE INDEX IF NOT EXISTS context_range_offers_by_range_start
-    ON context_range_offers (role, scope_key, start_key);
-CREATE INDEX IF NOT EXISTS context_range_offers_by_range_end
-    ON context_range_offers (role, scope_key, end_key);
-CREATE INDEX IF NOT EXISTS context_range_offers_by_owner
-    ON context_range_offers (owner);
 
 CREATE TABLE IF NOT EXISTS time_wakes (
     timeline TEXT NOT NULL,
@@ -204,18 +158,22 @@ CREATE TABLE IF NOT EXISTS pending_projection_matches (
     need_scope_key BLOB NOT NULL,
     need_start_key BLOB NOT NULL,
     need_end_key BLOB NOT NULL,
-    offer_id BLOB NOT NULL,
+    offer_owner BLOB NOT NULL,
+    offer_start_key BLOB NOT NULL,
+    offer_end_key BLOB NOT NULL,
     PRIMARY KEY (
         owner,
         need_role,
         need_scope_key,
         need_start_key,
         need_end_key,
-        offer_id
+        offer_owner,
+        offer_start_key,
+        offer_end_key
     )
 );
 CREATE INDEX IF NOT EXISTS pending_projection_matches_by_offer
-    ON pending_projection_matches (offer_id);
+    ON pending_projection_matches (offer_owner);
 
 CREATE TABLE IF NOT EXISTS pending_time_ranges (
     owner BLOB NOT NULL,
