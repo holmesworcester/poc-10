@@ -258,7 +258,7 @@ alphabetically.
   SQL. It admits retained and incoming facts, queues pending projection, loads
   matched context and due time ranges, runs the routed projector, applies source
   rules, purges exact fact-owned state, wakes matched owners, and commits
-  emitted effects.
+  emitted effects. Standing context SQL lives under `project_fact/context_db.rs`.
 - `runtime.rs`: executable engine for one selected protocol description. It
   opens databases, applies declared schemas, submits authored facts, exposes
   bounded projection and intent queue drains, owns the runtime-turn lock, admits
@@ -361,7 +361,8 @@ mode.
   facts, enforces storage-version requirements, admits durable facts, incoming
   facts, row mutations, and queues follow-up intents inside the caller's
   transaction.
-- `project_fact.rs::context_db`: SQL implementation of standing context. It
+- `project_fact::context_db` (`project_fact/context_db.rs`): SQL implementation
+  of standing context. It
   stores need edges and exact/range scalar offers, assembles projection context
   from queued `pending_projection_matches`, computes replacement-need and
   append-only-offer deltas by owner, and fans out pending projection rows when
