@@ -133,13 +133,17 @@
 //!   flag. `RuntimeEffects::row_mutation` uses this verified production helper;
 //!   table allowlist and raw-SQL confinement remain separate proof work.
 //! - Proven in production Rust today:
+//!   `ProjectedRowMutation::table` and `IntentRowMutation::table` return
+//!   exactly the table embedded in the insert/delete mutation payload. This
+//!   connects row validation's extracted table-name list to the actual row
+//!   mutation payload, but it still does not prove raw-SQL confinement.
+//! - Proven in production Rust today:
 //!   `row_mutation_table_is_allowed(table, allowed)` accepts if and only if the
 //!   table name occurs in the allowed table slice, and
 //!   `row_mutation_tables_are_allowed(tables, allowed)` accepts if and only if
 //!   every table in the extracted table-name list is allowed. Projection and
 //!   intent row validation use this verified production helper for their
-//!   success branch. This does not yet prove `ProjectedRowMutation::table` /
-//!   `IntentRowMutation::table` extraction or raw-SQL confinement.
+//!   success branch. Raw-SQL confinement remains separate proof work.
 //! - Proven in production Rust today:
 //!   `runtime_effects_with_version_replay_rebuild(effects)` sets
 //!   `RuntimeEffects.version_replay_rebuild` while preserving storage

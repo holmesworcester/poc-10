@@ -48,6 +48,7 @@ use rusqlite::{
 };
 use std::path::Path;
 use std::time::Duration;
+use vstd::prelude::*;
 
 // =============================================================================
 // Query Defaults
@@ -197,10 +198,7 @@ pub enum ProjectedRowMutation {
 
 impl ProjectedRowMutation {
     pub(crate) fn table(&self) -> TableName {
-        match self {
-            Self::InsertValues(insert) => insert.table,
-            Self::DeleteWhere(delete) => delete.table,
-        }
+        projected_row_mutation_table(self)
     }
 }
 
@@ -216,12 +214,60 @@ pub enum IntentRowMutation {
 
 impl IntentRowMutation {
     pub(crate) fn table(&self) -> TableName {
-        match self {
-            Self::InsertValues(insert) => insert.table,
-            Self::DeleteWhere(delete) => delete.table,
-        }
+        intent_row_mutation_table(self)
     }
 }
+
+verus! {
+#[verifier(external_type_specification)]
+#[verifier(external_body)]
+#[allow(dead_code)]
+pub struct ExValue(Value);
+
+#[verifier(external_type_specification)]
+#[allow(dead_code)]
+pub struct ExTableInsert(TableInsert);
+
+#[verifier(external_type_specification)]
+#[allow(dead_code)]
+pub struct ExTableDeleteWhere(TableDeleteWhere);
+
+/// Return the table embedded in a projection-owned row mutation.
+///
+/// This is the proof-facing implementation of `ProjectedRowMutation::table`.
+/// It proves the accessor does not reinterpret projected row authority: the
+/// returned table is exactly the table carried by the insert/delete payload.
+fn projected_row_mutation_table(mutation: &ProjectedRowMutation) -> (table: TableName)
+    ensures
+        match mutation {
+            ProjectedRowMutation::InsertValues(insert) => table == insert.table,
+            ProjectedRowMutation::DeleteWhere(delete) => table == delete.table,
+        },
+{
+    match mutation {
+        ProjectedRowMutation::InsertValues(insert) => insert.table,
+        ProjectedRowMutation::DeleteWhere(delete) => delete.table,
+    }
+}
+
+/// Return the table embedded in an intent-owned row mutation.
+///
+/// This is the proof-facing implementation of `IntentRowMutation::table`. It
+/// proves the accessor keeps intent row authority tied to the mutation payload
+/// before the shared allowlist validator checks the extracted table names.
+fn intent_row_mutation_table(mutation: &IntentRowMutation) -> (table: TableName)
+    ensures
+        match mutation {
+            IntentRowMutation::InsertValues(insert) => table == insert.table,
+            IntentRowMutation::DeleteWhere(delete) => table == delete.table,
+        },
+{
+    match mutation {
+        IntentRowMutation::InsertValues(insert) => insert.table,
+        IntentRowMutation::DeleteWhere(delete) => delete.table,
+    }
+}
+} // verus!
 
 // =============================================================================
 // Exported Database Handle

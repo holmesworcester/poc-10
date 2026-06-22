@@ -725,7 +725,6 @@ pub struct ExRuntimeEffects(RuntimeEffects);
 pub struct ExIntent(crate::core::intents::Intent);
 
 #[verifier(external_type_specification)]
-#[verifier(external_body)]
 #[allow(dead_code)]
 pub struct ExIntentRowMutation(crate::core::db::IntentRowMutation);
 
@@ -739,7 +738,6 @@ pub struct ExIncomingMetadata(IncomingMetadata);
 pub struct ExProjectionOutput(ProjectionOutput);
 
 #[verifier(external_type_specification)]
-#[verifier(external_body)]
 #[allow(dead_code)]
 pub struct ExProjectedRowMutation(ProjectedRowMutation);
 
