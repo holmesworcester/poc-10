@@ -115,7 +115,10 @@ Cargo-verus proves the input needs are carried unchanged and the constructed
 offers preserve the same owner and claim fields. Cargo-verus also proves that
 the version replay rebuild shape decision accepts exactly ordinary projections
 or version replay rebuild projections with empty standing output: no standing needs, offers, or time wakes.
-That is not the full offer-finalization or version replay rebuild admission theorem yet: the
+It also proves that the production status helper returns accepted or
+standing-output exactly from that predicate, and that the allow helper accepts
+only the accepted status. That is not the full offer-finalization or version
+replay rebuild admission theorem yet: the
 `ProjectionOutput::context_set` normalization step and the `prepare_projection`
 call order remain open core proof work, as does the
 `validate_version_replay_rebuild_projection_shape` `Result` wrapper. It is also
@@ -620,6 +623,8 @@ context_set_from_projection_parts(needs, claims, owner) preserves needs
 context_set_from_projection_parts(needs, claims, owner) builds same-index owned offers
 projection_route_evidence(fact_id, effective_tag, route_tag, projector_info, storage_requirement) preserves every route evidence field
 version_replay_rebuild_shape_allowed(version_replay_rebuild, needs, offers, wakes) accepts if and only if ordinary projection or empty version replay rebuild output
+version_replay_rebuild_shape_status(version_replay_rebuild, needs, offers, wakes) returns accepted or standing-output exactly from that predicate
+version_replay_rebuild_shape_status_allows_projection(status) accepts if and only if status is VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED
 ```
 
 These contracts are proofs over helper Rust code that normal builds execute.
@@ -639,9 +644,9 @@ status classification, or accept-status decision; it is proving the
 `enforce_owner_is_self` `Result` wrapper, diagnostic rejection branches, and
 `prepare_projection` call order over executable helper code.
 The remaining version replay rebuild admission gap is no longer the
-standing-output decision; it is proving the
-`validate_version_replay_rebuild_projection_shape` `Result` wrapper and
-`prepare_projection` call order around the verified decision helper.
+standing-output decision, status classification, or accept-status decision; it
+is proving the `validate_version_replay_rebuild_projection_shape` `Result`
+wrapper and `prepare_projection` call order around the verified status helper.
 
 The remaining route-dispatch gap is no longer route-evidence field stamping; it
 is proving that `RouterProjector` selected the registered route for the

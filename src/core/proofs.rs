@@ -82,6 +82,12 @@
 //!   `version_replay_rebuild_shape_allowed(version_replay_rebuild, needs, offers,
 //!   wakes)` accepts if and only if the projection is ordinary, or it is a
 //!   version replay rebuild with no standing needs, offers, or time wakes.
+//! - Proven in production Rust today:
+//!   `version_replay_rebuild_shape_status(version_replay_rebuild, needs, offers,
+//!   wakes)` returns accepted or standing-output exactly from that predicate,
+//!   and `version_replay_rebuild_shape_status_allows_projection(status)` accepts
+//!   if and only if the status is exactly
+//!   `VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED`.
 //! - Assumed only to call production code: the Verus contract for the derived
 //!   `ContextOfferClaim::clone` says clone preserves the whole claim. This
 //!   assumption is a Rust trait boundary helper, not a runtime theorem over
@@ -99,9 +105,9 @@
 //!   `enforce_owner_is_self` `Result` wrapper, diagnostic rejection branches,
 //!   and `prepare_projection` call order to the verified status and allow
 //!   helpers.
-//! - Not proven yet for version replay rebuild admission: the `validate_version_replay_rebuild_projection_shape`
-//!   `Result` wrapper and `prepare_projection` call order around the verified
-//!   version replay rebuild shape decision helper.
+//! - Not proven yet for version replay rebuild admission: the
+//!   `validate_version_replay_rebuild_projection_shape` `Result` wrapper and
+//!   `prepare_projection` call order around the verified status helper.
 //! - Punted for a later core proof model: the composition stubs that cross
 //!   matcher construction, offer loading, route dispatch, projected-table
 //!   write ownership, context replacement, and commit.

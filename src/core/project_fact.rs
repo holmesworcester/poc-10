@@ -611,12 +611,13 @@ fn validate_version_replay_rebuild_projection_shape(
     time_wakes: &[TimeWake],
     effects: &RuntimeEffects,
 ) -> Result<(), String> {
-    if version_replay_rebuild_shape_allowed(
+    let status = version_replay_rebuild_shape_status(
         effects.version_replay_rebuild,
         &context.needs,
         &context.offers,
         time_wakes,
-    ) {
+    );
+    if version_replay_rebuild_shape_status_allows_projection(status) {
         return Ok(());
     }
     Err(
@@ -665,6 +666,9 @@ const OWNER_CHECK_ACCEPTED: u8 = 0;
 const OWNER_CHECK_FOREIGN_PURGE: u8 = 1;
 const OWNER_CHECK_FOREIGN_NEED: u8 = 2;
 const OWNER_CHECK_FOREIGN_TIME_WAKE: u8 = 3;
+
+const VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED: u8 = 0;
+const VERSION_REPLAY_REBUILD_SHAPE_STANDING_OUTPUT: u8 = 1;
 
 #[verifier(external_type_specification)]
 #[verifier(external_body)]
@@ -968,6 +972,46 @@ fn version_replay_rebuild_shape_allowed(
         return true;
     }
     needs.len() == 0 && offers.len() == 0 && wakes.len() == 0
+}
+
+fn version_replay_rebuild_shape_status(
+    version_replay_rebuild: bool,
+    needs: &[ContextNeed],
+    offers: &[ContextOffer],
+    wakes: &[TimeWake],
+) -> (status: u8)
+    ensures
+        status == VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED <==> (
+            !version_replay_rebuild
+                || (needs@.len() == 0
+                    && offers@.len() == 0
+                    && wakes@.len() == 0)
+        ),
+        status == VERSION_REPLAY_REBUILD_SHAPE_STANDING_OUTPUT <==> !(
+            !version_replay_rebuild
+                || (needs@.len() == 0
+                    && offers@.len() == 0
+                    && wakes@.len() == 0)
+        ),
+        status == VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED
+            || status == VERSION_REPLAY_REBUILD_SHAPE_STANDING_OUTPUT,
+{
+    if version_replay_rebuild_shape_allowed(
+        version_replay_rebuild,
+        needs,
+        offers,
+        wakes,
+    ) {
+        return VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED;
+    }
+    VERSION_REPLAY_REBUILD_SHAPE_STANDING_OUTPUT
+}
+
+fn version_replay_rebuild_shape_status_allows_projection(status: u8) -> (accepted: bool)
+    ensures
+        accepted <==> status == VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED,
+{
+    status == VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED
 }
 } // verus!
 
@@ -5307,6 +5351,52 @@ mod contract_tests {
             })
             .version_replay_rebuild();
         assert_version_replay_rebuild_shape_rejected(&time_fact, time_output);
+    }
+
+    #[test]
+    fn version_replay_rebuild_shape_status_matches_standing_output_rule() {
+        let fact = Fact::new(FactScope::Global, 1, b"rebuild status".to_vec());
+        let role = Role::new("rebuild_status").unwrap();
+        let key = ContextKey::from_bytes([4; 32]);
+        let need = need_for(&fact, &role, &key);
+        let offer = offer_for(&fact, &role, &key);
+        let wake = TimeWake {
+            timeline: Timeline::new("rebuild_status").unwrap(),
+            owner: fact.id,
+            at: 10,
+        };
+
+        assert_eq!(
+            version_replay_rebuild_shape_status(
+                false,
+                &[need.clone()],
+                &[offer.clone()],
+                &[wake.clone()]
+            ),
+            VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED
+        );
+        assert_eq!(
+            version_replay_rebuild_shape_status(true, &[], &[], &[]),
+            VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED
+        );
+        assert_eq!(
+            version_replay_rebuild_shape_status(true, &[need], &[], &[]),
+            VERSION_REPLAY_REBUILD_SHAPE_STANDING_OUTPUT
+        );
+        assert_eq!(
+            version_replay_rebuild_shape_status(true, &[], &[offer], &[]),
+            VERSION_REPLAY_REBUILD_SHAPE_STANDING_OUTPUT
+        );
+        assert_eq!(
+            version_replay_rebuild_shape_status(true, &[], &[], &[wake]),
+            VERSION_REPLAY_REBUILD_SHAPE_STANDING_OUTPUT
+        );
+        assert!(version_replay_rebuild_shape_status_allows_projection(
+            VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED
+        ));
+        assert!(!version_replay_rebuild_shape_status_allows_projection(
+            VERSION_REPLAY_REBUILD_SHAPE_STANDING_OUTPUT
+        ));
     }
 
     fn assert_version_replay_rebuild_shape_rejected(fact: &Fact, output: ProjectionOutput) {

@@ -86,7 +86,7 @@ fn cargo_verus_verifies_production_core_projection_contracts() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        combined.contains("verification results:: 21 verified, 0 errors"),
+        combined.contains("verification results:: 25 verified, 0 errors"),
         "production proof should verify the real core projection contracts:\n{combined}"
     );
 }
@@ -184,6 +184,10 @@ fn core_proofs_make_trust_boundary_explicit() {
         "`version_replay_rebuild_shape_allowed(version_replay_rebuild, needs, offers,",
         "accepts if and only if the projection is ordinary",
         "no standing needs, offers, or time wakes",
+        "`version_replay_rebuild_shape_status(version_replay_rebuild, needs, offers,",
+        "returns accepted or standing-output exactly from that predicate",
+        "`version_replay_rebuild_shape_status_allows_projection(status)` accepts",
+        "`VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED`",
         "Refactored but not yet proved",
         "`ProjectionDispatcher::dispatch_projection`",
         "`RoutedProjection`",
@@ -319,6 +323,10 @@ fn verus_plan_is_single_core_first_source() {
         "version replay rebuild shape decision accepts exactly ordinary projections",
         "version replay rebuild projections",
         "no standing needs, offers, or time wakes",
+        "production status helper returns accepted or",
+        "standing-output exactly from that predicate",
+        "allow helper accepts",
+        "only the accepted status",
         "`validate_version_replay_rebuild_projection_shape` `Result` wrapper",
         "`ProjectionOutput::context_set` normalization step",
         "keep leaf projectors on the simple `Projector::project` API",
@@ -478,12 +486,16 @@ fn verus_plan_is_single_core_first_source() {
         "context_set_from_projection_parts(needs, claims, owner) builds same-index owned offers",
         "projection_route_evidence(fact_id, effective_tag, route_tag, projector_info, storage_requirement) preserves every route evidence field",
         "version_replay_rebuild_shape_allowed(version_replay_rebuild, needs, offers, wakes) accepts if and only if ordinary projection or empty version replay rebuild output",
+        "version_replay_rebuild_shape_status(version_replay_rebuild, needs, offers, wakes) returns accepted or standing-output exactly from that predicate",
+        "version_replay_rebuild_shape_status_allows_projection(status) accepts if and only if status is VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED",
         "assume_specification` for the derived `ContextOfferClaim::clone`",
         "clone preserves the whole claim",
         "remaining owner-checking gap",
         "accept-status decision",
         "remaining version replay rebuild admission gap",
         "standing-output decision",
+        "status classification",
+        "accept-status decision",
         "`validate_version_replay_rebuild_projection_shape` `Result` wrapper",
         "remaining route-dispatch gap",
         "route-evidence field stamping",
