@@ -148,7 +148,9 @@ mod tests {
     use crate::core::db::Db;
     use crate::core::effects::StorageRequirement;
     use crate::core::intents::IntentHandler;
-    use crate::core::project_fact::{ProjectionContext, ProjectionOutput, Projector};
+    use crate::core::project_fact::{
+        ProjectionContext, ProjectionDispatcher, ProjectionOutput, Projector, RoutedProjection,
+    };
     use crate::core::runtime::{HandlerRoute, Runtime, RuntimeDescription};
     use crate::core::schema::CORE_SCHEMA_SOURCE;
     use crate::protocol::registry::FACTS_SCHEMA_SOURCE;
@@ -284,7 +286,18 @@ mod tests {
         }
     }
 
-    fn noop_projector() -> Box<dyn Projector> {
+    impl ProjectionDispatcher for NoopProjector {
+        fn dispatch_projection(
+            &self,
+            fact: &crate::core::facts::Fact,
+            context: &ProjectionContext,
+        ) -> Result<RoutedProjection, String> {
+            self.project(fact, context)
+                .map(|output| RoutedProjection::for_test(fact, output))
+        }
+    }
+
+    fn noop_projector() -> Box<dyn ProjectionDispatcher> {
         Box::new(NoopProjector)
     }
 

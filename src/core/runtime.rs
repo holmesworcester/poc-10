@@ -55,7 +55,8 @@ use crate::core::handle_intent::{handle_one_intent, HandlerSet, IntentQueue};
 use crate::core::intents::Intent;
 use crate::core::network;
 use crate::core::project_fact::{
-    self, FactAdmissionFn, FactRoute, IncomingMetadata, ProjectionSource, Projector, Timeline,
+    self, FactAdmissionFn, FactRoute, IncomingMetadata, ProjectionDispatcher, ProjectionSource,
+    Timeline,
 };
 use crate::core::schema::{CORE_SCHEMA_SOURCE, INTENTS, LOCAL_INTENTS};
 use std::fs::{self, File, OpenOptions};
@@ -73,11 +74,13 @@ const LOCAL_DERIVATION_WORK_MULTIPLIER: usize = 16;
 const RUNTIME_TURN_PROFILE_ENV: &str = "TOPO_PROFILE_RUNTIME_TURNS";
 const LEGACY_DAEMON_TURN_PROFILE_ENV: &str = "TOPO_PROFILE_DAEMON_TURNS";
 
-/// Factory for the protocol's projector implementation.
+/// Factory for the protocol projection dispatcher used by this runtime.
 ///
-/// A projector is protocol code that derives context, rows, time wakes, and
-/// follow-up intents from one fact plus any matched context.
-pub type ProjectorFactory = fn() -> Box<dyn Projector>;
+/// Runtime projection enters through a dispatcher so core can record route
+/// evidence for the selected leaf projector. The leaf projector still owns the
+/// protocol work of deriving context, rows, time wakes, and follow-up intents
+/// from one fact plus any matched context.
+pub type ProjectorFactory = fn() -> Box<dyn ProjectionDispatcher>;
 /// Protocol-owned declarations needed to open core's runtime engine.
 ///
 /// The description is static so a runtime instance cannot drift after opening
@@ -297,7 +300,7 @@ impl Drop for RuntimeTurnLock {
 pub struct Runtime {
     description: &'static RuntimeDescription,
     db: Db,
-    projector: Box<dyn Projector>,
+    projector: Box<dyn ProjectionDispatcher>,
     handlers: HandlerSet,
 }
 
@@ -931,7 +934,9 @@ mod tests {
     use crate::core::facts::{Fact, FactScope};
     use crate::core::intents::{HandlerContext, HandlerResult, IntentHandler, IntentKind};
     use crate::core::network::{NetworkTarget, OutgoingFrame};
-    use crate::core::project_fact::{ProjectionContext, ProjectionOutput};
+    use crate::core::project_fact::{
+        ProjectionContext, ProjectionOutput, Projector, RoutedProjection,
+    };
     use std::io::Read;
     use std::net::{TcpListener, TcpStream};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -949,7 +954,18 @@ mod tests {
         }
     }
 
-    fn noop_projector() -> Box<dyn Projector> {
+    impl ProjectionDispatcher for NoopProjector {
+        fn dispatch_projection(
+            &self,
+            fact: &Fact,
+            context: &ProjectionContext,
+        ) -> Result<RoutedProjection, String> {
+            self.project(fact, context)
+                .map(|output| RoutedProjection::for_test(fact, output))
+        }
+    }
+
+    fn noop_projector() -> Box<dyn ProjectionDispatcher> {
         Box::new(NoopProjector)
     }
 

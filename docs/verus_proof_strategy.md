@@ -18,7 +18,7 @@ src/core/project_fact.rs::project_one
   -> load_one_projection_input
   -> evaluate_loaded_projection_input
   -> prepare_projection
-       -> projector.project_with_witness(&fact, &pending_inputs)
+       -> dispatcher.dispatch_projection(&fact, &pending_inputs)
        -> enforce_owner_is_self(&fact, &output)
        -> ProjectionOutput::context_set(fact.id)
        -> validate_runtime_effects_for_admission(...)
@@ -121,16 +121,38 @@ tying the `enforce_owner_is_self` `Result` wrapper, diagnostic rejection
 branches, and `prepare_projection` call order to the verified status and allow
 helpers.
 
-### Stage 3: Routed Projection Witness
+### Stage 3: Routed Projection Evidence
 
-Concrete work: extract the routing decision inside `RouterProjector::project`
-into a small helper that returns the effective tag and selected `FactRoute`
-before the route projector runs. Carry that route witness through
-`PreparedProjection` so the commit path can say which route produced the
-output. The route witness should include the projected fact id, effective tag,
-registered route tag, stable projector info name, and storage requirement. The
-proof identity is the stable route tag/projector-info pair, not runtime
-function-pointer equality.
+Concrete work: keep leaf projectors on the simple `Projector::project` API and
+put route evidence at the dispatcher boundary. `ProjectionDispatcher` selects
+the effective tag and registered `FactRoute`, calls that route projector, and
+returns a `RoutedProjection`. A `RoutedProjection` is the plain
+`ProjectionOutput` plus router-stamped `ProjectionRouteEvidence`: projected
+fact id, effective tag, registered route tag, stable projector info name, and
+storage requirement. Carry that route evidence through `PreparedProjection` so
+the commit path can say which route produced the output. The proof identity is
+the stable route tag/projector-info pair, not runtime function-pointer
+equality.
+
+Terminology in this stage:
+
+- `ProjectionDispatcher`: the production entry point used by `project_fact`.
+  It chooses the route before the leaf projector runs.
+- `FactRoute`: one registry row from a fact tag to the projector function,
+  storage requirement, and stable projector metadata for that tag.
+- effective tag: the semantic fact tag after envelope decoding. For ordinary
+  facts it is the first byte; for envelope facts it is the inner protocol tag.
+- route tag: the registered `FactRoute.tag` selected for the effective tag.
+- `RoutedProjection`: the `ProjectionOutput` returned by the leaf projector
+  plus route evidence stamped by the dispatcher that selected and called that
+  projector. Leaf projectors do not construct this value.
+- `ProjectionRouteEvidence`: the route evidence carried with a
+  `RoutedProjection`: owner fact id, effective tag, route tag, projector info,
+  and storage requirement.
+- `projector_info`: stable human-readable projector identity from the route
+  table. It is proof/debug metadata, not a runtime authority check by itself.
+- `storage_requirement`: the storage-version guard the selected route requires
+  before its effects may commit.
 
 Win: a visible output can be tied to the route that actually projected the
 owner fact. This is the core-side answer to "which projector did this come
@@ -144,20 +166,21 @@ theorem that justifies it.
 
 Success criteria: `project_fact_dispatches_owner_route` loses `external_body`;
 tests show an unknown tag is rejected, an envelope effective tag routes to the
-semantic route, and the route witness carried into `PreparedProjection` matches
-the stable route tag that ran; the route-tag to producer-theorem table is named
-explicitly as a proof obligation; and the runtime code still reads as load,
-prepare, commit.
+semantic route, and the route evidence carried into `PreparedProjection`
+matches the stable route tag that ran; the route-tag to producer-theorem table
+is named explicitly as a proof obligation; and the runtime code still reads as
+load, prepare, commit.
 
-Current production-code foothold: `Projector::project_with_witness` returns a
-`ProjectorRun` containing the existing `ProjectionOutput` plus optional route
-evidence. Ordinary projectors use the default unwitnessed path. `RouterProjector`
-overrides that path so the same selected route both calls the projector and
-creates `ProjectionRouteWitness { fact_id, effective_tag, route_tag,
-projector_info, storage_requirement }`. `prepare_projection` stores that
-witness in `PreparedProjection`. This is not yet the route theorem:
+Current production-code foothold: `ProjectionDispatcher::dispatch_projection`
+returns `RoutedProjection`. `RouterProjector` implements that dispatcher by
+selecting one route, calling that selected route's projector, applying the
+route's storage requirement to the output, and attaching
+`ProjectionRouteEvidence { fact_id, effective_tag, route_tag, projector_info,
+storage_requirement }`. Leaf projectors still return plain `ProjectionOutput`
+and cannot self-report a producer route. `prepare_projection` stores the route
+evidence in `PreparedProjection`. This is not yet the route theorem:
 Cargo-verus still needs to prove the selection helper and the correspondence
-from `PreparedProjection.route_witness` to the committed output path.
+from `PreparedProjection.route_evidence` to the committed output path.
 
 ### Stage 4: Projection DB Write Boundary
 
@@ -218,7 +241,7 @@ Concrete work: extend `pending_projection_input_context_for_owner` and
 `ProjectionContext` so authority-bearing context is a `ProvenOffer` or
 `ProvenContext` record, not a payload fact. Split the proof-facing state into
 core provenance and semantic provenness. Core provenance says the matched offer
-was finalized from an owner fact through an attested route witness. Semantic
+was finalized from an owner fact through attested route evidence. Semantic
 provenness additionally requires the producer route theorem for that offer kind.
 That record carries the matched offer fields, offer owner fact id, producer
 route identity, output kind or index when needed to disambiguate route output,

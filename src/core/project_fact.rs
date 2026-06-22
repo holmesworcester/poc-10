@@ -113,10 +113,10 @@ struct PreparedProjection {
     source: ProjectionSource,
     fact: Fact,
     mode: ProjectionMode,
-    // Proof-facing route evidence; produced now, consumed by later proven-offer
-    // context construction.
+    // Router-stamped route evidence; produced now, consumed by later
+    // proven-offer context construction.
     #[allow(dead_code)]
-    route_witness: Option<ProjectionRouteWitness>,
+    route_evidence: ProjectionRouteEvidence,
     input_received_at_ms: u64,
     input_staged_at_ms: Option<u64>,
     incoming_metadata: Option<IncomingMetadata>,
@@ -162,7 +162,7 @@ enum ProjectionOutcome {
 /// comparison, and wake fanout.
 pub(crate) fn project_one(
     store: &Db,
-    projector: &(impl Projector + ?Sized),
+    projector: &(impl ProjectionDispatcher + ?Sized),
     source: ProjectionSource,
     allowed_tables: &[TableName],
     registered_intent_kinds: &[&str],
@@ -271,7 +271,7 @@ pub(crate) fn load_pending_fact(
 /// incoming intake, publishes context, or commits runtime effects. It only turns
 /// a loaded in-memory input into an accepted or rejected outcome.
 fn evaluate_loaded_projection_input(
-    projector: &(impl Projector + ?Sized),
+    projector: &(impl ProjectionDispatcher + ?Sized),
     input: ProjectionInput,
     allowed_tables: &[TableName],
     registered_intent_kinds: &[&str],
@@ -555,7 +555,7 @@ fn projection_mode_from_replay_flag(replay: i64) -> ProjectionMode {
 /// rows and may purge only their own fact. Standing-context comparison happens
 /// later inside the commit transaction.
 fn prepare_projection(
-    projector: &(impl Projector + ?Sized),
+    projector: &(impl ProjectionDispatcher + ?Sized),
     input: ProjectionInput,
     allowed_tables: &[TableName],
     registered_intent_kinds: &[&str],
@@ -570,11 +570,11 @@ fn prepare_projection(
     let mode = pending_inputs.mode();
     let input_received_at_ms = fact.timestamp;
     let incoming_metadata = pending_inputs.incoming_metadata().cloned();
-    let run = perf::measure_result("projection_projector_cpu", || {
-        projector.project_with_witness(&fact, &pending_inputs)
+    let routed = perf::measure_result("projection_projector_cpu", || {
+        projector.dispatch_projection(&fact, &pending_inputs)
     })?;
-    let route_witness = run.route_witness;
-    let output = run.output;
+    let route_evidence = routed.route;
+    let output = routed.output;
     enforce_owner_is_self(&fact, &output)?;
     let projected_context = output.context_set(fact.id);
     let runtime_effects = output.effects;
@@ -591,7 +591,7 @@ fn prepare_projection(
         source,
         fact,
         mode,
-        route_witness,
+        route_evidence,
         input_received_at_ms,
         input_staged_at_ms,
         incoming_metadata,
@@ -3275,47 +3275,51 @@ pub mod route {
         }
     }
 
-    /// Route from a fact tag to the projector that owns that tag.
+    /// Route from one effective fact tag to the projector that owns that tag.
+    ///
+    /// The effective tag is usually the first fact byte. Envelope routes may
+    /// decode an outer envelope and return the inner semantic tag instead.
     #[derive(Debug, Clone, Copy)]
     pub struct FactRoute {
         /// Effective fact tag routed to this projector function.
         pub tag: u8,
+        /// Leaf projector function called after the router selects this route.
         pub projector: ProjectorFn,
         /// Storage version required by this route's committed effects.
         pub storage_requirement: StorageRequirement,
-        /// Projector metadata for this route.
+        /// Stable human-readable projector metadata for proofs and diagnostics.
         pub projector_info: FactProjectorInfo,
     }
 
-    /// Route evidence produced by the router in the same step that calls a
-    /// projector.
+    /// Router-stamped route evidence for one projection output.
     ///
-    /// Core does not interpret the route's protocol meaning. The witness names
-    /// the owner fact, effective tag, stable route tag, route metadata, and
-    /// storage requirement used for the actual projector call.
+    /// Core does not interpret the route's protocol meaning. The evidence names
+    /// the owner fact and the exact registered route used for the actual
+    /// projector call.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct ProjectionRouteWitness {
+    pub struct ProjectionRouteEvidence {
+        /// Fact being projected when this route was selected.
         pub fact_id: FactId,
+        /// Semantic tag used for routing after envelope decoding.
         pub effective_tag: u8,
+        /// `FactRoute.tag` for the selected registered route.
         pub route_tag: u8,
+        /// Stable route/projector identity; proof/debug metadata, not authority.
         pub projector_info: FactProjectorInfo,
+        /// Storage-version guard applied to this projection output.
         pub storage_requirement: StorageRequirement,
     }
 
-    /// The result of one projector call plus optional route evidence.
+    /// Output from a projector after the router has selected the route that ran.
+    ///
+    /// Leaf projectors return plain [`ProjectionOutput`]. A `RoutedProjection`
+    /// exists only at the dispatcher boundary: the router selected a
+    /// [`FactRoute`], called that route's projector, applied the route's storage
+    /// requirement to the output, and attached the route evidence shown here.
     #[derive(Debug)]
-    pub struct ProjectorRun {
+    pub struct RoutedProjection {
+        pub route: ProjectionRouteEvidence,
         pub output: ProjectionOutput,
-        pub route_witness: Option<ProjectionRouteWitness>,
-    }
-
-    impl ProjectorRun {
-        pub fn without_route_witness(output: ProjectionOutput) -> Self {
-            Self {
-                output,
-                route_witness: None,
-            }
-        }
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -3325,33 +3329,60 @@ pub mod route {
     }
 
     impl SelectedFactRoute {
-        fn witness(self, fact_id: FactId) -> ProjectionRouteWitness {
-            ProjectionRouteWitness {
-                fact_id,
-                effective_tag: self.effective_tag,
-                route_tag: self.route.tag,
-                projector_info: self.route.projector_info,
-                storage_requirement: self.route.storage_requirement,
+        fn into_routed_projection(
+            self,
+            fact_id: FactId,
+            output: ProjectionOutput,
+        ) -> RoutedProjection {
+            RoutedProjection {
+                route: ProjectionRouteEvidence {
+                    fact_id,
+                    effective_tag: self.effective_tag,
+                    route_tag: self.route.tag,
+                    projector_info: self.route.projector_info,
+                    storage_requirement: self.route.storage_requirement,
+                },
+                output,
             }
         }
     }
 
-    /// The protocol-facing projection entry point.
+    #[cfg(test)]
+    impl RoutedProjection {
+        pub(crate) fn for_test(fact: &Fact, output: ProjectionOutput) -> Self {
+            Self {
+                route: ProjectionRouteEvidence {
+                    fact_id: fact.id,
+                    effective_tag: fact.bytes.first().copied().unwrap_or_default(),
+                    route_tag: fact.bytes.first().copied().unwrap_or_default(),
+                    projector_info: FactProjectorInfo::projector("test_projector"),
+                    storage_requirement: StorageRequirement::MaintenanceBypass,
+                },
+                output,
+            }
+        }
+    }
+
+    /// A projection dispatcher selects a fact route and returns routed output.
+    ///
+    /// Production projection uses this trait rather than calling leaf projectors
+    /// directly. That keeps route evidence stamped by the router/core boundary,
+    /// not self-reported by a projector.
+    pub trait ProjectionDispatcher {
+        fn dispatch_projection(
+            &self,
+            fact: &Fact,
+            context: &ProjectionContext,
+        ) -> Result<RoutedProjection, String>;
+    }
+
+    /// The protocol-facing leaf projector entry point.
     pub trait Projector {
         fn project(
             &self,
             fact: &Fact,
             context: &ProjectionContext,
         ) -> Result<ProjectionOutput, String>;
-
-        fn project_with_witness(
-            &self,
-            fact: &Fact,
-            context: &ProjectionContext,
-        ) -> Result<ProjectorRun, String> {
-            self.project(fact, context)
-                .map(ProjectorRun::without_route_witness)
-        }
     }
 
     /// Route for envelope facts whose outer tag is not the semantic fact tag.
@@ -3421,15 +3452,17 @@ pub mod route {
             fact: &Fact,
             context: &ProjectionContext,
         ) -> Result<ProjectionOutput, String> {
-            self.project_with_witness(fact, context)
-                .map(|run| run.output)
+            self.dispatch_projection(fact, context)
+                .map(|routed| routed.output)
         }
+    }
 
-        fn project_with_witness(
+    impl ProjectionDispatcher for RouterProjector {
+        fn dispatch_projection(
             &self,
             fact: &Fact,
             context: &ProjectionContext,
-        ) -> Result<ProjectorRun, String> {
+        ) -> Result<RoutedProjection, String> {
             let selected = self.selected_route(fact)?;
             let output = (selected.route.projector)(fact, context)?;
             let output = ProjectionOutput {
@@ -3438,10 +3471,7 @@ pub mod route {
                     .with_storage_requirement(selected.route.storage_requirement),
                 ..output
             };
-            Ok(ProjectorRun {
-                output,
-                route_witness: Some(selected.witness(fact.id)),
-            })
+            Ok(selected.into_routed_projection(fact.id, output))
         }
     }
 }
@@ -3454,7 +3484,8 @@ pub use effects::{
 };
 pub use route::{
     EffectiveTagFn, EnvelopeRoute, FactAdmissionFn, FactProjectorInfo, FactRoute,
-    ProjectionRouteWitness, Projector, ProjectorFn, ProjectorRun, RouterProjector,
+    ProjectionDispatcher, ProjectionRouteEvidence, Projector, ProjectorFn, RoutedProjection,
+    RouterProjector,
 };
 
 const OWNER_KEYED_FACT_CLEANUP_TABLES: &[TableName] = &[
@@ -4174,8 +4205,9 @@ mod contract_tests {
         pending_inputs: ProjectionContext,
         registered_intent_kinds: &[&str],
     ) -> Result<PreparedProjection, String> {
+        let dispatcher = TestProjectionDispatcher { projector };
         prepare_projection(
-            projector,
+            &dispatcher,
             ProjectionInput {
                 source: ProjectionSource::Durable,
                 fact: fact.clone(),
@@ -4185,6 +4217,41 @@ mod contract_tests {
             &[],
             registered_intent_kinds,
             None,
+        )
+    }
+
+    struct TestProjectionDispatcher<'a, P: Projector + ?Sized> {
+        projector: &'a P,
+    }
+
+    impl<P: Projector + ?Sized> ProjectionDispatcher for TestProjectionDispatcher<'_, P> {
+        fn dispatch_projection(
+            &self,
+            fact: &Fact,
+            context: &ProjectionContext,
+        ) -> Result<RoutedProjection, String> {
+            self.projector
+                .project(fact, context)
+                .map(|output| RoutedProjection::for_test(fact, output))
+        }
+    }
+
+    fn project_one_with_test_projector(
+        store: &Db,
+        projector: &(impl Projector + ?Sized),
+        source: ProjectionSource,
+        allowed_tables: &[TableName],
+        registered_intent_kinds: &[&str],
+        fact_admission: Option<FactAdmissionFn>,
+    ) -> Result<bool, String> {
+        let dispatcher = TestProjectionDispatcher { projector };
+        crate::core::project_fact::project_one(
+            store,
+            &dispatcher,
+            source,
+            allowed_tables,
+            registered_intent_kinds,
+            fact_admission,
         )
     }
 
@@ -5033,7 +5100,10 @@ mod contract_tests {
             load_one_projection_input(&store, ProjectionSource::Durable)
                 .expect("load projection input"),
         );
-        let outcome = evaluate_loaded_projection_input(&projector, input, &[], &[], None)
+        let dispatcher = TestProjectionDispatcher {
+            projector: &projector,
+        };
+        let outcome = evaluate_loaded_projection_input(&dispatcher, input, &[], &[], None)
             .expect("evaluate projection");
 
         assert!(matches!(
@@ -5072,7 +5142,10 @@ mod contract_tests {
             load_one_projection_input(&store, ProjectionSource::Incoming)
                 .expect("load projection input"),
         );
-        let outcome = evaluate_loaded_projection_input(&projector, input, &[], &[], None)
+        let dispatcher = TestProjectionDispatcher {
+            projector: &projector,
+        };
+        let outcome = evaluate_loaded_projection_input(&dispatcher, input, &[], &[], None)
             .expect("evaluate projection");
 
         assert!(matches!(
@@ -5396,7 +5469,7 @@ mod contract_tests {
                 .drop_incoming()
                 .incoming_fact_with_metadata(child_for_projector.clone(), metadata))
         });
-        assert!(crate::core::project_fact::project_one(
+        assert!(project_one_with_test_projector(
             &store,
             &projector,
             ProjectionSource::Incoming,
@@ -5436,7 +5509,7 @@ mod contract_tests {
         let before = queue_now_ms().expect("clock before projection");
         let projector =
             test_projector(|_fact, _context| Ok(ProjectionOutput::new().drop_incoming()));
-        assert!(crate::core::project_fact::project_one(
+        assert!(project_one_with_test_projector(
             &store,
             &projector,
             ProjectionSource::Incoming,
@@ -5530,7 +5603,7 @@ mod contract_tests {
         submit_fact_to_db(&store, fact.clone()).expect("persist fact");
 
         let projector = test_projector(|_fact, _context| Ok(ProjectionOutput::new()));
-        assert!(crate::core::project_fact::project_one(
+        assert!(project_one_with_test_projector(
             &store,
             &projector,
             ProjectionSource::Durable,
@@ -5553,7 +5626,7 @@ mod contract_tests {
 
         insert_pending_owner_with_mode_in_tx(&store, fact.id, ProjectionMode::Normal)
             .expect("requeue fact");
-        assert!(crate::core::project_fact::project_one(
+        assert!(project_one_with_test_projector(
             &store,
             &projector,
             ProjectionSource::Durable,
@@ -5617,7 +5690,7 @@ mod contract_tests {
     ) -> Result<bool, String> {
         let mut progressed = false;
         for _ in 0..limit {
-            let mut step = crate::core::project_fact::project_one(
+            let mut step = project_one_with_test_projector(
                 store,
                 projector,
                 ProjectionSource::Durable,
@@ -5626,7 +5699,7 @@ mod contract_tests {
                 fact_admission,
             )?;
             if !step {
-                step = crate::core::project_fact::project_one(
+                step = project_one_with_test_projector(
                     store,
                     projector,
                     ProjectionSource::Incoming,
@@ -6365,62 +6438,61 @@ mod tests {
         assert_eq!(output.offers.len(), 1);
     }
 
-    fn route_witness_projector(
+    fn route_evidence_projector(
         _fact: &Fact,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         Ok(ProjectionOutput::new().offer(ContextOfferClaim::range(
-            "route_witness",
+            "route_evidence",
             FactScope::Global,
             vec![1],
             vec![1],
         )))
     }
 
-    fn route_witness_effective_tag(fact: &Fact) -> Result<u8, String> {
+    fn route_evidence_effective_tag(fact: &Fact) -> Result<u8, String> {
         fact.bytes
             .get(1)
             .copied()
-            .ok_or_else(|| "route witness envelope missing semantic tag".to_string())
+            .ok_or_else(|| "route evidence envelope missing semantic tag".to_string())
     }
 
-    const ROUTE_WITNESS_TAG: u8 = 42;
-    const ROUTE_WITNESS_OUTER_TAG: u8 = 99;
-    const ROUTE_WITNESS_STORAGE: StorageRequirement = StorageRequirement::Current(42);
-    const ROUTE_WITNESS_INFO: FactProjectorInfo =
-        FactProjectorInfo::projector("RouteWitnessProjector");
-    const ROUTE_WITNESS_ROUTES: &[FactRoute] = &[FactRoute {
-        tag: ROUTE_WITNESS_TAG,
-        projector: route_witness_projector,
-        storage_requirement: ROUTE_WITNESS_STORAGE,
-        projector_info: ROUTE_WITNESS_INFO,
+    const ROUTE_EVIDENCE_TAG: u8 = 42;
+    const ROUTE_EVIDENCE_OUTER_TAG: u8 = 99;
+    const ROUTE_EVIDENCE_STORAGE: StorageRequirement = StorageRequirement::Current(42);
+    const ROUTE_EVIDENCE_INFO: FactProjectorInfo =
+        FactProjectorInfo::projector("RouteEvidenceProjector");
+    const ROUTE_EVIDENCE_ROUTES: &[FactRoute] = &[FactRoute {
+        tag: ROUTE_EVIDENCE_TAG,
+        projector: route_evidence_projector,
+        storage_requirement: ROUTE_EVIDENCE_STORAGE,
+        projector_info: ROUTE_EVIDENCE_INFO,
     }];
-    const ROUTE_WITNESS_ENVELOPES: &[EnvelopeRoute] = &[EnvelopeRoute {
-        outer_tag: ROUTE_WITNESS_OUTER_TAG,
-        effective_tag: route_witness_effective_tag,
+    const ROUTE_EVIDENCE_ENVELOPES: &[EnvelopeRoute] = &[EnvelopeRoute {
+        outer_tag: ROUTE_EVIDENCE_OUTER_TAG,
+        effective_tag: route_evidence_effective_tag,
     }];
 
     #[test]
-    fn router_projector_witness_records_effective_route_that_ran() {
+    fn routed_projection_records_effective_route_that_ran() {
         let fact = Fact::new(
             FactScope::Global,
             1,
-            vec![ROUTE_WITNESS_OUTER_TAG, ROUTE_WITNESS_TAG],
+            vec![ROUTE_EVIDENCE_OUTER_TAG, ROUTE_EVIDENCE_TAG],
         );
 
-        let run = RouterProjector::new(ROUTE_WITNESS_ROUTES, ROUTE_WITNESS_ENVELOPES)
-            .project_with_witness(&fact, &ProjectionContext::default())
-            .expect("route projection with witness");
+        let run = RouterProjector::new(ROUTE_EVIDENCE_ROUTES, ROUTE_EVIDENCE_ENVELOPES)
+            .dispatch_projection(&fact, &ProjectionContext::default())
+            .expect("routed projection");
 
-        let witness = run.route_witness.expect("router should return witness");
-        assert_eq!(witness.fact_id, fact.id);
-        assert_eq!(witness.effective_tag, ROUTE_WITNESS_TAG);
-        assert_eq!(witness.route_tag, ROUTE_WITNESS_TAG);
-        assert_eq!(witness.projector_info, ROUTE_WITNESS_INFO);
-        assert_eq!(witness.storage_requirement, ROUTE_WITNESS_STORAGE);
+        assert_eq!(run.route.fact_id, fact.id);
+        assert_eq!(run.route.effective_tag, ROUTE_EVIDENCE_TAG);
+        assert_eq!(run.route.route_tag, ROUTE_EVIDENCE_TAG);
+        assert_eq!(run.route.projector_info, ROUTE_EVIDENCE_INFO);
+        assert_eq!(run.route.storage_requirement, ROUTE_EVIDENCE_STORAGE);
         assert_eq!(
             run.output.effects.storage_requirement,
-            ROUTE_WITNESS_STORAGE
+            ROUTE_EVIDENCE_STORAGE
         );
         assert_eq!(run.output.offers.len(), 1);
     }
@@ -6430,11 +6502,11 @@ mod tests {
         let fact = Fact::new(
             FactScope::Global,
             1,
-            vec![ROUTE_WITNESS_OUTER_TAG, ROUTE_WITNESS_TAG + 1],
+            vec![ROUTE_EVIDENCE_OUTER_TAG, ROUTE_EVIDENCE_TAG + 1],
         );
 
-        let err = RouterProjector::new(ROUTE_WITNESS_ROUTES, ROUTE_WITNESS_ENVELOPES)
-            .project_with_witness(&fact, &ProjectionContext::default())
+        let err = RouterProjector::new(ROUTE_EVIDENCE_ROUTES, ROUTE_EVIDENCE_ENVELOPES)
+            .dispatch_projection(&fact, &ProjectionContext::default())
             .expect_err("unknown effective tag should not project");
 
         assert!(err.contains("no target projector registered for fact tag 43"));

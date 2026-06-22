@@ -25,7 +25,8 @@ use crate::core::facts::Fact;
 use crate::core::intents::TypedTableSchema;
 use crate::core::network;
 use crate::core::project_fact::{
-    FactRoute, ProjectionContext, ProjectionOutput, Projector, ProjectorRun, RouterProjector,
+    FactRoute, ProjectionContext, ProjectionDispatcher, ProjectionOutput, Projector,
+    RoutedProjection, RouterProjector,
 };
 use crate::core::runtime::{HandlerRoute, RecurringIntentSpec};
 use crate::protocol::cli as command;
@@ -1201,7 +1202,7 @@ pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
     versioning::local_update::PROTOCOL_VERSION_ROWS,
 ];
 
-pub(crate) fn protocol_projector() -> Box<dyn Projector> {
+pub(crate) fn protocol_projector() -> Box<dyn ProjectionDispatcher> {
     Box::new(ProtocolProjector)
 }
 
@@ -1216,13 +1217,15 @@ impl Projector for ProtocolProjector {
     ) -> Result<ProjectionOutput, String> {
         RouterProjector::new(FACT_ROUTES, &[]).project(fact, context)
     }
+}
 
-    fn project_with_witness(
+impl ProjectionDispatcher for ProtocolProjector {
+    fn dispatch_projection(
         &self,
         fact: &Fact,
         context: &ProjectionContext,
-    ) -> Result<ProjectorRun, String> {
-        RouterProjector::new(FACT_ROUTES, &[]).project_with_witness(fact, context)
+    ) -> Result<RoutedProjection, String> {
+        RouterProjector::new(FACT_ROUTES, &[]).dispatch_projection(fact, context)
     }
 }
 
