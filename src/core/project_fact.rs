@@ -2074,6 +2074,25 @@ pub mod context {
             routed_offer.producer_route.fact_id,
         )
     }
+
+    /// Decide the complete local routed-context provenance predicate.
+    ///
+    /// This is the per-match fact future SQL-loader proofs should quantify:
+    /// the offer owner, loaded payload fact id, and producer route fact id all
+    /// name the same fact.
+    #[allow(dead_code)]
+    fn matched_context_has_routed_provenance(matched: &MatchedContext) -> (accepted: bool)
+        ensures
+            accepted <==> (
+                matched.routed_offer.offer.owner == matched.payload.id
+                && matched.routed_offer.offer.owner == matched.routed_offer.producer_route.fact_id
+            ),
+    {
+        if !matched_context_owner_matches_payload(matched) {
+            return false;
+        }
+        routed_offer_owner_matches_producer(&matched.routed_offer)
+    }
     } // verus!
 
     impl ProjectionContext {

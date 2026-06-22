@@ -86,7 +86,7 @@ fn cargo_verus_verifies_production_core_projection_contracts() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        combined.contains("verification results:: 28 verified, 0 errors"),
+        combined.contains("verification results:: 29 verified, 0 errors"),
         "production proof should verify the real core projection contracts:\n{combined}"
     );
 }
@@ -510,6 +510,7 @@ fn verus_plan_is_single_core_first_source() {
         "version_replay_rebuild_shape_status_allows_projection(status) accepts if and only if status is VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED",
         "matched_context_owner_matches_payload(matched) accepts if and only if matched.routed_offer.offer.owner == matched.payload.id",
         "routed_offer_owner_matches_producer(routed_offer) accepts if and only if routed_offer.offer.owner == routed_offer.producer_route.fact_id",
+        "matched_context_has_routed_provenance(matched) accepts if and only if matched.routed_offer.offer.owner == matched.payload.id and matched.routed_offer.offer.owner == matched.routed_offer.producer_route.fact_id",
         "`MatchedContext::with_route` rejects mismatched owner/payload/route fixtures at\nruntime",
         "the SQL pending-context loader asks the active `ProjectionDispatcher`\nfor producer route evidence",
         "`pending_projection_input_context_for_owner` and the SQL loader construct every",

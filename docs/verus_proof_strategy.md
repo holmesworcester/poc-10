@@ -676,6 +676,7 @@ version_replay_rebuild_shape_status(version_replay_rebuild, needs, offers, wakes
 version_replay_rebuild_shape_status_allows_projection(status) accepts if and only if status is VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED
 matched_context_owner_matches_payload(matched) accepts if and only if matched.routed_offer.offer.owner == matched.payload.id
 routed_offer_owner_matches_producer(routed_offer) accepts if and only if routed_offer.offer.owner == routed_offer.producer_route.fact_id
+matched_context_has_routed_provenance(matched) accepts if and only if matched.routed_offer.offer.owner == matched.payload.id and matched.routed_offer.offer.owner == matched.routed_offer.producer_route.fact_id
 ```
 
 These contracts are proofs over helper Rust code that normal builds execute.
@@ -705,7 +706,8 @@ offer-owner/producer-route equality decision for one `RoutedOffer`:
 `MatchedContext::with_route` rejects mismatched owner/payload/route fixtures at
 runtime, the SQL pending-context loader asks the active `ProjectionDispatcher`
 for producer route evidence while loading matched offer owners, and Cargo-verus
-proves both production decision helpers. The open core work is proving that
+proves both production decision helpers plus their combined routed-provenance
+predicate. The open core work is proving that
 `pending_projection_input_context_for_owner` and the SQL loader construct every
 projector-visible matched context through that checked path and proving route
 selection through the whole production dispatcher call graph. Semantic
