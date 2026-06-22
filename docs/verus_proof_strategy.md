@@ -702,6 +702,26 @@ ordered sequence of individual commits, or it must forbid intra-batch authority
 dependencies. Cyclic authority dependencies across generations are rejected
 unless a route proves a separate base case and decreasing measure.
 
+## Proof Discoveries
+
+Discovery: avoiding cascades forces direct support for replaceable or
+query-visible authority. A materialized row whose authority can be invalidated
+must either be regenerated from current proven offers, carry direct references
+to every revocation-sensitive offer needed to justify it, or be queried only
+through an accessor that rechecks those current proven offers. Hidden transitive
+support through an old projected row is not enough: if row A depends on row B
+and B's authority depended on offer C, then A is sound without a cascade only
+when B's current proven offer is the stable authority boundary and its producer
+theorem includes C, or A names C directly in its support set.
+
+Stricter discovery: every dependent of replaceable authority should need the
+same purge trigger id that invalidates that authority. Without cascades, the
+purge trigger is the common wakeup frontier. If a dependent row can remain
+visible after its authority disappears, that dependent must have emitted a need
+for the same purge trigger id so core reprojects it when the purge offer is
+committed. A family may choose query-time proven-offer rechecking instead, but
+then the query must not treat the stale projected row as authority on its own.
+
 ## Core Induction
 
 The runtime proof target is an induction over projection and handler commits:
