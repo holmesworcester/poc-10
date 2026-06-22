@@ -337,11 +337,12 @@ mod tests {
             timestamp: 100,
             bytes: b"connection-context".to_vec(),
         };
-        MatchedContext {
-            need: connection::project::connection_need(close_fact_id, connection_id),
-            offer: connection::project::connection_offer(connection_id, connection_id),
+        MatchedContext::new(
+            connection::project::connection_need(close_fact_id, connection_id),
+            connection::project::connection_offer(connection_id, connection_id),
             payload,
-        }
+        )
+        .expect("matched connection context")
     }
 
     #[test]

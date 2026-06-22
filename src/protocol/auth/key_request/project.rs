@@ -566,17 +566,14 @@ mod projector_tests {
     }
 
     fn matched(need: ContextNeed, payload: Fact) -> MatchedContext {
-        MatchedContext {
-            offer: ContextOffer::range(
-                payload.id,
-                need.role.clone(),
-                need.scope.clone(),
-                need.start_key.as_bytes(),
-                need.end_key.as_bytes(),
-            ),
-            need,
-            payload,
-        }
+        let offer = ContextOffer::range(
+            payload.id,
+            need.role.clone(),
+            need.scope.clone(),
+            need.start_key.as_bytes(),
+            need.end_key.as_bytes(),
+        );
+        MatchedContext::new(need, offer, payload).expect("matched context")
     }
 
     fn endpoint_shared_fact(

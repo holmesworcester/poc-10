@@ -777,50 +777,54 @@ mod tests {
         let needs = BootstrapAdminNeeds::new(admin_fact.id, &admin_body, signature_need.clone());
         let user_invite_need = auth_user_invite_need(admin_fact.id, user_invite_fact.id);
         ProjectionContext::from_matches(vec![
-            MatchedContext {
-                need: signature_need,
-                offer: signature::project::signature_proof_offer(
+            MatchedContext::new(
+                signature_need,
+                signature::project::signature_proof_offer(
                     signature_fact.id,
                     workspace::scope(admin_body.workspace_id),
                     admin_fact.id,
                     admin_body.signer_public_key,
                 )
                 .expect("signature offer"),
-                payload: signature_fact.clone(),
-            },
-            MatchedContext {
-                need: needs.workspace,
-                offer: ContextOffer::range(
+                signature_fact.clone(),
+            )
+            .expect("matched signature context"),
+            MatchedContext::new(
+                needs.workspace,
+                ContextOffer::range(
                     workspace_fact.id,
                     "auth_workspace",
                     FactScope::Global,
                     workspace_fact.id,
                     workspace_fact.id,
                 ),
-                payload: workspace_fact.clone(),
-            },
-            MatchedContext {
-                need: needs.user,
-                offer: ContextOffer::range(
+                workspace_fact.clone(),
+            )
+            .expect("matched workspace context"),
+            MatchedContext::new(
+                needs.user,
+                ContextOffer::range(
                     user_fact.id,
                     "auth_user",
                     FactScope::Global,
                     user_fact.id,
                     user_fact.id,
                 ),
-                payload: user_fact.clone(),
-            },
-            MatchedContext {
-                need: user_invite_need,
-                offer: ContextOffer::range(
+                user_fact.clone(),
+            )
+            .expect("matched user context"),
+            MatchedContext::new(
+                user_invite_need,
+                ContextOffer::range(
                     user_invite_fact.id,
                     "auth_user_invite",
                     FactScope::Global,
                     user_invite_fact.id,
                     user_invite_fact.id,
                 ),
-                payload: user_invite_fact.clone(),
-            },
+                user_invite_fact.clone(),
+            )
+            .expect("matched user invite context"),
         ])
     }
 

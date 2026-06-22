@@ -492,11 +492,17 @@ mod tests {
             signature_proof_need([1; 32], scope.clone(), target, signer_public_key).expect("need");
         let offer = signature_proof_offer([2; 32], scope.clone(), target, signer_public_key)
             .expect("offer");
-        let context = ProjectionContext::from_matches(vec![MatchedContext {
-            need: need.clone(),
+        let context = ProjectionContext::from_matches(vec![MatchedContext::new(
+            need.clone(),
             offer,
-            payload: Fact::new(scope, 1, b"not a signature fact".to_vec()),
-        }]);
+            Fact {
+                id: [2; 32],
+                scope,
+                timestamp: 1,
+                bytes: b"not a signature fact".to_vec(),
+            },
+        )
+        .expect("matched signature context")]);
 
         assert!(signature_proof_ready(
             &context,
@@ -520,11 +526,17 @@ mod tests {
             signature_proof_need([1; 32], scope.clone(), target, signer_public_key).expect("need");
         let offer = signature_proof_offer([2; 32], scope.clone(), other_target, signer_public_key)
             .expect("offer");
-        let context = ProjectionContext::from_matches(vec![MatchedContext {
-            need: need.clone(),
+        let context = ProjectionContext::from_matches(vec![MatchedContext::new(
+            need.clone(),
             offer,
-            payload: Fact::new(scope, 1, b"not a signature fact".to_vec()),
-        }]);
+            Fact {
+                id: [2; 32],
+                scope,
+                timestamp: 1,
+                bytes: b"not a signature fact".to_vec(),
+            },
+        )
+        .expect("matched signature context")]);
 
         assert!(signature_proof_ready(
             &context,

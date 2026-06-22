@@ -426,11 +426,7 @@ mod projector_tests {
             invite_accepted::workspace_accepted_offer_claim(workspace_id).into_offer(accepted.id);
         ProjectionContext::from_matches(vec![
             signature_match(workspace_id, signature),
-            MatchedContext {
-                need,
-                offer,
-                payload: accepted.clone(),
-            },
+            MatchedContext::new(need, offer, accepted.clone()).expect("matched accepted context"),
         ])
     }
 
@@ -450,22 +446,23 @@ mod projector_tests {
     ) -> MatchedContext {
         let signer_public_key = crate::core::crypto::ed25519_public_key(&[9; 32]);
         let scope = crate::protocol::auth::workspace::scope(workspace_id);
-        MatchedContext {
-            need: crate::protocol::auth::signature::project::signature_proof_need(
+        MatchedContext::new(
+            crate::protocol::auth::signature::project::signature_proof_need(
                 workspace_id,
                 scope.clone(),
                 workspace_id,
                 signer_public_key,
             )
             .expect("signature need"),
-            offer: crate::protocol::auth::signature::project::signature_proof_offer(
+            crate::protocol::auth::signature::project::signature_proof_offer(
                 signature.id,
                 scope,
                 workspace_id,
                 signer_public_key,
             )
             .expect("signature offer"),
-            payload: signature.clone(),
-        }
+            signature.clone(),
+        )
+        .expect("matched signature context")
     }
 }

@@ -710,17 +710,18 @@ pub mod authenticate {
         }
 
         fn request_match(owner: FactId, request_fact: &Fact) -> MatchedContext {
-            MatchedContext {
-                need: crate::protocol::connection::request::project::connection_request_need(
+            MatchedContext::new(
+                crate::protocol::connection::request::project::connection_request_need(
                     owner,
                     request_fact.id,
                 ),
-                offer: crate::protocol::connection::request::project::connection_request_offer(
+                crate::protocol::connection::request::project::connection_request_offer(
                     request_fact.id,
                     request_fact.id,
                 ),
-                payload: request_fact.clone(),
-            }
+                request_fact.clone(),
+            )
+            .expect("matched request context")
         }
 
         fn endpoint_match(owner: FactId, endpoint: EndpointFact) -> MatchedContext {
@@ -729,16 +730,17 @@ pub mod authenticate {
                 101,
                 endpoint_encode::encode_fact(&endpoint).expect("endpoint fact"),
             );
-            MatchedContext {
-                need: super::local_endpoint_need(owner, endpoint.endpoint),
-                offer: ContextOffer::for_key(
+            MatchedContext::new(
+                super::local_endpoint_need(owner, endpoint.endpoint),
+                ContextOffer::for_key(
                     endpoint_fact.id,
                     "auth_local_endpoint",
                     FactScope::Local,
                     endpoint.endpoint,
                 ),
-                payload: endpoint_fact,
-            }
+                endpoint_fact,
+            )
+            .expect("matched endpoint context")
         }
 
         fn assert_exact_need(need: &ContextNeed, role: &str, key: FactId) {
@@ -1365,14 +1367,12 @@ mod tests {
             received_at,
         )
         .expect("connection observation fact");
-        MatchedContext {
+        MatchedContext::new(
             need,
-            offer: frame_observation::project::connection_frame_observation_offer(
-                observation.id,
-                owner,
-            ),
-            payload: observation,
-        }
+            frame_observation::project::connection_frame_observation_offer(observation.id, owner),
+            observation,
+        )
+        .expect("matched frame observation context")
     }
 
     #[test]

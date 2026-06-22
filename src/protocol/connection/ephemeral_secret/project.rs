@@ -395,11 +395,12 @@ mod project_tests {
             close.closed_at_ms,
             close::encode::encode_fact(&close).expect("close fact"),
         );
-        MatchedContext {
-            need: close::ephemeral_secret_closed_need(owner, secret_id),
-            offer: close::ephemeral_secret_closed_offer(close_fact.id, secret_id),
-            payload: close_fact,
-        }
+        MatchedContext::new(
+            close::ephemeral_secret_closed_need(owner, secret_id),
+            close::ephemeral_secret_closed_offer(close_fact.id, secret_id),
+            close_fact,
+        )
+        .expect("matched close context")
     }
 
     #[test]

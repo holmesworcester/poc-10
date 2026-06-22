@@ -533,43 +533,45 @@ fn signature_match(fact: &Fact) -> MatchedContext {
         fact.timestamp,
     )
     .expect("signature evidence");
-    MatchedContext {
-        need: auth::signature::project::signature_proof_need(
+    MatchedContext::new(
+        auth::signature::project::signature_proof_need(
             fact.id,
             scope.clone(),
             fact.id,
             signer_public_key,
         )
         .expect("signature need"),
-        offer: auth::signature::project::signature_proof_offer(
+        auth::signature::project::signature_proof_offer(
             signature.id,
             scope,
             fact.id,
             signer_public_key,
         )
         .expect("signature offer"),
-        payload: signature,
-    }
+        signature,
+    )
+    .expect("matched signature context")
 }
 
 fn signer_match(owner: &Fact, signer: &Fact) -> MatchedContext {
-    MatchedContext {
-        need: topo::core::context::ContextNeed::range(
+    MatchedContext::new(
+        topo::core::context::ContextNeed::range(
             owner.id,
             "content_signer",
             topo::protocol::auth::workspace::scope(WORKSPACE),
             CONTENT_ENDPOINT_ID,
             CONTENT_ENDPOINT_ID,
         ),
-        offer: topo::core::context::ContextOffer::range(
+        topo::core::context::ContextOffer::range(
             signer.id,
             "content_signer",
             topo::protocol::auth::workspace::scope(WORKSPACE),
             CONTENT_ENDPOINT_ID,
             CONTENT_ENDPOINT_ID,
         ),
-        payload: signer.clone(),
-    }
+        signer.clone(),
+    )
+    .expect("matched signer context")
 }
 
 fn message_signer_match(
@@ -577,23 +579,24 @@ fn message_signer_match(
     message: &content::message::fact::ContentMessageFact,
     signer: &Fact,
 ) -> MatchedContext {
-    MatchedContext {
-        need: topo::core::context::ContextNeed::range(
+    MatchedContext::new(
+        topo::core::context::ContextNeed::range(
             owner.id,
             "content_signer",
             topo::protocol::auth::workspace::scope(message.workspace_id),
             message.signer_id,
             message.signer_id,
         ),
-        offer: topo::core::context::ContextOffer::range(
+        topo::core::context::ContextOffer::range(
             signer.id,
             "content_signer",
             topo::protocol::auth::workspace::scope(message.workspace_id),
             message.signer_id,
             message.signer_id,
         ),
-        payload: signer.clone(),
-    }
+        signer.clone(),
+    )
+    .expect("matched message signer context")
 }
 
 fn signature_fact(target: &Fact, created_at_ms: u64) -> Fact {
@@ -612,82 +615,86 @@ fn message_signature_match(
     signature: &Fact,
 ) -> MatchedContext {
     let scope = topo::protocol::auth::workspace::scope(message.workspace_id);
-    MatchedContext {
-        need: auth::signature::project::signature_proof_need(
+    MatchedContext::new(
+        auth::signature::project::signature_proof_need(
             owner.id,
             scope.clone(),
             owner.id,
             message.signer_public_key,
         )
         .expect("signature need"),
-        offer: auth::signature::project::signature_proof_offer(
+        auth::signature::project::signature_proof_offer(
             signature.id,
             scope,
             owner.id,
             message.signer_public_key,
         )
         .expect("signature offer"),
-        payload: signature.clone(),
-    }
+        signature.clone(),
+    )
+    .expect("matched message signature context")
 }
 
 fn author_match(owner: &Fact, author: &Fact) -> MatchedContext {
-    MatchedContext {
-        need: topo::core::context::ContextNeed::range(
+    MatchedContext::new(
+        topo::core::context::ContextNeed::range(
             owner.id,
             "auth_user",
             topo::core::facts::FactScope::Global,
             author.id,
             author.id,
         ),
-        offer: topo::core::context::ContextOffer::range(
+        topo::core::context::ContextOffer::range(
             author.id,
             "auth_user",
             topo::core::facts::FactScope::Global,
             author.id,
             author.id,
         ),
-        payload: author.clone(),
-    }
+        author.clone(),
+    )
+    .expect("matched author context")
 }
 
 fn message_match(owner: &Fact, message: &Fact) -> MatchedContext {
-    MatchedContext {
-        need: topo::core::context::ContextNeed::range(
+    MatchedContext::new(
+        topo::core::context::ContextNeed::range(
             owner.id,
             "content_message",
             topo::protocol::auth::workspace::scope(WORKSPACE),
             message.id,
             message.id,
         ),
-        offer: topo::core::context::ContextOffer::range(
+        topo::core::context::ContextOffer::range(
             message.id,
             "content_message",
             topo::protocol::auth::workspace::scope(WORKSPACE),
             message.id,
             message.id,
         ),
-        payload: message.clone(),
-    }
+        message.clone(),
+    )
+    .expect("matched message context")
 }
 
 #[allow(dead_code)]
 fn file_fact_match(owner: &Fact, file: &Fact) -> MatchedContext {
-    MatchedContext {
-        need: topo::core::context::ContextNeed::range(
+    MatchedContext::new(
+        topo::core::context::ContextNeed::range(
             owner.id,
             "sync_exact_fact",
             file.scope.clone(),
             file.id,
             file.id,
         ),
-        offer: topo::core::context::ContextOffer::range(
+        topo::core::context::ContextOffer::range(
             file.id,
             "sync_exact_fact",
             file.scope.clone(),
             file.id,
             file.id,
         ),
-        payload: file.clone(),
-    }
+        file.clone(),
+    )
+    .expect("matched file context")
 }

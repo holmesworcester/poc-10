@@ -1596,23 +1596,24 @@ mod projector_tests {
         signer: &Fact,
     ) -> MatchedContext {
         let scope = crate::protocol::auth::workspace::scope(message.workspace_id);
-        MatchedContext {
-            need: crate::core::context::ContextNeed::range(
+        MatchedContext::new(
+            crate::core::context::ContextNeed::range(
                 message_fact.id,
                 "content_signer",
                 scope.clone(),
                 message.signer_id,
                 message.signer_id,
             ),
-            offer: crate::core::context::ContextOffer::range(
+            crate::core::context::ContextOffer::range(
                 signer.id,
                 "content_signer",
                 scope,
                 message.signer_id,
                 message.signer_id,
             ),
-            payload: signer.clone(),
-        }
+            signer.clone(),
+        )
+        .expect("matched signer context")
     }
 
     fn signature_match(
@@ -1621,23 +1622,24 @@ mod projector_tests {
         signature: &Fact,
     ) -> MatchedContext {
         let scope = crate::protocol::auth::workspace::scope(message.workspace_id);
-        MatchedContext {
-            need: crate::protocol::auth::signature::project::signature_proof_need(
+        MatchedContext::new(
+            crate::protocol::auth::signature::project::signature_proof_need(
                 message_fact.id,
                 scope.clone(),
                 message_fact.id,
                 message.signer_public_key,
             )
             .expect("signature need"),
-            offer: crate::protocol::auth::signature::project::signature_proof_offer(
+            crate::protocol::auth::signature::project::signature_proof_offer(
                 signature.id,
                 scope,
                 message_fact.id,
                 message.signer_public_key,
             )
             .expect("signature offer"),
-            payload: signature.clone(),
-        }
+            signature.clone(),
+        )
+        .expect("matched signature context")
     }
 
     fn author_match(
@@ -1645,23 +1647,24 @@ mod projector_tests {
         message: &ContentMessageFact,
         author: &Fact,
     ) -> MatchedContext {
-        MatchedContext {
-            need: crate::core::context::ContextNeed::range(
+        MatchedContext::new(
+            crate::core::context::ContextNeed::range(
                 message_fact.id,
                 "auth_user",
                 crate::core::facts::FactScope::Global,
                 message.author_user_id,
                 message.author_user_id,
             ),
-            offer: crate::core::context::ContextOffer::range(
+            crate::core::context::ContextOffer::range(
                 author.id,
                 "auth_user",
                 crate::core::facts::FactScope::Global,
                 author.id,
                 author.id,
             ),
-            payload: author.clone(),
-        }
+            author.clone(),
+        )
+        .expect("matched author context")
     }
 
     fn secret_match(
@@ -1670,8 +1673,8 @@ mod projector_tests {
         secret: &Fact,
     ) -> MatchedContext {
         let scope = crate::protocol::auth::workspace::scope(message.workspace_id);
-        MatchedContext {
-            need: coverage::secret_need(
+        MatchedContext::new(
+            coverage::secret_need(
                 message_fact.id,
                 scope.clone(),
                 message.workspace_id,
@@ -1679,7 +1682,7 @@ mod projector_tests {
                 message.minute,
                 message_fact.id,
             ),
-            offer: coverage::secret_offer(
+            coverage::secret_offer(
                 secret.id,
                 scope,
                 message.workspace_id,
@@ -1689,8 +1692,9 @@ mod projector_tests {
                 0,
                 [0; 32],
             ),
-            payload: secret.clone(),
-        }
+            secret.clone(),
+        )
+        .expect("matched secret context")
     }
 
     fn deletion_match(
@@ -1699,18 +1703,19 @@ mod projector_tests {
         deletion_fact: &Fact,
     ) -> MatchedContext {
         let scope = crate::protocol::auth::workspace::scope(message.workspace_id);
-        MatchedContext {
-            need: crate::core::project_fact::fact_purged_need(
+        MatchedContext::new(
+            crate::core::project_fact::fact_purged_need(
                 message_fact.id,
                 scope.clone(),
                 project::fact_purged_key(message.frontier_id, message.minute, message_fact.id),
             ),
-            offer: crate::core::project_fact::fact_purged_offer(
+            crate::core::project_fact::fact_purged_offer(
                 deletion_fact.id,
                 scope,
                 project::fact_purged_key(message.frontier_id, message.minute, message_fact.id),
             ),
-            payload: deletion_fact.clone(),
-        }
+            deletion_fact.clone(),
+        )
+        .expect("matched deletion context")
     }
 }

@@ -218,9 +218,5 @@ fn matched(
     offer: topo::core::context::ContextOffer,
     payload: Fact,
 ) -> MatchedContext {
-    MatchedContext {
-        need,
-        offer,
-        payload,
-    }
+    MatchedContext::new(need, offer, payload).expect("matched context")
 }

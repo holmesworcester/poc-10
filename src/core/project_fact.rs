@@ -1887,6 +1887,7 @@ pub mod context {
     use crate::core::context::{ContextNeed, ContextOffer};
     use crate::core::facts::Fact;
     use std::collections::BTreeMap;
+    use vstd::prelude::*;
 
     /// Runtime mode visible while projecting one fact.
     ///
@@ -1926,7 +1927,8 @@ pub mod context {
     ///
     /// Core constructs this from standing context rows before calling the
     /// projector. New authority paths should consume the offer fields or future
-    /// proven-offer records rather than decoding this payload.
+    /// proven-offer records rather than decoding this payload. Construction is
+    /// checked: the offer owner must be the loaded payload fact id.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct MatchedContext {
         /// The need owned by the fact currently being projected.
@@ -1936,6 +1938,62 @@ pub mod context {
         /// Migration-only payload fact loaded from the offer owner.
         pub payload: Fact,
     }
+
+    impl MatchedContext {
+        /// Build a matched context record after checking the core provenance link.
+        ///
+        /// A matched offer is only useful as a proof record if its owner is the
+        /// fact whose bytes were loaded as the context payload. This constructor
+        /// enforces that local invariant before a `ProjectionContext` can carry
+        /// the match.
+        pub fn new(need: ContextNeed, offer: ContextOffer, payload: Fact) -> Result<Self, String> {
+            if offer.owner != payload.id {
+                return Err("matched context offer owner does not match payload fact".to_string());
+            }
+            Ok(Self {
+                need,
+                offer,
+                payload,
+            })
+        }
+
+        pub fn need(&self) -> &ContextNeed {
+            &self.need
+        }
+
+        pub fn offer(&self) -> &ContextOffer {
+            &self.offer
+        }
+
+        /// Return the legacy payload fact for projectors not yet migrated to
+        /// offer-carried authority.
+        pub fn payload(&self) -> &Fact {
+            &self.payload
+        }
+    }
+
+    verus! {
+    #[verifier(external_type_specification)]
+    #[allow(dead_code)]
+    pub struct ExFact(Fact);
+
+    #[verifier(external_type_specification)]
+    #[allow(dead_code)]
+    pub struct ExMatchedContext(MatchedContext);
+
+    /// Decide the local provenance link between a matched offer and payload.
+    ///
+    /// This is the production helper future loader proofs should cite: a
+    /// matched offer's owner is the fact id of the payload core loaded for that
+    /// match, if and only if this helper accepts.
+    #[allow(dead_code)]
+    fn matched_context_owner_matches_payload(matched: &MatchedContext) -> (accepted: bool)
+        ensures
+            accepted <==> matched.offer.owner == matched.payload.id,
+    {
+        super::projected_owner_matches(matched.offer.owner, matched.payload.id)
+    }
+    } // verus!
 
     impl ProjectionContext {
         /// Build context containing only unmatched standing offers.
@@ -2773,11 +2831,7 @@ pub(crate) mod context_db {
             payloads.insert(offer.owner, payload.clone());
             payload
         };
-        matched.push(MatchedContext {
-            need: need.clone(),
-            offer,
-            payload,
-        });
+        matched.push(MatchedContext::new(need.clone(), offer, payload)?);
         Ok(())
     }
 
@@ -6731,6 +6785,38 @@ mod tests {
     }
 
     #[test]
+    fn matched_context_rejects_offer_owner_payload_mismatch() {
+        let role = Role::new("exact").unwrap();
+        let need = ContextNeed {
+            owner: [1; 32],
+            role: role.clone(),
+            scope: FactScope::Global,
+            start_key: ContextKey::from_bytes([10; 32]),
+            end_key: ContextKey::from_bytes([10; 32]),
+        };
+        let offer = ContextOffer {
+            owner: [2; 32],
+            role,
+            scope: FactScope::Global,
+            start_key: ContextKey::from_bytes([10; 32]),
+            end_key: ContextKey::from_bytes([10; 32]),
+            value: ContextOfferValue::empty(),
+        };
+        let payload = Fact {
+            id: [3; 32],
+            scope: FactScope::Global,
+            timestamp: 1,
+            bytes: b"test payload".to_vec(),
+        };
+
+        let err = MatchedContext::new(need, offer, payload).expect_err("mismatch rejected");
+        assert_eq!(
+            err,
+            "matched context offer owner does not match payload fact"
+        );
+    }
+
+    #[test]
     fn projection_output_exposes_normalized_replacement_context() {
         let id = [1; 32];
         let role = Role::new("exact").unwrap();
@@ -6925,18 +7011,15 @@ mod tests {
             timestamp: 1,
             bytes: payload_id.to_vec(),
         };
-        MatchedContext {
-            offer: ContextOffer {
-                owner: payload_id,
-                role: need.role.clone(),
-                scope: need.scope.clone(),
-                start_key: need.start_key.clone(),
-                end_key: need.end_key.clone(),
-                value: ContextOfferValue::from_bytes(payload_id),
-            },
-            need,
-            payload,
-        }
+        let offer = ContextOffer {
+            owner: payload_id,
+            role: need.role.clone(),
+            scope: need.scope.clone(),
+            start_key: need.start_key.clone(),
+            end_key: need.end_key.clone(),
+            value: ContextOfferValue::from_bytes(payload_id),
+        };
+        MatchedContext::new(need, offer, payload).expect("matched context fixture")
     }
 
     fn seed_owner_keyed_fact_rows(

@@ -95,6 +95,11 @@
 //!   and `version_replay_rebuild_shape_status_allows_projection(status)` accepts
 //!   if and only if the status is exactly
 //!   `VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED`.
+//! - Proven in production Rust today:
+//!   `matched_context_owner_matches_payload(matched)` accepts if and only if
+//!   the matched offer owner equals the loaded payload fact id. This proves the
+//!   local decision helper only; the SQL loader theorem that every
+//!   projector-visible match is constructed through this check is still open.
 //! - Assumed only to call production code: the Verus contract for the derived
 //!   `ContextOfferClaim::clone` says clone preserves the whole claim. This
 //!   assumption is a Rust trait boundary helper, not a runtime theorem over

@@ -674,6 +674,7 @@ selected_route_evidence(fact_id, effective_tag, stamp) preserves selected route 
 version_replay_rebuild_shape_allowed(version_replay_rebuild, needs, offers, wakes) accepts if and only if ordinary projection or empty version replay rebuild output
 version_replay_rebuild_shape_status(version_replay_rebuild, needs, offers, wakes) returns accepted or standing-output exactly from that predicate
 version_replay_rebuild_shape_status_allows_projection(status) accepts if and only if status is VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED
+matched_context_owner_matches_payload(matched) accepts if and only if matched.offer.owner == matched.payload.id
 ```
 
 These contracts are proofs over helper Rust code that normal builds execute.
@@ -696,6 +697,14 @@ The remaining version replay rebuild admission gap is no longer the
 standing-output decision, status classification, or accept-status decision; it
 is proving the `validate_version_replay_rebuild_projection_shape` `Result`
 wrapper and `prepare_projection` call order around the verified status helper.
+
+The remaining matched-context provenance gap is no longer the local
+owner/payload equality decision for one `MatchedContext`: `MatchedContext::new`
+rejects mismatched owner/payload fixtures at runtime, and Cargo-verus proves
+the production decision helper. The open core work is proving that
+`pending_projection_input_context_for_owner` and the SQL loader construct every
+projector-visible matched context through that checked path, and then extending
+that record with producer route/proof identity.
 
 The remaining route-dispatch gap is no longer route-evidence field stamping or
 selected-stamp evidence construction; it is proving that `RouterProjector`

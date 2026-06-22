@@ -497,9 +497,9 @@ mod projector_tests {
         let signer_ctx = signer_match(&fact, &signer_fact);
         let author_ctx = author_match(&fact, &author_user_id);
         let mut expected_context_have = vec![
-            signature_ctx.payload.id,
-            signer_ctx.payload.id,
-            author_ctx.payload.id,
+            signature_ctx.payload().id,
+            signer_ctx.payload().id,
+            author_ctx.payload().id,
         ];
         expected_context_have.sort();
 
@@ -778,45 +778,47 @@ mod projector_tests {
         )
         .expect("signature evidence");
         let scope = crate::protocol::auth::workspace::scope(deletion.workspace_id);
-        MatchedContext {
-            need: auth::signature::project::signature_proof_need(
+        MatchedContext::new(
+            auth::signature::project::signature_proof_need(
                 deletion_fact.id,
                 scope.clone(),
                 deletion_fact.id,
                 deletion.signer_public_key,
             )
             .expect("signature need"),
-            offer: auth::signature::project::signature_proof_offer(
+            auth::signature::project::signature_proof_offer(
                 signature.id,
                 scope,
                 deletion_fact.id,
                 deletion.signer_public_key,
             )
             .expect("signature offer"),
-            payload: signature,
-        }
+            signature,
+        )
+        .expect("matched signature context")
     }
 
     fn signer_match(deletion_fact: &Fact, signer_fact: &Fact) -> MatchedContext {
         let deletion = deletion_from_fact(deletion_fact);
         let scope = crate::protocol::auth::workspace::scope(deletion.workspace_id);
-        MatchedContext {
-            need: crate::core::context::ContextNeed::range(
+        MatchedContext::new(
+            crate::core::context::ContextNeed::range(
                 deletion_fact.id,
                 "content_signer",
                 scope.clone(),
                 CONTENT_SIGNER_ID,
                 CONTENT_SIGNER_ID,
             ),
-            offer: crate::core::context::ContextOffer::range(
+            crate::core::context::ContextOffer::range(
                 signer_fact.id,
                 "content_signer",
                 scope,
                 CONTENT_SIGNER_ID,
                 CONTENT_SIGNER_ID,
             ),
-            payload: signer_fact.clone(),
-        }
+            signer_fact.clone(),
+        )
+        .expect("matched signer context")
     }
 
     fn deletion_from_fact(deletion_fact: &Fact) -> ContentMessageDeletionFact {
@@ -824,22 +826,23 @@ mod projector_tests {
     }
 
     fn author_match(deletion_fact: &Fact, author_fact: &Fact) -> MatchedContext {
-        MatchedContext {
-            need: crate::core::context::ContextNeed::range(
+        MatchedContext::new(
+            crate::core::context::ContextNeed::range(
                 deletion_fact.id,
                 "auth_user",
                 crate::core::facts::FactScope::Global,
                 author_fact.id,
                 author_fact.id,
             ),
-            offer: crate::core::context::ContextOffer::range(
+            crate::core::context::ContextOffer::range(
                 author_fact.id,
                 "auth_user",
                 crate::core::facts::FactScope::Global,
                 author_fact.id,
                 author_fact.id,
             ),
-            payload: author_fact.clone(),
-        }
+            author_fact.clone(),
+        )
+        .expect("matched author context")
     }
 }

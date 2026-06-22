@@ -853,11 +853,7 @@ mod projector_tests {
         offer: topo::core::context::ContextOffer,
         payload: Fact,
     ) -> MatchedContext {
-        MatchedContext {
-            need,
-            offer,
-            payload,
-        }
+        MatchedContext::new(need, offer, payload).expect("matched context")
     }
 
     fn decode_single_put_row(mutation: &ProjectedRowMutation) -> queries::RetentionPolicyRow {

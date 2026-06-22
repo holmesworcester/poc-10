@@ -374,17 +374,14 @@ fn key_wrap_projection_context(
 }
 
 fn matched(need: ContextNeed, payload: Fact) -> MatchedContext {
-    MatchedContext {
-        offer: ContextOffer::range(
-            payload.id,
-            need.role.clone(),
-            need.scope.clone(),
-            need.start_key.as_bytes(),
-            need.end_key.as_bytes(),
-        ),
-        need,
-        payload,
-    }
+    let offer = ContextOffer::range(
+        payload.id,
+        need.role.clone(),
+        need.scope.clone(),
+        need.start_key.as_bytes(),
+        need.end_key.as_bytes(),
+    );
+    MatchedContext::new(need, offer, payload).expect("matched context")
 }
 
 fn recipient_key_fact(workspace_id: [u8; 32], endpoint_id: [u8; 32], public_key: [u8; 32]) -> Fact {

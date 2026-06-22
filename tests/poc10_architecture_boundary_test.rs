@@ -8,7 +8,10 @@ fn rust_files(root: &Path) -> Vec<PathBuf> {
         for entry in std::fs::read_dir(&dir).expect("read dir") {
             let path = entry.expect("dir entry").path();
             if path.is_dir() {
-                if path.file_name().is_some_and(|name| name == "target") {
+                if path.file_name().is_some_and(|name| {
+                    let name = name.to_string_lossy();
+                    name == "target" || name.starts_with('.')
+                }) {
                     continue;
                 }
                 pending.push(path);
@@ -27,7 +30,10 @@ fn source_files(root: &Path) -> Vec<PathBuf> {
         for entry in std::fs::read_dir(&dir).expect("read dir") {
             let path = entry.expect("dir entry").path();
             if path.is_dir() {
-                if path.file_name().is_some_and(|name| name == "target") {
+                if path.file_name().is_some_and(|name| {
+                    let name = name.to_string_lossy();
+                    name == "target" || name.starts_with('.')
+                }) {
                     continue;
                 }
                 pending.push(path);
@@ -524,6 +530,28 @@ fn row_mutation_authority_is_split_by_worker() {
             .intent_row_mutation_tables
             .contains(&bootstrap_attempt),
         "connection maintenance handler needs intent-side bootstrap attempt authority"
+    );
+}
+
+#[test]
+fn matched_context_uses_checked_construction() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+
+    for path in rust_files(root) {
+        let relative = path.strip_prefix(root).unwrap().display().to_string();
+        let text = source_text(&path);
+        for (line_number, line) in text.lines().enumerate() {
+            if line.trim() == "MatchedContext {" {
+                offenders.push(format!("{relative}:{}", line_number + 1));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "MatchedContext carries the core offer-owner/payload-id provenance link; construct it with MatchedContext::new:\n{}",
+        offenders.join("\n")
     );
 }
 

@@ -124,11 +124,12 @@ fn exact_match(
     key: [u8; 32],
     payload: Fact,
 ) -> MatchedContext {
-    MatchedContext {
-        need: ContextNeed::for_key(owner, role, scope.clone(), key),
-        offer: ContextOffer::for_key(payload.id, role, scope, key),
+    MatchedContext::new(
+        ContextNeed::for_key(owner, role, scope.clone(), key),
+        ContextOffer::for_key(payload.id, role, scope, key),
         payload,
-    }
+    )
+    .expect("matched exact context")
 }
 
 fn incoming_metadata() -> IncomingMetadata {
@@ -144,21 +145,22 @@ fn local_endpoint_match(frame_fact_id: [u8; 32], endpoint: &EndpointFact) -> Mat
         0,
         endpoint_layout::encode_fact(endpoint).expect("encode endpoint"),
     );
-    MatchedContext {
-        need: ContextNeed::for_key(
+    MatchedContext::new(
+        ContextNeed::for_key(
             frame_fact_id,
             "auth_local_endpoint",
             FactScope::Local,
             endpoint.endpoint,
         ),
-        offer: ContextOffer::for_key(
+        ContextOffer::for_key(
             endpoint_fact.id,
             "auth_local_endpoint",
             FactScope::Local,
             endpoint.endpoint,
         ),
-        payload: endpoint_fact,
-    }
+        endpoint_fact,
+    )
+    .expect("matched local endpoint context")
 }
 
 fn incoming_connection_context(

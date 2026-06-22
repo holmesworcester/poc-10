@@ -1327,31 +1327,33 @@ mod tests {
             endpoint_encode::encode_fact(&responder).expect("endpoint fact"),
         );
         vec![
-            MatchedContext {
-                need: local_endpoint_need(request_fact.id, responder.endpoint),
-                offer: ContextOffer::for_key(
+            MatchedContext::new(
+                local_endpoint_need(request_fact.id, responder.endpoint),
+                ContextOffer::for_key(
                     endpoint_fact.id,
                     "auth_local_endpoint",
                     FactScope::Local,
                     responder.endpoint,
                 ),
-                payload: endpoint_fact,
-            },
-            MatchedContext {
-                need: ContextNeed::for_key(
+                endpoint_fact,
+            )
+            .expect("matched endpoint context"),
+            MatchedContext::new(
+                ContextNeed::for_key(
                     request_fact.id,
                     "connection_invite_secret",
                     FactScope::Local,
                     invite_fact.id,
                 ),
-                offer: ContextOffer::for_key(
+                ContextOffer::for_key(
                     invite_fact.id,
                     "connection_invite_secret",
                     FactScope::Local,
                     invite_fact.id,
                 ),
-                payload: invite_fact.clone(),
-            },
+                invite_fact.clone(),
+            )
+            .expect("matched invite context"),
         ]
     }
 
@@ -1365,17 +1367,18 @@ mod tests {
             metadata.received_at_local_ms,
         )
         .expect("request observation fact");
-        MatchedContext {
-            need: frame_observation::project::connection_frame_observation_need(
+        MatchedContext::new(
+            frame_observation::project::connection_frame_observation_need(
                 request_fact.id,
                 request_fact.id,
             ),
-            offer: frame_observation::project::connection_frame_observation_offer(
+            frame_observation::project::connection_frame_observation_offer(
                 observation.id,
                 request_fact.id,
             ),
-            payload: observation,
-        }
+            observation,
+        )
+        .expect("matched request observation context")
     }
 
     fn assert_exact_need(needs: &[ContextNeed], role: &str, key: FactId) {
@@ -1441,36 +1444,38 @@ mod tests {
         let (invite_fact, ephemeral_fact, request_fact) = bootstrap_facts(local, remote.endpoint);
 
         let context = ProjectionContext::from_matches(vec![
-            MatchedContext {
-                need: ephemeral_secret_public_key_need(
+            MatchedContext::new(
+                ephemeral_secret_public_key_need(
                     request_fact.id,
                     decode::request_header_ephemeral_public_key(request_fact.body())
                         .expect("request public key"),
                 ),
-                offer: ContextOffer::for_key(
+                ContextOffer::for_key(
                     ephemeral_fact.id,
                     ephemeral_secret::project::CONNECTION_EPHEMERAL_SECRET_PUBLIC_KEY_ROLE,
                     FactScope::Local,
                     decode::request_header_ephemeral_public_key(request_fact.body())
                         .expect("request public key"),
                 ),
-                payload: ephemeral_fact,
-            },
-            MatchedContext {
-                need: ContextNeed::for_key(
+                ephemeral_fact,
+            )
+            .expect("matched ephemeral context"),
+            MatchedContext::new(
+                ContextNeed::for_key(
                     request_fact.id,
                     "connection_invite_secret",
                     FactScope::Local,
                     invite_fact.id,
                 ),
-                offer: ContextOffer::for_key(
+                ContextOffer::for_key(
                     invite_fact.id,
                     "connection_invite_secret",
                     FactScope::Local,
                     invite_fact.id,
                 ),
-                payload: invite_fact,
-            },
+                invite_fact,
+            )
+            .expect("matched invite context"),
         ]);
 
         let projected = ConnectionRequestProjector::new()

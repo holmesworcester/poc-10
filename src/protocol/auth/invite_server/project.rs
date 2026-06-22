@@ -608,28 +608,30 @@ mod tests {
         let workspace_need =
             WorkspaceAuthorityNeeds::new(server.id, &server_body, signature_need.clone()).workspace;
         ProjectionContext::from_matches(vec![
-            MatchedContext {
-                need: signature_need,
-                offer: signature::project::signature_proof_offer(
+            MatchedContext::new(
+                signature_need,
+                signature::project::signature_proof_offer(
                     signature_fact.id,
                     workspace::scope(server_body.workspace_id),
                     server.id,
                     server_body.signer_public_key,
                 )
                 .expect("signature offer"),
-                payload: signature_fact.clone(),
-            },
-            MatchedContext {
-                need: workspace_need,
-                offer: ContextOffer::range(
+                signature_fact.clone(),
+            )
+            .expect("matched signature context"),
+            MatchedContext::new(
+                workspace_need,
+                ContextOffer::range(
                     workspace_fact.id,
                     "auth_workspace",
                     FactScope::Global,
                     workspace_fact.id,
                     workspace_fact.id,
                 ),
-                payload: workspace_fact.clone(),
-            },
+                workspace_fact.clone(),
+            )
+            .expect("matched workspace context"),
         ])
     }
 

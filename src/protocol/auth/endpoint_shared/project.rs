@@ -607,28 +607,30 @@ mod tests {
         .expect("signature need");
         let authority_need = authority_need(shared_fact, &shared_body, shared_body.signer_id);
         ProjectionContext::from_matches(vec![
-            MatchedContext {
-                need: signature_need,
-                offer: signature::project::signature_proof_offer(
+            MatchedContext::new(
+                signature_need,
+                signature::project::signature_proof_offer(
                     signature_fact.id,
                     crate::protocol::auth::workspace::scope(shared_body.workspace_id),
                     shared_fact.id,
                     shared_body.signer_public_key,
                 )
                 .expect("signature offer"),
-                payload: signature_fact.clone(),
-            },
-            MatchedContext {
-                need: authority_need,
-                offer: ContextOffer::range(
+                signature_fact.clone(),
+            )
+            .expect("matched signature context"),
+            MatchedContext::new(
+                authority_need,
+                ContextOffer::range(
                     authority_fact.id,
                     "auth_device_invite",
                     FactScope::Global,
                     authority_fact.id,
                     authority_fact.id,
                 ),
-                payload: authority_fact.clone(),
-            },
+                authority_fact.clone(),
+            )
+            .expect("matched authority context"),
         ])
     }
 
