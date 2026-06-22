@@ -22,7 +22,7 @@ fn threat_model_keeps_invariant_centric_shape_and_sources() {
         "## Review Questions",
         "https://github.com/defuse/ictm",
         "https://github.com/TryQuiet/quiet/wiki/Threat-Model",
-        "docs/todo-add-verus-proofs.md",
+        "docs/verus_proof_strategy.md",
     ];
 
     let missing = required

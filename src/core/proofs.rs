@@ -11,18 +11,23 @@
 //!
 //! 1. Deferred composition stubs describe the runtime facts that make projector
 //!    proofs useful end to end: context construction, matched-payload origin,
-//!    selector preservation, context replacement, and atomic commit. These are
-//!    the theorem interfaces projectors eventually compose through, but their
-//!    bodies are unproven today.
+//!    offer-provenance recording, selector preservation, route dispatch,
+//!    projected table write confinement, context replacement, and atomic commit. These
+//!    are the theorem interfaces projectors eventually compose through, but
+//!    their bodies are unproven today.
 //! 2. Near-term core glue stubs describe smaller facts we plan to prove first:
 //!    owner-bearing output ownership, self-only purge requests, parked
 //!    missing-context output, and offer-claim finalization. They are not
 //!    threat-model coverage by themselves; they only let projector proofs attach
 //!    their semantic evidence to stored core state.
 //! 3. Foundational stubs describe substrate contracts such as Ed25519 binding.
-//!    They may talk about primitive bytes and keys, never protocol authority.
+//!    They may talk about primitive bytes, keys, and cryptographic possession
+//!    properties. They must never decide protocol authority such as membership,
+//!    admin status, or deletion authorship.
 //! 4. Spec helpers and witness structs are vocabulary. They are not proof
-//!    coverage and do not justify a checklist item.
+//!    coverage, do not justify a checklist item, and do not retire a theorem
+//!    stub unless a separate correspondence theorem ties them to production
+//!    Rust code.
 //!
 //! Every exported `theorem_*` below currently uses
 //! `#[verifier::external_body]`. That means Verus verifies the type and
@@ -32,15 +37,19 @@
 //! consumers may use these theorems only as named assumptions, and any
 //! threat-model walkthrough must list them as gaps.
 //!
-//! Current status:
+//! Proof debt summary:
 //!
 //! - Proven here today: vocabulary consistency and any non-theorem spec helper
 //!   definitions that Verus type-checks.
 //! - Not proven here today: every exported `theorem_*` runtime/core property.
 //! - Punted for a later core proof model: the composition stubs that cross
-//!   matcher construction, payload loading, context replacement, and commit.
+//!   matcher construction, payload loading, route dispatch, projected-table
+//!   write ownership, context replacement, and commit.
 //! - First stubs to replace: the near-term core glue stubs over local projection
 //!   output and offer-claim finalization.
+//! - First core proof milestone: remove `external_body` from the core theorem
+//!   surface before using projector proofs to claim high-level threat-model
+//!   coverage.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -59,6 +68,29 @@ pub mod verus_model {
     #[derive(Copy, Clone)]
     pub struct SpecPipelineGraph {
         pub token: int,
+        pub projected_table_epoch: int,
+        pub offer_provenance_epoch: int,
+        pub projected_table_writes_confined_to_project_fact: bool,
+        pub authority_reads_confined_to_proven_views: bool,
+        pub runtime_side_effects_deferred_until_commit: bool,
+    }
+
+    #[derive(Copy, Clone)]
+    pub struct SpecFact {
+        pub id: int,
+        pub fact_type: int,
+        pub body_hash: int,
+    }
+
+    #[derive(Copy, Clone)]
+    pub struct SpecFactRoute {
+        pub fact_id: int,
+        pub fact_type: int,
+        pub route_id: int,
+        pub registered_fact_type: int,
+        pub dispatched_fact_id: int,
+        pub dispatched_route_id: int,
+        pub dispatched_by_project_fact: bool,
     }
 
     #[derive(Copy, Clone)]
@@ -97,6 +129,8 @@ pub mod verus_model {
     #[derive(Copy, Clone)]
     pub struct SpecProjectionContext {
         pub graph_token: int,
+        pub offer_provenance_epoch: int,
+        pub offer_provenance_records_route: bool,
         pub missing_need: SpecContextNeed,
         pub missing_need_absent: bool,
     }
@@ -114,6 +148,19 @@ pub mod verus_model {
         pub has_materialized_facts: bool,
         pub has_time_wakes: bool,
         pub has_purges: bool,
+    }
+
+    #[derive(Copy, Clone)]
+    pub struct SpecProjectionCommit {
+        pub current_fact_id: int,
+        pub lifecycle_settled_for_current_fact: bool,
+        pub context_replaced_for_current_fact: bool,
+        pub projected_rows_committed: bool,
+        pub emitted_facts_committed: bool,
+        pub emitted_intents_committed: bool,
+        pub purges_committed: bool,
+        pub all_effects_share_one_transaction: bool,
+        pub no_authority_visible_before_commit: bool,
     }
 
     #[derive(Copy, Clone)]
@@ -145,6 +192,15 @@ pub mod verus_model {
         ctx.graph_token == graph.token
     }
 
+    pub open spec fn projection_context_records_offer_provenance(
+        ctx: SpecProjectionContext,
+        graph: SpecPipelineGraph,
+    ) -> bool {
+        projection_context_sound(ctx, graph)
+            && ctx.offer_provenance_epoch == graph.offer_provenance_epoch
+            && ctx.offer_provenance_records_route
+    }
+
     pub open spec fn matcher_preserves_role_scope_selector(
         need: SpecContextNeed,
         matched: SpecMatchedContext,
@@ -168,12 +224,41 @@ pub mod verus_model {
         before.token == after.token && owner == owner
     }
 
-    pub open spec fn atomic_projection_commit_sound(
+    pub open spec fn project_fact_dispatches_owner_route(
+        fact: SpecFact,
+        route: SpecFactRoute,
+    ) -> bool {
+        route.fact_id == fact.id
+            && route.fact_type == fact.fact_type
+            && route.registered_fact_type == fact.fact_type
+            && route.dispatched_fact_id == fact.id
+            && route.dispatched_route_id == route.route_id
+            && route.dispatched_by_project_fact
+    }
+
+    pub open spec fn projected_table_writes_are_project_fact_only(
         before: SpecPipelineGraph,
-        output: SpecProjectionOutput,
         after: SpecPipelineGraph,
     ) -> bool {
-        before.token == after.token && output.current_fact_id == output.current_fact_id
+        before.projected_table_epoch <= after.projected_table_epoch
+            && after.projected_table_writes_confined_to_project_fact
+    }
+
+    pub open spec fn atomic_projection_commit_sound(
+        before: SpecPipelineGraph,
+        commit: SpecProjectionCommit,
+        after: SpecPipelineGraph,
+    ) -> bool {
+        before.token == after.token
+            && commit.lifecycle_settled_for_current_fact
+            && commit.context_replaced_for_current_fact
+            && commit.projected_rows_committed
+            && commit.emitted_facts_committed
+            && commit.emitted_intents_committed
+            && commit.purges_committed
+            && commit.all_effects_share_one_transaction
+            && commit.no_authority_visible_before_commit
+            && after.runtime_side_effects_deferred_until_commit
     }
 
     // -------------------------------------------------------------------------
@@ -236,7 +321,8 @@ pub mod verus_model {
 
     // -------------------------------------------------------------------------
     // Foundational primitive predicates. These are about advertised primitive
-    // contracts only, never protocol authority.
+    // contracts only. They can describe cryptographic possession/binding, but
+    // never decide protocol authority.
     // -------------------------------------------------------------------------
 
     pub open spec fn ed25519_signature_binds(
@@ -262,9 +348,11 @@ pub mod verus_model {
     // Punted composition theorem stubs.
     //
     // These are the highest-value core facts and the hardest to prove because
-    // they cross matcher construction, offer-owner payload loading, context
-    // replacement, and SQLite transaction boundaries. They are explicit trusted
-    // assumptions until real core proofs replace the external bodies.
+    // they cross matcher construction, offer-owner payload loading,
+    // offer-provenance recording, route dispatch, projected-table write
+    // ownership, context replacement, and SQLite transaction boundaries. They
+    // are explicit trusted assumptions until real core proofs replace the
+    // external bodies.
     // -------------------------------------------------------------------------
 
     // Deferred trusted core theorem: core context construction exposes only
@@ -275,6 +363,19 @@ pub mod verus_model {
         graph: SpecPipelineGraph,
     )
         ensures projection_context_sound(ctx, graph)
+    {
+    }
+
+    // Deferred trusted core theorem: offer provenance records in projection
+    // context come from route-backed projection output. This proves no protocol
+    // authority or semantic offer validity; consumers still need projector
+    // theorems for role meaning.
+    #[verifier::external_body]
+    pub proof fn theorem_projection_context_records_offer_provenance(
+        ctx: SpecProjectionContext,
+        graph: SpecPipelineGraph,
+    )
+        ensures projection_context_records_offer_provenance(ctx, graph)
     {
     }
 
@@ -299,6 +400,29 @@ pub mod verus_model {
     {
     }
 
+    // Deferred trusted core theorem: project_fact dispatches an owner fact
+    // through the route registered for that fact type before committing that
+    // route's output.
+    #[verifier::external_body]
+    pub proof fn theorem_project_fact_dispatches_owner_route(
+        fact: SpecFact,
+        route: SpecFactRoute,
+    )
+        ensures project_fact_dispatches_owner_route(fact, route)
+    {
+    }
+
+    // Deferred trusted core theorem: projected tables and projection-owned
+    // certificate tables are mutated only through the project_fact commit path.
+    #[verifier::external_body]
+    pub proof fn theorem_projected_table_writes_are_project_fact_only(
+        before: SpecPipelineGraph,
+        after: SpecPipelineGraph,
+    )
+        ensures projected_table_writes_are_project_fact_only(before, after)
+    {
+    }
+
     // Deferred trusted core theorem: context replacement is owner-scoped.
     #[verifier::external_body]
     pub proof fn theorem_context_replacement_preserves_owner_boundaries(
@@ -314,10 +438,10 @@ pub mod verus_model {
     #[verifier::external_body]
     pub proof fn theorem_atomic_projection_commit_sound(
         before: SpecPipelineGraph,
-        output: SpecProjectionOutput,
+        commit: SpecProjectionCommit,
         after: SpecPipelineGraph,
     )
-        ensures atomic_projection_commit_sound(before, output, after)
+        ensures atomic_projection_commit_sound(before, commit, after)
     {
     }
 

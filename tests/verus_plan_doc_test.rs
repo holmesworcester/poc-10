@@ -2,18 +2,12 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-const VERUS_TODO_PATH: &str = "docs/todo-add-verus-proofs.md";
-const VERUS_STRATEGY_PATH: &str = "docs/verus_proof_strategy.md";
+const VERUS_PLAN_PATH: &str = "docs/verus_proof_strategy.md";
 const DEFAULT_VERUS_PATH: &str = "/home/holmes/verus-install/verus-x86-linux/verus";
 
 fn verus_plan() -> String {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    fs::read_to_string(root.join(VERUS_TODO_PATH)).expect("read Verus TODO doc")
-}
-
-fn verus_strategy() -> String {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    fs::read_to_string(root.join(VERUS_STRATEGY_PATH)).expect("read Verus strategy doc")
+    fs::read_to_string(root.join(VERUS_PLAN_PATH)).expect("read Verus plan doc")
 }
 
 fn repo_file(path: &str) -> String {
@@ -118,15 +112,27 @@ fn core_proofs_make_trust_boundary_explicit() {
         "It is an explicit proof debt",
         "Not proven here today: every exported `theorem_*` runtime/core property.",
         "First stubs to replace: the near-term core glue stubs",
+        "First core proof milestone: remove `external_body` from the core theorem",
         "Punted composition theorem stubs.",
         "Near-term core theorem stubs.",
         "Foundational trusted stubs.",
         "Spec helpers and witness structs are vocabulary.",
+        "do not retire a theorem",
+        "correspondence theorem ties them to production",
         "SpecContextOfferClaim",
+        "SpecFact",
+        "SpecFactRoute",
+        "SpecProjectionCommit",
         "offer_claim_finalizes_to_projected_owner",
+        "projection_context_records_offer_provenance",
+        "project_fact_dispatches_owner_route",
+        "projected_table_writes_are_project_fact_only",
         "theorem_projection_context_sound",
+        "theorem_projection_context_records_offer_provenance",
         "theorem_matched_payloads_are_offer_owner_facts",
         "theorem_matcher_preserves_role_scope_selector",
+        "theorem_project_fact_dispatches_owner_route",
+        "theorem_projected_table_writes_are_project_fact_only",
         "theorem_context_replacement_preserves_owner_boundaries",
         "theorem_atomic_projection_commit_sound",
         "theorem_projection_output_owner_bearing_effects_are_self",
@@ -148,320 +154,259 @@ fn core_proofs_make_trust_boundary_explicit() {
 }
 
 #[test]
-fn verus_plan_uses_current_fact_layout_and_context_terms() {
+fn proof_rules_reject_model_view_only_progress() {
     let plan = verus_plan();
     let required = [
+        "Proof progress means proof over production Rust code.",
+        "verified Rust-code view is acceptable only with an explicit correspondence",
+        "Standalone model/view proofs do not count.",
+        "proving a theorem only over `Spec*` values does not retire",
+        "does not advance a stage",
+        "does not support a threat-model",
+        "lose\n`external_body` only when the theorem body proves the production Rust helper",
+    ];
+    let missing = required
+        .into_iter()
+        .filter(|needle| !plan.contains(needle))
+        .collect::<Vec<_>>();
+    assert!(
+        missing.is_empty(),
+        "{VERUS_PLAN_PATH} is missing production-code proof rules:\n{}",
+        missing.join("\n")
+    );
+
+    let text = core_proofs();
+    assert!(
+        text.contains("correspondence theorem ties them to production"),
+        "src/core/proofs.rs must reject standalone model/view proof credit"
+    );
+}
+
+#[test]
+fn verus_plan_is_single_core_first_source() {
+    let plan = verus_plan();
+    let required = [
+        "single Verus proof plan",
+        "## Execution Plan",
+        "src/core/project_fact.rs::project_one",
+        "load_one_projection_input",
+        "evaluate_loaded_projection_input",
+        "prepare_projection",
+        "projector.project(&fact, &pending_inputs)",
+        "enforce_owner_is_self(&fact, &output)",
+        "ProjectionOutput::context_set(fact.id)",
+        "commit_projection_effects",
+        "publish_retained_projection_state_in_tx",
+        "wake_projection_work_from_new_context_in_tx",
+        "### Stage 1: Theorem Surface And Debt Ledger",
+        "### Stage 2: Local Core Facts Already Exposed By The Code",
+        "### Stage 3: Routed Projection Witness",
+        "### Stage 4: Projection DB Write Boundary",
+        "### Stage 5: Projected Versus Intent Row Authority",
+        "### Stage 6: Proven Context Loading",
+        "### Stage 7: Core Proof Feasibility Pass",
+        "### Stage 8: Query-Visible Source Lockdown",
+        "### Stage 9: Route-Local Projector Contracts",
+        "### Stage 10: First Real Projector Foothold",
+        "### Stage 11: Compose Threat-Model Invariants",
+        "Concrete work:",
+        "Win:",
+        "What it means:",
+        "Success criteria:",
+        "keep `src/core/proofs.rs` as the only place where core theorem",
+        "prove the small core helpers over the production Rust code",
+        "`ContextOfferClaim::into_offer` must",
+        "not merely mirrored by a separate model function",
+        "extract the routing decision inside `RouterProjector::project`",
+        "Carry that route witness through",
+        "proof identity is the stable route tag",
+        "limit database write access before relying on offers as proof",
+        "`ProjectionWriteTx` is constructible only inside",
+        "`project_fact.rs::commit_projection_effects`; `IntentWriteTx`",
+        "`ProjectionOutput::row_mutation` should accept a",
+        "`ProjectedRowMutation`; intent handlers should emit `IntentRowMutation`",
+        "inventory every user-facing query module",
+        "may read projected tables",
+        "intake, pending queues",
+        "`ProjectionContext::proven_offers_for`",
+        "`ProjectionContext::matched_proven_offers_for`",
+        "validity proof record is the stored offer",
+        "not a separate proof row",
+        "do not expose a raw `Fact` as a",
+        "wrapped in a `ProvenContext` record",
+        "collection of matched",
+        "`ProvenOffer` records, grouped or filtered by accepted offer contracts",
+        "needs emitted for scheduling/liveness",
+        "accepted proven offer contracts used for authority/proofs",
+        "emitted proven offer contracts produced for other projectors",
+        "An accepted offer contract names the offer kind",
+        "mandatory producer route",
+        "negative/revocation condition",
+        "An emitted offer contract names the offer kind",
+        "predicate version",
+        "Producer proofs establish",
+        "emitted offer contracts; consumer proofs cite accepted offer contracts",
+        "should not inspect unrelated offers",
+        "silently upgrade a",
+        "wakeup match into authority",
+        "or decode producer-owned historical fact formats.",
+        "deliberately precedes query rewiring:",
+        "projection context loading is core input",
+        "projector matching is a liveness guarantee, not an invariant",
+        "authority comes from a proven",
+        "offer emitted by a known producer route",
+        "whose projector decoded/adapted",
+        "do not make every consumer decode raw",
+        "producer fact versions",
+        "Historical compatibility stays producer-owned.",
+        "several old facts together correspond to one",
+        "producer projector/family owns that join",
+        "Other projectors see",
+        "only that current proven offer",
+        "producer proof walkthroughs show",
+        "multi-fact compatibility joins",
+        "walkthroughs identify the emitted offer contracts",
+        "accepted offer contract used by the consumer",
+        "then check the proven offer",
+        "revocation-context-completeness theorem",
+        "projection_context_records_offer_provenance",
+        "`wake_context_matches_in_tx` must record",
+        "matcher role/scope/selector semantics are liveness",
+        "actual call graph",
+        "every `*_in_tx` helper shares",
+        "after the minimum refactor in stages 3-6",
+        "immediately try to",
+        "remove `#[verifier::external_body]` from the core runtime theorems",
+        "we learn early how hard the Verus proof is over the real core code",
+        "before query lockdown or projector theorem work",
+        "no core theorem about route dispatch, offer finalization",
+        "threat-model authority proofs cite proven",
+        "producer projector theorems",
+        "consumer offer-boundary checks",
+        "`replace_context_for_owner_in_tx` deletes and",
+        "inventory every user-facing query module",
+        "typed read",
+        "Raw `ReadDb` access may expose diagnostics",
+        "may read projected tables",
+        "intake, pending queues",
+        "route-local projector theorem stubs only after",
+        "Each stub names one route, one",
+        "revocation-sensitive stubs name the completeness theorem",
+        "prove `auth::signature` first",
+        "work through the threat-model checklist in proof dependency",
+        "one top-level theorem",
+        "transition-effect theorems",
+        "## Proof Simplifications",
+        "Projector matching is a liveness guarantee, not an invariant guarantee.",
+        "Authority-bearing context means proven stable offers",
+        "Producers decode/authenticate/adapt their",
+        "Consumers check the",
+        "Offers are the cross-projector authority surface.",
+        "requires joining several old facts",
+        "emits the current offer it wants other projectors to see",
+        "Emitted offer contracts are the producer side",
+        "name every authority-bearing offer kind it can emit",
+        "same projector should also name its emitted offer contracts",
+        "Core proves provenance and write authority:",
+        "Avoid hash injectivity and authoring iff theorems",
+        "BLAKE3 collision resistance is a named foundational assumption",
+        "Prefer only-if safety theorems",
+        "Must-purge, must-retire, and must-suppress",
+        "Query lockdown is downstream of proven context loading.",
         "src/core/proofs.rs",
         "src/protocol/<scope>/<fact_family>/proofs.rs",
-        "fact-family roles: decode, authenticate, adapt, project",
-        "effects. Do not create proof subdirectories",
-        "Do not create proof subdirectories, sibling `*_proof.rs` files, or",
-        "src/protocol/connection/request/proofs.rs",
-        "src/protocol/connection/connection/proofs.rs",
-        "src/protocol/auth/admin/proofs.rs",
-        "src/protocol/auth/key_wrap/proofs.rs",
-        "src/protocol/content/file/proofs.rs",
-        "nearest owning `proofs.rs` module",
-        "#[cfg(verus_keep_ghost)]",
-        "pub mod proofs;",
-        "offer_claim_finalizes_to_projected_owner(claim, offer, current_fact_id)",
-        "`create.rs`, `layout.rs`, and `rows.rs` are transitional implementation or",
-        "not target proof homes for new work.",
-        "matched payloads are loaded from the offer owner's fact id",
-        "projection_context_marks_proven_payloads(ctx, graph)",
-        "projected_table_writes_are_project_fact_only(before, after)",
-        "project_fact_dispatches_owner_route(fact, route)",
-        "proven offer status links offer owner, fact route, emitted claim, and projector theorem",
-        "protocol projector correctness may be represented by",
-        "route-local trusted theorem contracts",
-        "Do not add a blanket theorem that all projector output is valid.",
-        "ProjectedTableSchema and ProjectedRowMutation",
-        "IntentTableSchema and IntentRowMutation",
-        "ProjectionWriteTx is constructible only by project_fact",
-        "IntentWriteTx is constructible only by intent handling",
-        "ProjectionContext exposes payload_for_proven and matched_proven_payloads_for",
-        "ProvenFactCertificate records the owner fact id, fact route, finalized claim, and projector theorem obligation",
-        "This ownership work must keep core readable and workable.",
-        "migrate one table owner at a",
-        "Offers may be emitted as candidate wakeup edges before the producing fact is",
-        "proven status links offer -> owner fact -> fact route -> projector theorem",
-        "projected table writes are confined to project_fact",
-        "offer-owner payload",
-        "connection_invite_secret",
-        "Core predicates:",
-        "Projector proof obligations:",
-        "Intent handler proof obligations:",
-    ];
-    let missing = required
-        .into_iter()
-        .filter(|needle| !plan.contains(needle))
-        .collect::<Vec<_>>();
-    assert!(
-        missing.is_empty(),
-        "{VERUS_TODO_PATH} is missing current-layout proof terms:\n{}",
-        missing.join("\n")
-    );
-
-    let forbidden = [
-        "src/protocol/facts/",
-        "src/protocol/intents/",
-        "src/core/projectors_proof.rs",
-        "src/core/matchers/proof.rs",
-        "src/core/projection/proof.rs",
-        "src/core/wake_loop/proof.rs",
-        "src/core/proof.rs",
-        "src/core/context_proof.rs",
-        "src/core/pipeline_proof.rs",
-        "src/protocol/<scope>/<fact_family>/proof.rs",
-        "src/protocol/<scope>/<verb_object>_proof.rs",
-        "src/protocol/connection/request/proof.rs",
-        "src/protocol/auth/admin/proof.rs",
-        "src/protocol/sync/share_fact_with_sync_proof.rs",
-        "pub mod proof;",
-        "feature = \"verus-proof\"",
-        "payload_ref",
-        "payload refs",
-        "row intent",
-        "Event Module",
-        "event module",
-        "event/fact",
-        "after signed-fact validation lands",
-        "invite-secret role mismatch",
-    ];
-    let present = forbidden
-        .into_iter()
-        .filter(|needle| plan.contains(needle))
-        .collect::<Vec<_>>();
-    assert!(
-        present.is_empty(),
-        "{VERUS_TODO_PATH} still contains retired proof-plan terms:\n{}",
-        present.join("\n")
-    );
-
-    let old_terms = plan
-        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
-        .filter(|term| term.eq_ignore_ascii_case("event") || term.eq_ignore_ascii_case("events"))
-        .collect::<Vec<_>>();
-    assert!(
-        old_terms.is_empty(),
-        "{VERUS_TODO_PATH} should use fact terminology, not retired event terms"
-    );
-}
-
-#[test]
-fn verus_plan_names_meaningful_security_proof_targets() {
-    let plan = verus_plan();
-    let required = [
-        "## Proof Target Selection",
-        "### First Foothold: Signature Proof Certificate",
-        "Start with `auth::signature` before the auth DAG or connection handshake.",
-        "A stored proven signature_proof offer can exist only if it came from a routed",
-        "auth::signature fact whose bytes verified an Ed25519 signature over the exact",
-        "SignatureProjector emits signature_proof claim C",
-        "owner fact id binds the exact payload bytes",
-        "C.selector == (target_fact_id, signer_public_key)",
-        "This proves no carrier or context row can manufacture a `signature_proof`",
-        "It does not prove that the signer is a member, admin,",
-        "### Auth Authority DAG",
-        "valid_admin_offer_claim(admin_claim, admin_fact, graph)",
-        "Cycles of admin facts do not bootstrap authority",
-        "### Auth Key Material And Forward Secrecy",
-        "Deterministic key-wrap identity excludes request entropy",
-        "secret_coverage",
-        "Local private material and local secret facts are never sync-shareable",
-        "### Connection Handshake",
-        "After the signature foothold, the first vertical proof slice should be the",
-        "receipt alone grants no request, response, or child-fact authority",
-        "public handshake hash matches transcript",
-        "### Content Admission, Deletion, And Retention",
-        "Deletion is target-owned",
-        "content_retention_floor",
-        "### Encrypted File Slice",
-        "BAO slice proof verifies against the parent file descriptor root hash",
-        "Connection `frame_file_slice` remains a carrier proof",
-        "### Sync Shareability And Dependency Closure",
-        "Sync facts describe convergence, not domain validity",
-        "`share_fact_with_sync` is emitted only after the owner projector's authority",
-        "validated non-local dependencies",
-        "auth_signature proof",
-        "Commit the completed work on that same worktree branch before handoff or",
-    ];
-    let missing = required
-        .into_iter()
-        .filter(|needle| !plan.contains(needle))
-        .collect::<Vec<_>>();
-    assert!(
-        missing.is_empty(),
-        "{VERUS_TODO_PATH} is missing meaningful security proof targets:\n{}",
-        missing.join("\n")
-    );
-
-    let forbidden = [
-        "valid_admin_offer(admin_offer, admin_fact, graph)",
-        "valid_user_offer(user_offer, user_fact, graph)",
-        "valid_recipient_key_offer(recipient_key_offer, recipient_key_fact, graph)",
-    ];
-    let present = forbidden
-        .into_iter()
-        .filter(|needle| plan.contains(needle))
-        .collect::<Vec<_>>();
-    assert!(
-        present.is_empty(),
-        "{VERUS_TODO_PATH} still contains retired owned-offer proof terms:\n{}",
-        present.join("\n")
-    );
-}
-
-#[test]
-fn verus_strategy_centralizes_assumed_core_theorems() {
-    let strategy = verus_strategy();
-    let required = [
-        "small protocol-neutral core properties",
-        "Core matching, offer-owner payload loading, projected-table write confinement",
-        "src/core/proofs.rs",
-        "proof code lives only in `proofs.rs` files",
-        "Do not add normal Rust `theorem_*` shims or",
-        "certificate structs in `proofs.rs`",
-        "whole-codebase proof of every threat-model invariant",
-        "parallel Verus model",
-        "core Rust behavior",
-        "Verus-only proof code is gated with `cfg(verus_keep_ghost)`",
-        "protocol-neutral plumbing properties",
-        "Projector proof modules may import theorem functions from this module.",
-        "must not call `assume(...)` directly",
-        "projection_context_sound(ctx, graph)",
+        "projection_context_records_offer_provenance(ctx, graph)",
         "matched_payloads_are_offer_owner_facts(matched)",
         "matcher_preserves_role_scope_selector(need, matched)",
-        "projection_context_lacks_payload_for_need(ctx, need)",
-        "parked_output_for_missing_need(output, need)",
-        "context_replacement_preserves_owner_boundaries(before, after, owner)",
-        "purges_are_self_only(output, current_fact_id)",
-        "Core Theorem Surface",
-        "offer_claim_finalizes_to_projected_owner(claim, offer, current_fact_id)",
-        "projection_output_owner_bearing_effects_are_self(output, current_fact_id)",
-        "trusted until core model",
-        "prove now",
-        "atomic_projection_commit_sound(before, output, after)",
-        "projected_table_writes_are_project_fact_only(before, after)",
-        "projection_context_marks_proven_payloads(ctx, graph)",
         "project_fact_dispatches_owner_route(fact, route)",
-        "Table Ownership Implementation Direction",
-        "ProjectedTableSchema",
-        "ProjectedRowMutation",
-        "IntentTableSchema",
-        "IntentRowMutation",
-        "ProjectionWriteTx",
-        "IntentWriteTx",
-        "ProvenFactCertificate",
-        "matched_proven_payloads_for",
-        "Offers stay flexible under this design.",
-        "A proven offer is not",
-        "proven status links offer -> owner fact -> fact route -> projector theorem",
-        "stored offer O",
-        "project_fact dispatched F through route P",
-        "P's theorem proves C is valid from F's decoded bytes and proven context",
-        "For core-only proof work, projector correctness may be represented as",
-        "route-local trusted theorem contracts",
-        "blanket axiom that all projector output is valid",
-        "threat-model checklist item by itself",
-        "High-level threat-model theorems may be",
-        "proved conditionally on those stubs",
-        "final checklist coverage requires",
-        "The refactor must preserve core readability.",
-        "avoid macro-heavy ownership DSLs",
-        "load, prepare, commit",
-        "one owner split at a time",
-        "Projector proofs must use the proven-payload accessors for authority-bearing",
-        "#[verifier::external_body]",
-        "Every trusted theorem stub must have a name beginning with `theorem_`",
-        "Do not add a theorem that asserts",
-        "for an arbitrary output",
-        "ProjectionContext::payload_for(&need)",
-        "ProjectionOutput::new().need(need)",
-        "Core theorems establish plumbing",
-        "Projector theorems establish protocol meaning.",
+        "projected_table_writes_are_project_fact_only(before, after)",
+        "offer_claim_finalizes_to_projected_owner(claim, offer, current_fact_id)",
         "theorem_ed25519_verify_binds(evidence)",
-        "must not state protocol",
-        "Proof modules must verify with Verus before a checklist item can move out of",
-        "The security bar for threat-model coverage is the only-if direction over the",
-        "Full iff theorems are useful when the spec can characterize the exact Rust",
-        "Model-only projector relations are not proof work for this repo.",
-        "Proofs must target actual Rust code.",
-        "The top-level projector theorem must",
-        "quantify over real Rust inputs and outputs",
-        "Standalone `Spec*` duplicates are forbidden as proof targets.",
-        "Disconnected model-level slices are not accepted",
-        "materializes proof-relevant output",
-        "output implies required authority evidence",
-        "Use iff only for exact projector characterization.",
-        "Constructor lemmas are not checklist coverage by themselves.",
-        "Every proof change must include a walkthrough before handoff.",
-        "what the theorem really proves, and the remaining gaps against",
-        "receipt remains only a receipt",
-        "Replacing a trusted core",
-        "Do not rely on static source analysis as proof.",
-        "Do not cheat by placing protocol conclusions in core.",
-        "Foundational axioms may assume SQLite transactions",
-        "## Current Execution Plan",
-        "Establish the projected-table ownership boundary.",
-        "Finish the universal offer-claim runtime boundary.",
-        "Proven offer",
-        "fact route",
-        "Add projection-visible proof status for matched payloads.",
-        "Prove the tractable core boundary first",
-        "Leave matcher graph construction, offer-owner payload loading,",
-        "projected-table write confinement",
-        "First Foothold Target",
-        "The first projector proof target is `auth::signature`.",
+        "Projector row builders return ProjectedRowMutation.",
+        "ProjectionWriteTx is constructible only by project_fact.",
+        "IntentWriteTx is constructible only by intent handling.",
+        "Authority-influencing reads use AuthorityReadDb/proven accessors",
+        "Keep `project_fact.rs` readable as load, prepare, commit",
+        "blanket projector-validity axiom",
+        "No checklist item may be checked while it depends on an unproved core theorem",
+    ];
+    let missing = required
+        .into_iter()
+        .filter(|needle| !plan.contains(needle))
+        .collect::<Vec<_>>();
+    assert!(
+        missing.is_empty(),
+        "{VERUS_PLAN_PATH} is missing single-source core-first terms:\n{}",
+        missing.join("\n")
+    );
+}
+
+#[test]
+fn verus_plan_names_first_projector_foothold_and_threat_checklist() {
+    let plan = verus_plan();
+    let required = [
+        "## First Projector Foothold",
+        "After the core proof spine is complete, start projector coverage with",
         "stored proven signature_proof offer O",
         "F was routed through auth::signature::SignatureProjector",
         "O.selector == (target_fact_id, signer_public_key)",
-        "It does not prove that the signer is a member,",
-        "Start projector coverage with `auth::signature`.",
-        "not claim membership or protocol authority",
-        "Use route-local projector theorem stubs only to prove core composition",
-        "Replace each used stub with the real",
-        "## Threat Model Checklist",
-        "TM-M1 root workspace slice",
-        "TM-D6",
+        "It does not prove membership, admin,",
+        "## Proof Order",
+        "Complete the core proof spine.",
+        "Prove `auth::signature` as the first projector proof foothold.",
+        "## Threat-Model Checklist",
+        "TM-M1 root workspace and auth DAG.",
+        "TM-C2 local private material is not syncable.",
+        "TM-I1 content authorship is signer-bound.",
+        "TM-D6 key healing cannot resurrect removed roots.",
+        "Every proof change must include a walkthrough",
+        "Commit completed work on the same worktree branch before handoff or review.",
     ];
     let missing = required
         .into_iter()
-        .filter(|needle| !strategy.contains(needle))
+        .filter(|needle| !plan.contains(needle))
         .collect::<Vec<_>>();
     assert!(
         missing.is_empty(),
-        "{VERUS_STRATEGY_PATH} is missing assumed-core theorem strategy terms:\n{}",
+        "{VERUS_PLAN_PATH} is missing proof-order or checklist terms:\n{}",
         missing.join("\n")
     );
+}
 
+#[test]
+fn verus_plan_rejects_retired_or_split_plan_terms() {
+    let plan = verus_plan();
     let forbidden = [
-        "Core assumptions prove admin validity",
-        "Core assumptions prove deletion authority",
-        "Core proof bodies are out of scope for this phase.",
+        "docs/todo-add-verus-proofs.md",
         "## Assumed Core Theorems",
+        "Core proof bodies are out of scope for this phase.",
         "projectors may call assume(...) directly",
-        "projection_output_owners_are_self(output, current_fact_id)",
-        "They may remain as regression checks over",
-        "Model-only projector relations are staging artifacts.",
         "model-level Verus theorem",
         "model-level workspace proof",
-        "model-level workspace sync-share",
-        "Model-level Verus slices are noted",
+        "standalone Verus views",
+        "verified-view lemmas",
+        "finalized_offer_from_claim_view",
+        "owner_checked_projection_output_view",
+        "purge_checked_projection_output_view",
+        "parked_output_for_missing_need_view",
         "theorem_no_materialized_output(output)",
         "all offers must be proven before they can be emitted",
         "context offers are authoritative",
         "generic row mutations are sufficient proof",
-        "- [x] TM-M1 root workspace slice",
-        "- [x] TM-C2 workspace local-bootstrap slice",
+        "- [x] TM-M1",
+        "- [x] TM-C2",
+        "src/core/proof.rs",
+        "src/protocol/<scope>/<fact_family>/proof.rs",
+        "pub mod proof;",
+        "feature = \"verus-proof\"",
     ];
     let present = forbidden
         .into_iter()
-        .filter(|needle| strategy.contains(needle))
+        .filter(|needle| plan.contains(needle))
         .collect::<Vec<_>>();
     assert!(
         present.is_empty(),
-        "{VERUS_STRATEGY_PATH} contains forbidden proof-strategy claims:\n{}",
+        "{VERUS_PLAN_PATH} contains retired or split-plan terms:\n{}",
         present.join("\n")
     );
 }

@@ -8,7 +8,7 @@ expected property that is not listed here is either out of scope, a missing
 invariant, or a known weakness to document before users rely on it.
 
 This document is also the review bridge to the Verus work in
-`docs/todo-add-verus-proofs.md`. The proofs should either establish the
+`docs/verus_proof_strategy.md`. The proofs should either establish the
 mechanized form of these invariants or force this threat model to move the
 property into Known Weaknesses.
 
@@ -16,7 +16,7 @@ Sources and starting points:
 
 - Invariant-Centric Threat Modeling: <https://github.com/defuse/ictm>
 - Quiet Threat Model: <https://github.com/TryQuiet/quiet/wiki/Threat-Model>
-- Context Verus plan: `docs/todo-add-verus-proofs.md`
+- Context Verus plan: `docs/verus_proof_strategy.md`
 - Current architecture docs: `README.md`, `src/core/README.md`, and
   `src/protocol/*/README.md`
 

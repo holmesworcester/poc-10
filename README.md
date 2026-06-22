@@ -534,10 +534,8 @@ Active design and maintenance docs are:
 - [docs/RULES.md](docs/RULES.md): architecture rules, projector rules, and
   guardrails.
 - [docs/verus_proof_strategy.md](docs/verus_proof_strategy.md): current Verus
-  strategy for treating core invariants as explicit assumed theorems while
-  proving projector invariants.
-- [docs/todo-add-verus-proofs.md](docs/todo-add-verus-proofs.md): TODO plan
-  for adding Verus proofs.
+  proof plan, including core proof order, theorem boundaries, and threat-model
+  coverage checklist.
 - [src/core/README.md](src/core/README.md): core/runtime responsibility boundaries, including
   projection and handler commit boundaries.
 - [src/protocol/README.md](src/protocol/README.md),
