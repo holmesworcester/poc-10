@@ -1440,10 +1440,9 @@ pub mod context {
     /// One matched need/offer pair plus the offer value as a compatibility fact.
     ///
     /// Core constructs this from standing context rows before calling the
-    /// projector. New projectors should prefer `value_for` or
-    /// `matched_values_for`. The `payload` field exists for legacy projectors and
-    /// is built from the stored offer value, not by loading the offer owner's
-    /// retained fact bytes.
+    /// projector. New projectors should prefer `value_for`. The `payload` field
+    /// exists for legacy projectors and is built from the stored offer value, not
+    /// by loading the offer owner's retained fact bytes.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct MatchedContext {
         /// The need owned by the fact currently being projected.
@@ -1571,23 +1570,14 @@ pub mod context {
 
         /// Return every matched compatibility payload for a need.
         ///
-        /// The payload bytes are stored offer values; use `matched_values_for`
-        /// when the projector does not need the legacy fact-shaped wrapper.
+        /// The payload bytes are stored offer values. This helper remains for
+        /// legacy fact-shaped wrappers and intentional multi-match roles.
         pub fn matched_payloads_for<'a>(
             &'a self,
             need: &'a ContextNeed,
         ) -> impl Iterator<Item = (&'a ContextOffer, &'a Fact)> + 'a {
             self.matched_entries_for(need)
                 .map(|matched| (&matched.offer, &matched.payload))
-        }
-
-        /// Return every matched scalar value for a need, preserving offer metadata.
-        pub fn matched_values_for<'a>(
-            &'a self,
-            need: &'a ContextNeed,
-        ) -> impl Iterator<Item = (&'a ContextOffer, &'a [u8])> + 'a {
-            self.matched_entries_for(need)
-                .map(|matched| (&matched.offer, matched.offer.value.as_slice()))
         }
 
         fn matched_entries_for<'a>(

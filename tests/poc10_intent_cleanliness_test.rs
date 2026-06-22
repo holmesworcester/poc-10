@@ -388,7 +388,7 @@ fn target_projectors_use_typed_context_lookups_not_direct_match_scans() {
 
     assert!(
         offenders.is_empty() && stale_allowlist.is_empty(),
-        "source projectors must look up context by concrete ContextNeed with ProjectionContext::value_for, matched_values_for, or legacy payload helpers. Direct matched_context scans are exceptional and must not spread.\nnew offenders:\n{}\nstale allowlist entries to remove:\n{}",
+        "source projectors must look up context by concrete ContextNeed with ProjectionContext::value_for or legacy payload helpers. Direct matched_context scans are exceptional and must not spread.\nnew offenders:\n{}\nstale allowlist entries to remove:\n{}",
         offenders.join("\n"),
         stale_allowlist.join("\n")
     );

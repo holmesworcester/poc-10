@@ -171,9 +171,9 @@ explicitly archived or the user asks for history.
   that learns useful context emits an offer. Missing context is not a separate
   "blocked" state in target code.
 - Projectors look up matched context by the concrete `ContextNeed` they just
-  constructed, using `ProjectionContext::value_for` or `matched_values_for`.
-  `payload_for`, `payload_for_checked`, and `matched_payloads_for` are
-  fact-shaped compatibility helpers while projector code migrates. Direct
+  constructed, using `ProjectionContext::value_for`. `payload_for`,
+  `payload_for_checked`, and `matched_payloads_for` are fact-shaped
+  compatibility helpers while projector code migrates. Direct
   `matched_context()` scans are exceptional compatibility code and must be
   explicitly justified by a guardrail allowlist.
 - Deletion, supersession, connection fact receipts, key availability, and dependency
@@ -225,11 +225,10 @@ Projectors must read matched context by the exact `ContextNeed` they declared.
 Use:
 
 - `value_for(&need)` for one exact scalar value.
-- `matched_values_for(&need)` for intentional multi-match roles, such as
-  connection fact receipts or range roots.
 - `payload_for(&need)`, `payload_for_checked(&need, label)`, and
   `matched_payloads_for(&need)` only for legacy fact-shaped wrappers while a
-  projector is being migrated.
+  projector is being migrated, including intentional multi-match roles that
+  still need offer metadata.
 
 Do not call `matched_context()` from protocol projectors. Do not scan
 `context.offers()` to infer whether a declared need is satisfied. A matched
