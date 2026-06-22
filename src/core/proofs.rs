@@ -105,6 +105,12 @@
 //!   stamp. This still does not prove route-table search or the projector
 //!   function pointer call.
 //! - Proven in production Rust today:
+//!   `routed_projection_from_selected_route(fact_id, effective_tag, stamp,
+//!   output)` attaches that selected-stamp route evidence to the actual
+//!   projector output value passed to it and preserves the output unchanged.
+//!   This still does not prove route-table search or the projector function
+//!   pointer call.
+//! - Proven in production Rust today:
 //!   `version_replay_rebuild_shape_allowed(version_replay_rebuild, needs, offers,
 //!   wakes)` accepts if and only if the projection is ordinary, or it is a
 //!   version replay rebuild with no standing needs, offers, or time wakes.
@@ -158,7 +164,7 @@
 //!   calls the projector. `PreparedProjection` carries that route evidence.
 //!   The field-stamping and selected-stamp helpers are verified, but the
 //!   route-table search/function-call and `PreparedProjection` correspondence
-//!   theorem is not complete yet.
+//!   theorem is not complete yet. The routed-output constructor is verified.
 //! - Refactored but not yet proved: projected row output and intent row output
 //!   now use separate Rust types, separate `RuntimeDescription` table lists, and
 //!   separate DB apply helpers. This gives

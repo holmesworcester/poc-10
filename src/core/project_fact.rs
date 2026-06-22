@@ -4335,6 +4335,42 @@ pub mod route {
         pub output: ProjectionOutput,
     }
 
+    verus! {
+    #[verifier(external_type_specification)]
+    #[allow(dead_code)]
+    pub struct ExRoutedProjection(RoutedProjection);
+
+    /// Attach selected-route evidence to the output returned by the selected
+    /// projector.
+    ///
+    /// This proves the dispatch-boundary constructor, not route-table search:
+    /// given proof-relevant route metadata whose tag matches the effective tag,
+    /// the routed output carries that metadata and preserves the projector
+    /// output value passed to it.
+    fn routed_projection_from_selected_route(
+        fact_id: FactId,
+        effective_tag: u8,
+        stamp: FactRouteStamp,
+        output: ProjectionOutput,
+    ) -> (routed: RoutedProjection)
+        requires
+            stamp.tag == effective_tag,
+        ensures
+            routed.route.fact_id == fact_id,
+            routed.route.effective_tag == effective_tag,
+            routed.route.route_tag == effective_tag,
+            routed.route.route_tag == stamp.tag,
+            routed.route.projector_info == stamp.projector_info,
+            routed.route.storage_requirement == stamp.storage_requirement,
+            routed.output == output,
+    {
+        RoutedProjection {
+            route: selected_route_evidence(fact_id, effective_tag, stamp),
+            output,
+        }
+    }
+    } // verus!
+
     #[derive(Debug, Clone, Copy)]
     struct SelectedFactRoute {
         effective_tag: u8,
@@ -4348,10 +4384,7 @@ pub mod route {
             fact_id: FactId,
             output: ProjectionOutput,
         ) -> RoutedProjection {
-            RoutedProjection {
-                route: selected_route_evidence(fact_id, self.effective_tag, self.stamp),
-                output,
-            }
+            routed_projection_from_selected_route(fact_id, self.effective_tag, self.stamp, output)
         }
     }
 

@@ -86,7 +86,7 @@ fn cargo_verus_verifies_production_core_projection_contracts() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        combined.contains("verification results:: 47 verified, 0 errors"),
+        combined.contains("verification results:: 48 verified, 0 errors"),
         "production proof should verify the real core projection contracts:\n{combined}"
     );
 }
@@ -192,6 +192,8 @@ fn core_proofs_make_trust_boundary_explicit() {
         "selected route's proof-relevant `FactRouteStamp`",
         "evidence route tag is that same",
         "projector info/storage requirement come from the",
+        "`routed_projection_from_selected_route(fact_id, effective_tag, stamp,",
+        "preserves the output unchanged",
         "does not prove route-table search",
         "`version_replay_rebuild_shape_allowed(version_replay_rebuild, needs, offers,",
         "accepts if and only if the projection is ordinary",
@@ -372,11 +374,14 @@ fn verus_plan_is_single_core_first_source() {
         "returns route evidence with exactly those same field",
         "`selected_route_evidence(fact_id, effective_tag, stamp)`",
         "selected route's proof-relevant `FactRouteStamp`",
-        "This is selected-route\nmetadata proof, not the full route theorem",
+        "`routed_projection_from_selected_route(fact_id, effective_tag, stamp, output)`",
+        "preserves the output unchanged",
+        "This is selected-route\nmetadata and routed-output constructor proof",
+        "not the full route theorem",
         "Leaf projectors still return plain `ProjectionOutput`",
         "Cargo-verus",
-        "still needs to prove\nthe route-table search",
-        "selected projector function call",
+        "still needs to prove the route-table search",
+        "the selected projector\nfunction call",
         "Route-search discovery",
         "`FactRoute` while it contains the projector function pointer",
         "Cargo-verus does\nnot support function pointer types as a proof target",
@@ -522,6 +527,7 @@ fn verus_plan_is_single_core_first_source() {
         "projection_context_offers_match_claims(context, claims, owner) accepts only if every final offer matches an owner-stamped output claim",
         "projection_route_evidence(fact_id, effective_tag, route_tag, projector_info, storage_requirement) preserves every route evidence field",
         "selected_route_evidence(fact_id, effective_tag, stamp) preserves selected route stamp metadata and gives route_tag == effective_tag when stamp.tag == effective_tag",
+        "routed_projection_from_selected_route(fact_id, effective_tag, stamp, output) preserves selected route stamp metadata and preserves output unchanged",
         "version_replay_rebuild_shape_allowed(version_replay_rebuild, needs, offers, wakes) accepts if and only if ordinary projection or empty version replay rebuild output",
         "version_replay_rebuild_shape_status(version_replay_rebuild, needs, offers, wakes) returns accepted or standing-output exactly from that predicate",
         "version_replay_rebuild_shape_status_allows_projection(status) accepts if and only if status is VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED",

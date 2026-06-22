@@ -222,11 +222,14 @@ values. Cargo-verus also proves that
 `selected_route_evidence(fact_id, effective_tag, stamp)` builds evidence from
 the selected route's proof-relevant `FactRouteStamp`: if the stamp tag is the
 effective tag, the evidence route tag is that same effective tag and the
-projector info/storage requirement come from the stamp. This is selected-route
-metadata proof, not the full route theorem: Cargo-verus still needs to prove
-the route-table search, the selected projector function call, and the
-correspondence from `PreparedProjection.route_evidence` to the committed output
-path.
+projector info/storage requirement come from the stamp. It also proves that
+`routed_projection_from_selected_route(fact_id, effective_tag, stamp, output)`
+attaches that selected-stamp route evidence to the actual projector output
+value passed to it and preserves the output unchanged. This is selected-route
+metadata and routed-output constructor proof, not the full route theorem:
+Cargo-verus still needs to prove the route-table search, the selected projector
+function call, and the correspondence from `PreparedProjection.route_evidence`
+to the committed output path.
 
 Route-search discovery: do not try to prove route-table search directly over
 `FactRoute` while it contains the projector function pointer. Cargo-verus does
@@ -712,6 +715,7 @@ projection_output_context_set_parts(output, owner) preserves output needs and bu
 projection_context_offers_match_claims(context, claims, owner) accepts only if every final offer matches an owner-stamped output claim
 projection_route_evidence(fact_id, effective_tag, route_tag, projector_info, storage_requirement) preserves every route evidence field
 selected_route_evidence(fact_id, effective_tag, stamp) preserves selected route stamp metadata and gives route_tag == effective_tag when stamp.tag == effective_tag
+routed_projection_from_selected_route(fact_id, effective_tag, stamp, output) preserves selected route stamp metadata and preserves output unchanged
 version_replay_rebuild_shape_allowed(version_replay_rebuild, needs, offers, wakes) accepts if and only if ordinary projection or empty version replay rebuild output
 version_replay_rebuild_shape_status(version_replay_rebuild, needs, offers, wakes) returns accepted or standing-output exactly from that predicate
 version_replay_rebuild_shape_status_allows_projection(status) accepts if and only if status is VERSION_REPLAY_REBUILD_SHAPE_ACCEPTED
