@@ -533,6 +533,8 @@ Active design and maintenance docs are:
   architecture flowcharts.
 - [docs/RULES.md](docs/RULES.md): architecture rules, projector rules, and
   guardrails.
+- [docs/context_fixes.md](docs/context_fixes.md): planned context dependency
+  model fixes for semantic key/value offers and producer-stamped effects.
 - [docs/todo-add-verus-proofs.md](docs/todo-add-verus-proofs.md): TODO plan
   for adding Verus proofs.
 - [src/core/README.md](src/core/README.md): core/runtime responsibility boundaries, including
