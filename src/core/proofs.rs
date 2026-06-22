@@ -139,6 +139,14 @@
 //!   output. `validate_version_replay_rebuild_projection_shape` uses this
 //!   verified helper for its success branch.
 //! - Proven in production Rust today:
+//!   `version_replay_rebuild_effect_has_no_fact_or_intent_work(effects)`
+//!   accepts if and only if a version replay rebuild effect is absent, or it
+//!   is present with no emitted facts, priority facts, incoming facts, durable
+//!   intents, or local intents. The runtime effect validator uses this verified
+//!   helper for its success branch. Projected marker rows are still allowed
+//!   through `ProjectionOutput::row_mutation` so a version-upgrade fact can
+//!   record the surviving version row after the wipe/replay.
+//! - Proven in production Rust today:
 //!   `projection_output_with_projected_row_mutation(output, mutation)` appends
 //!   exactly one `ProjectedRowMutation` to `ProjectionOutput::row_mutations`,
 //!   preserves needs, offers, time wakes, retention, and effects, and leaves

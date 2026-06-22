@@ -1254,6 +1254,34 @@ fn version_replay_rebuild_projection_accepts(
     version_replay_rebuild_shape_status_allows_projection(status)
 }
 
+/// Decide whether a version wipe-and-replay effect is isolated from new work.
+///
+/// The rebuild may still write projected marker rows after the wipe, but it
+/// must not simultaneously admit facts or queue intents. Those follow-up facts
+/// and intents would race the wipe/replay induction step.
+fn version_replay_rebuild_effect_has_no_fact_or_intent_work(
+    effects: &RuntimeEffects,
+) -> (accepted: bool)
+    ensures
+        accepted <==> (
+            !effects.version_replay_rebuild
+                || (effects.facts@.len() == 0
+                    && effects.priority_facts@.len() == 0
+                    && effects.incoming_facts@.len() == 0
+                    && effects.intents@.len() == 0
+                    && effects.local_intents@.len() == 0)
+        ),
+{
+    if !effects.version_replay_rebuild {
+        return true;
+    }
+    effects.facts.len() == 0
+        && effects.priority_facts.len() == 0
+        && effects.incoming_facts.len() == 0
+        && effects.intents.len() == 0
+        && effects.local_intents.len() == 0
+}
+
 /// Decide whether projector runtime effects contain no intent-owned row writes.
 ///
 /// Projected rows live on `ProjectionOutput::row_mutations`. Intent row
@@ -1934,20 +1962,10 @@ pub(crate) mod commit_effects {
     fn validate_version_replay_rebuild_effect_shape(
         effects: &RuntimeEffects,
     ) -> Result<(), String> {
-        if !effects.version_replay_rebuild {
+        if super::version_replay_rebuild_effect_has_no_fact_or_intent_work(effects) {
             return Ok(());
         }
-        if !effects.facts.is_empty()
-            || !effects.priority_facts.is_empty()
-            || !effects.incoming_facts.is_empty()
-            || !effects.intents.is_empty()
-            || !effects.local_intents.is_empty()
-        {
-            return Err(
-                "version replay rebuild effect cannot be mixed with facts or intents".to_string(),
-            );
-        }
-        Ok(())
+        Err("version replay rebuild effect cannot be mixed with facts or intents".to_string())
     }
 
     fn validate_incoming_fact_metadata(effects: &RuntimeEffects) -> Result<(), String> {
@@ -6434,6 +6452,27 @@ mod contract_tests {
             })
             .version_replay_rebuild();
         assert_version_replay_rebuild_shape_rejected(&time_fact, time_output);
+    }
+
+    #[test]
+    fn version_replay_rebuild_rejects_fact_or_intent_work() {
+        let fact = Fact::new(FactScope::Global, 1, b"rebuild with child fact".to_vec());
+        let child = Fact::new(
+            FactScope::Global,
+            2,
+            b"child emitted during rebuild".to_vec(),
+        );
+        let output = ProjectionOutput::new().version_replay_rebuild().fact(child);
+        let projector =
+            test_projector(move |_fact: &Fact, _context: &ProjectionContext| Ok(output.clone()));
+
+        let err = run_projection(&projector, &fact, ProjectionContext::default())
+            .expect_err("version replay rebuild with emitted fact should fail validation");
+
+        assert!(
+            err.contains("version replay rebuild effect cannot be mixed with facts or intents"),
+            "{err}"
+        );
     }
 
     #[test]
