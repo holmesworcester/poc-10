@@ -150,9 +150,9 @@ correspondence proof tying the `enforce_owner_is_self` `Result` wrapper,
 diagnostic rejection branches, and `prepare_projection` call order to the
 verified status and allow helpers.
 For context input, `matched_contexts_all_have_routed_provenance(matched)`
-scans the actual matched-context slice and accepts only if every entry has the
-local core provenance link: stored offer owner, loaded payload id, and producer
-route fact id all agree. `prepare_projection` calls the corresponding
+scans the actual matched-context slice and accepts if and only if every entry
+has the local core provenance link: stored offer owner, loaded payload id, and
+producer route fact id all agree. `prepare_projection` calls the corresponding
 `ProjectionContext::validate_routed_provenance` guard before dispatching to the
 projector. This still does not prove semantic offer validity or the SQL
 loader's whole construction theorem; it proves malformed local provenance is
@@ -726,7 +726,7 @@ routed_offer_owner_matches_producer(routed_offer) accepts if and only if routed_
 matched_context_has_routed_provenance(matched) accepts if and only if matched.routed_offer.offer.owner == matched.payload.id and matched.routed_offer.offer.owner == matched.routed_offer.producer_route.fact_id
 RoutedOffer::owner_matches_producer accepts if and only if routed_offer.offer.owner == routed_offer.producer_route.fact_id
 MatchedContext::has_routed_provenance accepts if and only if matched.routed_offer.offer.owner == matched.payload.id and matched.routed_offer.offer.owner == matched.routed_offer.producer_route.fact_id
-matched_contexts_all_have_routed_provenance(matched) accepts only if every matched context has routed provenance
+matched_contexts_all_have_routed_provenance(matched) accepts if and only if every matched context has routed provenance
 ```
 
 These contracts are proofs over helper Rust code that normal builds execute.

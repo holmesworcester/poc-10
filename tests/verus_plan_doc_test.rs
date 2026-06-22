@@ -538,7 +538,7 @@ fn verus_plan_is_single_core_first_source() {
         "matched_context_has_routed_provenance(matched) accepts if and only if matched.routed_offer.offer.owner == matched.payload.id and matched.routed_offer.offer.owner == matched.routed_offer.producer_route.fact_id",
         "RoutedOffer::owner_matches_producer accepts if and only if routed_offer.offer.owner == routed_offer.producer_route.fact_id",
         "MatchedContext::has_routed_provenance accepts if and only if matched.routed_offer.offer.owner == matched.payload.id and matched.routed_offer.offer.owner == matched.routed_offer.producer_route.fact_id",
-        "matched_contexts_all_have_routed_provenance(matched) accepts only if every matched context has routed provenance",
+        "matched_contexts_all_have_routed_provenance(matched) accepts if and only if every matched context has routed provenance",
         "`MatchedContext::with_route` rejects mismatched owner/payload/route fixtures at\nruntime",
         "the SQL pending-context loader asks the active `ProjectionDispatcher`\nfor producer route evidence",
         "The production `attested_offer_for` and\n`matched_attested_offers_for` accessors filter on that same local predicate.",

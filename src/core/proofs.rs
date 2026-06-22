@@ -146,7 +146,7 @@
 //!   local core provenance only; route-local semantic offer theorems and the
 //!   whole-loader theorem are still open.
 //! - Proven in production Rust today:
-//!   `matched_contexts_all_have_routed_provenance(matched)` accepts only if
+//!   `matched_contexts_all_have_routed_provenance(matched)` accepts if and only if
 //!   every matched context in the slice has the local routed-provenance link,
 //!   and `prepare_projection` calls the corresponding `ProjectionContext`
 //!   guard before dispatching to the projector. This blocks malformed local

@@ -2555,7 +2555,7 @@ pub mod context {
         matched: &[MatchedContext],
     ) -> (accepted: bool)
         ensures
-            accepted ==> matched_contexts_have_routed_provenance(matched@),
+            accepted <==> matched_contexts_have_routed_provenance(matched@),
     {
         let mut i: usize = 0;
         while i < matched.len()
@@ -2565,6 +2565,8 @@ pub mod context {
             decreases matched@.len() - i,
         {
             if !matched[i].has_routed_provenance() {
+                assert(!matched_context_routed_provenance_spec(matched@[i as int]));
+                assert(!matched_contexts_have_routed_provenance(matched@));
                 return false;
             }
             i += 1;
