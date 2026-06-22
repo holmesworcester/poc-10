@@ -57,7 +57,9 @@ use self::context_db::{
     wake_context_matches_in_tx,
 };
 use crate::core::command::AuthoredFacts;
-use crate::core::context::{ContextNeed, ContextOffer, ContextSet, ContextSetAdditions};
+use crate::core::context::{
+    context_set_from_projection_parts, ContextNeed, ContextOffer, ContextSet, ContextSetAdditions,
+};
 pub use crate::core::db::ProjectedRowMutation;
 use crate::core::db::{quoted_identifier, quoted_table_name, Db, TableName};
 use crate::core::effects::RuntimeEffects;
@@ -728,6 +730,13 @@ pub struct ExProjectionOutput(ProjectionOutput);
 #[allow(dead_code)]
 pub struct ExProjectedRowMutation(ProjectedRowMutation);
 
+pub assume_specification[<ContextNeed as Clone>::clone](
+    need: &ContextNeed,
+) -> (out: ContextNeed)
+    ensures
+        out == *need,
+;
+
 /// Bytewise fact-id equality used by the owner guard.
 ///
 /// Keeping this comparison explicit lets Verus prove the branch condition that
@@ -1146,6 +1155,63 @@ fn version_replay_rebuild_projection_status(
         &context.offers,
         wakes,
     )
+}
+
+/// Build the unnormalized context set for one complete projection output.
+///
+/// `ProjectionOutput::context_set` normalizes this result before commit.
+/// This helper proves the owner-stamping and field-preservation bridge from
+/// the actual `ProjectionOutput` object; normalization remains separate proof
+/// work.
+fn projection_output_context_set_parts(
+    output: &ProjectionOutput,
+    owner: FactId,
+) -> (context: ContextSet)
+    ensures
+        context.needs@ == output.needs@,
+        context.offers@.len() == output.offers@.len(),
+        forall|i: int|
+            #![trigger context.offers@[i]]
+            0 <= i < context.offers@.len() ==> context.offers@[i].owner == owner,
+        forall|i: int|
+            #![trigger context.offers@[i]]
+            0 <= i < context.offers@.len() ==> context.offers@[i].role == output.offers@[i].role,
+        forall|i: int|
+            #![trigger context.offers@[i]]
+            0 <= i < context.offers@.len() ==> context.offers@[i].scope == output.offers@[i].scope,
+        forall|i: int|
+            #![trigger context.offers@[i]]
+            0 <= i < context.offers@.len() ==> context.offers@[i].start_key == output.offers@[i].start_key,
+        forall|i: int|
+            #![trigger context.offers@[i]]
+            0 <= i < context.offers@.len() ==> context.offers@[i].end_key == output.offers@[i].end_key,
+        forall|i: int|
+            #![trigger context.offers@[i]]
+            0 <= i < context.offers@.len() ==> context.offers@[i].value == output.offers@[i].value,
+{
+    let needs = clone_context_needs(&output.needs);
+    context_set_from_projection_parts(needs, &output.offers, owner)
+}
+
+/// Clone the replacement needs from a projection output with a proof that the
+/// sequence is unchanged.
+fn clone_context_needs(needs: &[ContextNeed]) -> (out: Vec<ContextNeed>)
+    ensures
+        out@ == needs@,
+{
+    let mut out: Vec<ContextNeed> = Vec::new();
+    let mut i: usize = 0;
+    while i < needs.len()
+        invariant
+            i <= needs@.len(),
+            out@.len() == i,
+            forall|j: int| 0 <= j < out@.len() ==> out@[j] == needs@[j],
+        decreases needs@.len() - i,
+    {
+        out.push(needs[i].clone());
+        i += 1;
+    }
+    out
 }
 } // verus!
 
@@ -3440,8 +3506,8 @@ pub mod effects {
     //! Projection effects and time-wake output for fact projectors.
 
     use crate::core::context::{
-        context_set_from_projection_parts, ContextKey, ContextNeed, ContextOffer,
-        ContextOfferClaim, ContextOfferValue, ContextSet, Role,
+        ContextKey, ContextNeed, ContextOffer, ContextOfferClaim, ContextOfferValue, ContextSet,
+        Role,
     };
     use crate::core::db::ProjectedRowMutation;
     use crate::core::effects::{IncomingMetadata, RuntimeEffects};
@@ -3714,7 +3780,7 @@ pub mod effects {
         }
 
         pub fn context_set(&self, owner: FactId) -> ContextSet {
-            context_set_from_projection_parts(self.needs.clone(), &self.offers, owner).normalized()
+            super::projection_output_context_set_parts(self, owner).normalized()
         }
     }
 
@@ -7301,6 +7367,37 @@ mod tests {
         assert_eq!(context.offers[0].role, role);
         assert_eq!(context.offers[0].start_key, key);
         assert_eq!(context.offers[0].value.as_bytes(), b"offer-cert-v1");
+    }
+
+    #[test]
+    fn projection_output_context_set_parts_preserve_output_needs_and_claim_fields() {
+        let owner = [1; 32];
+        let role = Role::new("parts_offer").unwrap();
+        let key = ContextKey::from_bytes([2; 32]);
+        let need = ContextNeed {
+            owner,
+            role: role.clone(),
+            scope: FactScope::Global,
+            start_key: key.clone(),
+            end_key: key.clone(),
+        };
+        let claim = ContextOfferClaim {
+            role: role.clone(),
+            scope: FactScope::Global,
+            start_key: key.clone(),
+            end_key: key.clone(),
+            value: ContextOfferValue::from_bytes(b"parts-cert-v1"),
+        };
+        let output = ProjectionOutput::new().need(need.clone()).offer(claim);
+
+        let context = projection_output_context_set_parts(&output, owner);
+
+        assert_eq!(context.needs, vec![need]);
+        assert_eq!(context.offers.len(), 1);
+        assert_eq!(context.offers[0].owner, owner);
+        assert_eq!(context.offers[0].role, role);
+        assert_eq!(context.offers[0].start_key, key);
+        assert_eq!(context.offers[0].value.as_bytes(), b"parts-cert-v1");
     }
 
     #[test]

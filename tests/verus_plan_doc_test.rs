@@ -86,7 +86,7 @@ fn cargo_verus_verifies_production_core_projection_contracts() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        combined.contains("verification results:: 33 verified, 0 errors"),
+        combined.contains("verification results:: 36 verified, 0 errors"),
         "production proof should verify the real core projection contracts:\n{combined}"
     );
 }
@@ -175,6 +175,8 @@ fn core_proofs_make_trust_boundary_explicit() {
         "unproved interpretation of the status byte",
         "`ContextOfferClaim::into_offer(claim, owner).owner == owner`",
         "ContextOfferClaim::into_offer(claim, owner) preserves role/scope/start/end/value",
+        "`clone_context_needs(needs)` preserves the need sequence",
+        "`projection_output_context_set_parts(output, owner)` preserves output needs",
         "`owned_offers_from_claims(claims, owner)` returns one offer per claim",
         "every returned offer has `owner`",
         "same role, scope, start key, end key, and offer value",
@@ -328,7 +330,7 @@ fn verus_plan_is_single_core_first_source() {
         "owner, role, scope",
         "start key, end key, and value preservation",
         "every returned offer",
-        "version replay rebuild shape decision accepts exactly ordinary projections",
+        "replay rebuild shape decision accepts exactly ordinary projections",
         "version replay rebuild projections",
         "no standing needs, offers, or time wakes",
         "production status helper returns accepted or",
@@ -507,6 +509,8 @@ fn verus_plan_is_single_core_first_source() {
         "forall returned offer: offer.role/scope/start/end/value match the same-index claim",
         "context_set_from_projection_parts(needs, claims, owner) preserves needs",
         "context_set_from_projection_parts(needs, claims, owner) builds same-index owned offers",
+        "clone_context_needs(needs) preserves the need sequence",
+        "projection_output_context_set_parts(output, owner) preserves output needs and builds same-index owned offers from output claims",
         "projection_route_evidence(fact_id, effective_tag, route_tag, projector_info, storage_requirement) preserves every route evidence field",
         "selected_route_evidence(fact_id, effective_tag, stamp) preserves selected route stamp metadata and gives route_tag == effective_tag when stamp.tag == effective_tag",
         "version_replay_rebuild_shape_allowed(version_replay_rebuild, needs, offers, wakes) accepts if and only if ordinary projection or empty version replay rebuild output",
@@ -522,10 +526,11 @@ fn verus_plan_is_single_core_first_source() {
         "the SQL pending-context loader asks the active `ProjectionDispatcher`\nfor producer route evidence",
         "The production `attested_offer_for` and\n`matched_attested_offers_for` accessors filter on that same local predicate.",
         "`pending_projection_input_context_for_owner` and the SQL loader construct every",
-        "assume_specification` for the derived `ContextOfferClaim::clone`",
-        "clone preserves the whole claim",
+        "assume_specification`s for the derived `ContextOfferClaim::clone` and",
+        "that clone preserves the whole value",
         "remaining owner-checking gap",
         "full-output status bridge",
+        "bridge from\n`ProjectionOutput` to that assembly",
         "remaining version replay rebuild admission gap",
         "standing-output decision",
         "status classification",

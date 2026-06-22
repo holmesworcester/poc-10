@@ -115,8 +115,11 @@ offer value are copied unchanged. For a slice of claims, Cargo-verus proves
 the same length, owner, role, scope, start key, end key, and value preservation
 for every returned offer. For the pre-normalization context-set construction,
 Cargo-verus proves the input needs are carried unchanged and the constructed
-offers preserve the same owner and claim fields. Cargo-verus also proves that
-the version replay rebuild shape decision accepts exactly ordinary projections
+offers preserve the same owner and claim fields.
+`projection_output_context_set_parts(output, owner)` applies that
+pre-normalization construction to the actual `ProjectionOutput` object consumed
+by `ProjectionOutput::context_set`. Cargo-verus also proves that the version
+replay rebuild shape decision accepts exactly ordinary projections
 or version replay rebuild projections with empty standing output: no standing needs, offers, or time wakes.
 It also proves that the production status helper returns accepted or
 standing-output exactly from that predicate, and that the allow helper accepts
@@ -682,6 +685,8 @@ forall returned offer: offer.owner == owner
 forall returned offer: offer.role/scope/start/end/value match the same-index claim
 context_set_from_projection_parts(needs, claims, owner) preserves needs
 context_set_from_projection_parts(needs, claims, owner) builds same-index owned offers
+clone_context_needs(needs) preserves the need sequence
+projection_output_context_set_parts(output, owner) preserves output needs and builds same-index owned offers from output claims
 projection_route_evidence(fact_id, effective_tag, route_tag, projector_info, storage_requirement) preserves every route evidence field
 selected_route_evidence(fact_id, effective_tag, stamp) preserves selected route stamp metadata and gives route_tag == effective_tag when stamp.tag == effective_tag
 version_replay_rebuild_shape_allowed(version_replay_rebuild, needs, offers, wakes) accepts if and only if ordinary projection or empty version replay rebuild output
@@ -700,11 +705,14 @@ They are core proof footholds, not threat-model coverage and not completion of
 `offer_claim_finalizes_to_projected_owner` or
 `project_fact_dispatches_owner_route`.
 
-The `owned_offers_from_claims` and `context_set_from_projection_parts` proofs use a narrow Verus
-`assume_specification` for the derived `ContextOfferClaim::clone` call so Verus
-can call that production clone and reason that clone preserves the whole claim.
-The remaining offer-finalization gap is no longer claim-to-offer field copying
-or pre-normalization context-set assembly; it is proving the
+The `owned_offers_from_claims`, `clone_context_needs`, and
+`context_set_from_projection_parts` proofs use narrow Verus
+`assume_specification`s for the derived `ContextOfferClaim::clone` and
+`ContextNeed::clone` calls so Verus can call those production clones and reason
+that clone preserves the whole value.
+The remaining offer-finalization gap is no longer claim-to-offer field copying,
+need cloning, pre-normalization context-set assembly, or the bridge from
+`ProjectionOutput` to that assembly; it is proving the
 `ProjectionOutput::context_set` normalization step and `prepare_projection`
 call order over executable helper code. The remaining owner-checking gap is no
 longer the equality decision, per-slice scans, aggregate owner predicate,

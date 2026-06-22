@@ -78,6 +78,10 @@
 //!   `context_set_from_projection_parts(needs, claims, owner)` carries needs
 //!   unchanged and builds same-index owned offers from the claims.
 //! - Proven in production Rust today:
+//!   `clone_context_needs(needs)` preserves the need sequence, and
+//!   `projection_output_context_set_parts(output, owner)` preserves output needs
+//!   while building same-index owned offers from output claims.
+//! - Proven in production Rust today:
 //!   `projection_route_evidence(fact_id, effective_tag, route_tag,
 //!   projector_info, storage_requirement)` returns `ProjectionRouteEvidence`
 //!   with exactly those same field values. This proves route-evidence field
@@ -118,10 +122,10 @@
 //!   producer route evidence while loading matched owner facts. This proves
 //!   local core provenance only; route-local semantic offer theorems and the
 //!   whole-loader theorem are still open.
-//! - Assumed only to call production code: the Verus contract for the derived
-//!   `ContextOfferClaim::clone` says clone preserves the whole claim. This
-//!   assumption is a Rust trait boundary helper, not a runtime theorem over
-//!   projection.
+//! - Assumed only to call production code: the Verus contracts for the derived
+//!   `ContextOfferClaim::clone` and `ContextNeed::clone` calls say clone
+//!   preserves the whole value. These assumptions are Rust trait boundary
+//!   helpers, not runtime theorems over projection.
 //! - Refactored but not yet proved: `ProjectionDispatcher::dispatch_projection`
 //!   now returns `RoutedProjection`, which is a plain `ProjectionOutput` plus
 //!   router-stamped `ProjectionRouteEvidence` from the same route selection that
@@ -137,7 +141,8 @@
 //!   validation, commit routing, and raw-SQL confinement to the split lists.
 //! - Not proven here today: every exported `theorem_*` runtime/core property.
 //! - Not proven yet for offer finalization: `ProjectionOutput::context_set`
-//!   normalization or `prepare_projection` call order.
+//!   normalization or `prepare_projection` call order. The unnormalized bridge
+//!   from `ProjectionOutput` to `ContextSet` is proved.
 //! - Not proven yet for owner enforcement: the exported theorem tying
 //!   `enforce_owner_is_self` `Result` wrapper diagnostic rejection branches and
 //!   `prepare_projection` call order to the verified status and allow helpers.
