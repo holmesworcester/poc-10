@@ -440,6 +440,8 @@ fn row_mutation_authority_is_split_by_worker() {
     let db = source_text(&root.join("src/core/db.rs"));
     let effects = source_text(&root.join("src/core/effects.rs"));
     let project_fact = source_text(&root.join("src/core/project_fact.rs"));
+    let runtime = source_text(&root.join("src/core/runtime.rs"));
+    let registry = source_text(&root.join("src/protocol/registry.rs"));
 
     for required in [
         "pub enum ProjectedRowMutation",
@@ -450,6 +452,28 @@ fn row_mutation_authority_is_split_by_worker() {
         assert!(
             db.contains(required),
             "db row vocabulary should expose split row authority: {required:?}"
+        );
+    }
+
+    for required in [
+        "pub projected_row_mutation_tables: &'static [TableName]",
+        "pub intent_row_mutation_tables: &'static [TableName]",
+        "self.description.projected_row_mutation_tables",
+        "self.description.intent_row_mutation_tables",
+    ] {
+        assert!(
+            runtime.contains(required),
+            "RuntimeDescription should keep projected and intent row tables separate: {required:?}"
+        );
+    }
+
+    for required in [
+        "pub(crate) const PROJECTED_ROW_MUTATION_TABLES: &[TableName]",
+        "pub(crate) const INTENT_ROW_MUTATION_TABLES: &[TableName]",
+    ] {
+        assert!(
+            registry.contains(required),
+            "protocol registry should declare split row-table allowlists: {required:?}"
         );
     }
 
@@ -486,6 +510,21 @@ fn row_mutation_authority_is_split_by_worker() {
             "projection should not use the generic intent row path: {forbidden:?}"
         );
     }
+
+    let bootstrap_attempt = topo::protocol::connection::request::BOOTSTRAP_CONNECTION_ATTEMPT_ROWS;
+    let runtime = topo::protocol::app::CONTEXT_RUNTIME;
+    assert!(
+        !runtime
+            .projected_row_mutation_tables
+            .contains(&bootstrap_attempt),
+        "bootstrap connection attempts are intent-owned live bookkeeping"
+    );
+    assert!(
+        runtime
+            .intent_row_mutation_tables
+            .contains(&bootstrap_attempt),
+        "connection maintenance handler needs intent-side bootstrap attempt authority"
+    );
 }
 
 #[test]

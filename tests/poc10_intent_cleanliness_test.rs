@@ -1553,7 +1553,8 @@ fn target_protocol_registry_owns_protocol_tables_without_runtime_io() {
     for required in [
         "pub const CONTEXT_COMMANDS: &[CliCommand<ContextCliContext>]",
         "pub(crate) const SCHEMA_SOURCES: &[SchemaSource]",
-        "pub(crate) const ROW_MUTATION_TABLES: &[TableName]",
+        "pub(crate) const PROJECTED_ROW_MUTATION_TABLES: &[TableName]",
+        "pub(crate) const INTENT_ROW_MUTATION_TABLES: &[TableName]",
         "pub(crate) const HANDLER_ROUTES: &[HandlerRoute]",
     ] {
         assert!(

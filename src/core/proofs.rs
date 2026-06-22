@@ -106,6 +106,12 @@
 //!   The field-stamping and selected-stamp helpers are verified, but the
 //!   route-table search/function-call and `PreparedProjection` correspondence
 //!   theorem is not complete yet.
+//! - Refactored but not yet proved: projected row output and intent row output
+//!   now use separate Rust types, separate `RuntimeDescription` table lists, and
+//!   separate DB apply helpers. This gives
+//!   `projected_table_writes_are_project_fact_only` a realistic production-code
+//!   target, but it is not the theorem yet; the proof must still tie
+//!   validation, commit routing, and raw-SQL confinement to the split lists.
 //! - Not proven here today: every exported `theorem_*` runtime/core property.
 //! - Not proven yet for offer finalization: `ProjectionOutput::context_set`
 //!   normalization or `prepare_projection` call order.

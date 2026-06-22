@@ -561,7 +561,8 @@ mod tests {
 
     const MAINTAIN_CONNECTIONS_RUNTIME: RuntimeDescription = RuntimeDescription {
         schema_sources: &[network::SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE],
-        row_mutation_tables: &[],
+        projected_row_mutation_tables: &[],
+        intent_row_mutation_tables: &[request::BOOTSTRAP_CONNECTION_ATTEMPT_ROWS],
         projector: noop_projector,
         fact_routes: &[],
         fact_admission: None,

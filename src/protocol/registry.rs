@@ -1163,10 +1163,9 @@ pub const CONTEXT_COMMANDS: &[CliCommand<ContextCliContext>] = &[
 
 pub(crate) const SCHEMA_SOURCES: &[SchemaSource] = &[network::SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE];
 
-pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
+pub(crate) const PROJECTED_ROW_MUTATION_TABLES: &[TableName] = &[
     connection::ephemeral_secret::CONNECTION_EPHEMERAL_SECRET_ROWS,
     connection::fact_receipt::CONNECTION_FACT_RECEIPT_ROWS,
-    connection::request::BOOTSTRAP_CONNECTION_ATTEMPT_ROWS,
     connection::request::CONNECTION_REQUEST_ROWS,
     connection::connection::CONNECTION_ROWS,
     read_models::FILE_ROWS,
@@ -1201,6 +1200,9 @@ pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
     sync::local_setting::SYNC_LOCAL_SETTING_ROWS,
     versioning::local_update::PROTOCOL_VERSION_ROWS,
 ];
+
+pub(crate) const INTENT_ROW_MUTATION_TABLES: &[TableName] =
+    &[connection::request::BOOTSTRAP_CONNECTION_ATTEMPT_ROWS];
 
 pub(crate) fn protocol_projector() -> Box<dyn ProjectionDispatcher> {
     Box::new(ProtocolProjector)

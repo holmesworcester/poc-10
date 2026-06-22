@@ -185,7 +185,7 @@ pub(crate) fn project_one(
     store: &Db,
     projector: &(impl ProjectionDispatcher + ?Sized),
     source: ProjectionSource,
-    allowed_tables: &[TableName],
+    projected_row_mutation_tables: &[TableName],
     registered_intent_kinds: &[&str],
     fact_admission: Option<FactAdmissionFn>,
 ) -> Result<bool, String> {
@@ -198,7 +198,7 @@ pub(crate) fn project_one(
         ProjectionLoad::Loaded(input) => evaluate_loaded_projection_input(
             projector,
             input,
-            allowed_tables,
+            projected_row_mutation_tables,
             registered_intent_kinds,
             fact_admission,
         )?,
@@ -213,7 +213,7 @@ pub(crate) fn project_one(
     commit_projection_effects(
         store,
         &outcome,
-        allowed_tables,
+        projected_row_mutation_tables,
         registered_intent_kinds,
         fact_admission,
     )?;
@@ -294,7 +294,7 @@ pub(crate) fn load_pending_fact(
 fn evaluate_loaded_projection_input(
     projector: &(impl ProjectionDispatcher + ?Sized),
     input: ProjectionInput,
-    allowed_tables: &[TableName],
+    projected_row_mutation_tables: &[TableName],
     registered_intent_kinds: &[&str],
     fact_admission: Option<FactAdmissionFn>,
 ) -> Result<ProjectionOutcome, String> {
@@ -304,7 +304,7 @@ fn evaluate_loaded_projection_input(
         prepare_projection(
             projector,
             input,
-            allowed_tables,
+            projected_row_mutation_tables,
             registered_intent_kinds,
             fact_admission,
         )
@@ -335,7 +335,7 @@ fn evaluate_loaded_projection_input(
 fn commit_projection_effects(
     store: &Db,
     outcome: &ProjectionOutcome,
-    allowed_tables: &[TableName],
+    projected_row_mutation_tables: &[TableName],
     registered_intent_kinds: &[&str],
     fact_admission: Option<FactAdmissionFn>,
 ) -> Result<(), String> {
@@ -375,7 +375,7 @@ fn commit_projection_effects(
                         commit_projector_emitted_runtime_effects_in_tx(
                             &tx,
                             projection,
-                            allowed_tables,
+                            projected_row_mutation_tables,
                             registered_intent_kinds,
                             fact_admission,
                         )
@@ -579,7 +579,7 @@ fn projection_mode_from_replay_flag(replay: i64) -> ProjectionMode {
 fn prepare_projection(
     projector: &(impl ProjectionDispatcher + ?Sized),
     input: ProjectionInput,
-    allowed_tables: &[TableName],
+    projected_row_mutation_tables: &[TableName],
     registered_intent_kinds: &[&str],
     fact_admission: Option<FactAdmissionFn>,
 ) -> Result<PreparedProjection, String> {
@@ -610,7 +610,7 @@ fn prepare_projection(
         validate_projection_runtime_effects_for_admission(
             &runtime_effects,
             &projected_row_mutations,
-            allowed_tables,
+            projected_row_mutation_tables,
             registered_intent_kinds,
             fact_admission,
         )
@@ -1293,7 +1293,7 @@ fn wake_projection_work_from_new_context_in_tx(
 fn commit_projector_emitted_runtime_effects_in_tx(
     tx: &ProjectionWriteTx<'_>,
     projection: &PreparedProjection,
-    allowed_tables: &[TableName],
+    projected_row_mutation_tables: &[TableName],
     registered_intent_kinds: &[&str],
     fact_admission: Option<FactAdmissionFn>,
 ) -> rusqlite::Result<()> {
@@ -1302,7 +1302,7 @@ fn commit_projector_emitted_runtime_effects_in_tx(
             tx.db(),
             &projection.runtime_effects,
             &projection.projected_row_mutations,
-            allowed_tables,
+            projected_row_mutation_tables,
             registered_intent_kinds,
             fact_admission,
             projection.mode.is_replay(),
@@ -1474,38 +1474,38 @@ pub(crate) mod commit_effects {
     /// write time because they depend on the transaction's current view of SQLite.
     pub(crate) fn validate_runtime_effects(
         effects: &RuntimeEffects,
-        allowed_tables: &[TableName],
+        intent_row_mutation_tables: &[TableName],
         registered_intent_kinds: &[&str],
     ) -> Result<(), String> {
         validate_intents(&effects.intents, registered_intent_kinds)?;
         validate_intents(&effects.local_intents, registered_intent_kinds)?;
         validate_incoming_fact_metadata(effects)?;
         validate_version_replay_rebuild_effect_shape(effects)?;
-        validate_intent_row_mutations(&effects.row_mutations, allowed_tables)?;
+        validate_intent_row_mutations(&effects.row_mutations, intent_row_mutation_tables)?;
         Ok(())
     }
 
     pub(crate) fn validate_projection_runtime_effects_for_admission(
         effects: &RuntimeEffects,
         projected_row_mutations: &[ProjectedRowMutation],
-        allowed_tables: &[TableName],
+        projected_row_mutation_tables: &[TableName],
         registered_intent_kinds: &[&str],
         fact_admission: Option<FactAdmissionFn>,
     ) -> Result<(), String> {
-        validate_runtime_effects(effects, allowed_tables, registered_intent_kinds)?;
         validate_no_intent_row_mutations_from_projection(effects)?;
-        validate_projected_row_mutations(projected_row_mutations, allowed_tables)?;
+        validate_runtime_effects(effects, &[], registered_intent_kinds)?;
+        validate_projected_row_mutations(projected_row_mutations, projected_row_mutation_tables)?;
         validate_fact_admissions(effects, fact_admission)?;
         Ok(())
     }
 
     pub(crate) fn validate_runtime_effects_for_admission(
         effects: &RuntimeEffects,
-        allowed_tables: &[TableName],
+        intent_row_mutation_tables: &[TableName],
         registered_intent_kinds: &[&str],
         fact_admission: Option<FactAdmissionFn>,
     ) -> Result<(), String> {
-        validate_runtime_effects(effects, allowed_tables, registered_intent_kinds)?;
+        validate_runtime_effects(effects, intent_row_mutation_tables, registered_intent_kinds)?;
         validate_fact_admissions(effects, fact_admission)?;
         Ok(())
     }
@@ -1598,30 +1598,30 @@ pub(crate) mod commit_effects {
 
     fn validate_projected_row_mutations(
         mutations: &[ProjectedRowMutation],
-        allowed_tables: &[TableName],
+        projected_row_mutation_tables: &[TableName],
     ) -> Result<(), String> {
         validate_row_mutation_tables(
             mutations.iter().map(ProjectedRowMutation::table),
-            allowed_tables,
+            projected_row_mutation_tables,
         )
     }
 
     fn validate_intent_row_mutations(
         mutations: &[IntentRowMutation],
-        allowed_tables: &[TableName],
+        intent_row_mutation_tables: &[TableName],
     ) -> Result<(), String> {
         validate_row_mutation_tables(
             mutations.iter().map(IntentRowMutation::table),
-            allowed_tables,
+            intent_row_mutation_tables,
         )
     }
 
     fn validate_row_mutation_tables(
         tables: impl IntoIterator<Item = TableName>,
-        allowed_tables: &[TableName],
+        allowed_tables_for_worker: &[TableName],
     ) -> Result<(), String> {
         tables.into_iter().try_for_each(|table| {
-            if allowed_tables.contains(&table) {
+            if allowed_tables_for_worker.contains(&table) {
                 Ok(())
             } else {
                 Err(format!(
@@ -1647,7 +1647,7 @@ pub(crate) mod commit_effects {
     pub(crate) fn commit_runtime_effects_to_db(
         store: &Db,
         effects: &RuntimeEffects,
-        allowed_tables: &[TableName],
+        intent_row_mutation_tables: &[TableName],
         registered_intent_kinds: &[&str],
         fact_admission: Option<FactAdmissionFn>,
         replay: bool,
@@ -1656,7 +1656,7 @@ pub(crate) mod commit_effects {
     ) -> Result<RuntimeEffectCounts, String> {
         validate_runtime_effects_for_admission(
             effects,
-            allowed_tables,
+            intent_row_mutation_tables,
             registered_intent_kinds,
             fact_admission,
         )?;
@@ -1665,7 +1665,7 @@ pub(crate) mod commit_effects {
                 commit_runtime_effects_in_tx(
                     tx,
                     effects,
-                    allowed_tables,
+                    intent_row_mutation_tables,
                     registered_intent_kinds,
                     fact_admission,
                     replay,
@@ -1712,13 +1712,13 @@ pub(crate) mod commit_effects {
     pub(crate) fn commit_runtime_effects_in_tx(
         tx: &Db,
         effects: &RuntimeEffects,
-        allowed_tables: &[TableName],
+        intent_row_mutation_tables: &[TableName],
         registered_intent_kinds: &[&str],
         fact_admission: Option<FactAdmissionFn>,
         replay: bool,
         allow_rebuild: bool,
     ) -> rusqlite::Result<RuntimeEffectCounts> {
-        validate_runtime_effects(effects, allowed_tables, registered_intent_kinds)
+        validate_runtime_effects(effects, intent_row_mutation_tables, registered_intent_kinds)
             .map_err(sqlite_string_error)?;
         enforce_storage_requirement(tx, effects.storage_requirement)
             .map_err(sqlite_string_error)?;
@@ -1732,7 +1732,7 @@ pub(crate) mod commit_effects {
         tx: &Db,
         effects: &RuntimeEffects,
         projected_row_mutations: &[ProjectedRowMutation],
-        allowed_tables: &[TableName],
+        projected_row_mutation_tables: &[TableName],
         registered_intent_kinds: &[&str],
         fact_admission: Option<FactAdmissionFn>,
         replay: bool,
@@ -1741,7 +1741,7 @@ pub(crate) mod commit_effects {
         validate_projection_runtime_effects_for_admission(
             effects,
             projected_row_mutations,
-            allowed_tables,
+            projected_row_mutation_tables,
             registered_intent_kinds,
             fact_admission,
         )
@@ -4249,7 +4249,7 @@ pub(crate) fn submit_facts_with_admission(
 pub(crate) fn submit_authored_facts_to_db<T>(
     store: &Db,
     output: AuthoredFacts<T>,
-    allowed_tables: &[TableName],
+    intent_row_mutation_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
     label: &str,
 ) -> Result<T, String> {
@@ -4261,7 +4261,7 @@ pub(crate) fn submit_authored_facts_to_db<T>(
     commit_runtime_effects_to_db(
         store,
         &effects,
-        allowed_tables,
+        intent_row_mutation_tables,
         &[],
         fact_admission,
         false,

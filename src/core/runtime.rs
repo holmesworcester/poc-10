@@ -4,8 +4,8 @@
 //! protocol instance. It owns the SQLite connection, applies core plus protocol
 //! schema, exposes admission APIs, and defines the bounded order for one runtime
 //! turn. Protocol code supplies the schemas, projector router, handler registry,
-//! row mutation allowlist, and live-host declarations that make those mechanics
-//! meaningful.
+//! projected/intent row table allowlists, and live-host declarations that make
+//! those mechanics meaningful.
 //!
 //! `core::app` opens a `Runtime` for either a long-running `start` process or a
 //! one-shot command process. `core::daemon` only provides the daemon process
@@ -84,16 +84,19 @@ pub type ProjectorFactory = fn() -> Box<dyn ProjectionDispatcher>;
 /// Protocol-owned declarations needed to open core's runtime engine.
 ///
 /// The description is static so a runtime instance cannot drift after opening
-/// its database. `schema_sources` declare protocol tables, `row_mutation_tables`
-/// is the allowlist for effect-written rows, `projector` defines how facts turn
-/// into context/rows/follow-up work, and `handlers` define which queued intents
-/// core may dispatch.
+/// its database. `schema_sources` declare protocol tables,
+/// `projected_row_mutation_tables` names projector-owned row outputs,
+/// `intent_row_mutation_tables` names live handler-owned row outputs,
+/// `projector` defines how facts turn into context/rows/follow-up work, and
+/// `handlers` define which queued intents core may dispatch.
 #[derive(Clone, Copy)]
 pub struct RuntimeDescription {
     /// Protocol table declarations appended after the core schema.
     pub schema_sources: &'static [SchemaSource],
-    /// Tables protocol effects are allowed to mutate.
-    pub row_mutation_tables: &'static [TableName],
+    /// Tables fact projectors are allowed to mutate through `ProjectionOutput`.
+    pub projected_row_mutation_tables: &'static [TableName],
+    /// Tables intent handlers and live runtime effects are allowed to mutate.
+    pub intent_row_mutation_tables: &'static [TableName],
     /// Factory for the projector router.
     pub projector: ProjectorFactory,
     /// Per-fact-type projector routes used for registry diagnostics and
@@ -447,7 +450,7 @@ impl Runtime {
         project_fact::submit_authored_facts_to_db(
             &self.db,
             output,
-            self.description.row_mutation_tables,
+            self.description.intent_row_mutation_tables,
             self.description.fact_admission,
             "submit authored facts",
         )
@@ -466,7 +469,7 @@ impl Runtime {
         project_fact::commit_effects::commit_runtime_effects_to_db(
             &self.db,
             &effects,
-            self.description.row_mutation_tables,
+            self.description.intent_row_mutation_tables,
             self.handlers.intent_kinds(),
             self.description.fact_admission,
             false,
@@ -529,7 +532,7 @@ impl Runtime {
                 &self.db,
                 self.projector.as_ref(),
                 source,
-                self.description.row_mutation_tables,
+                self.description.projected_row_mutation_tables,
                 self.handlers.intent_kinds(),
                 self.description.fact_admission,
             )
@@ -557,7 +560,7 @@ impl Runtime {
                 &self.db,
                 &self.handlers,
                 queue,
-                self.description.row_mutation_tables,
+                self.description.intent_row_mutation_tables,
                 self.description.fact_admission,
             )
         })
@@ -1020,7 +1023,8 @@ mod tests {
 
     const TEST_RUNTIME: RuntimeDescription = RuntimeDescription {
         schema_sources: &[],
-        row_mutation_tables: &[],
+        projected_row_mutation_tables: &[],
+        intent_row_mutation_tables: &[],
         projector: noop_projector,
         fact_routes: &[],
         fact_admission: None,
@@ -1029,7 +1033,8 @@ mod tests {
 
     const NETWORK_RUNTIME: RuntimeDescription = RuntimeDescription {
         schema_sources: &[network::SCHEMA_SOURCE],
-        row_mutation_tables: &[],
+        projected_row_mutation_tables: &[],
+        intent_row_mutation_tables: &[],
         projector: noop_projector,
         fact_routes: &[],
         fact_admission: None,
@@ -1046,7 +1051,8 @@ mod tests {
 
     const ADMISSION_RUNTIME: RuntimeDescription = RuntimeDescription {
         schema_sources: &[],
-        row_mutation_tables: &[],
+        projected_row_mutation_tables: &[],
+        intent_row_mutation_tables: &[],
         projector: noop_projector,
         fact_routes: &[],
         fact_admission: Some(reject_bad_fact),
@@ -1055,7 +1061,8 @@ mod tests {
 
     const HANDLER_RUNTIME: RuntimeDescription = RuntimeDescription {
         schema_sources: &[],
-        row_mutation_tables: &[],
+        projected_row_mutation_tables: &[],
+        intent_row_mutation_tables: &[],
         projector: noop_projector,
         fact_routes: &[],
         fact_admission: None,
@@ -1064,7 +1071,8 @@ mod tests {
 
     const EMIT_FACT_RUNTIME: RuntimeDescription = RuntimeDescription {
         schema_sources: &[],
-        row_mutation_tables: &[],
+        projected_row_mutation_tables: &[],
+        intent_row_mutation_tables: &[],
         projector: noop_projector,
         fact_routes: &[],
         fact_admission: None,
@@ -1094,7 +1102,8 @@ mod tests {
 
     const DURABLE_RUNTIME: RuntimeDescription = RuntimeDescription {
         schema_sources: &[network::SCHEMA_SOURCE],
-        row_mutation_tables: &[],
+        projected_row_mutation_tables: &[],
+        intent_row_mutation_tables: &[],
         projector: noop_projector,
         fact_routes: &[],
         fact_admission: None,
@@ -1142,7 +1151,8 @@ mod tests {
 
     const RECURRING_RUNTIME: RuntimeDescription = RuntimeDescription {
         schema_sources: &[network::SCHEMA_SOURCE],
-        row_mutation_tables: &[],
+        projected_row_mutation_tables: &[],
+        intent_row_mutation_tables: &[],
         projector: noop_projector,
         fact_routes: &[],
         fact_admission: None,
@@ -1220,7 +1230,8 @@ mod tests {
 
     const MULTI_RECURRING_RUNTIME: RuntimeDescription = RuntimeDescription {
         schema_sources: &[network::SCHEMA_SOURCE],
-        row_mutation_tables: &[],
+        projected_row_mutation_tables: &[],
+        intent_row_mutation_tables: &[],
         projector: noop_projector,
         fact_routes: &[],
         fact_admission: None,

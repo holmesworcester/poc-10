@@ -6,9 +6,9 @@
 //! The binary selects this description; core consumes it generically.
 //!
 //! `protocol::registry` is the larger table of contents. This file chooses the
-//! pieces needed to run the protocol: schema sources, row mutation allowlist,
-//! projector, handler routes, runtime time wakes, and inbound-network intake
-//! conversion. If a new protocol capability needs to be
+//! pieces needed to run the protocol: schema sources, projected/intent row
+//! table allowlists, projector, handler routes, runtime time wakes, and
+//! inbound-network intake conversion. If a new protocol capability needs to be
 //! visible to core, it is usually declared in the registry and wired into the
 //! `CONTEXT_RUNTIME` or `CONTEXT_PROTOCOL` constants here.
 //!
@@ -24,14 +24,15 @@ use crate::core::runtime::{
 };
 use crate::protocol::registry::{
     authenticate_fact_for_admission, protocol_projector, FACT_ROUTES, HANDLER_ROUTES,
-    ROW_MUTATION_TABLES, SCHEMA_SOURCES,
+    INTENT_ROW_MUTATION_TABLES, PROJECTED_ROW_MUTATION_TABLES, SCHEMA_SOURCES,
 };
 use crate::protocol::registry::{ContextCliContext, CONTEXT_COMMANDS};
 use crate::protocol::{connection, content};
 
 pub const CONTEXT_RUNTIME: RuntimeDescription = RuntimeDescription {
     schema_sources: SCHEMA_SOURCES,
-    row_mutation_tables: ROW_MUTATION_TABLES,
+    projected_row_mutation_tables: PROJECTED_ROW_MUTATION_TABLES,
+    intent_row_mutation_tables: INTENT_ROW_MUTATION_TABLES,
     projector: protocol_projector,
     fact_routes: FACT_ROUTES,
     fact_admission: Some(authenticate_fact_for_admission),

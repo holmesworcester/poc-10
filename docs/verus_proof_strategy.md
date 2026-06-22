@@ -281,11 +281,16 @@ Current production-code foothold: `ProjectionOutput::row_mutation` now accepts
 `ProjectedRowMutation` and stores those rows outside `RuntimeEffects`;
 `RuntimeEffects::row_mutation` now accepts `IntentRowMutation`; projection
 validation rejects non-empty intent row mutations inside projector effects; and
-projection commit calls `apply_projected_row_mutations_in_tx` at the same commit
-position where generic row mutations used to run. The remaining proof gap is
-table classification: the runtime still has one `row_mutation_tables` allowlist,
-so a later step must split or certify which tables are projector-owned,
-intent-owned, or both.
+projection commit calls `apply_projected_row_mutations_in_tx` at the same
+commit position where generic row mutations used to run. `RuntimeDescription`
+now carries separate `projected_row_mutation_tables` and
+`intent_row_mutation_tables` lists. The protocol registry classifies current
+projector read-model tables as projected tables and classifies
+`bootstrap_connection_attempt_rows` as intent-owned connection-maintenance
+bookkeeping, not projected state. The remaining proof gap is no longer one
+shared allowlist; it is proving that the production validation and commit call
+path always uses the correct list, and closing lower raw-SQL escape hatches
+before claiming table-write confinement as a theorem.
 
 ### Stage 6: Proven Context Loading
 

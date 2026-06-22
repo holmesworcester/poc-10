@@ -178,8 +178,9 @@ fn projector_and_handler_owner_modules_declare_storage_requirements() {
 #[test]
 fn protocol_write_allowlist_does_not_register_old_version_tables() {
     let offenders = CONTEXT_RUNTIME
-        .row_mutation_tables
+        .projected_row_mutation_tables
         .iter()
+        .chain(CONTEXT_RUNTIME.intent_row_mutation_tables.iter())
         .filter_map(|table| {
             let name = table.as_str();
             [
@@ -200,6 +201,24 @@ fn protocol_write_allowlist_does_not_register_old_version_tables() {
         offenders.is_empty(),
         "protocol write allowlist must target current tables only:\n{}",
         offenders.join("\n")
+    );
+}
+
+#[test]
+fn protocol_row_table_authority_is_split_by_worker() {
+    let bootstrap_attempt = topo::protocol::connection::request::BOOTSTRAP_CONNECTION_ATTEMPT_ROWS;
+
+    assert!(
+        !CONTEXT_RUNTIME
+            .projected_row_mutation_tables
+            .contains(&bootstrap_attempt),
+        "bootstrap connection attempt rows are handler bookkeeping, not projected state"
+    );
+    assert!(
+        CONTEXT_RUNTIME
+            .intent_row_mutation_tables
+            .contains(&bootstrap_attempt),
+        "connection maintenance must be the intent-side writer for bootstrap attempt rows"
     );
 }
 

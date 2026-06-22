@@ -314,7 +314,8 @@ mod tests {
 
     const MAINTAIN_SYNC_RUNTIME: RuntimeDescription = RuntimeDescription {
         schema_sources: &[FACTS_SCHEMA_SOURCE],
-        row_mutation_tables: &[],
+        projected_row_mutation_tables: &[],
+        intent_row_mutation_tables: &[],
         projector: noop_projector,
         fact_routes: &[],
         fact_admission: None,
