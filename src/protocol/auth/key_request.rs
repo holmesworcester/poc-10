@@ -7,6 +7,7 @@
 pub mod encode;
 pub mod fact;
 pub mod project;
+#[cfg(not(verus_keep_ghost))]
 pub mod proofs;
 
 pub const TYPE_KEY_REQUEST: u8 = encode::TYPE_KEY_REQUEST;

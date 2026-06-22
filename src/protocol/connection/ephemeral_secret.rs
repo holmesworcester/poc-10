@@ -15,6 +15,7 @@ pub mod author;
 pub mod encode;
 pub mod fact;
 pub mod project;
+#[cfg(not(verus_keep_ghost))]
 pub mod proofs;
 
 use crate::core::crypto::{X25519PrivateKey, X25519PublicKey};

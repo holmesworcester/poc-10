@@ -4,6 +4,7 @@ use std::process::Command;
 
 const VERUS_PLAN_PATH: &str = "docs/verus_proof_strategy.md";
 const DEFAULT_VERUS_PATH: &str = "/home/holmes/verus-install/verus-x86-linux/verus";
+const DEFAULT_CARGO_VERUS_PATH: &str = "/home/holmes/verus-install/verus-x86-linux/cargo-verus";
 
 fn verus_plan() -> String {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -46,6 +47,48 @@ fn verus_projector_proof_modules_verify() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+}
+
+#[test]
+fn cargo_verus_verifies_production_context_offer_owner() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let cargo_verus =
+        std::env::var("CARGO_VERUS").unwrap_or_else(|_| DEFAULT_CARGO_VERUS_PATH.to_string());
+    assert!(
+        Path::new(&cargo_verus).exists(),
+        "cargo-verus binary not found at {cargo_verus}; set CARGO_VERUS to the verifier path"
+    );
+
+    let output = Command::new(&cargo_verus)
+        .current_dir(root)
+        .args([
+            "focus",
+            "-p",
+            "topo",
+            "--target-dir",
+            "/mnt/storage/holmes-cargo-target/verus-production-proof-test",
+            "--lib",
+            "--",
+            "--no-lifetime",
+        ])
+        .output()
+        .unwrap_or_else(|err| panic!("run cargo-verus production proof: {err}"));
+    assert!(
+        output.status.success(),
+        "cargo-verus production proof failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("verification results:: 1 verified, 0 errors"),
+        "production proof should verify the real ContextOfferClaim::into_offer owner contract:\n{combined}"
+    );
 }
 
 #[test]
@@ -110,6 +153,9 @@ fn core_proofs_make_trust_boundary_explicit() {
         "Every exported `theorem_*` below currently uses",
         "`#[verifier::external_body]`",
         "It is an explicit proof debt",
+        "Proven in production Rust today:",
+        "`ContextOfferClaim::into_offer(claim, owner).owner == owner`",
+        "Not proven yet for offer finalization",
         "Not proven here today: every exported `theorem_*` runtime/core property.",
         "First stubs to replace: the near-term core glue stubs",
         "First core proof milestone: remove `external_body` from the core theorem",
@@ -157,13 +203,13 @@ fn core_proofs_make_trust_boundary_explicit() {
 fn proof_rules_reject_model_view_only_progress() {
     let plan = verus_plan();
     let required = [
-        "Proof progress means proof over production Rust code.",
-        "verified Rust-code view is acceptable only with an explicit correspondence",
-        "Standalone model/view proofs do not count.",
+        "Proof progress means Cargo-verus proof over production Rust code that normal",
+        "builds execute.",
+        "Model/view proofs are not proof progress, even with a correspondence story.",
         "proving a theorem only over `Spec*` values does not retire",
-        "does not advance a stage",
+        "advance a stage",
         "does not support a threat-model",
-        "lose\n`external_body` only when the theorem body proves the production Rust helper",
+        "lose\n`external_body` only when Cargo-verus verifies the production Rust helper",
     ];
     let missing = required
         .into_iter()
@@ -217,6 +263,11 @@ fn verus_plan_is_single_core_first_source() {
         "prove the small core helpers over the production Rust code",
         "`ContextOfferClaim::into_offer` must",
         "not merely mirrored by a separate model function",
+        "Model/view proofs are not proof progress, even with a correspondence story.",
+        "Current production-code foothold:",
+        "returned `ContextOffer.owner` equals the owner argument",
+        "role, scope, start key, end key",
+        "`ProjectionOutput::context_set` map over every claim",
         "extract the routing decision inside `RouterProjector::project`",
         "Carry that route witness through",
         "proof identity is the stable route tag",
@@ -315,6 +366,10 @@ fn verus_plan_is_single_core_first_source() {
         "Query lockdown is downstream of proven context loading.",
         "src/core/proofs.rs",
         "src/protocol/<scope>/<fact_family>/proofs.rs",
+        "Production implementation files may carry small Verus contracts",
+        "Cargo-verus verifies the\nproduction crate path",
+        "standalone proof modules",
+        "ContextOfferClaim::into_offer(claim, owner).owner == owner",
         "projection_context_records_offer_provenance(ctx, graph)",
         "matched_payloads_are_offer_owner_facts(matched)",
         "matcher_preserves_role_scope_selector(need, matched)",

@@ -12,6 +12,7 @@ pub mod cli;
 pub mod encode;
 pub mod fact;
 pub mod project;
+#[cfg(not(verus_keep_ghost))]
 pub mod proofs;
 pub mod queries;
 

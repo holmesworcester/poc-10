@@ -41,7 +41,11 @@
 //!
 //! - Proven here today: vocabulary consistency and any non-theorem spec helper
 //!   definitions that Verus type-checks.
+//! - Proven in production Rust today:
+//!   `ContextOfferClaim::into_offer(claim, owner).owner == owner`.
 //! - Not proven here today: every exported `theorem_*` runtime/core property.
+//! - Not proven yet for offer finalization: role, scope, start key, end key,
+//!   `ProjectionOutput::context_set`, or `prepare_projection` call order.
 //! - Punted for a later core proof model: the composition stubs that cross
 //!   matcher construction, payload loading, route dispatch, projected-table
 //!   write ownership, context replacement, and commit.

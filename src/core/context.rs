@@ -61,9 +61,10 @@
 //! purged. Core wakes only genuinely new need/offer matches and avoids
 //! self-waking loops when stable unmet needs are re-emitted.
 
-use crate::core::facts::{FactId, FactScope};
+use crate::core::facts::{FactId, FactScope, ScopeKind};
 use crate::core::wire::Writer;
 use std::collections::BTreeSet;
+use vstd::prelude::*;
 
 /// Maximum encoded size for a core-built canonical context key.
 pub const CONTEXT_KEY_MAX_BYTES: usize = 512;
@@ -447,9 +448,42 @@ impl ContextOfferClaim {
             end_key: ContextKey::from_bytes(end_key),
         }
     }
+}
 
+verus! {
+#[verifier(external_type_specification)]
+#[verifier(external_body)]
+#[allow(dead_code)]
+pub struct ExScopeKind(ScopeKind);
+
+#[verifier(external_type_specification)]
+#[allow(dead_code)]
+pub struct ExFactScope(FactScope);
+
+#[verifier(external_type_specification)]
+#[verifier(external_body)]
+#[allow(dead_code)]
+pub struct ExRole(Role);
+
+#[verifier(external_type_specification)]
+#[verifier(external_body)]
+#[allow(dead_code)]
+pub struct ExContextKey(ContextKey);
+
+#[verifier(external_type_specification)]
+#[allow(dead_code)]
+pub struct ExContextOffer(ContextOffer);
+
+#[verifier(external_type_specification)]
+#[allow(dead_code)]
+pub struct ExContextOfferClaim(ContextOfferClaim);
+
+impl ContextOfferClaim {
     /// Attach the projected fact owner after core has validated projection.
-    pub fn into_offer(self, owner: FactId) -> ContextOffer {
+    pub fn into_offer(self, owner: FactId) -> (offer: ContextOffer)
+        ensures
+            offer.owner == owner,
+    {
         ContextOffer {
             owner,
             role: self.role,
@@ -459,6 +493,7 @@ impl ContextOfferClaim {
         }
     }
 }
+} // verus!
 
 // =============================================================================
 // Context Set API

@@ -11,6 +11,7 @@ pub mod cli;
 pub mod encode;
 pub mod fact;
 pub mod project;
+#[cfg(not(verus_keep_ghost))]
 pub mod proofs;
 
 use crate::core::db::{TableInsert, TableName, TypedTableSchema, Value};

@@ -81,11 +81,17 @@ core proof failure.
 Success criteria: `offer_claim_finalizes_to_projected_owner`,
 `projection_output_owner_bearing_effects_are_self`,
 `purges_are_self_only`, and the missing-context/drop helpers lose
-`external_body` only when the theorem body proves the production Rust helper or
-a verified Rust-code view with an explicit correspondence theorem to the
-production helper. Focused Rust tests cover rejection of foreign owners and
-dropped incoming durable-output attempts; and no threat-model checklist item is
-claimed from this stage alone.
+`external_body` only when Cargo-verus verifies the production Rust helper or
+function body that normal builds execute. Focused Rust tests cover rejection of
+foreign owners and dropped incoming durable-output attempts; and no
+threat-model checklist item is claimed from this stage alone.
+
+Current production-code foothold: `ContextOfferClaim::into_offer` is now a
+real production helper inside Verus verification. Cargo-verus proves that the
+returned `ContextOffer.owner` equals the owner argument. That is not the full
+offer-finalization theorem yet: role, scope, start key, end key, the
+`ProjectionOutput::context_set` map over every claim, and the
+`prepare_projection` call order remain open core proof work.
 
 ### Stage 3: Routed Projection Witness
 
@@ -395,10 +401,10 @@ offer. It still does not prove membership, admin rights, endpoint authority, or
 content authorization by itself.
 
 Success criteria: the `auth::signature` proof no longer claims model-only
-coverage; it proves over `SignatureProjector::project` or a verified view with
-an explicit correspondence theorem; its proof walkthrough explains every branch
-including decode failure and invalid signature; and downstream proofs consume
-it through proven offer accessors rather than candidate context.
+coverage; Cargo-verus verifies the theorem over the
+`SignatureProjector::project` production body; its proof walkthrough explains
+every branch including decode failure and invalid signature; and downstream
+proofs consume it through proven offer accessors rather than candidate context.
 
 ### Stage 11: Compose Threat-Model Invariants
 
@@ -489,16 +495,22 @@ incidental mechanics:
 
 ## File Layout
 
-Proof code lives only in `proofs.rs` files:
+Protocol-neutral theorem surfaces and route-local theorem stubs live in
+`proofs.rs` files:
 
 ```text
 src/core/proofs.rs
 src/protocol/<scope>/<fact_family>/proofs.rs
 ```
 
-Normal Rust builds must not depend on proof modules. Verus-only proof code is
-gated with `cfg(verus_keep_ghost)`. Production implementation files should stay
-readable as protocol code: decode, authenticate, adapt, project, and effects.
+Production implementation files may carry small Verus contracts on the actual
+helpers they define. Those contracts count only when Cargo-verus verifies the
+production crate path. Normal Rust builds may depend on `vstd` for erased
+contracts, but they must not depend on standalone proof modules. Standalone
+proof modules are kept out of Cargo-verus production verification and are
+verified directly by the proof-module test. Production implementation files
+should stay readable as protocol code: decode, authenticate, adapt, project,
+and effects.
 
 ## Core Theorem Surface
 
@@ -523,6 +535,16 @@ projection_context_lacks_payload_for_need(ctx, need)
 parked_output_for_missing_need(output, need)
 theorem_ed25519_verify_binds(evidence)
 ```
+
+Production helper contracts currently proved:
+
+```text
+ContextOfferClaim::into_offer(claim, owner).owner == owner
+```
+
+This contract is proof over the helper Rust code that normal builds execute.
+It is a core proof foothold, not threat-model coverage and not completion of
+`offer_claim_finalizes_to_projected_owner`.
 
 Core proves plumbing only. It must not prove that an admin is valid, an endpoint
 may sign content, a deletion is authorized, a receipt grants authority, or a
@@ -742,17 +764,16 @@ stub or a route-local projector stub.
 
 ## Review Rules
 
-1. Proof progress means proof over production Rust code.
-2. A verified Rust-code view is acceptable only with an explicit correspondence
-   theorem to the production helper it represents.
-3. Standalone model/view proofs do not count. A `Spec*` helper may define
-   vocabulary, but proving a theorem only over `Spec*` values does not retire
-   a stub, does not advance a stage, and does not support a threat-model
-   checklist item.
-4. Core theorem stubs live only in `src/core/proofs.rs`.
-5. Protocol authority stays in protocol projector proofs.
-6. Missing-context and mismatched-context branches must be explicit.
-7. Runtime changes need realistic Rust tests; proof changes need Verus runs.
-8. Every proof change must include a walkthrough naming theorem shape,
+1. Proof progress means Cargo-verus proof over production Rust code that normal
+   builds execute.
+2. Model/view proofs are not proof progress, even with a correspondence story.
+   A `Spec*` helper may define vocabulary for a production-code contract, but
+   proving a theorem only over `Spec*` values does not retire a stub, does not
+   advance a stage, and does not support a threat-model checklist item.
+3. Core theorem stubs live only in `src/core/proofs.rs`.
+4. Protocol authority stays in protocol projector proofs.
+5. Missing-context and mismatched-context branches must be explicit.
+6. Runtime changes need realistic Rust tests; proof changes need Verus runs.
+7. Every proof change must include a walkthrough naming theorem shape,
    assumptions, proof steps, what is really proved, and remaining gaps.
-9. Commit completed work on the same worktree branch before handoff or review.
+8. Commit completed work on the same worktree branch before handoff or review.
