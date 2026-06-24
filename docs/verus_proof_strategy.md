@@ -494,9 +494,21 @@ An emitted offer contract names the offer kind the projector can produce for
 other projectors: role, scope, key/range layout, producer route, output
 constructor, and theorem that proves the offer from the projector's current
 fact plus any accepted proven offers it consumed. It also names a stable
-predicate version, and every producer version that emits the offer must
-re-prove that it preserves the same predicate. Producer proofs establish
-emitted offer contracts; consumer proofs cite accepted offer contracts.
+predicate version in proof/code, not necessarily a stored offer-version column,
+and every producer implementation that emits the offer must re-prove that it
+preserves the same predicate. Producer proofs establish emitted offer contracts; consumer proofs cite accepted offer contracts.
+
+Same-build offer semantics are an intentional simplification. Standing offers
+are derived projection state, not durable protocol facts. A version
+wipe/replay must clear authority-visible standing offers and matched context,
+then reproject retained facts through the current build before consumers treat
+those offers as authority. Under that invariant, producer and consumer code in
+one build speak the same offer layout, so a separate persisted offer-version
+field is not required merely to handle stale historical offers. The proof still
+needs named typed offer predicates such as `is_signature_proof_offer(...)`:
+those predicates define the role, scope, selector/range, value layout,
+producer route, and semantic relation that this build assigns to the generic
+`ContextOffer` fields.
 
 Current production-code foothold: `AcceptedOfferContract` names the core-visible
 part of a consumer's accepted offer boundary: role, scope, and producer route
@@ -507,7 +519,7 @@ provenance. `ProjectionContext::accepted_attested_offer_for` and
 `matched_accepted_attested_offers_for` filter the matched context through that
 same production helper. This is still not a semantic `ProvenOffer`; the
 route-local producer theorem for the named route must later prove the offer's
-predicate version and domain meaning.
+predicate version/layout and domain meaning.
 
 Negative-authority contracts need a stronger context theorem than positive
 grant contracts. For a positive grant, missing context usually means no grant,
@@ -519,7 +531,7 @@ decryption, materialization, or sync offer, projection loaded all in-scope
 proven revocation offers for the accepted contract.
 
 Win: projector proofs can distinguish "there is matching context" from "there
-is a proven, version-stable offer boundary from producer route P available for
+is a proven, current-build offer boundary from producer route P available for
 me to check." This is the core tool needed for induction through multiple
 projector generations without forcing every consumer to understand every
 historical producer fact version.
@@ -528,9 +540,9 @@ What it means: projector matching is a liveness guarantee, not an invariant
 guarantee. A match may wake a projector, but authority comes from a proven
 offer emitted by a known producer route whose projector decoded/adapted its own
 fact bytes and proved that offer. Consumer projectors check the proven offer's
-standard role, scope, key/range, producer route/proof identity, predicate
-version, and semantic relation to the current fact. If a consumer needs more
-information than the
+standard role, scope, key/range, value layout, producer route/proof identity,
+predicate version, and semantic relation to the current fact. If a consumer
+needs more information than the
 offer boundary exposes, extend the producer's stable offer/context shape or add
 a producer-owned adapter theorem; do not make every consumer decode raw
 producer fact versions.
@@ -553,8 +565,8 @@ faithful decode/adapt from every supported fact version to the stable offer
 predicate, including any required multi-fact compatibility joins; consumer proof
 walkthroughs identify the emitted offer contracts proved by the producer and the
 accepted offer contract used by the consumer, then check the proven offer
-boundary, producer route, predicate version, and provenance against the current
-fact;
+boundary, producer route, predicate version/layout, and provenance against the
+current fact;
 tests cover a candidate offer whose owner route has no applicable producer
 theorem, whose role/key matches a wakeup need but no accepted offer contract,
 whose offer kind is not admitted by that projector, or whose producer route is
@@ -647,9 +659,9 @@ reads are tied to projected rows, context, or proven offers.
 Concrete work: introduce route-local projector theorem stubs only after the
 core spine is precise enough to compose them. Each stub names one route, one
 owner fact shape, one emitted offer claim or projected row, required proven
-context inputs, crypto/parser assumptions, predicate version, whether the
-contract is positive or revocation-sensitive, and the exact semantic predicate
-proved for that output.
+context inputs, crypto/parser assumptions, predicate version/layout, whether
+the contract is positive or revocation-sensitive, and the exact semantic
+predicate proved for that output.
 
 Win: stubbing becomes controlled and useful. A stub can stand in for one
 projector theorem while we build high-level proofs, without pretending every
@@ -663,9 +675,9 @@ authorized, all context is trustworthy, or all revocation context was complete.
 Success criteria: every route-local stub is in that route's `proofs.rs`, not
 core; each stub has a concrete "remove this by proving `Projector::project`
 path" note; revocation-sensitive stubs name the completeness theorem they still
-owe; every stable offer predicate has a version-stability obligation; no
-blanket projector-validity axiom exists; and high-level walkthroughs list any
-route-local stub as an open gap.
+owe; every stable offer predicate has a proof-level version/layout stability
+obligation when code changes; no blanket projector-validity axiom exists; and
+high-level walkthroughs list any route-local stub as an open gap.
 
 ### Stage 10: First Real Projector Foothold
 
@@ -674,6 +686,15 @@ actual `SignatureProjector` path to decoded signature fact bytes, `Fact.id ==
 hash(Fact.bytes)`, workspace scope, Ed25519 verification of
 `signature_message(workspace_id, target_fact_id)`, and the emitted
 `signature_proof` claim's role/scope/selector.
+
+First migration target: change `signature_proof_ready` to consume an accepted
+attested signature-proof contract pinned to the signature route, not a generic
+`context.offer_for` result. Then change `auth::workspace` to consume typed
+`SignatureProofOffer` and `WorkspaceAcceptedOffer` contracts rather than
+calling `payload_for_checked` and decoding the invite-accepted payload itself.
+That keeps version adaptation producer-owned: the invite-accepted route proves
+the workspace-accepted offer it emits, and workspace consumes that offer
+boundary instead of learning every invite-accepted fact encoding.
 
 Win: we get one reusable protocol proof artifact with minimal upstream authority
 dependencies. Many later auth, content, and connection proofs can consume
@@ -689,7 +710,8 @@ Success criteria: the `auth::signature` proof no longer claims model-only
 coverage; Cargo-verus verifies the theorem over the
 `SignatureProjector::project` production body; its proof walkthrough explains
 every branch including decode failure and invalid signature; and downstream
-proofs consume it through proven offer accessors rather than candidate context.
+proofs consume it through accepted attested/proven offer accessors rather than
+candidate context or raw producer payload facts.
 
 ### Stage 11: Compose Threat-Model Invariants
 
@@ -739,9 +761,15 @@ incidental mechanics:
 - Authority-bearing context means proven stable offers, backed by producer
   projector theorems over owner facts. Producers decode/authenticate/adapt their
   own fact versions and prove the emitted offer predicate. Consumers check the
-  proven offer's standard role, scope, key/range, mandatory producer route,
-  predicate version, and relation to the current fact; they should not decode
-  every raw producer fact version.
+  proven offer's standard role, scope, key/range, value layout, mandatory
+  producer route, predicate version/layout, and relation to the current fact;
+  they should not decode every raw producer fact version.
+- Offer predicate version is a proof/code concept, not automatically a new
+  stored field. If version wipe/replay clears standing offers and matched
+  context and then reprojects retained facts with the current build, producer
+  and consumer projectors in that build can share one offer layout. The proof
+  obligation is to prove stale offers cannot survive rebuild into
+  authority-bearing context.
 - Needs are liveness subscriptions. Accepted proven offer contracts are the
   authority interface. A projector may emit broad or convenient needs, but its
   proof may consume only the proven offer kinds it explicitly admits.
