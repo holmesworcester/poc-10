@@ -222,7 +222,7 @@ use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::Value;
 use crate::core::intents::{RowMutation, TableDeleteWhere, TableInsert};
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, MatchedContext, ProjectionContext, ProjectionOutput, Projector,
 };
 
 use crate::protocol::auth::signature;
@@ -304,18 +304,16 @@ impl ContentReactionProjector {
             reaction.signer_public_key,
         )?;
         let signer_need = project::signer_need(fact.id, reaction.workspace_id, reaction.signer_id);
-        let target_need = crate::core::context::ContextNeed::range(
+        let target_need = crate::core::context::ContextNeed::for_key(
             fact.id,
             "content_message",
             scope.clone(),
             reaction.target_message_id,
-            reaction.target_message_id,
         );
-        let author_need = crate::core::context::ContextNeed::range(
+        let author_need = crate::core::context::ContextNeed::for_key(
             fact.id,
             "auth_user",
             crate::core::facts::FactScope::Global,
-            reaction.author_user_id,
             reaction.author_user_id,
         );
         if !signature::project::signature_proof_ready(
@@ -443,7 +441,7 @@ fn context_payload<'a>(
     context: &'a ProjectionContext,
     need: &crate::core::context::ContextNeed,
     label: &str,
-) -> Result<Option<&'a Fact>, String> {
+) -> Result<Option<&'a MatchedContext>, String> {
     project::context_payload(context, need, label)
 }
 
@@ -456,38 +454,35 @@ fn output_with_needs(
         .fold(ProjectionOutput::new(), |output, need| output.need(need))
 }
 
-fn target_message_context<'a>(
-    payload: &'a Fact,
+fn target_message_context(
+    matched: &MatchedContext,
     expected_scope: &FactScope,
     workspace_id: crate::core::facts::FactId,
     target_message_id: crate::core::facts::FactId,
     label: &str,
-) -> Result<TargetMessageContext<'a>, String> {
-    if payload.id != target_message_id {
-        return Err("reaction target context payload id mismatch".to_string());
+) -> Result<TargetMessageContext, String> {
+    if matched.offer_owner() != target_message_id {
+        return Err("reaction target matched offer owner mismatch".to_string());
     }
-    if &payload.scope != expected_scope {
+    if &matched.offer_owner_scope != expected_scope {
         return Err("reaction target context scope does not match reaction workspace".to_string());
     }
-    let target = decode_target_message_payload(payload, label)?;
+    let target = decode_target_message_offer(matched, label)?;
     if target.workspace_id != workspace_id {
         return Err("reaction target message workspace does not match reaction".to_string());
     }
-    Ok(TargetMessageContext {
-        _payload: payload,
-        message: target,
-    })
+    Ok(TargetMessageContext { message: target })
 }
 
 fn validate_author_user(
-    payload: &Fact,
+    matched: &MatchedContext,
     workspace_id: crate::core::facts::FactId,
     author_user_id: crate::core::facts::FactId,
 ) -> Result<(), String> {
-    if payload.id != author_user_id {
-        return Err("reaction author context payload id mismatch".to_string());
+    if matched.offer_owner() != author_user_id {
+        return Err("reaction author matched offer owner mismatch".to_string());
     }
-    let author = crate::protocol::auth::user::decode_fact_payload(payload.body())
+    let author = crate::protocol::auth::user::decode_fact_payload(matched.value())
         .map_err(|_| "reaction author context is not an identity user".to_string())?;
     if author.workspace_id != workspace_id {
         return Err("reaction author workspace does not match reaction".to_string());
@@ -514,14 +509,14 @@ fn reaction_delete(workspace_id: FactId, reaction_id: FactId) -> TableDeleteWher
 }
 
 fn validate_message_deletion(
-    payload: &Fact,
+    matched: &MatchedContext,
     workspace_id: crate::core::facts::FactId,
     target_frontier_id: crate::core::facts::FactId,
     target_minute: u64,
     target_message_id: crate::core::facts::FactId,
     author_user_id: crate::core::facts::FactId,
 ) -> Result<(), String> {
-    let deletion = message_deletion::decode_fact_payload(payload.body())
+    let deletion = message_deletion::decode_fact_payload(matched.value())
         .map_err(|_| "target deletion context is not a content message deletion".to_string())?;
     if deletion.workspace_id != workspace_id {
         return Err("target deletion workspace does not match reaction".to_string());
@@ -541,8 +536,7 @@ fn validate_message_deletion(
     Ok(())
 }
 
-struct TargetMessageContext<'a> {
-    _payload: &'a Fact,
+struct TargetMessageContext {
     message: TargetMessage,
 }
 
@@ -553,9 +547,12 @@ struct TargetMessage {
     author_user_id: crate::core::facts::FactId,
 }
 
-fn decode_target_message_payload(payload: &Fact, label: &str) -> Result<TargetMessage, String> {
-    let message = project::decode_typed_fact(
-        payload,
+fn decode_target_message_offer(
+    matched: &MatchedContext,
+    label: &str,
+) -> Result<TargetMessage, String> {
+    let message = project::decode_typed_context(
+        matched,
         message::TYPE_CONTENT_MESSAGE,
         label,
         message::decode_fact_payload,

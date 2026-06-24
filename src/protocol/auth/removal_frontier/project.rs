@@ -185,7 +185,7 @@ use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::facts::Fact;
 use crate::core::intents::{RowMutation, TableInsert, Value};
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, MatchedContext, ProjectionContext, ProjectionOutput, Projector,
 };
 use crate::protocol::auth;
 use crate::protocol::auth::key_wrap::project::require_fact_scope;
@@ -244,18 +244,16 @@ impl RemovalFrontierProjector {
             fact.id,
             frontier.signer_public_key,
         )?;
-        let owner_signer_need = ContextNeed::range(
+        let owner_signer_need = ContextNeed::for_key(
             fact.id,
             "content_signer",
             scope.clone(),
             frontier.owner_endpoint_id,
-            frontier.owner_endpoint_id,
         );
-        let local_signer_need = ContextNeed::range(
+        let local_signer_need = ContextNeed::for_key(
             fact.id,
             "local_signer_secret",
             scope.clone(),
-            frontier.owner_endpoint_id,
             frontier.owner_endpoint_id,
         );
         let waiting = ProjectionOutput::new()
@@ -273,8 +271,8 @@ impl RemovalFrontierProjector {
             return Ok(waiting);
         }
         let context_have = match (
-            context.payload_for(&owner_signer_need),
-            context.payload_for(&local_signer_need),
+            context.match_for(&owner_signer_need),
+            context.match_for(&local_signer_need),
         ) {
             (Some(owner_fact), _) => {
                 validate_frontier_endpoint_shared_owner(owner_fact, &frontier)?;
@@ -295,6 +293,7 @@ impl RemovalFrontierProjector {
                 scope,
                 fact.id,
                 fact.id,
+                fact.bytes.clone(),
             )),
             frontier.workspace_id,
             fact,
@@ -321,10 +320,10 @@ impl RemovalFrontierProjector {
 }
 
 fn validate_frontier_endpoint_shared_owner(
-    owner_fact: &Fact,
+    owner_fact: &MatchedContext,
     frontier: &RemovalFrontierFact,
 ) -> Result<(), String> {
-    let owner = auth::endpoint_shared::decode_fact_payload(owner_fact.body())
+    let owner = auth::endpoint_shared::decode_fact_payload(owner_fact.value())
         .map_err(|_| "removal frontier owner context must be endpoint_shared".to_string())?;
     if owner.workspace_id != frontier.workspace_id {
         return Err("removal frontier owner workspace mismatch".to_string());
@@ -339,11 +338,11 @@ fn validate_frontier_endpoint_shared_owner(
 }
 
 fn validate_frontier_local_owner(
-    owner_fact: &Fact,
+    owner_fact: &MatchedContext,
     frontier: &RemovalFrontierFact,
 ) -> Result<(), String> {
     let owner =
-        auth::local_signer_secret::decode_fact_payload(owner_fact.body()).map_err(|_| {
+        auth::local_signer_secret::decode_fact_payload(owner_fact.value()).map_err(|_| {
             "removal frontier local owner context must be local signer secret".to_string()
         })?;
     if owner.workspace_id != frontier.workspace_id {

@@ -150,7 +150,7 @@ impl IntentHandler for CreateConnectionHandler {
                 }
                 request_auth::validate_invite_context_scope(authority_fact)
                     .map_err(|_| "create_connection invite context must be local")?;
-                let invite = request_auth::invite_secret_from_context_fact(
+                let invite = request_auth::invite_secret_from_fact(
                     authority_fact,
                     request.invite_secret_fact_id,
                 )

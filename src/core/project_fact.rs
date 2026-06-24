@@ -16,9 +16,9 @@
 //! - `pending_projection_matches` and `pending_time_ranges` are pending input
 //!   tables: they carry context matches and time ranges that woke an owner.
 //!   They are consumed with the owner row.
-//! - `context_exact_edges` and `context_range_edges` store standing needs/offers,
-//!   and `time_wakes` stores standing future wake requests emitted by durable
-//!   projection.
+//! - `context_needs` stores standing exact needs, `context_exact_offers` and
+//!   `context_range_offers` store stamped scalar offers, and `time_wakes` stores
+//!   standing future wake requests emitted by durable projection.
 //!
 //! SQL atomicity is the safety mechanism. Submitting a fact inserts bytes,
 //! admission metadata, the pending row, and any already matched context in one
@@ -31,8 +31,8 @@
 //! projector output is visible as a complete unit.
 //!
 //! Projectors do not query the database for missing context during a run. Matched
-//! payload facts arrive through `ProjectionContext` because the pending row
-//! already carries the context that woke it. Newly emitted needs may match
+//! offer values arrive through `ProjectionContext` because the pending row
+//! already carries the offer id that woke it. Newly emitted needs may match
 //! stored offers during commit, but those matches queue a later projection item.
 //!
 //! Queue recursion is explicit outside this item. If projection emits child
@@ -44,13 +44,13 @@ use self::commit_effects::{
     commit_runtime_effects_in_tx, sqlite_string_error, storage_requirement_satisfied,
     validate_runtime_effects_for_admission,
 };
+use self::context_db::{
+    delete_pending_matches_for_offer_owner_in_tx, pending_projection_input_context_for_owner,
+    replace_context_for_owner_in_tx, wake_context_matches_in_tx,
+};
 #[cfg(test)]
 use self::context_db::{
     insert_context_need_in_tx, insert_context_offer_in_tx, stored_context_for_owner,
-};
-use self::context_db::{
-    pending_projection_input_context_for_owner, replace_context_for_owner_in_tx,
-    wake_context_matches_in_tx,
 };
 use crate::core::command::AuthoredFacts;
 use crate::core::context::{ContextSet, ContextSetAdditions};
@@ -61,8 +61,9 @@ use crate::core::facts::{
 };
 use crate::core::perf_profile as perf;
 use crate::core::schema::{
-    CONTEXT_EXACT_EDGES, CONTEXT_RANGE_EDGES, FACTS, INCOMING_FACTS, LOCAL_FACT_ADMISSIONS,
-    PENDING_PROJECTION, PENDING_PROJECTION_MATCHES, PENDING_TIME_RANGES, TIME_WAKES,
+    CONTEXT_EXACT_OFFERS, CONTEXT_NEEDS, CONTEXT_RANGE_OFFERS, FACTS, INCOMING_FACTS,
+    LOCAL_FACT_ADMISSIONS, PENDING_PROJECTION, PENDING_PROJECTION_MATCHES, PENDING_TIME_RANGES,
+    TIME_WAKES,
 };
 use crate::core::wire::Writer;
 use rusqlite::{params, OptionalExtension};
@@ -130,6 +131,13 @@ enum ProjectionOutcome {
     Accepted(PreparedProjection),
 }
 
+#[derive(Clone, Copy)]
+struct ProjectionEffectPolicy<'a, 'kind> {
+    allowed_tables: &'a [TableName],
+    registered_intent_kinds: &'a [&'kind str],
+    fact_admission: Option<FactAdmissionFn>,
+}
+
 // =============================================================================
 // Central Procedure
 // =============================================================================
@@ -160,19 +168,20 @@ pub(crate) fn project_one(
     registered_intent_kinds: &[&str],
     fact_admission: Option<FactAdmissionFn>,
 ) -> Result<bool, String> {
+    let effect_policy = ProjectionEffectPolicy {
+        allowed_tables,
+        registered_intent_kinds,
+        fact_admission,
+    };
     let load = match load_one_projection_input(store, source)? {
         None => return Ok(false),
         Some(load) => load,
     };
 
     let outcome = match load {
-        ProjectionLoad::Loaded(input) => evaluate_loaded_projection_input(
-            projector,
-            input,
-            allowed_tables,
-            registered_intent_kinds,
-            fact_admission,
-        )?,
+        ProjectionLoad::Loaded(input) => {
+            evaluate_loaded_projection_input(projector, input, effect_policy)?
+        }
         ProjectionLoad::Stale { source, fact_id } => {
             // The selected queue/intake owner no longer has backing bytes, so
             // there is no fact to evaluate. Commit still owns retiring that
@@ -181,13 +190,7 @@ pub(crate) fn project_one(
         }
     };
 
-    commit_projection_effects(
-        store,
-        &outcome,
-        allowed_tables,
-        registered_intent_kinds,
-        fact_admission,
-    )?;
+    commit_projection_effects(store, &outcome, effect_policy)?;
     Ok(true)
 }
 
@@ -260,25 +263,18 @@ pub(crate) fn load_pending_fact(
 /// Stage 2: run the protocol projector and validate its uncommitted output.
 ///
 /// This stage is pure with respect to SQL. It never clears a queue row, deletes
-/// incoming intake, publishes context, or commits runtime effects. It only turns
-/// a loaded in-memory input into an accepted or rejected outcome.
+/// incoming intake, publishes context, or commits runtime effects. It does use
+/// `ProjectionEffectPolicy` to validate projector-emitted row mutations,
+/// follow-up intents, and facts before accepting the outcome.
 fn evaluate_loaded_projection_input(
     projector: &(impl Projector + ?Sized),
     input: ProjectionInput,
-    allowed_tables: &[TableName],
-    registered_intent_kinds: &[&str],
-    fact_admission: Option<FactAdmissionFn>,
+    effect_policy: ProjectionEffectPolicy<'_, '_>,
 ) -> Result<ProjectionOutcome, String> {
     let source = input.source;
     let fact_id = input.fact.id;
     let projection = match perf::measure_result("projection_prepare_effects", || {
-        prepare_projection(
-            projector,
-            input,
-            allowed_tables,
-            registered_intent_kinds,
-            fact_admission,
-        )
+        prepare_projection(projector, input, effect_policy)
     }) {
         Ok(projection) => projection,
         Err(_rejection) => {
@@ -306,9 +302,7 @@ fn evaluate_loaded_projection_input(
 fn commit_projection_effects(
     store: &Db,
     outcome: &ProjectionOutcome,
-    allowed_tables: &[TableName],
-    registered_intent_kinds: &[&str],
-    fact_admission: Option<FactAdmissionFn>,
+    effect_policy: ProjectionEffectPolicy<'_, '_>,
 ) -> Result<(), String> {
     perf::measure_result("projection_commit_effects", || {
         store
@@ -336,7 +330,7 @@ fn commit_projection_effects(
                         }
 
                         let retained =
-                            settle_projected_input_lifecycle_in_tx(tx, projection, fact_id)?;
+                            commit_accepted_input_lifecycle_in_tx(tx, projection, fact_id)?;
                         record_projection_timing_in_tx(tx, projection, retained)?;
                         let new_context = publish_retained_projection_state_in_tx(
                             tx, projection, fact_id, retained,
@@ -345,9 +339,7 @@ fn commit_projection_effects(
                         commit_projector_emitted_runtime_effects_in_tx(
                             tx,
                             projection,
-                            allowed_tables,
-                            registered_intent_kinds,
-                            fact_admission,
+                            effect_policy,
                         )
                     }
                 })
@@ -437,7 +429,7 @@ impl ProjectionSource {
 
     /// Build the `ProjectionContext` visible to this projection run.
     ///
-    /// Durable pending inputs are the matched context payloads and due time
+    /// Durable pending inputs are the matched context offer values and due time
     /// ranges recorded when the owner was queued. Incoming first-pass inputs do
     /// not participate in standing context yet, so the context only carries the
     /// execution mode and optional origin metadata supplied by intake.
@@ -549,9 +541,7 @@ fn projection_mode_from_replay_flag(replay: i64) -> ProjectionMode {
 fn prepare_projection(
     projector: &(impl Projector + ?Sized),
     input: ProjectionInput,
-    allowed_tables: &[TableName],
-    registered_intent_kinds: &[&str],
-    fact_admission: Option<FactAdmissionFn>,
+    effect_policy: ProjectionEffectPolicy<'_, '_>,
 ) -> Result<PreparedProjection, String> {
     let ProjectionInput {
         source,
@@ -567,14 +557,15 @@ fn prepare_projection(
     })?;
     enforce_owner_is_self(&fact, &output)?;
     let projected_context = output.context_set();
+    validate_context_offer_values(&projected_context)?;
     let runtime_effects = output.effects;
     validate_rebuild_projection_shape(&projected_context, &output.time_wakes, &runtime_effects)?;
     perf::measure_result("projection_validate_effects", || {
         validate_runtime_effects_for_admission(
             &runtime_effects,
-            allowed_tables,
-            registered_intent_kinds,
-            fact_admission,
+            effect_policy.allowed_tables,
+            effect_policy.registered_intent_kinds,
+            effect_policy.fact_admission,
         )
     })?;
     Ok(PreparedProjection {
@@ -604,6 +595,13 @@ fn validate_rebuild_projection_shape(
             "derived-state rebuild projection cannot publish standing context or time wakes"
                 .to_string(),
         );
+    }
+    Ok(())
+}
+
+fn validate_context_offer_values(context: &ContextSet) -> Result<(), String> {
+    if context.offers.iter().any(|offer| offer.value.is_empty()) {
+        return Err("context offers must provide an explicit non-empty semantic value".to_string());
     }
     Ok(())
 }
@@ -684,12 +682,12 @@ fn projection_retains_fact_after_commit(projection: &PreparedProjection) -> bool
     }
 }
 
-/// Settle the selected input before publishing projection-owned state.
+/// Commit the accepted input's queue/intake lifecycle.
 ///
 /// Durable inputs clear pending work. Incoming inputs are volatile: projection
 /// either retains them as ordinary facts or drops them. The returned boolean is
 /// whether this fact remains retained and may publish standing context/time rows.
-fn settle_projected_input_lifecycle_in_tx(
+fn commit_accepted_input_lifecycle_in_tx(
     tx: &Db,
     projection: &PreparedProjection,
     fact_id: FactId,
@@ -856,7 +854,8 @@ fn replace_needs_and_append_offers_if_retained_in_tx(
         return Ok(ContextSetAdditions::default());
     }
     perf::measure_result("projection_replace_context", || {
-        replace_context_for_owner_in_tx(tx, fact_id, &projection.projected_context)
+        debug_assert_eq!(projection.fact.id, fact_id);
+        replace_context_for_owner_in_tx(tx, &projection.fact, &projection.projected_context)
     })
 }
 
@@ -890,17 +889,15 @@ fn wake_projection_work_from_new_context_in_tx(
 fn commit_projector_emitted_runtime_effects_in_tx(
     tx: &Db,
     projection: &PreparedProjection,
-    allowed_tables: &[TableName],
-    registered_intent_kinds: &[&str],
-    fact_admission: Option<FactAdmissionFn>,
+    effect_policy: ProjectionEffectPolicy<'_, '_>,
 ) -> rusqlite::Result<()> {
     perf::measure_result("projection_commit_runtime_effects", || {
         commit_runtime_effects_in_tx(
             tx,
             &projection.runtime_effects,
-            allowed_tables,
-            registered_intent_kinds,
-            fact_admission,
+            effect_policy.allowed_tables,
+            effect_policy.registered_intent_kinds,
+            effect_policy.fact_admission,
             projection.mode.is_replay(),
             true,
         )
@@ -1401,7 +1398,7 @@ pub mod context {
     use super::effects::{TimeRange, Timeline};
     use super::IncomingMetadata;
     use crate::core::context::{ContextNeed, ContextOffer};
-    use crate::core::facts::Fact;
+    use crate::core::facts::{FactId, FactScope};
     use std::collections::BTreeMap;
 
     /// Runtime mode visible while projecting one fact.
@@ -1437,26 +1434,28 @@ pub mod context {
         incoming_metadata: Option<IncomingMetadata>,
     }
 
-    /// One matched need/offer pair plus the offer owner's payload fact.
+    /// One matched need/offer pair plus offering-fact metadata.
     ///
     /// Core constructs this from standing context rows before calling the
-    /// projector. A projector may inspect the payload, but it must not assume core
-    /// has validated the protocol semantics of that payload.
+    /// projector. The context value is `offer.value`; the offering fact's id,
+    /// scope, and receive time are provenance, not a hidden retained fact load.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct MatchedContext {
         /// The need owned by the fact currently being projected.
         pub need: ContextNeed,
         /// The offer that satisfied the need.
         pub offer: ContextOffer,
-        /// Payload fact loaded from the offer owner.
-        pub payload: Fact,
+        /// Scope of the fact that emitted the offer.
+        pub offer_owner_scope: FactScope,
+        /// Receive timestamp of the fact that emitted the offer.
+        pub offer_owner_received_at: u64,
     }
 
     impl ProjectionContext {
         /// Build context containing only unmatched standing offers.
         ///
         /// This shape is mainly used for facts with no needs; protocol code should
-        /// prefer the matched-payload helpers when a proof depends on a need.
+        /// prefer matched-context lookups when a proof depends on a need.
         pub fn new(offers: Vec<ContextOffer>) -> Self {
             Self {
                 offers,
@@ -1464,7 +1463,7 @@ pub mod context {
             }
         }
 
-        /// Build context from already matched need/offer/payload triples.
+        /// Build context from already matched need/offer triples.
         pub fn from_matches(matched: Vec<MatchedContext>) -> Self {
             let mut offers = matched
                 .iter()
@@ -1531,37 +1530,38 @@ pub mod context {
                 .max()
         }
 
-        /// Return the payload fact supplied for an exact need, if any.
-        ///
-        /// This is a lookup over context core already matched and loaded before
-        /// projection. It does not query storage or run overlap queries.
-        pub fn payload_for(&self, need: &ContextNeed) -> Option<&Fact> {
+        /// Return the scalar offer value supplied for an exact need, if any.
+        pub fn value_for(&self, need: &ContextNeed) -> Option<&[u8]> {
             self.matched_entries_for(need)
                 .next()
-                .map(|matched| &matched.payload)
+                .map(|matched| matched.offer.value.as_slice())
         }
 
-        pub fn payload_for_checked(
+        /// Return the first matched offer for a need, if any.
+        pub fn match_for(&self, need: &ContextNeed) -> Option<&MatchedContext> {
+            self.matched_entries_for(need).next()
+        }
+
+        pub fn match_for_checked(
             &self,
             need: &ContextNeed,
             label: &str,
-        ) -> Result<Option<&Fact>, String> {
-            let Some(matched) = self.matched_entries_for(need).next() else {
+        ) -> Result<Option<&MatchedContext>, String> {
+            let Some(matched) = self.match_for(need) else {
                 return Ok(None);
             };
-            if matched.offer.owner != matched.payload.id {
-                return Err(format!("{label} context offer payload mismatch"));
+            if matched.offer.value.is_empty() {
+                return Err(format!("{label} context offer value is empty"));
             }
-            Ok(Some(&matched.payload))
+            Ok(Some(matched))
         }
 
-        /// Return every matched payload for a need, preserving its offer metadata.
-        pub fn matched_payloads_for<'a>(
+        /// Return every matched offer for a need.
+        pub fn matches_for<'a>(
             &'a self,
             need: &'a ContextNeed,
-        ) -> impl Iterator<Item = (&'a ContextOffer, &'a Fact)> + 'a {
+        ) -> impl Iterator<Item = &'a MatchedContext> + 'a {
             self.matched_entries_for(need)
-                .map(|matched| (&matched.offer, &matched.payload))
         }
 
         fn matched_entries_for<'a>(
@@ -1585,990 +1585,33 @@ pub mod context {
         }
         matched_by_need
     }
-}
-pub(crate) mod context_db {
-    //! Standing context rows, projection context assembly, and context wake fanout.
-    //!
-    //! Context is core's dependency surface between facts. A projector can say
-    //! "this fact needs another fact with this role, scope, and byte range before it
-    //! can finish" by emitting a `ContextNeed`, or "this fact provides payload for
-    //! matching needs" by emitting a `ContextOffer`. Core does not know the
-    //! protocol meaning of those relationships. It matches only stable role/scope
-    //! partitions plus inclusive byte-range overlap.
-    //!
-    //! This module is where that model becomes SQL. The public vocabulary lives in
-    //! `core::context`: needs, offers, roles, keys, scopes, and normalized
-    //! `ContextSet`s. Protocol projectors produce those sets. The projection
-    //! step calls this file to assemble matched `ProjectionContext`, replace stored
-    //! needs, append stored offers, compare output with current standing context,
-    //! and fan out wakeups to facts that may now make progress.
-    //!
-    //! Exact rows and true-range rows are stored separately. The `owner` column is
-    //! always the fact whose projection emitted the row. For offers, that same owner
-    //! is also the payload fact loaded into matched projection context. Needs are
-    //! current subscriptions: when a fact projects again, its new output replaces the
-    //! old need rows it owned. Offers are append-only evidence: once inserted, an
-    //! offer remains until the owner fact is purged.
-    //!
-    //! The invariant is replacement needs plus append-only offers. Projection
-    //! output is the complete need set and new offer set for one fact, and wake
-    //! fanout considers only added rows from the resulting delta. If protocol
-    //! semantics change, keep the generic overlap query here and change the
-    //! domain-owned key encoders/validators.
 
-    use crate::core::context::{
-        context_set_additions, scope_key, ContextKey, ContextNeed, ContextOffer, ContextSet,
-        ContextSetAdditions, Role,
-    };
-    use crate::core::db::{quoted_table_name, Db, TableName};
-    use crate::core::facts::{Fact, FactId, FactScope, ScopeKind};
-    use crate::core::schema::{CONTEXT_EXACT_EDGES, CONTEXT_RANGE_EDGES};
-    use crate::core::wire::{Reader, WireError};
-    use rusqlite::params;
-    use std::collections::{BTreeMap, BTreeSet};
-
-    use super::{
-        insert_pending_owner_in_tx, perf, retained_fact, MatchedContext, ProjectionContext,
-    };
-
-    const CONTEXT_NEED_DIRECTION: &str = "need";
-    const CONTEXT_OFFER_DIRECTION: &str = "offer";
-
-    struct StoredContextEdge<'a> {
-        owner: &'a FactId,
-        direction: &'static str,
-        role: &'a Role,
-        scope: &'a FactScope,
-        start_key: &'a [u8],
-        end_key: &'a [u8],
-    }
-
-    impl StoredContextEdge<'_> {
-        fn is_exact(&self) -> bool {
-            self.start_key == self.end_key
+    impl MatchedContext {
+        pub fn offer_owner(&self) -> FactId {
+            self.offer.owner
         }
-    }
 
-    trait ContextEdgeView {
-        fn as_edge(&self, direction: &'static str) -> StoredContextEdge<'_>;
-    }
-
-    impl ContextEdgeView for ContextNeed {
-        fn as_edge(&self, direction: &'static str) -> StoredContextEdge<'_> {
-            StoredContextEdge {
-                owner: &self.owner,
-                direction,
-                role: &self.role,
-                scope: &self.scope,
-                start_key: self.start_key.as_bytes(),
-                end_key: self.end_key.as_bytes(),
+        pub fn require_owner(&self, expected: FactId, label: &str) -> Result<(), String> {
+            if self.offer.owner != expected {
+                return Err(format!("{label} matched offer owner mismatch"));
             }
+            Ok(())
         }
-    }
 
-    impl ContextEdgeView for ContextOffer {
-        fn as_edge(&self, direction: &'static str) -> StoredContextEdge<'_> {
-            StoredContextEdge {
-                owner: &self.owner,
-                direction,
-                role: &self.role,
-                scope: &self.scope,
-                start_key: self.start_key.as_bytes(),
-                end_key: self.end_key.as_bytes(),
+        pub fn require_owner_scope(&self, expected: &FactScope, label: &str) -> Result<(), String> {
+            if &self.offer_owner_scope != expected {
+                return Err(format!("{label} matched offer scope mismatch"));
             }
+            Ok(())
         }
-    }
 
-    fn is_exact_range(start: &ContextKey, end: &ContextKey) -> bool {
-        start == end
-    }
-
-    /// Load a fact's standing context: the needs and offers it currently owns.
-    pub(crate) fn stored_context_for_owner(
-        store: &Db,
-        owner: &FactId,
-    ) -> Result<ContextSet, String> {
-        perf::measure_result("context_stored_context_owner", || {
-            Ok(ContextSet {
-                needs: stored_needs_for_owner(store, owner)?,
-                offers: stored_offers_for_owner(store, owner)?,
-            }
-            .normalized())
-        })
-    }
-
-    /// Replace this fact's standing needs, append its offers, and report additions.
-    ///
-    /// Needs are current subscriptions, so each successful durable projection
-    /// replaces the owner's need rows. Offers are durable evidence emitted by an
-    /// immutable fact, so they are inserted idempotently and remain until the fact
-    /// is purged. The additions are computed against current stored context inside
-    /// the commit transaction rather than against queue-time projection state.
-    pub(crate) fn replace_context_for_owner_in_tx(
-        store: &Db,
-        owner: FactId,
-        context: &ContextSet,
-    ) -> rusqlite::Result<ContextSetAdditions> {
-        let previous = stored_context_for_owner(store, &owner)
-            .map_err(rusqlite::Error::InvalidParameterName)?;
-        let additions = context_set_additions(&previous, context);
-
-        delete_owner_direction_in_tx(store, CONTEXT_EXACT_EDGES, owner, CONTEXT_NEED_DIRECTION)?;
-        delete_owner_direction_in_tx(store, CONTEXT_RANGE_EDGES, owner, CONTEXT_NEED_DIRECTION)?;
-        for need in &context.needs {
-            insert_context_need_in_tx(store, need)?;
+        pub fn value(&self) -> &[u8] {
+            &self.offer.value
         }
-        for offer in &context.offers {
-            insert_context_offer_in_tx(store, offer)?;
-        }
-        Ok(additions)
-    }
-
-    pub(crate) fn insert_context_need_in_tx(
-        store: &Db,
-        need: &ContextNeed,
-    ) -> rusqlite::Result<bool> {
-        insert_context_edge_in_tx(store, need.as_edge(CONTEXT_NEED_DIRECTION))
-    }
-
-    /// Insert one standing offer row inside the projection transaction.
-    pub(crate) fn insert_context_offer_in_tx(
-        store: &Db,
-        offer: &ContextOffer,
-    ) -> rusqlite::Result<bool> {
-        insert_context_edge_in_tx(store, offer.as_edge(CONTEXT_OFFER_DIRECTION))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn insert_context_offer_for_test(
-        store: &Db,
-        offer: &ContextOffer,
-    ) -> Result<(), String> {
-        store
-            .write_transaction(|tx| insert_context_offer_in_tx(tx, offer).map(|_| ()))
-            .map_err(|err| format!("insert context offer: {err}"))
-    }
-
-    /// Load context offers whose range overlaps a single need range.
-    pub(super) fn stored_overlapping_offers_for_need(
-        store: &Db,
-        need: &ContextNeed,
-    ) -> Result<Vec<ContextOffer>, String> {
-        let scope_key = scope_key(&need.scope);
-        let mut offers = if is_exact_range(&need.start_key, &need.end_key) {
-            exact_offers_for_key(
-                store,
-                need.role.as_str(),
-                &scope_key,
-                need.start_key.as_bytes(),
-            )?
-        } else {
-            exact_offers_in_range(
-                store,
-                need.role.as_str(),
-                &scope_key,
-                need.start_key.as_bytes(),
-                need.end_key.as_bytes(),
-            )?
-        };
-        offers.extend(range_offers_overlapping_range(
-            store,
-            need.role.as_str(),
-            &scope_key,
-            need.start_key.as_bytes(),
-            need.end_key.as_bytes(),
-        )?);
-        offers.sort();
-        offers.dedup();
-        Ok(offers)
-    }
-
-    /// Load all needs owned by one fact.
-    fn stored_needs_for_owner(store: &Db, owner: &FactId) -> Result<Vec<ContextNeed>, String> {
-        let mut needs = stored_exact_needs_for_owner(store, owner)?;
-        needs.extend(stored_range_needs_for_owner(store, owner)?);
-        needs.sort();
-        needs.dedup();
-        Ok(needs)
-    }
-
-    fn stored_exact_needs_for_owner(
-        store: &Db,
-        owner: &FactId,
-    ) -> Result<Vec<ContextNeed>, String> {
-        perf::measure_result("context_owner_exact_needs", || {
-            select_exact_context_needs(
-                store,
-                r#"
-        SELECT owner, role, scope_key, key
-        FROM context_exact_edges
-        WHERE owner = :owner
-          AND direction = 'need'
-        ORDER BY owner, role, scope_key, key
-        "#,
-                &[(":owner", bytes(owner))],
-            )
-        })
-    }
-
-    fn stored_range_needs_for_owner(
-        store: &Db,
-        owner: &FactId,
-    ) -> Result<Vec<ContextNeed>, String> {
-        perf::measure_result("context_owner_range_needs", || {
-            select_range_context_needs(
-                store,
-                r#"
-        SELECT owner, role, scope_key, start_key, end_key
-        FROM context_range_edges
-        WHERE owner = :owner
-          AND direction = 'need'
-        ORDER BY owner, role, scope_key, start_key, end_key
-        "#,
-                &[(":owner", bytes(owner))],
-            )
-        })
-    }
-
-    /// Load all offers owned by one fact.
-    fn stored_offers_for_owner(store: &Db, owner: &FactId) -> Result<Vec<ContextOffer>, String> {
-        let mut offers = stored_exact_offers_for_owner(store, owner)?;
-        offers.extend(stored_range_offers_for_owner(store, owner)?);
-        offers.sort();
-        offers.dedup();
-        Ok(offers)
-    }
-
-    fn stored_exact_offers_for_owner(
-        store: &Db,
-        owner: &FactId,
-    ) -> Result<Vec<ContextOffer>, String> {
-        perf::measure_result("context_owner_exact_offers", || {
-            select_exact_context_offers(
-                store,
-                r#"
-        SELECT owner, role, scope_key, key
-        FROM context_exact_edges
-        WHERE owner = :owner
-          AND direction = 'offer'
-        ORDER BY owner, role, scope_key, key
-        "#,
-                &[(":owner", bytes(owner))],
-            )
-        })
-    }
-
-    fn stored_range_offers_for_owner(
-        store: &Db,
-        owner: &FactId,
-    ) -> Result<Vec<ContextOffer>, String> {
-        perf::measure_result("context_owner_range_offers", || {
-            select_range_context_offers(
-                store,
-                r#"
-        SELECT owner, role, scope_key, start_key, end_key
-        FROM context_range_edges
-        WHERE owner = :owner
-          AND direction = 'offer'
-        ORDER BY owner, role, scope_key, start_key, end_key
-        "#,
-                &[(":owner", bytes(owner))],
-            )
-        })
-    }
-
-    fn select_exact_context_needs(
-        store: &Db,
-        sql: &str,
-        params: &[(&str, rusqlite::types::Value)],
-    ) -> Result<Vec<ContextNeed>, String> {
-        let mut stmt = store
-            .conn()
-            .prepare(sql)
-            .map_err(|err| format!("load exact context needs: {err}"))?;
-        bind_named_params(&mut stmt, params)
-            .map_err(|err| format!("load exact context needs: {err}"))?;
-        let rows = stmt
-            .raw_query()
-            .mapped(selected_exact_context_need)
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|err| format!("load exact context needs: {err}"))?;
-        Ok(rows)
-    }
-
-    fn select_range_context_needs(
-        store: &Db,
-        sql: &str,
-        params: &[(&str, rusqlite::types::Value)],
-    ) -> Result<Vec<ContextNeed>, String> {
-        let mut stmt = store
-            .conn()
-            .prepare(sql)
-            .map_err(|err| format!("load range context needs: {err}"))?;
-        bind_named_params(&mut stmt, params)
-            .map_err(|err| format!("load range context needs: {err}"))?;
-        let rows = stmt
-            .raw_query()
-            .mapped(selected_range_context_need)
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|err| format!("load range context needs: {err}"))?;
-        Ok(rows)
-    }
-
-    fn select_exact_context_offers(
-        store: &Db,
-        sql: &str,
-        params: &[(&str, rusqlite::types::Value)],
-    ) -> Result<Vec<ContextOffer>, String> {
-        let mut stmt = store
-            .conn()
-            .prepare(sql)
-            .map_err(|err| format!("load exact context offers: {err}"))?;
-        bind_named_params(&mut stmt, params)
-            .map_err(|err| format!("load exact context offers: {err}"))?;
-        let rows = stmt
-            .raw_query()
-            .mapped(selected_exact_context_offer)
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|err| format!("load exact context offers: {err}"))?;
-        Ok(rows)
-    }
-
-    fn select_range_context_offers(
-        store: &Db,
-        sql: &str,
-        params: &[(&str, rusqlite::types::Value)],
-    ) -> Result<Vec<ContextOffer>, String> {
-        let mut stmt = store
-            .conn()
-            .prepare(sql)
-            .map_err(|err| format!("load range context offers: {err}"))?;
-        bind_named_params(&mut stmt, params)
-            .map_err(|err| format!("load range context offers: {err}"))?;
-        let rows = stmt
-            .raw_query()
-            .mapped(selected_range_context_offer)
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|err| format!("load range context offers: {err}"))?;
-        Ok(rows)
-    }
-
-    fn insert_context_edge_in_tx(
-        store: &Db,
-        edge: StoredContextEdge<'_>,
-    ) -> rusqlite::Result<bool> {
-        if edge.is_exact() {
-            insert_exact_context_edge_in_tx(store, edge)
-        } else {
-            insert_range_context_edge_in_tx(store, edge)
-        }
-    }
-
-    fn insert_exact_context_edge_in_tx(
-        store: &Db,
-        edge: StoredContextEdge<'_>,
-    ) -> rusqlite::Result<bool> {
-        let scope_key = scope_key(edge.scope);
-        store
-            .conn()
-            .execute(
-                "INSERT OR IGNORE INTO context_exact_edges
-                (owner, direction, role, scope_key, key)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    edge.owner.as_slice(),
-                    edge.direction,
-                    edge.role.as_str(),
-                    scope_key.as_slice(),
-                    edge.start_key
-                ],
-            )
-            .map(|count| count > 0)
-    }
-
-    fn insert_range_context_edge_in_tx(
-        store: &Db,
-        edge: StoredContextEdge<'_>,
-    ) -> rusqlite::Result<bool> {
-        let scope_key = scope_key(edge.scope);
-        store
-            .conn()
-            .execute(
-                "INSERT OR IGNORE INTO context_range_edges
-                (owner, direction, role, scope_key, start_key, end_key)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    edge.owner.as_slice(),
-                    edge.direction,
-                    edge.role.as_str(),
-                    scope_key.as_slice(),
-                    edge.start_key,
-                    edge.end_key
-                ],
-            )
-            .map(|count| count > 0)
-    }
-
-    fn delete_owner_direction_in_tx(
-        store: &Db,
-        table: TableName,
-        owner: FactId,
-        direction: &str,
-    ) -> rusqlite::Result<usize> {
-        let table = quoted_table_name(table)?;
-        store.conn().execute(
-            &format!("DELETE FROM {table} WHERE owner = ?1 AND direction = ?2"),
-            params![owner.as_slice(), direction],
-        )
-    }
-
-    /// Decode one persisted need row back into the public context type.
-    fn selected_exact_context_need(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextNeed> {
-        let key = ContextKey::from_bytes(row.get::<_, Vec<u8>>(3)?);
-        Ok(ContextNeed {
-            owner: fact_id_column(row.get::<_, Vec<u8>>(0)?, "owner")?,
-            role: Role::new(row.get::<_, String>(1)?)
-                .map_err(rusqlite::Error::InvalidParameterName)?,
-            scope: decode_scope_key(&row.get::<_, Vec<u8>>(2)?)
-                .map_err(rusqlite::Error::InvalidParameterName)?,
-            start_key: key.clone(),
-            end_key: key,
-        })
-    }
-
-    fn selected_range_context_need(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextNeed> {
-        Ok(ContextNeed {
-            owner: fact_id_column(row.get::<_, Vec<u8>>(0)?, "owner")?,
-            role: Role::new(row.get::<_, String>(1)?)
-                .map_err(rusqlite::Error::InvalidParameterName)?,
-            scope: decode_scope_key(&row.get::<_, Vec<u8>>(2)?)
-                .map_err(rusqlite::Error::InvalidParameterName)?,
-            start_key: ContextKey::from_bytes(row.get::<_, Vec<u8>>(3)?),
-            end_key: ContextKey::from_bytes(row.get::<_, Vec<u8>>(4)?),
-        })
-    }
-
-    /// Decode one persisted offer row back into the public context type.
-    fn selected_exact_context_offer(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextOffer> {
-        let key = ContextKey::from_bytes(row.get::<_, Vec<u8>>(3)?);
-        Ok(ContextOffer {
-            owner: fact_id_column(row.get::<_, Vec<u8>>(0)?, "owner")?,
-            role: Role::new(row.get::<_, String>(1)?)
-                .map_err(rusqlite::Error::InvalidParameterName)?,
-            scope: decode_scope_key(&row.get::<_, Vec<u8>>(2)?)
-                .map_err(rusqlite::Error::InvalidParameterName)?,
-            start_key: key.clone(),
-            end_key: key,
-        })
-    }
-
-    fn selected_range_context_offer(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextOffer> {
-        Ok(ContextOffer {
-            owner: fact_id_column(row.get::<_, Vec<u8>>(0)?, "owner")?,
-            role: Role::new(row.get::<_, String>(1)?)
-                .map_err(rusqlite::Error::InvalidParameterName)?,
-            scope: decode_scope_key(&row.get::<_, Vec<u8>>(2)?)
-                .map_err(rusqlite::Error::InvalidParameterName)?,
-            start_key: ContextKey::from_bytes(row.get::<_, Vec<u8>>(3)?),
-            end_key: ContextKey::from_bytes(row.get::<_, Vec<u8>>(4)?),
-        })
-    }
-
-    fn bind_named_params(
-        stmt: &mut rusqlite::Statement<'_>,
-        params: &[(&str, rusqlite::types::Value)],
-    ) -> rusqlite::Result<()> {
-        for (name, value) in params {
-            let index = stmt.parameter_index(name)?.ok_or_else(|| {
-                rusqlite::Error::InvalidParameterName(format!(
-                    "context SQL does not bind parameter {name}"
-                ))
-            })?;
-            stmt.raw_bind_parameter(index, value)?;
-        }
-        Ok(())
-    }
-
-    fn fact_id_column(bytes: Vec<u8>, name: &str) -> rusqlite::Result<FactId> {
-        bytes.try_into().map_err(|_| {
-            rusqlite::Error::InvalidParameterName(format!(
-                "context SQL column {name} is not a fact id"
-            ))
-        })
-    }
-
-    fn bytes(value: &[u8]) -> rusqlite::types::Value {
-        rusqlite::types::Value::Blob(value.to_vec())
-    }
-
-    fn text(value: &str) -> rusqlite::types::Value {
-        rusqlite::types::Value::Text(value.to_string())
-    }
-
-    fn decode_scope_key(bytes: &[u8]) -> Result<FactScope, String> {
-        let mut reader = Reader::new(bytes);
-        let scope = decode_scope(&mut reader)?;
-        reader.finish().row()?;
-        Ok(scope)
-    }
-
-    /// Decode the compact `scope_key` written by `context::scope_key`.
-    fn decode_scope(reader: &mut Reader<'_>) -> Result<FactScope, String> {
-        match reader.u8().row()? {
-            0 => Ok(FactScope::Global),
-            1 => Ok(FactScope::Local),
-            2 => {
-                let kind = ScopeKind::new(reader.string_u16be().row()?)?;
-                let id = reader.array::<32>().row()?;
-                Ok(FactScope::Scoped { kind, id })
-            }
-            other => Err(format!("invalid fact scope tag {other}")),
-        }
-    }
-
-    trait RowWireResult<T> {
-        fn row(self) -> Result<T, String>;
-    }
-
-    impl<T> RowWireResult<T> for Result<T, WireError> {
-        fn row(self) -> Result<T, String> {
-            self.map_err(|err| format!("invalid encoded row: {err}"))
-        }
-    }
-
-    /// Load context matches already attached as pending projection input.
-    ///
-    /// Context fanout records these rows when it queues the owner. Loading a
-    /// pending item therefore does not have to search standing context for the
-    /// owner's old needs before the first projector run.
-    pub(crate) fn pending_projection_input_context_for_owner(
-        store: &Db,
-        owner: &FactId,
-    ) -> Result<ProjectionContext, String> {
-        let pairs = perf::measure_result("context_pending_matches_select", || {
-            let mut stmt = store
-                .conn()
-                .prepare(
-                    r#"
-                SELECT need_role,
-                       need_scope_key,
-                       need_start_key,
-                       need_end_key,
-                       offer_owner,
-                       offer_start_key,
-                       offer_end_key
-                FROM pending_projection_matches
-                WHERE owner = ?1
-                ORDER BY
-                    need_role,
-                    need_scope_key,
-                    need_start_key,
-                    need_end_key,
-                    offer_owner,
-                    offer_start_key,
-                    offer_end_key
-                "#,
-                )
-                .map_err(|err| format!("load pending projection matches: {err}"))?;
-            let rows = stmt
-                .query_map(params![owner.as_slice()], |row| {
-                    selected_pending_projection_match(row, owner)
-                })
-                .map_err(|err| format!("load pending projection matches: {err}"))?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(|err| format!("load pending projection matches: {err}"))
-        })?;
-
-        let mut matched = Vec::new();
-        let mut seen = BTreeSet::new();
-        let mut payloads = BTreeMap::new();
-        for (need, offer) in pairs {
-            push_stored_matched_context(
-                store,
-                &need,
-                offer,
-                &mut seen,
-                &mut payloads,
-                &mut matched,
-            )?;
-        }
-        Ok(ProjectionContext::from_matches(matched))
-    }
-
-    /// Decode one pending match row into the need owned by `owner` and its offer.
-    ///
-    /// Pending match rows deliberately store the already matched edge pair, not
-    /// the payload bytes. Loading the `ProjectionContext` later resolves the
-    /// offer owner to its retained fact so the projector sees the same payload
-    /// shape regardless of which context edge woke it.
-    fn selected_pending_projection_match(
-        row: &rusqlite::Row<'_>,
-        owner: &FactId,
-    ) -> rusqlite::Result<(ContextNeed, ContextOffer)> {
-        let role =
-            Role::new(row.get::<_, String>(0)?).map_err(rusqlite::Error::InvalidParameterName)?;
-        let scope = decode_scope_key(&row.get::<_, Vec<u8>>(1)?)
-            .map_err(rusqlite::Error::InvalidParameterName)?;
-        let need = ContextNeed {
-            owner: *owner,
-            role: role.clone(),
-            scope: scope.clone(),
-            start_key: ContextKey::from_bytes(row.get::<_, Vec<u8>>(2)?),
-            end_key: ContextKey::from_bytes(row.get::<_, Vec<u8>>(3)?),
-        };
-        let offer = ContextOffer {
-            owner: fact_id_column(row.get::<_, Vec<u8>>(4)?, "offer_owner")?,
-            role,
-            scope,
-            start_key: ContextKey::from_bytes(row.get::<_, Vec<u8>>(5)?),
-            end_key: ContextKey::from_bytes(row.get::<_, Vec<u8>>(6)?),
-        };
-        Ok((need, offer))
-    }
-
-    /// Add a matched pair and load the offer owner's payload fact.
-    ///
-    /// A missing payload is a storage invariant failure: context offers are only
-    /// useful because their owner fact is the payload exposed to projection.
-    fn push_stored_matched_context(
-        store: &Db,
-        need: &ContextNeed,
-        offer: ContextOffer,
-        seen: &mut BTreeSet<(ContextNeed, ContextOffer)>,
-        payloads: &mut BTreeMap<FactId, Fact>,
-        matched: &mut Vec<MatchedContext>,
-    ) -> Result<(), String> {
-        if !seen.insert((need.clone(), offer.clone())) {
-            return Ok(());
-        }
-        let payload = if let Some(payload) = payloads.get(&offer.owner) {
-            payload.clone()
-        } else {
-            let payload = perf::measure_result("context_pending_match_payload", || {
-                retained_fact(store, &offer.owner)?
-                    .ok_or_else(|| "context offer owner references unknown fact".to_string())
-            })?;
-            payloads.insert(offer.owner, payload.clone());
-            payload
-        };
-        matched.push(MatchedContext {
-            need: need.clone(),
-            offer,
-            payload,
-        });
-        Ok(())
-    }
-
-    /// Queue and record matches for owners woken by newly added context rows.
-    ///
-    /// Removals do not wake projection. A projector that stops needing context has
-    /// already run; dependent facts wake only when a new need can now be satisfied
-    /// or a new offer may satisfy existing needs. An owner is woken only when at
-    /// least one overlapping edge exists; for each such owner this queues it pending
-    /// and records every match its standing needs currently have. Recording from
-    /// stored needs is idempotent, so distinct overlaps for the same owner collapse
-    /// to one queue-and-record pass.
-    pub(crate) fn wake_context_matches_in_tx(
-        store: &Db,
-        additions: &ContextSetAdditions,
-    ) -> Result<usize, String> {
-        let owners = perf::measure_result("context_wake_find_owners", || {
-            let mut owners = BTreeSet::new();
-            for need in &additions.needs {
-                let has_offer = perf::measure_result("context_wake_need_offer_probe", || {
-                    stored_overlapping_offers_for_need(store, need).map(|offers| !offers.is_empty())
-                })?;
-                if has_offer {
-                    owners.insert(need.owner);
-                }
-            }
-            for offer in &additions.offers {
-                for need in perf::measure_result("context_wake_offer_need_probe", || {
-                    stored_overlapping_needs_for_offer(store, offer)
-                })? {
-                    owners.insert(need.owner);
-                }
-            }
-            Ok::<_, String>(owners)
-        })?;
-
-        perf::measure_result("context_wake_record_owners", || {
-            let mut changed = 0usize;
-            for owner in owners {
-                let queued = insert_pending_owner_in_tx(store, owner)
-                    .map_err(|err| format!("queue pending projection input: {err}"))?;
-                let recorded = record_pending_context_inputs_for_stored_needs_in_tx(store, owner)?;
-                changed += usize::from(queued > 0 || recorded > 0);
-            }
-            Ok(changed)
-        })
-    }
-
-    fn stored_overlapping_needs_for_offer(
-        store: &Db,
-        offer: &ContextOffer,
-    ) -> Result<Vec<ContextNeed>, String> {
-        let scope_key = scope_key(&offer.scope);
-        let mut needs = if is_exact_range(&offer.start_key, &offer.end_key) {
-            exact_needs_for_key(
-                store,
-                offer.role.as_str(),
-                &scope_key,
-                offer.start_key.as_bytes(),
-            )?
-        } else {
-            exact_needs_in_range(
-                store,
-                offer.role.as_str(),
-                &scope_key,
-                offer.start_key.as_bytes(),
-                offer.end_key.as_bytes(),
-            )?
-        };
-        needs.extend(range_needs_overlapping_range(
-            store,
-            offer.role.as_str(),
-            &scope_key,
-            offer.start_key.as_bytes(),
-            offer.end_key.as_bytes(),
-        )?);
-        needs.sort();
-        needs.dedup();
-        Ok(needs)
-    }
-
-    fn exact_offers_for_key(
-        store: &Db,
-        role: &str,
-        scope_key: &[u8],
-        key: &[u8],
-    ) -> Result<Vec<ContextOffer>, String> {
-        perf::measure_result("context_exact_offers_key", || {
-            select_exact_context_offers(
-                store,
-                r#"
-        SELECT owner, role, scope_key, key
-        FROM context_exact_edges
-        WHERE direction = 'offer'
-          AND role = :role
-          AND scope_key = :scope_key
-          AND key = :key
-        ORDER BY owner, key
-        "#,
-                &[
-                    (":role", text(role)),
-                    (":scope_key", bytes(scope_key)),
-                    (":key", bytes(key)),
-                ],
-            )
-        })
-    }
-
-    fn exact_needs_for_key(
-        store: &Db,
-        role: &str,
-        scope_key: &[u8],
-        key: &[u8],
-    ) -> Result<Vec<ContextNeed>, String> {
-        perf::measure_result("context_exact_needs_key", || {
-            select_exact_context_needs(
-                store,
-                r#"
-        SELECT owner, role, scope_key, key
-        FROM context_exact_edges
-        WHERE direction = 'need'
-          AND role = :role
-          AND scope_key = :scope_key
-          AND key = :key
-        ORDER BY owner, key
-        "#,
-                &[
-                    (":role", text(role)),
-                    (":scope_key", bytes(scope_key)),
-                    (":key", bytes(key)),
-                ],
-            )
-        })
-    }
-
-    fn exact_offers_in_range(
-        store: &Db,
-        role: &str,
-        scope_key: &[u8],
-        start_key: &[u8],
-        end_key: &[u8],
-    ) -> Result<Vec<ContextOffer>, String> {
-        perf::measure_result("context_exact_offers_in_range", || {
-            select_exact_context_offers(
-                store,
-                r#"
-        SELECT owner, role, scope_key, key
-        FROM context_exact_edges
-        WHERE direction = 'offer'
-          AND role = :role
-          AND scope_key = :scope_key
-          AND key >= :start_key
-          AND key <= :end_key
-        ORDER BY owner, key
-        "#,
-                &[
-                    (":role", text(role)),
-                    (":scope_key", bytes(scope_key)),
-                    (":start_key", bytes(start_key)),
-                    (":end_key", bytes(end_key)),
-                ],
-            )
-        })
-    }
-
-    fn exact_needs_in_range(
-        store: &Db,
-        role: &str,
-        scope_key: &[u8],
-        start_key: &[u8],
-        end_key: &[u8],
-    ) -> Result<Vec<ContextNeed>, String> {
-        perf::measure_result("context_exact_needs_in_range", || {
-            select_exact_context_needs(
-                store,
-                r#"
-        SELECT owner, role, scope_key, key
-        FROM context_exact_edges
-        WHERE direction = 'need'
-          AND role = :role
-          AND scope_key = :scope_key
-          AND key >= :start_key
-          AND key <= :end_key
-        ORDER BY owner, key
-        "#,
-                &[
-                    (":role", text(role)),
-                    (":scope_key", bytes(scope_key)),
-                    (":start_key", bytes(start_key)),
-                    (":end_key", bytes(end_key)),
-                ],
-            )
-        })
-    }
-
-    fn range_offers_overlapping_range(
-        store: &Db,
-        role: &str,
-        scope_key: &[u8],
-        start_key: &[u8],
-        end_key: &[u8],
-    ) -> Result<Vec<ContextOffer>, String> {
-        perf::measure_result("context_range_offers_overlap", || {
-            select_range_context_offers(
-                store,
-                r#"
-        SELECT owner, role, scope_key, start_key, end_key
-        FROM context_range_edges
-        WHERE direction = 'offer'
-          AND role = :role
-          AND scope_key = :scope_key
-          AND start_key <= :end_key
-          AND end_key >= :start_key
-        ORDER BY owner, start_key, end_key
-        "#,
-                &[
-                    (":role", text(role)),
-                    (":scope_key", bytes(scope_key)),
-                    (":start_key", bytes(start_key)),
-                    (":end_key", bytes(end_key)),
-                ],
-            )
-        })
-    }
-
-    fn range_needs_overlapping_range(
-        store: &Db,
-        role: &str,
-        scope_key: &[u8],
-        start_key: &[u8],
-        end_key: &[u8],
-    ) -> Result<Vec<ContextNeed>, String> {
-        perf::measure_result("context_range_needs_overlap", || {
-            select_range_context_needs(
-                store,
-                r#"
-        SELECT owner, role, scope_key, start_key, end_key
-        FROM context_range_edges
-        WHERE direction = 'need'
-          AND role = :role
-          AND scope_key = :scope_key
-          AND start_key <= :end_key
-          AND end_key >= :start_key
-        ORDER BY owner, start_key, end_key
-        "#,
-                &[
-                    (":role", text(role)),
-                    (":scope_key", bytes(scope_key)),
-                    (":start_key", bytes(start_key)),
-                    (":end_key", bytes(end_key)),
-                ],
-            )
-        })
-    }
-
-    /// Record pending context inputs for every standing need an owner currently holds.
-    ///
-    /// Used both by context wake fanout and by direct queueing paths (due time
-    /// wakes, duplicate fact admission) that attach context to an owner's existing
-    /// needs. Idempotent: every input row is an `INSERT OR IGNORE`.
-    pub(super) fn record_pending_context_inputs_for_stored_needs_in_tx(
-        store: &Db,
-        owner: FactId,
-    ) -> Result<usize, String> {
-        perf::measure_result("context_record_pending_inputs_for_owner", || {
-            let mut changed = 0usize;
-            for need in stored_needs_for_owner(store, &owner)? {
-                for offer in stored_overlapping_offers_for_need(store, &need)? {
-                    changed += record_pending_context_input_in_tx(store, &need, &offer)?;
-                }
-            }
-            Ok(changed)
-        })
-    }
-
-    fn record_pending_context_input_in_tx(
-        store: &Db,
-        need: &ContextNeed,
-        offer: &ContextOffer,
-    ) -> Result<usize, String> {
-        if need.role != offer.role || need.scope != offer.scope {
-            return Err("pending projection context input role/scope mismatch".to_string());
-        }
-        let scope_key = scope_key(&need.scope);
-        perf::measure_result("context_pending_match_insert", || {
-            store
-                .conn()
-                .execute(
-                    "INSERT OR IGNORE INTO pending_projection_matches
-                    (owner,
-                     need_role,
-                     need_scope_key,
-                     need_start_key,
-                     need_end_key,
-                     offer_owner,
-                     offer_start_key,
-                     offer_end_key)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    params![
-                        need.owner.as_slice(),
-                        need.role.as_str(),
-                        scope_key.as_slice(),
-                        need.start_key.as_bytes(),
-                        need.end_key.as_bytes(),
-                        offer.owner.as_slice(),
-                        offer.start_key.as_bytes(),
-                        offer.end_key.as_bytes(),
-                    ],
-                )
-                .map_err(|err| format!("record pending projection match: {err}"))
-        })
     }
 }
+pub(crate) mod context_db;
+
 pub mod effects {
     //! Projection effects and time-wake output for fact projectors.
 
@@ -2582,7 +1625,7 @@ pub mod effects {
     /// Context role used by deletion/retention projectors to wake a target fact.
     ///
     /// Core treats purge keys opaquely. Protocol families choose their own stable
-    /// key shape and validate matched payloads before treating this context as
+    /// key shape and validate matched offer values before treating this context as
     /// authority. This context is proof and routing only. The target projector must
     /// still emit `ProjectionOutput::purge_self` after deleting its own rows so
     /// core removes the target fact bytes.
@@ -2595,30 +1638,21 @@ pub mod effects {
         scope: crate::core::facts::FactScope,
         key: ContextKey,
     ) -> ContextNeed {
-        fact_purged_range_need(owner, scope, key.clone(), key)
+        ContextNeed {
+            owner,
+            role: fact_purged_role(),
+            scope,
+            key,
+        }
     }
 
     pub fn fact_purged_offer(
         owner: FactId,
         scope: crate::core::facts::FactScope,
         key: ContextKey,
+        value: impl Into<Vec<u8>>,
     ) -> ContextOffer {
-        fact_purged_range_offer(owner, scope, key.clone(), key)
-    }
-
-    pub fn fact_purged_range_need(
-        owner: FactId,
-        scope: crate::core::facts::FactScope,
-        start_key: ContextKey,
-        end_key: ContextKey,
-    ) -> ContextNeed {
-        ContextNeed {
-            owner,
-            role: fact_purged_role(),
-            scope,
-            start_key,
-            end_key,
-        }
+        fact_purged_range_offer(owner, scope, key.clone(), key, value)
     }
 
     pub fn fact_purged_range_offer(
@@ -2626,6 +1660,7 @@ pub mod effects {
         scope: crate::core::facts::FactScope,
         start_key: ContextKey,
         end_key: ContextKey,
+        value: impl Into<Vec<u8>>,
     ) -> ContextOffer {
         ContextOffer {
             owner,
@@ -2633,6 +1668,7 @@ pub mod effects {
             scope,
             start_key,
             end_key,
+            value: value.into(),
         }
     }
 
@@ -2842,30 +1878,12 @@ pub mod effects {
             let scope = FactScope::Local;
             let key = ContextKey::from_bytes(vec![4, 2, 9]);
             let need = fact_purged_need([1; 32], scope.clone(), key.clone());
-            let offer = fact_purged_offer([3; 32], scope.clone(), key);
+            let offer = fact_purged_offer([3; 32], scope.clone(), key, b"purged".to_vec());
 
             assert_eq!(need.role, offer.role);
             assert_eq!(need.scope, scope);
-            assert_eq!(need.start_key, offer.start_key);
-            assert_eq!(need.end_key, offer.end_key);
-        }
-
-        #[test]
-        fn purge_range_need_spans_matching_offer_key() {
-            let scope = FactScope::Local;
-            let need = fact_purged_range_need(
-                [1; 32],
-                scope.clone(),
-                ContextKey::from_bytes(vec![2, 0]),
-                ContextKey::from_bytes(vec![2, 255]),
-            );
-            let offer =
-                fact_purged_offer([3; 32], scope.clone(), ContextKey::from_bytes(vec![2, 9]));
-
-            assert_eq!(need.role, offer.role);
-            assert_eq!(need.scope, scope);
-            assert!(need.start_key <= offer.start_key);
-            assert!(need.end_key >= offer.end_key);
+            assert_eq!(need.key, offer.start_key);
+            assert_eq!(offer.start_key, offer.end_key);
         }
 
         #[test]
@@ -2877,12 +1895,13 @@ pub mod effects {
                 scope.clone(),
                 ContextKey::from_bytes(vec![2, 0]),
                 ContextKey::from_bytes(vec![2, 255]),
+                b"purged".to_vec(),
             );
 
             assert_eq!(need.role, offer.role);
             assert_eq!(need.scope, scope);
-            assert!(offer.start_key <= need.start_key);
-            assert!(offer.end_key >= need.end_key);
+            assert!(offer.start_key <= need.key);
+            assert!(offer.end_key >= need.key);
         }
     }
 }
@@ -3001,8 +2020,8 @@ pub mod route {
 
 pub use context::{MatchedContext, ProjectionContext, ProjectionMode};
 pub use effects::{
-    fact_purged_need, fact_purged_offer, fact_purged_range_need, fact_purged_range_offer,
-    fact_purged_role, ProjectionOutput, TimeRange, TimeWake, Timeline,
+    fact_purged_need, fact_purged_offer, fact_purged_range_offer, fact_purged_role,
+    ProjectionOutput, TimeRange, TimeWake, Timeline,
 };
 pub use route::{
     EffectiveTagFn, EnvelopeRoute, FactAdmissionFn, FactProjectorInfo, FactRoute, Projector,
@@ -3010,8 +2029,9 @@ pub use route::{
 };
 
 const OWNER_KEYED_FACT_CLEANUP_TABLES: &[TableName] = &[
-    CONTEXT_EXACT_EDGES,
-    CONTEXT_RANGE_EDGES,
+    CONTEXT_NEEDS,
+    CONTEXT_EXACT_OFFERS,
+    CONTEXT_RANGE_OFFERS,
     TIME_WAKES,
     PENDING_TIME_RANGES,
     PENDING_PROJECTION_MATCHES,
@@ -3039,6 +2059,7 @@ fn verify_idempotent_insert<T>(
     Ok(changed > 0)
 }
 
+#[cfg(test)]
 fn retained_fact(store: &Db, id: &FactId) -> Result<Option<Fact>, String> {
     store
         .conn()
@@ -3271,13 +2292,8 @@ fn purge_fact_in_tx(store: &Db, owner: FactId) -> rusqlite::Result<bool> {
         "fact_id",
         owner.as_slice(),
     )? > 0;
+    changed |= delete_pending_matches_for_offer_owner_in_tx(store, owner)? > 0;
     changed |= delete_owner_rows_from_tables(store, OWNER_KEYED_FACT_CLEANUP_TABLES, owner)? > 0;
-    changed |= delete_rows_by_blob_column_in_tx(
-        store,
-        PENDING_PROJECTION_MATCHES,
-        "offer_owner",
-        owner.as_slice(),
-    )? > 0;
     Ok(changed)
 }
 
@@ -3679,7 +2695,7 @@ mod contract_tests {
     use super::*;
     use crate::core::context::{ContextKey, ContextNeed, ContextOffer, ContextSetAdditions, Role};
     use crate::core::effects::StorageRequirement;
-    use crate::core::facts::{FactId, FactScope};
+    use crate::core::facts::{FactId, FactScope, ScopeKind};
     use crate::core::intents::{Intent, IntentKind};
     use crate::core::schema::CORE_SCHEMA_SOURCE;
     use rusqlite::OptionalExtension;
@@ -3695,9 +2711,9 @@ mod contract_tests {
         "premature",
         "queue_ready",
         "queued_context_ready",
-        "range_ready",
         "ready",
         "readded_ready",
+        "semantic_ready",
     ];
 
     fn submit_fact_to_db(store: &Db, fact: Fact) -> Result<bool, String> {
@@ -3731,10 +2747,18 @@ mod contract_tests {
                 input_staged_at_ms: None,
                 pending_inputs,
             },
-            &[],
-            registered_intent_kinds,
-            None,
+            test_effect_policy(registered_intent_kinds),
         )
+    }
+
+    fn test_effect_policy<'a>(
+        registered_intent_kinds: &'a [&'a str],
+    ) -> ProjectionEffectPolicy<'a, 'a> {
+        ProjectionEffectPolicy {
+            allowed_tables: &[],
+            registered_intent_kinds,
+            fact_admission: None,
+        }
     }
 
     fn expect_loaded(load: Option<ProjectionLoad>) -> ProjectionInput {
@@ -3751,11 +2775,10 @@ mod contract_tests {
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         VERSION_GUARD_PROJECTOR_CALLS.fetch_add(1, Ordering::SeqCst);
-        Ok(ProjectionOutput::new().need(ContextNeed::range(
+        Ok(ProjectionOutput::new().need(ContextNeed::for_key(
             fact.id,
             "version_guard",
             FactScope::Global,
-            [7; 32],
             [7; 32],
         )))
     }
@@ -3806,6 +2829,130 @@ mod contract_tests {
     }
 
     #[test]
+    fn projection_context_uses_offer_value_not_breaking_older_fact_bytes() {
+        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+            .expect("open db");
+        let producer = Fact::new(
+            FactScope::Global,
+            1,
+            b"author-v0|profile:ada|user:ada".to_vec(),
+        );
+        let consumer = Fact::new(FactScope::Global, 2, b"needs-author-profile:ada".to_vec());
+        let role = Role::new("author_profile").unwrap();
+        let key = ContextKey::from_bytes(b"profile:ada");
+        let offered_value = b"user:ada".to_vec();
+
+        assert!(
+            decode_v1_author_fact(producer.body()).is_err(),
+            "the retained producer bytes intentionally use an older layout"
+        );
+        submit_fact_to_db(&store, consumer.clone()).expect("submit dependent first");
+
+        let projector = SemanticOfferProjector {
+            producer_id: producer.id,
+            consumer_id: consumer.id,
+            role: role.clone(),
+            key: key.clone(),
+            offered_value: offered_value.clone(),
+        };
+        let first = drain_projection(&projector, &store, &[], None, 1)
+            .expect("consumer parks on missing semantic offer");
+
+        assert!(first);
+        assert_eq!(pending_projection_count(&store, consumer.id), 0);
+        assert!(stored_context_for_owner(&store, &consumer.id)
+            .expect("consumer context")
+            .offers
+            .is_empty());
+
+        submit_fact_to_db(&store, producer.clone()).expect("submit producer");
+        let second =
+            drain_projection(&projector, &store, &[], None, 3).expect("producer wakes consumer");
+
+        assert!(second);
+        assert_eq!(
+            intent_payload_for(&store, "semantic_ready", &consumer.id),
+            offered_value
+        );
+        let producer_context =
+            stored_context_for_owner(&store, &producer.id).expect("producer context");
+        assert_eq!(producer_context.offers.len(), 1);
+        assert_eq!(producer_context.offers[0].value, b"user:ada".to_vec());
+        assert_ne!(producer_context.offers[0].value, producer.bytes);
+    }
+
+    #[test]
+    fn projection_context_preserves_offer_owner_metadata_and_value() {
+        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+            .expect("open db");
+        let producer_scope = FactScope::Scoped {
+            kind: ScopeKind::new("owner_meta").unwrap(),
+            id: [9; 32],
+        };
+        let producer = Fact::new(producer_scope.clone(), 41, b"producer-fact-v0".to_vec());
+        let consumer = Fact::new(FactScope::Global, 42, b"consumer-needs-value".to_vec());
+        let role = Role::new("owner_meta").unwrap();
+        let key = ContextKey::from_bytes(b"producer-value");
+        let value = b"semantic-value".to_vec();
+
+        submit_fact_to_db(&store, consumer.clone()).expect("submit consumer");
+
+        let projector = test_projector({
+            let role = role.clone();
+            let key = key.clone();
+            let producer_scope = producer_scope.clone();
+            let producer_id = producer.id;
+            let consumer_id = consumer.id;
+            let value = value.clone();
+            move |fact, context| {
+                if fact.id == producer_id {
+                    return Ok(ProjectionOutput::new().offer(ContextOffer::for_key(
+                        fact.id,
+                        role.clone(),
+                        FactScope::Global,
+                        key.as_bytes().to_vec(),
+                        value.clone(),
+                    )));
+                }
+                if fact.id != consumer_id {
+                    return Ok(ProjectionOutput::new());
+                }
+                let need = ContextNeed {
+                    owner: fact.id,
+                    role: role.clone(),
+                    scope: FactScope::Global,
+                    key: key.clone(),
+                };
+                let Some(matched) = context.match_for(&need) else {
+                    return Ok(ProjectionOutput::new().need(need));
+                };
+                assert_eq!(matched.offer_owner(), producer_id);
+                assert_eq!(&matched.offer_owner_scope, &producer_scope);
+                assert_eq!(matched.offer_owner_received_at, 41);
+                assert_eq!(matched.value(), value.as_slice());
+                Ok(ProjectionOutput::new().intent(Intent::new(
+                    IntentKind::new("ready").unwrap(),
+                    fact.id,
+                    b"ok".to_vec(),
+                )))
+            }
+        });
+        let first = drain_projection(&projector, &store, &[], None, 1)
+            .expect("consumer parks on missing offer");
+
+        assert!(first);
+        submit_fact_to_db(&store, producer.clone()).expect("submit producer");
+        let second =
+            drain_projection(&projector, &store, &[], None, 3).expect("producer wakes consumer");
+
+        assert!(second);
+        assert_eq!(
+            intent_payload_for(&store, "ready", &consumer.id),
+            b"ok".to_vec()
+        );
+    }
+
+    #[test]
     fn projection_drain_resolves_new_need_that_matches_existing_offer() {
         let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
             .expect("open db");
@@ -3829,11 +2976,12 @@ mod contract_tests {
             scope: target.scope.clone(),
             start_key: key.clone(),
             end_key: key.clone(),
+            value: offered.bytes.clone(),
         };
         crate::core::project_fact::context_db::insert_context_offer_for_test(&store, &offer)
             .expect("insert stored offer");
 
-        let projector = need_until_payload(role, key, "ready", Some("premature"));
+        let projector = need_until_offer_owner(role, key, "ready", Some("premature"));
         let progress =
             drain_projection(&projector, &store, &[], None, 2).expect("drain projection");
 
@@ -3931,14 +3079,13 @@ mod contract_tests {
                     },
                 )
                 .map_err(sqlite_string_error)?;
-                delete_rows_by_owner_in_tx(tx, CONTEXT_EXACT_EDGES, offered.id)?;
-                delete_rows_by_owner_in_tx(tx, CONTEXT_RANGE_EDGES, offered.id)?;
+                delete_rows_by_owner_in_tx(tx, CONTEXT_NEEDS, offered.id)?;
                 Ok(())
             })
             .expect("queue match then remove standing offer");
 
         assert_eq!(pending_projection_match_count(&store, target.id), 1);
-        let projector = need_until_payload(role, key, "queued_context_ready", None);
+        let projector = need_until_offer_owner(role, key, "queued_context_ready", None);
         let progress =
             drain_projection(&projector, &store, &[], None, 1).expect("drain projection");
 
@@ -4003,11 +3150,12 @@ mod contract_tests {
             scope: parent.scope.clone(),
             start_key: key.clone(),
             end_key: key.clone(),
+            value: offered.bytes.clone(),
         };
         crate::core::project_fact::context_db::insert_context_offer_for_test(&store, &offer)
             .expect("insert stored offer");
 
-        let projector = need_until_payload(role.clone(), key.clone(), "ephemeral_ready", None);
+        let projector = need_until_offer_owner(role.clone(), key.clone(), "ephemeral_ready", None);
         let progress =
             drain_projection(&projector, &store, &[], None, 10).expect("drain projection");
 
@@ -4222,6 +3370,7 @@ mod contract_tests {
             scope: FactScope::Global,
             start_key: key.clone(),
             end_key: key,
+            value: b"value".to_vec(),
         };
 
         let next = run_projection(&projector, &fact, ProjectionContext::new(vec![offer]))
@@ -4256,82 +3405,18 @@ mod contract_tests {
             scope: target.scope.clone(),
             start_key: ContextKey::from_bytes(b"a"),
             end_key: ContextKey::from_bytes(b"z"),
+            value: offered.bytes.clone(),
         };
         crate::core::project_fact::context_db::insert_context_offer_for_test(&store, &offer)
             .expect("insert stored offer");
 
-        let projector = need_until_payload(role, key, "ready", Some("premature"));
+        let projector = need_until_offer_owner(role, key, "ready", Some("premature"));
         let progress =
             drain_projection(&projector, &store, &[], None, 2).expect("drain projection");
 
         assert!(progress);
         assert_eq!(
             intent_payload_for(&store, "ready", &target.id),
-            offered.id.to_vec()
-        );
-    }
-
-    #[test]
-    fn projection_drain_resolves_range_need_that_matches_existing_exact_offer() {
-        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
-            .expect("open db");
-        let target = Fact::new(FactScope::Global, 1, b"target".to_vec());
-        let offered = Fact::new(FactScope::Global, 2, b"custom".to_vec());
-        submit_fact_to_db(&store, offered.clone()).expect("persist offer payload");
-        submit_fact_to_db(&store, target.clone()).expect("persist target");
-        store
-            .conn()
-            .execute(
-                "DELETE FROM pending_projection WHERE owner = ?1",
-                rusqlite::params![offered.id.as_slice()],
-            )
-            .expect("clear offered fact pending row");
-
-        let role = Role::new("range_need").unwrap();
-        let offer_key = ContextKey::from_bytes(b"m");
-        let offer = offer_for(&offered, &role, &offer_key);
-        crate::core::project_fact::context_db::insert_context_offer_for_test(&store, &offer)
-            .expect("insert stored offer");
-
-        let projector = test_projector(move |fact, context| {
-            let need = ContextNeed::range(
-                fact.id,
-                role.clone(),
-                fact.scope.clone(),
-                b"a".to_vec(),
-                b"z".to_vec(),
-            );
-            if let Some(payload) = context.payload_for(&need) {
-                Ok(ProjectionOutput::new().intent(Intent::new(
-                    IntentKind::new("range_ready").unwrap(),
-                    fact.id,
-                    payload.id,
-                )))
-            } else {
-                Ok(ProjectionOutput::new().need(need))
-            }
-        });
-
-        let first = drain_projection(&projector, &store, &[], None, 1)
-            .expect("first projection parks range need");
-        assert!(first);
-        assert_eq!(
-            pending_projection_count(&store, target.id),
-            1,
-            "range need should be requeued after matching the existing exact offer"
-        );
-        assert_eq!(
-            pending_projection_match_count(&store, target.id),
-            1,
-            "range need should record the exact offer as pending context"
-        );
-
-        let second = drain_projection(&projector, &store, &[], None, 1)
-            .expect("second projection sees exact offer payload");
-
-        assert!(second);
-        assert_eq!(
-            intent_payload_for(&store, "range_ready", &target.id),
             offered.id.to_vec()
         );
     }
@@ -4421,6 +3506,7 @@ mod contract_tests {
             scope: target.scope.clone(),
             start_key: key.clone(),
             end_key: key.clone(),
+            value: b"watched".to_vec(),
         };
         crate::core::project_fact::context_db::insert_context_offer_for_test(&store, &offer)
             .expect("insert stored offer");
@@ -4569,7 +3655,7 @@ mod contract_tests {
             load_one_projection_input(&store, ProjectionSource::Durable)
                 .expect("load projection input"),
         );
-        let outcome = evaluate_loaded_projection_input(&projector, input, &[], &[], None)
+        let outcome = evaluate_loaded_projection_input(&projector, input, test_effect_policy(&[]))
             .expect("evaluate projection");
 
         assert!(matches!(
@@ -4584,7 +3670,8 @@ mod contract_tests {
             .expect("load retained fact")
             .is_some());
 
-        commit_projection_effects(&store, &outcome, &[], &[], None).expect("commit rejection");
+        commit_projection_effects(&store, &outcome, test_effect_policy(&[]))
+            .expect("commit rejection");
 
         assert_eq!(pending_projection_count(&store, fact.id), 0);
         assert!(retained_fact(&store, &fact.id)
@@ -4608,7 +3695,7 @@ mod contract_tests {
             load_one_projection_input(&store, ProjectionSource::Incoming)
                 .expect("load projection input"),
         );
-        let outcome = evaluate_loaded_projection_input(&projector, input, &[], &[], None)
+        let outcome = evaluate_loaded_projection_input(&projector, input, test_effect_policy(&[]))
             .expect("evaluate projection");
 
         assert!(matches!(
@@ -4622,7 +3709,8 @@ mod contract_tests {
             .expect("load incoming fact")
             .is_some());
 
-        commit_projection_effects(&store, &outcome, &[], &[], None).expect("commit rejection");
+        commit_projection_effects(&store, &outcome, test_effect_policy(&[]))
+            .expect("commit rejection");
 
         assert!(incoming_fact_by_id(&store, &fact.id)
             .expect("load incoming fact")
@@ -4705,6 +3793,7 @@ mod contract_tests {
                 scope: fact.scope.clone(),
                 start_key: ContextKey::from_bytes(fact.id),
                 end_key: ContextKey::from_bytes(fact.id),
+                value: b"value".to_vec(),
             }))
         });
 
@@ -4722,8 +3811,7 @@ mod contract_tests {
                 owner: [9; 32],
                 role: Role::new("exact").unwrap(),
                 scope: fact.scope.clone(),
-                start_key: ContextKey::from_bytes(fact.id),
-                end_key: ContextKey::from_bytes(fact.id),
+                key: ContextKey::from_bytes(fact.id),
             }))
         });
 
@@ -5010,22 +4098,21 @@ mod contract_tests {
             r#"
             EXPLAIN QUERY PLAN
             SELECT owner, role, scope_key, key
-            FROM context_exact_edges
-            WHERE direction = 'need'
-              AND role = 'exact_plan'
-              AND scope_key = x'01'
-              AND key = x'02'
+    FROM context_needs
+    WHERE role = 'exact_plan'
+      AND scope_key = x'01'
+      AND key = x'02'
             ORDER BY owner, key
             "#,
         );
 
         assert!(
-            plan.contains("context_exact_edges_by_key"),
+            plan.contains("context_needs_by_key"),
             "exact lookup should use the exact key index:\n{plan}"
         );
         assert!(
-            !plan.contains("context_range_edges"),
-            "exact lookup should not touch range context rows:\n{plan}"
+            !plan.contains("context_range_offers"),
+            "exact need lookup should not touch range offer rows:\n{plan}"
         );
     }
 
@@ -5107,8 +4194,9 @@ mod contract_tests {
     }
 
     fn context_edge_count(store: &Db, owner: FactId) -> i64 {
-        context_edge_table_count(store, CONTEXT_EXACT_EDGES, owner)
-            + context_edge_table_count(store, CONTEXT_RANGE_EDGES, owner)
+        context_edge_table_count(store, CONTEXT_NEEDS, owner)
+            + context_edge_table_count(store, CONTEXT_EXACT_OFFERS, owner)
+            + context_edge_table_count(store, CONTEXT_RANGE_OFFERS, owner)
     }
 
     fn context_edge_table_count(store: &Db, table: TableName, owner: FactId) -> i64 {
@@ -5137,8 +4225,7 @@ mod contract_tests {
             owner: fact.id,
             role: role.clone(),
             scope: fact.scope.clone(),
-            start_key: key.clone(),
-            end_key: key.clone(),
+            key: key.clone(),
         }
     }
 
@@ -5149,6 +4236,7 @@ mod contract_tests {
             scope: fact.scope.clone(),
             start_key: key.clone(),
             end_key: key.clone(),
+            value: fact.bytes.clone(),
         }
     }
 
@@ -5194,7 +4282,7 @@ mod contract_tests {
         })
     }
 
-    fn need_until_payload(
+    fn need_until_offer_owner(
         role: Role,
         key: ContextKey,
         ready_kind: &'static str,
@@ -5202,11 +4290,11 @@ mod contract_tests {
     ) -> impl Projector {
         test_projector(move |fact, context| {
             let need = need_for(fact, &role, &key);
-            if let Some(payload) = context.payload_for(&need) {
+            if let Some(matched) = context.match_for(&need) {
                 Ok(ProjectionOutput::new().intent(Intent::new(
                     IntentKind::new(ready_kind).unwrap(),
                     fact.id,
-                    payload.id,
+                    matched.offer_owner(),
                 )))
             } else {
                 let mut output = ProjectionOutput::new().need(need);
@@ -5226,7 +4314,7 @@ mod contract_tests {
         test_projector(move |fact, context| {
             let need = need_for(fact, &role, &key);
             let mut output = ProjectionOutput::new().need(need.clone());
-            if context.payload_for(&need).is_some() {
+            if context.match_for(&need).is_some() {
                 output = output.intent(Intent::new(
                     IntentKind::new(intent_kind).unwrap(),
                     fact.id,
@@ -5265,11 +4353,11 @@ mod contract_tests {
             }
 
             let need = need_for(fact, &self.role, &self.key);
-            if let Some(payload) = context.payload_for(&need) {
+            if let Some(matched) = context.match_for(&need) {
                 Ok(ProjectionOutput::new().intent(Intent::new(
                     IntentKind::new("queue_ready").unwrap(),
                     fact.id,
-                    payload.id,
+                    matched.offer_owner(),
                 )))
             } else {
                 Ok(ProjectionOutput::new().need(need))
@@ -5312,22 +4400,86 @@ mod contract_tests {
             }
 
             let first_need = need_for(fact, &self.first_role, &self.first_key);
-            let Some(first_payload) = context.payload_for(&first_need) else {
+            let Some(first_match) = context.match_for(&first_need) else {
                 return Ok(ProjectionOutput::new().need(first_need));
             };
             let second_need = need_for(fact, &self.second_role, &self.second_key);
-            let Some(second_payload) = context.payload_for(&second_need) else {
+            let Some(second_match) = context.match_for(&second_need) else {
                 return Ok(ProjectionOutput::new().need(first_need).need(second_need));
             };
 
-            let mut payload = first_payload.id.to_vec();
-            payload.extend_from_slice(&second_payload.id);
+            let mut ready_value = first_match.offer_owner().to_vec();
+            ready_value.extend_from_slice(&second_match.offer_owner());
             Ok(ProjectionOutput::new().intent(Intent::new(
                 IntentKind::new("multi_stage_ready").unwrap(),
                 fact.id,
-                payload,
+                ready_value,
             )))
         }
+    }
+
+    struct SemanticOfferProjector {
+        producer_id: FactId,
+        consumer_id: FactId,
+        role: Role,
+        key: ContextKey,
+        offered_value: Vec<u8>,
+    }
+
+    impl Projector for SemanticOfferProjector {
+        fn project(
+            &self,
+            fact: &Fact,
+            context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            if fact.id == self.producer_id {
+                let decoded =
+                    decode_v0_author_fact(fact.body()).ok_or("unknown author fact layout")?;
+                return Ok(ProjectionOutput::new().offer(ContextOffer::for_key(
+                    fact.id,
+                    self.role.clone(),
+                    fact.scope.clone(),
+                    self.key.as_bytes().to_vec(),
+                    decoded,
+                )));
+            }
+
+            if fact.id != self.consumer_id {
+                return Ok(ProjectionOutput::new());
+            }
+
+            let need = need_for(fact, &self.role, &self.key);
+            let Some(value) = context.value_for(&need) else {
+                return Ok(ProjectionOutput::new().need(need));
+            };
+            if value != self.offered_value.as_slice() {
+                return Err("consumer received unexpected semantic offer value".to_string());
+            }
+            if context
+                .match_for(&need)
+                .is_some_and(|matched| matched.value() != value)
+            {
+                return Err("matched context did not expose offer value".to_string());
+            }
+            Ok(ProjectionOutput::new().intent(Intent::new(
+                IntentKind::new("semantic_ready").unwrap(),
+                fact.id,
+                value.to_vec(),
+            )))
+        }
+    }
+
+    fn decode_v0_author_fact(bytes: &[u8]) -> Option<Vec<u8>> {
+        bytes
+            .strip_prefix(b"author-v0|profile:ada|")
+            .map(|value| value.to_vec())
+    }
+
+    fn decode_v1_author_fact(bytes: &[u8]) -> Result<Vec<u8>, String> {
+        bytes
+            .strip_prefix(b"author-v1\0")
+            .map(|value| value.to_vec())
+            .ok_or_else(|| "not a v1 author fact".to_string())
     }
 
     struct ReaddedNeedProjector {
@@ -5354,11 +4506,11 @@ mod contract_tests {
                 0 => Ok(ProjectionOutput::new().need(need)),
                 1 => Ok(ProjectionOutput::new()),
                 _ => {
-                    if let Some(payload) = context.payload_for(&need) {
+                    if let Some(matched) = context.match_for(&need) {
                         Ok(ProjectionOutput::new().intent(Intent::new(
                             IntentKind::new("readded_ready").unwrap(),
                             fact.id,
-                            payload.id,
+                            matched.offer_owner(),
                         )))
                     } else {
                         Ok(ProjectionOutput::new().need(need))
@@ -5412,7 +4564,7 @@ mod contract_tests {
             }
             if fact.id == self.failing_id {
                 let need = need_for(fact, &self.role, &self.key);
-                if context.payload_for(&need).is_some() {
+                if context.match_for(&need).is_some() {
                     return Err("context inconsistent".to_string());
                 }
                 return Ok(ProjectionOutput::new().need(need));
@@ -5462,29 +4614,9 @@ mod contract_tests {
     }
 }
 
-// Core fact lifecycle and SQL-backed runtime projection.
-//
-// This module owns the reusable fact projection contract and queue worker.
-// Core routes raw facts to protocol projectors:
-//
-// ```text
-// route -> project -> effects/needs/offers -> commit
-// ```
-//
-// Core owns queueing, matched context loading, need/offer parking, and commit
-// boundaries. Protocol fact families own raw byte decoding, signature/context
-// validation, legacy adaptation, semantic projection, row construction, and
-// user-facing commands. Keeping the projector contract here lets core
-// projection stay protocol-neutral without teaching it what a workspace, message,
-// invite, key wrap, sync range, or connection fact means.
-//
-// The SQL-backed worker below owns one queued fact at a time: matched context
-// loading, projector execution, incoming retention, context wake fanout,
-// time-wake replacement, and projection effect commit.
-
-// =============================================================================
-// Tests
-// =============================================================================
+// -----------------------------------------------------------------------------
+// Unit Tests
+// -----------------------------------------------------------------------------
 //
 // Unit coverage of the building blocks `contract_tests` composes, ordered
 // most-central first: content-addressed fact identity and the purge/delete
@@ -5495,7 +4627,7 @@ mod contract_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
+    use crate::core::context::{scope_key, ContextKey, ContextNeed, ContextOffer, Role};
     use crate::core::effects::StorageRequirement;
     use crate::core::facts::{Fact, FactId, FactScope};
     use crate::core::schema::CORE_SCHEMA_SOURCE;
@@ -5610,12 +4742,11 @@ mod tests {
             insert_incoming_fact_in_tx(tx, &newer)?;
             insert_context_need_in_tx(
                 tx,
-                &ContextNeed::range(
+                &ContextNeed::for_key(
                     oldest.id,
                     "incoming_context",
                     FactScope::Local,
                     b"a".to_vec(),
-                    b"z".to_vec(),
                 ),
             )?;
             Ok(())
@@ -5631,35 +4762,35 @@ mod tests {
     }
 
     #[test]
-    fn projection_context_returns_matched_payloads_by_need() {
+    fn projection_context_returns_matches_by_need() {
         let role = Role::new("exact").unwrap();
         let need_a = ContextNeed {
             owner: [1; 32],
             role: role.clone(),
             scope: FactScope::Global,
-            start_key: ContextKey::from_bytes([10; 32]),
-            end_key: ContextKey::from_bytes([10; 32]),
+            key: ContextKey::from_bytes([10; 32]),
         };
         let need_b = ContextNeed {
             owner: [2; 32],
             role: role.clone(),
             scope: FactScope::Global,
-            start_key: ContextKey::from_bytes([20; 32]),
-            end_key: ContextKey::from_bytes([20; 32]),
+            key: ContextKey::from_bytes([20; 32]),
         };
         let context = ProjectionContext::from_matches(vec![
-            matched_context(need_a.clone(), [11; 32]),
-            matched_context(need_b.clone(), [22; 32]),
-            matched_context(need_a.clone(), [33; 32]),
+            matched_offer_for_need(need_a.clone(), [11; 32]),
+            matched_offer_for_need(need_b.clone(), [22; 32]),
+            matched_offer_for_need(need_a.clone(), [33; 32]),
         ]);
 
-        let payload_ids = context
-            .matched_payloads_for(&need_a)
-            .map(|(_offer, payload)| payload.id)
+        let matched_offer_owner_ids = context
+            .matches_for(&need_a)
+            .map(|matched| matched.offer_owner())
             .collect::<Vec<_>>();
-        assert_eq!(payload_ids, vec![[11; 32], [33; 32]]);
+        assert_eq!(matched_offer_owner_ids, vec![[11; 32], [33; 32]]);
         assert_eq!(
-            context.payload_for(&need_b).map(|payload| payload.id),
+            context
+                .match_for(&need_b)
+                .map(|matched| matched.offer_owner()),
             Some([22; 32])
         );
     }
@@ -5672,8 +4803,7 @@ mod tests {
             owner: id,
             role,
             scope: FactScope::Global,
-            start_key: ContextKey::from_bytes([2; 32]),
-            end_key: ContextKey::from_bytes([2; 32]),
+            key: ContextKey::from_bytes([2; 32]),
         };
         let output = ProjectionOutput::new()
             .need(need.clone())
@@ -5692,8 +4822,7 @@ mod tests {
                 owner: id,
                 role: role.clone(),
                 scope: FactScope::Global,
-                start_key: key.clone(),
-                end_key: key.clone(),
+                key: key.clone(),
             })
             .offer(ContextOffer {
                 owner: id,
@@ -5701,6 +4830,7 @@ mod tests {
                 scope: FactScope::Global,
                 start_key: key.clone(),
                 end_key: key,
+                value: b"value".to_vec(),
             });
 
         assert_eq!(output.needs.len(), 1);
@@ -5743,27 +4873,24 @@ mod tests {
                 FactScope::Global,
                 vec![semantic as u8],
                 vec![semantic as u8],
+                fact.bytes.clone(),
             )))
         }
     }
 
-    fn matched_context(need: ContextNeed, payload_id: FactId) -> MatchedContext {
-        let payload = Fact {
-            id: payload_id,
-            scope: need.scope.clone(),
-            timestamp: 1,
-            bytes: payload_id.to_vec(),
-        };
+    fn matched_offer_for_need(need: ContextNeed, offer_owner: FactId) -> MatchedContext {
         MatchedContext {
             offer: ContextOffer {
-                owner: payload_id,
+                owner: offer_owner,
                 role: need.role.clone(),
                 scope: need.scope.clone(),
-                start_key: need.start_key.clone(),
-                end_key: need.end_key.clone(),
+                start_key: need.key.clone(),
+                end_key: need.key.clone(),
+                value: offer_owner.to_vec(),
             },
+            offer_owner_scope: need.scope.clone(),
+            offer_owner_received_at: 1,
             need,
-            payload,
         }
     }
 
@@ -5774,13 +4901,7 @@ mod tests {
     ) -> rusqlite::Result<()> {
         insert_context_need_in_tx(
             store,
-            &ContextNeed::range(
-                owner,
-                "cleanup_role",
-                FactScope::Local,
-                b"a".to_vec(),
-                b"z".to_vec(),
-            ),
+            &ContextNeed::for_key(owner, "cleanup_role", FactScope::Local, b"a".to_vec()),
         )?;
         store.conn().execute(
             "INSERT INTO time_wakes (timeline, at, owner)
@@ -5802,26 +4923,38 @@ mod tests {
     }
 
     fn seed_pending_match(store: &Db, owner: FactId, offer_owner: FactId) -> rusqlite::Result<()> {
+        let offer = cleanup_offer(offer_owner);
+        insert_context_offer_in_tx(store, &offer)?;
+        let offer_id = offer.id();
+        let scope_key = scope_key(&FactScope::Local);
         store.conn().execute(
             "INSERT INTO pending_projection_matches
-                (owner, need_role, need_scope_key, need_start_key, need_end_key,
-                 offer_owner, offer_start_key, offer_end_key)
-             VALUES (?1, 'cleanup_role', ?2, ?3, ?4, ?5, ?3, ?4)",
+                (owner, need_role, need_scope_key, need_key, offer_id)
+             VALUES (?1, 'cleanup_role', ?2, ?3, ?4)",
             params![
                 owner.as_slice(),
-                b"scope".as_slice(),
+                scope_key.as_slice(),
                 b"a".as_slice(),
-                b"z".as_slice(),
-                offer_owner.as_slice()
+                offer_id.as_slice()
             ],
         )?;
         Ok(())
     }
 
+    fn cleanup_offer(owner: FactId) -> ContextOffer {
+        ContextOffer::range(
+            owner,
+            "cleanup_role",
+            FactScope::Local,
+            b"a".to_vec(),
+            b"z".to_vec(),
+            b"cleanup".to_vec(),
+        )
+    }
+
     fn assert_owner_keyed_fact_rows(store: &Db, owner: FactId, expected: i64) {
         assert_eq!(
-            owner_row_count(store, CONTEXT_EXACT_EDGES, owner)
-                + owner_row_count(store, CONTEXT_RANGE_EDGES, owner),
+            owner_row_count(store, CONTEXT_NEEDS, owner),
             expected,
             "logical context rows"
         );
@@ -5853,11 +4986,12 @@ mod tests {
     }
 
     fn pending_match_offer_count(store: &Db, offer_owner: FactId) -> i64 {
+        let offer_id = cleanup_offer(offer_owner).id();
         store
             .conn()
             .query_row(
-                "SELECT COUNT(*) FROM pending_projection_matches WHERE offer_owner = ?1",
-                params![offer_owner.as_slice()],
+                "SELECT COUNT(*) FROM pending_projection_matches WHERE offer_id = ?1",
+                params![offer_id.as_slice()],
                 |row| row.get(0),
             )
             .expect("count offer rows")

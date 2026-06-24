@@ -388,7 +388,7 @@ fn target_projectors_use_typed_context_lookups_not_direct_match_scans() {
 
     assert!(
         offenders.is_empty() && stale_allowlist.is_empty(),
-        "source projectors must look up context by concrete ContextNeed with ProjectionContext::payload_for, payload_for_checked, or matched_payloads_for. Direct matched_context scans are exceptional and must not spread.\nnew offenders:\n{}\nstale allowlist entries to remove:\n{}",
+        "source projectors must look up context by concrete ContextNeed with ProjectionContext::value_for, match_for_checked, or matches_for. Direct matched_context scans are exceptional and must not spread.\nnew offenders:\n{}\nstale allowlist entries to remove:\n{}",
         offenders.join("\n"),
         stale_allowlist.join("\n")
     );
@@ -442,7 +442,7 @@ fn target_projectors_do_not_read_raw_context_offer_storage_fields() {
 
     assert!(
         offenders.is_empty(),
-        "projectors should consume typed matched payloads, not raw standing context rows. Keep offer owner checks in core ProjectionContext helpers and range decoding beside the validating domain:\n{}",
+        "projectors should consume typed matched offer values, not raw standing context rows. Keep offer owner checks in core ProjectionContext helpers and range decoding beside the validating domain:\n{}",
         offenders.join("\n")
     );
 }
@@ -698,13 +698,13 @@ fn event_module_context_rs_files_do_not_reappear() {
 
     assert!(
         offenders.is_empty(),
-        "protocol-specific fact-module context.rs files are dumping-ground risks, not a target source of truth. Core-owned src/core/context.rs is allowed; put nontrivial range encoders and matched-payload validation beside the domain that validates them instead:\n{}",
+        "protocol-specific fact-module context.rs files are dumping-ground risks, not a target source of truth. Core-owned src/core/context.rs is allowed; put nontrivial range encoders and matched-offer validation beside the domain that validates them instead:\n{}",
         offenders.join("\n")
     );
 }
 
 #[test]
-fn legacy_custom_context_matcher_api_does_not_reappear() {
+fn retired_custom_context_matcher_api_does_not_reappear() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders = Vec::new();
 
@@ -718,13 +718,13 @@ fn legacy_custom_context_matcher_api_does_not_reappear() {
 
     assert!(
         offenders.is_empty(),
-        "the legacy ContextMatcher API is retired; use core-owned byte-range overlap and projector/domain matched-payload validation instead:\n{}",
+        "the retired ContextMatcher API must not reappear; use core-owned exact-need matching with range-capable offers and projector/domain matched-offer validation instead:\n{}",
         offenders.join("\n")
     );
 }
 
 #[test]
-fn temporary_protocol_context_helpers_do_not_emit_work_or_rows() {
+fn protocol_context_helper_files_do_not_emit_work_or_rows() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders = Vec::new();
     for path in fact_family_files_named(root, "context.rs") {
@@ -753,7 +753,7 @@ fn temporary_protocol_context_helpers_do_not_emit_work_or_rows() {
 
     assert!(
         offenders.is_empty(),
-        "temporary protocol context.rs helper files are not the context source of truth; range encoders and matched-payload validation belong beside their domain, while ProjectionContext inspection belongs in project.rs:\n{}",
+        "protocol context.rs helper files are not the context source of truth; range-offer encoders and matched-offer validation belong beside their domain, while ProjectionContext inspection belongs in project.rs:\n{}",
         offenders.join("\n")
     );
 }

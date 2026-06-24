@@ -247,6 +247,7 @@ impl SyncSharedFactProjector {
                 scope,
                 shared.fact_id,
                 shared.fact_id,
+                fact.bytes.clone(),
             )),
         )
     }
@@ -285,8 +286,8 @@ pub fn context_have_from_needs<'a>(
 ) -> Vec<FactId> {
     let mut ids = BTreeSet::new();
     for need in needs {
-        for (_offer, payload) in context.matched_payloads_for(need) {
-            ids.insert(payload.id);
+        for matched in context.matches_for(need) {
+            ids.insert(matched.offer_owner());
         }
     }
     ids.into_iter().collect()
@@ -339,6 +340,7 @@ mod tests {
                 scope,
                 shared.fact_id,
                 shared.fact_id,
+                fact.bytes.clone()
             )]
         );
         assert!(output.effects.row_mutations.is_empty());

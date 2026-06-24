@@ -314,6 +314,7 @@ mod tests {
                     FactScope::Global,
                     fact.id,
                     fact.id,
+                    fact.bytes.clone()
                 ),
                 ContextOffer::range(
                     fact.id,
@@ -321,6 +322,7 @@ mod tests {
                     FactScope::Local,
                     fact.id,
                     fact.id,
+                    fact.bytes.clone()
                 ),
             ]
         );
@@ -385,6 +387,7 @@ impl InviteSecretProjector {
                 crate::core::facts::FactScope::Global,
                 fact.id,
                 fact.id,
+                fact.bytes.clone(),
             ))
             .offer(crate::core::context::ContextOffer::range(
                 fact.id,
@@ -392,6 +395,7 @@ impl InviteSecretProjector {
                 crate::core::facts::FactScope::Local,
                 fact.id,
                 fact.id,
+                fact.bytes.clone(),
             ))
             .row_mutation(RowMutation::InsertValues(invite_secret_row(&invite_secret))))
     }

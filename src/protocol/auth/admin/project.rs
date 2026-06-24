@@ -236,7 +236,7 @@ use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, MatchedContext, ProjectionContext, ProjectionOutput, Projector,
 };
 use crate::protocol::auth::admin::fact::AdminFact;
 use crate::protocol::auth::signature;
@@ -331,18 +331,18 @@ fn project_bootstrap_admin(
     signature_need: ContextNeed,
 ) -> Result<ProjectionOutput, String> {
     let needs = BootstrapAdminNeeds::new(fact.id, admin, signature_need);
-    let Some(workspace_fact) = context.payload_for_checked(&needs.workspace, "admin workspace")?
+    let Some(workspace_fact) = context.match_for_checked(&needs.workspace, "admin workspace")?
     else {
         return Ok(needs.output());
     };
     let workspace = decode_workspace_context(workspace_fact, admin.workspace_id)?;
-    let Some(user_fact) = context.payload_for_checked(&needs.user, "bootstrap admin user")? else {
+    let Some(user_fact) = context.match_for_checked(&needs.user, "bootstrap admin user")? else {
         return Ok(needs.output());
     };
     let user = decode_user_context(user_fact, admin)?;
     let user_invite_need = auth_user_invite_need(fact.id, user.signer_id);
     let Some(user_invite_fact) =
-        context.payload_for_checked(&user_invite_need, "bootstrap admin user_invite")?
+        context.match_for_checked(&user_invite_need, "bootstrap admin user_invite")?
     else {
         return Ok(needs.output().need(user_invite_need));
     };
@@ -389,13 +389,13 @@ fn project_delegated_admin(
     signature_need: ContextNeed,
 ) -> Result<ProjectionOutput, String> {
     let needs = DelegatedAdminNeeds::new(fact.id, admin, signature_need);
-    let Some(workspace_fact) = context.payload_for(&needs.workspace) else {
+    let Some(workspace_fact) = context.match_for(&needs.workspace) else {
         return Ok(needs.output());
     };
-    let Some(authority_fact) = context.payload_for(&needs.authority) else {
+    let Some(authority_fact) = context.match_for(&needs.authority) else {
         return Ok(needs.output());
     };
-    let Some(user_fact) = context.payload_for(&needs.user) else {
+    let Some(user_fact) = context.match_for(&needs.user) else {
         return Ok(needs.output());
     };
     decode_workspace_context(workspace_fact, admin.workspace_id)?;
@@ -404,9 +404,7 @@ fn project_delegated_admin(
         return Err("signed admin grant signer must be the authority admin".to_string());
     }
 
-    if authority_fact.id != admin.authority_fact_id {
-        return Err("admin authority context payload id mismatch".to_string());
-    }
+    authority_fact.require_owner(admin.authority_fact_id, "admin authority")?;
     let authority = decode_admin_payload(authority_fact)
         .map_err(|_| "signed admin authority must be an admin fact".to_string())?;
     if authority.workspace_id != admin.workspace_id {
@@ -416,9 +414,7 @@ fn project_delegated_admin(
         return Err("signed admin signer key does not match authority admin".to_string());
     }
 
-    if user_fact.id != admin.user_fact_id {
-        return Err("admin user context payload id mismatch".to_string());
-    }
+    user_fact.require_owner(admin.user_fact_id, "admin user")?;
     let user = decode_user_payload(user_fact)
         .map_err(|_| "admin user dependency must be a user fact".to_string())?;
     if user.workspace_id != admin.workspace_id {
@@ -451,18 +447,16 @@ impl BootstrapAdminNeeds {
     fn new(owner: FactId, admin: &AdminFact, signature: ContextNeed) -> Self {
         Self {
             signature,
-            workspace: crate::core::context::ContextNeed::range(
+            workspace: crate::core::context::ContextNeed::for_key(
                 owner,
                 "auth_workspace",
                 crate::core::facts::FactScope::Global,
                 admin.workspace_id,
-                admin.workspace_id,
             ),
-            user: crate::core::context::ContextNeed::range(
+            user: crate::core::context::ContextNeed::for_key(
                 owner,
                 "auth_user",
                 crate::core::facts::FactScope::Global,
-                admin.user_fact_id,
                 admin.user_fact_id,
             ),
         }
@@ -487,25 +481,22 @@ impl DelegatedAdminNeeds {
     fn new(owner: FactId, admin: &AdminFact, signature: ContextNeed) -> Self {
         Self {
             signature,
-            workspace: crate::core::context::ContextNeed::range(
+            workspace: crate::core::context::ContextNeed::for_key(
                 owner,
                 "auth_workspace",
                 crate::core::facts::FactScope::Global,
                 admin.workspace_id,
-                admin.workspace_id,
             ),
-            authority: crate::core::context::ContextNeed::range(
+            authority: crate::core::context::ContextNeed::for_key(
                 owner,
                 "auth_admin",
                 crate::core::facts::FactScope::Global,
                 admin.authority_fact_id,
-                admin.authority_fact_id,
             ),
-            user: crate::core::context::ContextNeed::range(
+            user: crate::core::context::ContextNeed::for_key(
                 owner,
                 "auth_user",
                 crate::core::facts::FactScope::Global,
-                admin.user_fact_id,
                 admin.user_fact_id,
             ),
         }
@@ -521,13 +512,11 @@ impl DelegatedAdminNeeds {
 }
 
 fn decode_workspace_context(
-    workspace_fact: &Fact,
+    workspace_fact: &MatchedContext,
     workspace_id: FactId,
 ) -> Result<WorkspaceFact, String> {
-    if workspace_fact.id != workspace_id {
-        return Err("admin workspace context payload id mismatch".to_string());
-    }
-    let workspace = workspace::decode_fact_payload(workspace_fact.body())
+    workspace_fact.require_owner(workspace_id, "admin workspace")?;
+    let workspace = workspace::decode_fact_payload(workspace_fact.value())
         .map_err(|_| "admin workspace dependency must be a workspace fact".to_string())?;
     Ok(workspace)
 }
@@ -546,6 +535,7 @@ fn materialized_output(
                 crate::core::facts::FactScope::Global,
                 fact.id,
                 fact.id,
+                fact.bytes.clone(),
             ))
             .offer(crate::core::context::ContextOffer::range(
                 fact.id,
@@ -553,6 +543,7 @@ fn materialized_output(
                 crate::protocol::auth::workspace::scope(admin.workspace_id),
                 admin.user_fact_id,
                 admin.user_fact_id,
+                fact.bytes.clone(),
             ))
             .row_mutation(RowMutation::InsertValues(admin_insert(fact.id, admin))),
         admin.workspace_id,
@@ -561,33 +552,32 @@ fn materialized_output(
     ))
 }
 
-fn decode_admin_payload(fact: &Fact) -> Result<super::fact::AdminFact, String> {
-    let admin = super::decode_fact_payload(fact.body())?;
+fn decode_admin_payload(fact: &MatchedContext) -> Result<super::fact::AdminFact, String> {
+    let admin = super::decode_fact_payload(fact.value())?;
     Ok(admin)
 }
 
-fn decode_user_payload(fact: &Fact) -> Result<crate::protocol::auth::user::fact::UserFact, String> {
-    let user = user::decode_fact_payload(fact.body())?;
+fn decode_user_payload(
+    fact: &MatchedContext,
+) -> Result<crate::protocol::auth::user::fact::UserFact, String> {
+    let user = user::decode_fact_payload(fact.value())?;
     Ok(user)
 }
 
 fn auth_user_invite_need(owner: FactId, invite_id: FactId) -> ContextNeed {
-    crate::core::context::ContextNeed::range(
+    crate::core::context::ContextNeed::for_key(
         owner,
         "auth_user_invite",
         crate::core::facts::FactScope::Global,
-        invite_id,
         invite_id,
     )
 }
 
 fn decode_user_context(
-    user_fact: &Fact,
+    user_fact: &MatchedContext,
     admin: &AdminFact,
 ) -> Result<crate::protocol::auth::user::fact::UserFact, String> {
-    if user_fact.id != admin.user_fact_id {
-        return Err("bootstrap admin user context payload id mismatch".to_string());
-    }
+    user_fact.require_owner(admin.user_fact_id, "bootstrap admin user")?;
     let user = decode_user_payload(user_fact)
         .map_err(|_| "bootstrap admin user dependency must be a user fact".to_string())?;
     if user.workspace_id != admin.workspace_id {
@@ -602,14 +592,12 @@ fn decode_user_context(
 }
 
 fn decode_user_invite_context(
-    user_invite_fact: &Fact,
+    user_invite_fact: &MatchedContext,
     user: &crate::protocol::auth::user::fact::UserFact,
     workspace_id: FactId,
 ) -> Result<crate::protocol::auth::user_invite::fact::UserInviteFact, String> {
-    if user_invite_fact.id != user.signer_id {
-        return Err("bootstrap admin user_invite context payload id mismatch".to_string());
-    }
-    let invite = user_invite::decode_fact_payload(user_invite_fact.body())
+    user_invite_fact.require_owner(user.signer_id, "bootstrap admin user_invite")?;
+    let invite = user_invite::decode_fact_payload(user_invite_fact.value())
         .map_err(|_| "bootstrap admin user signer must be a user_invite fact".to_string())?;
     if invite.workspace_id != workspace_id {
         return Err("bootstrap admin user_invite belongs to a different workspace".to_string());
@@ -786,9 +774,11 @@ mod tests {
                     workspace::scope(admin_body.workspace_id),
                     admin_fact.id,
                     admin_body.signer_public_key,
+                    signature_fact.bytes.clone(),
                 )
                 .expect("signature offer"),
-                payload: signature_fact.clone(),
+                offer_owner_scope: signature_fact.scope.clone(),
+                offer_owner_received_at: signature_fact.timestamp,
             },
             MatchedContext {
                 need: needs.workspace,
@@ -798,8 +788,10 @@ mod tests {
                     FactScope::Global,
                     workspace_fact.id,
                     workspace_fact.id,
+                    workspace_fact.bytes.clone(),
                 ),
-                payload: workspace_fact.clone(),
+                offer_owner_scope: workspace_fact.scope.clone(),
+                offer_owner_received_at: workspace_fact.timestamp,
             },
             MatchedContext {
                 need: needs.user,
@@ -809,8 +801,10 @@ mod tests {
                     FactScope::Global,
                     user_fact.id,
                     user_fact.id,
+                    user_fact.bytes.clone(),
                 ),
-                payload: user_fact.clone(),
+                offer_owner_scope: user_fact.scope.clone(),
+                offer_owner_received_at: user_fact.timestamp,
             },
             MatchedContext {
                 need: user_invite_need,
@@ -820,8 +814,10 @@ mod tests {
                     FactScope::Global,
                     user_invite_fact.id,
                     user_invite_fact.id,
+                    user_invite_fact.bytes.clone(),
                 ),
-                payload: user_invite_fact.clone(),
+                offer_owner_scope: user_invite_fact.scope.clone(),
+                offer_owner_received_at: user_invite_fact.timestamp,
             },
         ])
     }

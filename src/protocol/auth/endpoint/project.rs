@@ -248,11 +248,10 @@ const DAEMON_ENDPOINT_KEY: &[u8] = b"daemon_endpoint";
 pub fn daemon_endpoint_need(
     owner: crate::core::facts::FactId,
 ) -> crate::core::context::ContextNeed {
-    crate::core::context::ContextNeed::range(
+    crate::core::context::ContextNeed::for_key(
         owner,
         DAEMON_ENDPOINT_ROLE,
         crate::core::facts::FactScope::Local,
-        DAEMON_ENDPOINT_KEY,
         DAEMON_ENDPOINT_KEY,
     )
 }
@@ -266,6 +265,7 @@ pub fn daemon_endpoint_offer(
         crate::core::facts::FactScope::Local,
         DAEMON_ENDPOINT_KEY,
         DAEMON_ENDPOINT_KEY,
+        owner.to_vec(),
     )
 }
 
@@ -320,6 +320,7 @@ mod tests {
                     FactScope::Local,
                     endpoint.endpoint,
                     endpoint.endpoint,
+                    fact.bytes.clone()
                 ),
                 daemon_endpoint_offer(fact.id),
             ]
@@ -386,6 +387,7 @@ impl EndpointProjector {
             crate::core::facts::FactScope::Local,
             endpoint.endpoint,
             endpoint.endpoint,
+            fact.bytes.clone(),
         ));
         output = output.offer(daemon_endpoint_offer(fact.id));
         output = output.row_mutation(RowMutation::InsertValues(local_endpoint_insert(&endpoint)));

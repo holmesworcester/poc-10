@@ -201,7 +201,7 @@ use crate::core::intents::{RowMutation, TableDeleteWhere, TableInsert, Value};
 use crate::core::project_fact::{
     FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
 };
-use crate::protocol::auth::key_wrap::project::{matched_payload_fact, require_local_scope};
+use crate::protocol::auth::key_wrap::project::require_local_scope;
 use crate::protocol::auth::recipient_key;
 
 use super::{fact::LocalRecipientKeyFact, LOCAL_RECIPIENT_KEY_ROWS};
@@ -257,17 +257,17 @@ fn local_recipient_key(
     require_local_scope(fact)?;
 
     // 2. Context: recipient match and supersession.
-    let recipient_need = ContextNeed::range(
+    let recipient_need = ContextNeed::for_key(
         fact.id,
         "recipient_key",
         scope.clone(),
         local.recipient_key_id,
-        local.recipient_key_id,
     );
-    let Some(recipient_fact) = matched_payload_fact(projection_context, &recipient_need) else {
+    let Some(recipient_fact) = projection_context.match_for(&recipient_need) else {
         return Ok(ProjectionOutput::new().need(recipient_need));
     };
-    let recipient = recipient_key::decode_fact_payload(&recipient_fact.bytes)?;
+    recipient_fact.require_owner(local.recipient_key_id, "local recipient key recipient")?;
+    let recipient = recipient_key::decode_fact_payload(recipient_fact.value())?;
     if recipient.workspace_id != local.workspace_id {
         return Err("local recipient key workspace does not match recipient".to_string());
     }
@@ -275,14 +275,13 @@ fn local_recipient_key(
         return Err("local recipient key public key does not match recipient".to_string());
     }
 
-    let superseded_need = ContextNeed::range(
+    let superseded_need = ContextNeed::for_key(
         fact.id,
         "recipient_superseded",
         scope.clone(),
         local.recipient_key_id,
-        local.recipient_key_id,
     );
-    let is_superseded = projection_context.payload_for(&superseded_need).is_some();
+    let is_superseded = projection_context.match_for(&superseded_need).is_some();
     let output = ProjectionOutput::new()
         .need(recipient_need)
         .need(superseded_need);
@@ -324,5 +323,6 @@ fn local_recipient_key(
             scope,
             local.recipient_key_id,
             local.recipient_key_id,
+            fact.bytes.clone(),
         )))
 }

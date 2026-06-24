@@ -222,15 +222,16 @@ src/
 ```
 
 The exact fact module names can change. The ownership pattern should not.
-Only `src/core/context.rs` owns context primitives. Every dependency is a
-byte-range edge with `owner`, `role`, `scope`, `start_key`, and `end_key`.
-Exact dependencies are just ranges with identical endpoints. There is no
-central protocol role registry or separate point API; projectors choose the
-role strings they validate and emit `ContextNeed::range` /
-`ContextOffer::range` directly when the key is a simple fact id or composite
-id. Nontrivial protocol byte layouts and candidate validation belong beside the
-domain that owns the semantics, such as auth secret coverage and wrap-source
-ranges under `src/protocol/auth/`. Fact modules must
+Only `src/core/context.rs` owns context primitives. Every dependency need is an
+exact key with `owner`, `role`, `scope`, and `key`. Offers are either exact-key
+offers or range offers; those are distinct offer shapes rather than range
+needs. There is no central protocol role registry; projectors choose the role
+strings and key layouts they validate, emit exact needs with
+`ContextNeed::for_key` / `ContextNeed::for_key_parts`, and emit semantic offers
+with `ContextOffer::for_key`, `ContextOffer::for_key_parts`, or
+`ContextOffer::range`. Nontrivial protocol byte layouts and candidate
+validation belong beside the domain that owns the semantics, such as auth
+secret coverage and wrap-source ranges under `src/protocol/auth/`. Fact modules must
 not define their own `matchers.rs`, `context.rs`, or `selectors.rs` files.
 Core only stores, indexes, overlaps, and wakes; projectors must decode and
 validate matched payloads before giving candidates semantic authority.
@@ -406,10 +407,11 @@ frame.rs / receive.rs
   (connection-frame modules only)
 ```
 
-Context range encoders are not a separate file. Simple fact-id and composite-id
-ranges are emitted directly from projectors with `ContextNeed::range` and
-`ContextOffer::range`; any nontrivial range encoding folds into the `project.rs`
-of the family that validates its candidates.
+Context key encoders are not a separate file. Simple fact-id and composite-id
+keys are emitted directly from projectors with `ContextNeed::for_key`,
+`ContextNeed::for_key_parts`, `ContextOffer::for_key`, and
+`ContextOffer::for_key_parts`; any nontrivial range offer encoding folds into
+the `project.rs` of the family that validates its candidates.
 
 ### Command Chaining
 
@@ -603,28 +605,27 @@ again unless matching offers change.
 
 ## Context Matching
 
-Core owns one candidate overlap query for every context role:
+Core owns one candidate query for every exact context need:
 
 ```text
 same role
 same scope_key
-need.start_key <= offer.end_key
-offer.start_key <= need.end_key
+exact offer key == need key
+or range offer start_key <= need key <= range offer end_key
 ```
 
-Exact dependencies are represented as degenerate ranges where `start_key ==
-end_key`. Broader key ranges encode canonical bytes so ordinary lexicographic
-range overlap is enough to find candidates. The target projector must still
-decode and validate matched facts semantically before emitting rows, offers, or
-intents. This deliberately keeps workspace, frontier, signer, and authorization
-rules out of core.
+Needs are always exact. Broader key ranges live only on offers, where canonical
+bytes make ordinary lexicographic containment enough to find candidates. The
+target projector must still decode and validate matched offer values
+semantically before emitting rows, offers, or intents. This deliberately keeps
+workspace, frontier, signer, and authorization rules out of core.
 
 Core owns the syntax for simple exact/composite keys: `ContextKey::from_parts`
-encodes bounded typed parts, and `ContextNeed::for_key_parts` /
-`ContextOffer::for_key_parts` create the identical-endpoint range. Protocol
-code still owns which fields are included, their order, the role string, and
-the matched-payload validation. Domain-owned helpers remain appropriate only
-when a relation needs order-preserving low/high endpoints or candidate decoding,
+encodes bounded typed parts, while `ContextNeed::for_key_parts` and
+`ContextOffer::for_key_parts` create exact needs and offers. Protocol code
+still owns which fields are included, their order, the role string, and the
+matched-offer validation. Domain-owned helpers remain appropriate only when an
+offer relation needs order-preserving low/high endpoints or candidate decoding,
 as with auth key-material coverage and wrap-source ranges.
 
 Standard context range shapes:
@@ -708,10 +709,10 @@ pub fn project(fact: &Fact, ctx: &ProjectionContext) -> Result<ProjectionOutput,
         .need(workspace_need.clone())
         .need(signer_need.clone());
 
-    let Some(workspace) = ctx.payload_for(&workspace_need) else {
+    let Some(workspace) = ctx.match_for(&workspace_need) else {
         return Ok(waiting);
     };
-    let Some(signer) = ctx.payload_for(&signer_need) else {
+    let Some(signer) = ctx.match_for(&signer_need) else {
         return Ok(waiting);
     };
 
@@ -726,19 +727,18 @@ pub fn project(fact: &Fact, ctx: &ProjectionContext) -> Result<ProjectionOutput,
 }
 ```
 
-`payload_for` finds the `MatchedContext` for the exact need the projector
-emitted and returns the matched offer owner's fact. Offers no longer carry a
-separate payload reference: the offered fact owns its context, and projectors
-must validate that matched fact before emitting rows, offers, or intents. The
-projector does not query the store, run overlap queries, or decide candidate
-matching; core already built the context from matched needs/offers before
-invoking the projector.
+`match_for` finds the `MatchedContext` for the exact need the projector emitted
+and returns the matched offer value plus core-stamped owner metadata. Offers are
+the authoritative semantic context: projectors validate the matched value and
+owner metadata before emitting rows, offers, or intents. The projector does not
+query the store, run candidate queries, or decide candidate matching; core
+already built the context from matched needs/offers before invoking the
+projector.
 
-When a projector needs offer metadata as well as the fact payload, it should use
-`matched_payloads_for(&need)` so the lookup is still anchored to the concrete
-`ContextNeed`. Direct `matched_context()` iteration bypasses the typed/indexed
-context surface and is allowed only as an explicitly documented compatibility
-exception.
+When a projector needs to choose among multiple matches, it should use
+`matches_for(&need)` so the lookup is still anchored to the concrete
+`ContextNeed`. Raw context iteration bypasses the typed/indexed context surface
+and needs an explicit local justification.
 
 The `waiting` output is not a blocked state. It is the fact's current standing
 context surface. If a matching offer already exists, the projection preparation
@@ -777,10 +777,10 @@ When implementing or reviewing a projector:
 2. For each requirement, inspect supplied ProjectionContext first. If matched
    context is absent, emit a stable target ContextNeed unless the fact is
    local-only or truly dependency-free.
-3. Retrieve matched context through `payload_for`, `payload_for_checked`, or
-   `matched_payloads_for` for the exact need; then decode and re-check type,
-   scope, workspace, signer/author authority, and endpoint role before writing
-   rows.
+3. Retrieve matched context through `match_for`, `match_for_checked`,
+   `matches_for`, or `value_for` for the exact need; then decode the offer
+   value and re-check type, owner scope, workspace, signer/author authority,
+   and endpoint role before writing rows.
 4. Emit ContextOffers only after the fact is valid context for that role.
 5. If required context is missing, return stable needs and no materialized rows
    or intents for that branch.
@@ -790,9 +790,9 @@ When implementing or reviewing a projector:
 8. Keep helper functions small and local to the fact family. They live inside
    the standard role file that owns their responsibility, not in a separate
    invariant-named file.
-9. Emit simple fact-id or composite-id context with `ContextNeed::range` and
-   `ContextOffer::range` directly. Fold nontrivial range encodings and candidate
-   validation into the `project.rs` of the domain that validates them.
+9. Emit simple fact-id or composite-id context with exact key constructors.
+   Fold nontrivial range offer encodings and candidate validation into the
+   `project.rs` of the domain that validates them.
 10. If a module is temporarily a row shell because sibling context is not ready,
     document the exact behavior gap in the module docs and remove that gap when
     the sibling context lands.

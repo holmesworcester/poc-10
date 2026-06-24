@@ -310,7 +310,7 @@ pub mod authenticate {
     use crate::core::context::ContextNeed;
     use crate::core::crypto::{self, Ed25519PublicKey};
     use crate::core::facts::{Fact, FactId, FactScope};
-    use crate::core::project_fact::{verify_fact_id, ProjectionContext};
+    use crate::core::project_fact::{verify_fact_id, MatchedContext, ProjectionContext};
     use crate::protocol::auth::{endpoint, endpoint_shared, invite_accepted, invite_secret};
     use crate::protocol::connection::ephemeral_secret;
 
@@ -349,12 +349,11 @@ pub mod authenticate {
             fact.id,
             decode::request_header_ephemeral_public_key(fact.body())?,
         );
-        for (_, secret_fact) in context.matched_payloads_for(&sender_need) {
-            if secret_fact.scope != FactScope::Local {
-                return Err("connection request sender secret context must be local".to_string());
-            }
+        for secret_fact in context.matches_for(&sender_need) {
+            secret_fact
+                .require_owner_scope(&FactScope::Local, "connection request sender secret")?;
             let secret =
-                match ephemeral_secret::decode_fact_payload(secret_fact.body()).map_err(|_| {
+                match ephemeral_secret::decode_fact_payload(secret_fact.value()).map_err(|_| {
                     "connection request sender context is not an ephemeral secret".to_string()
                 }) {
                     Ok(secret) => secret,
@@ -366,7 +365,7 @@ pub mod authenticate {
             if let Err(error) = validate_common_request(fact.id, &request) {
                 return Err(error);
             }
-            if request.initiator_ephemeral_secret_fact_id != secret_fact.id {
+            if request.initiator_ephemeral_secret_fact_id != secret_fact.offer_owner() {
                 return Err(
                     "connection request sender secret id does not match request".to_string()
                 );
@@ -391,14 +390,11 @@ pub mod authenticate {
 
         let receiver_need =
             local_endpoint_need(fact.id, decode::request_header_to_endpoint(fact.body())?);
-        for (_, endpoint_fact) in context.matched_payloads_for(&receiver_need) {
-            if endpoint_fact.scope != FactScope::Local {
-                return Err(
-                    "connection request receiver endpoint context must be local".to_string()
-                );
-            }
+        for endpoint_fact in context.matches_for(&receiver_need) {
+            endpoint_fact
+                .require_owner_scope(&FactScope::Local, "connection request receiver endpoint")?;
             let local_endpoint =
-                match endpoint::decode_fact_payload(endpoint_fact.body()).map_err(|_| {
+                match endpoint::decode_fact_payload(endpoint_fact.value()).map_err(|_| {
                     "connection request receiver context is not a local endpoint".to_string()
                 }) {
                     Ok(endpoint) => endpoint,
@@ -442,32 +438,26 @@ pub mod authenticate {
         match request.mode {
             REQUEST_MODE_BOOTSTRAP => {
                 let invite_need = invite_secret_need(owner, request.invite_secret_fact_id);
-                let Some(invite_fact) = context.payload_for(&invite_need) else {
+                let Some(invite_fact) = context.match_for(&invite_need) else {
                     return Ok(Some(vec![invite_need]));
                 };
-                if invite_fact.scope != FactScope::Local {
-                    return Err("connection request invite context must be local".to_string());
-                }
-                let invite =
-                    invite_secret_from_context_fact(invite_fact, request.invite_secret_fact_id)
-                        .map_err(|_| {
-                            "connection request invite context is malformed".to_string()
-                        })?;
+                invite_fact.require_owner_scope(&FactScope::Local, "connection request invite")?;
+                let invite = invite_secret_from_context(invite_fact, request.invite_secret_fact_id)
+                    .map_err(|_| "connection request invite context is malformed".to_string())?;
                 validate_invite_signature(request, &invite)?;
                 Ok(None)
             }
             REQUEST_MODE_MEMBERSHIP => {
                 let shared_need = endpoint_shared_need(owner, request.initiator_endpoint_shared_id);
-                let Some(shared_fact) = context.payload_for(&shared_need) else {
+                let Some(shared_fact) = context.match_for(&shared_need) else {
                     return Ok(Some(vec![shared_need]));
                 };
-                if shared_fact.scope != FactScope::Global {
-                    return Err(
-                        "connection request endpoint_shared context must be global".to_string()
-                    );
-                }
+                shared_fact.require_owner_scope(
+                    &FactScope::Global,
+                    "connection request endpoint_shared",
+                )?;
                 let shared =
-                    endpoint_shared::decode_fact_payload(shared_fact.body()).map_err(|_| {
+                    endpoint_shared::decode_fact_payload(shared_fact.value()).map_err(|_| {
                         "connection request endpoint_shared context is malformed".to_string()
                     })?;
                 if shared.endpoint_id != request.from_endpoint {
@@ -508,17 +498,36 @@ pub mod authenticate {
         Ok(())
     }
 
-    pub(crate) fn invite_secret_from_context_fact(
+    pub(crate) fn invite_secret_from_fact(
         fact: &Fact,
         expected_invite_secret_id: FactId,
     ) -> Result<invite_secret::fact::InviteSecretFact, String> {
-        if let Ok(secret) = invite_secret::decode_fact_payload(fact.body()) {
-            if fact.id != expected_invite_secret_id {
+        invite_secret_from_bytes(fact.id, fact.body(), expected_invite_secret_id)
+    }
+
+    pub(crate) fn invite_secret_from_context(
+        matched: &MatchedContext,
+        expected_invite_secret_id: FactId,
+    ) -> Result<invite_secret::fact::InviteSecretFact, String> {
+        invite_secret_from_bytes(
+            matched.offer_owner(),
+            matched.value(),
+            expected_invite_secret_id,
+        )
+    }
+
+    fn invite_secret_from_bytes(
+        owner: FactId,
+        bytes: &[u8],
+        expected_invite_secret_id: FactId,
+    ) -> Result<invite_secret::fact::InviteSecretFact, String> {
+        if let Ok(secret) = invite_secret::decode_fact_payload(bytes) {
+            if owner != expected_invite_secret_id {
                 return Err("connection invite context id does not match request".to_string());
             }
             return Ok(secret);
         }
-        let accepted = invite_accepted::decode_fact_payload(fact.body())
+        let accepted = invite_accepted::decode_fact_payload(bytes)
             .map_err(|_| "connection invite context is not invite_secret or invite_accepted")?;
         let derived_id = invite_accepted::derived_invite_secret_fact_id(&accepted)?;
         if derived_id != expected_invite_secret_id {
@@ -864,12 +873,17 @@ pub fn connection_request_need(owner: FactId, request_id: FactId) -> ContextNeed
     )
 }
 
-pub fn connection_request_offer(owner: FactId, request_id: FactId) -> ContextOffer {
+pub fn connection_request_offer(
+    owner: FactId,
+    request_id: FactId,
+    value: impl Into<Vec<u8>>,
+) -> ContextOffer {
     ContextOffer::for_key(
         owner,
         CONNECTION_REQUEST_ROLE,
         FactScope::Global,
         request_id,
+        value,
     )
 }
 
@@ -882,12 +896,17 @@ pub fn connection_for_request_need(owner: FactId, request_id: FactId) -> Context
     )
 }
 
-pub fn connection_for_request_offer(owner: FactId, request_id: FactId) -> ContextOffer {
+pub fn connection_for_request_offer(
+    owner: FactId,
+    request_id: FactId,
+    value: impl Into<Vec<u8>>,
+) -> ContextOffer {
     ContextOffer::for_key(
         owner,
         CONNECTION_FOR_REQUEST_ROLE,
         FactScope::Local,
         request_id,
+        value,
     )
 }
 
@@ -966,29 +985,23 @@ fn project_sender_request(
     match request.mode {
         REQUEST_MODE_BOOTSTRAP => {
             let invite_need = invite_secret_need(fact.id, request.invite_secret_fact_id);
-            let Some(invite_fact) = context.payload_for(&invite_need) else {
+            let Some(invite_fact) = context.match_for(&invite_need) else {
                 return Ok(output.need(invite_need));
             };
-            if invite_fact.scope != FactScope::Local {
-                return Err("connection request invite context must be local".to_string());
-            }
-            authenticate::invite_secret_from_context_fact(
-                invite_fact,
-                request.invite_secret_fact_id,
-            )
-            .map_err(|_| "connection request invite context is malformed".to_string())?;
+            invite_fact.require_owner_scope(&FactScope::Local, "connection request invite")?;
+            authenticate::invite_secret_from_context(invite_fact, request.invite_secret_fact_id)
+                .map_err(|_| "connection request invite context is malformed".to_string())?;
             output = output.need(invite_need);
         }
         REQUEST_MODE_MEMBERSHIP => {
             let shared_need = endpoint_shared_need(fact.id, request.initiator_endpoint_shared_id);
-            let Some(shared_fact) = context.payload_for(&shared_need) else {
+            let Some(shared_fact) = context.match_for(&shared_need) else {
                 return Ok(output.need(shared_need));
             };
-            if shared_fact.scope != FactScope::Global {
-                return Err("connection request endpoint_shared context must be global".to_string());
-            }
+            shared_fact
+                .require_owner_scope(&FactScope::Global, "connection request endpoint_shared")?;
             let shared =
-                endpoint_shared::decode_fact_payload(shared_fact.body()).map_err(|_| {
+                endpoint_shared::decode_fact_payload(shared_fact.value()).map_err(|_| {
                     "connection request endpoint_shared context is malformed".to_string()
                 })?;
             if shared.endpoint_id != request.from_endpoint {
@@ -1003,7 +1016,11 @@ fn project_sender_request(
         return Err("connection request dialed_addr is required for sending".to_string());
     };
     Ok(output
-        .offer(connection_request_offer(fact.id, fact.id))
+        .offer(connection_request_offer(
+            fact.id,
+            fact.id,
+            fact.bytes.clone(),
+        ))
         .row_mutation(RowMutation::InsertValues(connection_request_row(
             fact.id,
             fact.id,
@@ -1036,30 +1053,24 @@ fn project_receiver_request(
     let authority_id = match request.mode {
         REQUEST_MODE_BOOTSTRAP => {
             let invite_need = invite_secret_need(fact.id, request.invite_secret_fact_id);
-            let Some(invite_fact) = context.payload_for(&invite_need) else {
+            let Some(invite_fact) = context.match_for(&invite_need) else {
                 return Ok(output.need(invite_need));
             };
-            if invite_fact.scope != FactScope::Local {
-                return Err("connection request invite context must be local".to_string());
-            }
-            authenticate::invite_secret_from_context_fact(
-                invite_fact,
-                request.invite_secret_fact_id,
-            )
-            .map_err(|_| "connection request invite context is malformed".to_string())?;
+            invite_fact.require_owner_scope(&FactScope::Local, "connection request invite")?;
+            authenticate::invite_secret_from_context(invite_fact, request.invite_secret_fact_id)
+                .map_err(|_| "connection request invite context is malformed".to_string())?;
             output = output.need(invite_need);
             request.invite_secret_fact_id
         }
         REQUEST_MODE_MEMBERSHIP => {
             let shared_need = endpoint_shared_need(fact.id, request.initiator_endpoint_shared_id);
-            let Some(shared_fact) = context.payload_for(&shared_need) else {
+            let Some(shared_fact) = context.match_for(&shared_need) else {
                 return Ok(output.need(shared_need));
             };
-            if shared_fact.scope != FactScope::Global {
-                return Err("connection request endpoint_shared context must be global".to_string());
-            }
+            shared_fact
+                .require_owner_scope(&FactScope::Global, "connection request endpoint_shared")?;
             let shared =
-                endpoint_shared::decode_fact_payload(shared_fact.body()).map_err(|_| {
+                endpoint_shared::decode_fact_payload(shared_fact.value()).map_err(|_| {
                     "connection request endpoint_shared context is malformed".to_string()
                 })?;
             if shared.endpoint_id != request.from_endpoint {
@@ -1067,11 +1078,13 @@ fn project_receiver_request(
             }
             let member_need =
                 content_signer_need(fact.id, shared.workspace_id, request.to_endpoint);
-            let Some(member_fact) = context.payload_for(&member_need) else {
+            let Some(member_fact) = context.match_for(&member_need) else {
                 return Ok(output.need(shared_need).need(member_need));
             };
+            member_fact
+                .require_owner_scope(&FactScope::Global, "connection request mutual membership")?;
             let member =
-                endpoint_shared::decode_fact_payload(member_fact.body()).map_err(|_| {
+                endpoint_shared::decode_fact_payload(member_fact.value()).map_err(|_| {
                     "connection request mutual membership context is malformed".to_string()
                 })?;
             if member.endpoint_id != request.to_endpoint
@@ -1104,7 +1117,11 @@ fn project_receiver_request(
     })?;
     let receive_id = receipt.id;
     Ok(output
-        .offer(connection_request_offer(fact.id, fact.id))
+        .offer(connection_request_offer(
+            fact.id,
+            fact.id,
+            fact.bytes.clone(),
+        ))
         .fact(receipt)
         .intent(create_connection_intent(CreateConnection {
             request_id: fact.id,
@@ -1135,7 +1152,7 @@ fn attach_request_observation_if_available(
     output: ProjectionOutput,
 ) -> Result<ProjectionOutput, String> {
     let need = frame_observation::project::connection_frame_observation_need(fact.id, fact.id);
-    if context.incoming_metadata().is_none() && context.payload_for(&need).is_none() {
+    if context.incoming_metadata().is_none() && context.match_for(&need).is_none() {
         return Ok(output);
     }
     let observation = request_observation(fact, context)?;
@@ -1167,13 +1184,11 @@ fn request_observation(
         });
     }
 
-    let Some(observation_fact) = context.payload_for(&need) else {
+    let Some(observation_fact) = context.match_for(&need) else {
         return Ok(ObservationResolution::Missing { output });
     };
-    if observation_fact.scope != FactScope::Local {
-        return Err("connection request observation context must be local".to_string());
-    }
-    let observed = frame_observation::project::decode::decode_fact(observation_fact.body())
+    observation_fact.require_owner_scope(&FactScope::Local, "connection request observation")?;
+    let observed = frame_observation::project::decode::decode_fact(observation_fact.value())
         .map_err(|_| "connection request observation context is malformed".to_string())?;
     if observed.frame_fact_id != fact.id {
         return Err("connection request observation does not bind request".to_string());
@@ -1328,8 +1343,10 @@ mod tests {
                     "auth_local_endpoint",
                     FactScope::Local,
                     responder.endpoint,
+                    endpoint_fact.bytes.clone(),
                 ),
-                payload: endpoint_fact,
+                offer_owner_scope: endpoint_fact.scope,
+                offer_owner_received_at: endpoint_fact.timestamp,
             },
             MatchedContext {
                 need: ContextNeed::for_key(
@@ -1343,8 +1360,10 @@ mod tests {
                     "connection_invite_secret",
                     FactScope::Local,
                     invite_fact.id,
+                    invite_fact.bytes.clone(),
                 ),
-                payload: invite_fact.clone(),
+                offer_owner_scope: invite_fact.scope.clone(),
+                offer_owner_received_at: invite_fact.timestamp,
             },
         ]
     }
@@ -1367,8 +1386,10 @@ mod tests {
             offer: frame_observation::project::connection_frame_observation_offer(
                 observation.id,
                 request_fact.id,
+                observation.bytes.clone(),
             ),
-            payload: observation,
+            offer_owner_scope: observation.scope,
+            offer_owner_received_at: observation.timestamp,
         }
     }
 
@@ -1377,8 +1398,7 @@ mod tests {
             .iter()
             .find(|need| need.role.as_str() == role)
             .expect("need role");
-        assert_eq!(need.start_key.as_bytes(), key);
-        assert_eq!(need.end_key.as_bytes(), key);
+        assert_eq!(need.key.as_bytes(), key);
     }
 
     #[test]
@@ -1447,8 +1467,10 @@ mod tests {
                     FactScope::Local,
                     decode::request_header_ephemeral_public_key(request_fact.body())
                         .expect("request public key"),
+                    ephemeral_fact.bytes.clone(),
                 ),
-                payload: ephemeral_fact,
+                offer_owner_scope: ephemeral_fact.scope,
+                offer_owner_received_at: ephemeral_fact.timestamp,
             },
             MatchedContext {
                 need: ContextNeed::for_key(
@@ -1462,8 +1484,10 @@ mod tests {
                     "connection_invite_secret",
                     FactScope::Local,
                     invite_fact.id,
+                    invite_fact.bytes.clone(),
                 ),
-                payload: invite_fact,
+                offer_owner_scope: invite_fact.scope,
+                offer_owner_received_at: invite_fact.timestamp,
             },
         ]);
 

@@ -303,7 +303,7 @@ use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::Value;
 use crate::core::intents::{RowMutation, TableDeleteWhere, TableInsert};
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, MatchedContext, ProjectionContext, ProjectionOutput, Projector,
 };
 
 use crate::protocol::auth::signature;
@@ -383,18 +383,16 @@ impl ContentFileProjector {
             file.signer_public_key,
         )?;
         let signer_need = project::signer_need(fact.id, file.workspace_id, file.signer_id);
-        let parent_need = crate::core::context::ContextNeed::range(
+        let parent_need = crate::core::context::ContextNeed::for_key(
             fact.id,
             "content_message",
             scope.clone(),
             file.message_id,
-            file.message_id,
         );
-        let author_need = crate::core::context::ContextNeed::range(
+        let author_need = crate::core::context::ContextNeed::for_key(
             fact.id,
             "auth_user",
             crate::core::facts::FactScope::Global,
-            file.author_user_id,
             file.author_user_id,
         );
         let file_deletion_need = crate::core::project_fact::fact_purged_need(
@@ -524,6 +522,7 @@ impl ContentFileProjector {
                     scope,
                     file.file_id,
                     file.file_id,
+                    fact.bytes.clone(),
                 ))
                 .offer(crate::core::context::ContextOffer::range(
                     fact.id,
@@ -531,6 +530,7 @@ impl ContentFileProjector {
                     crate::protocol::auth::workspace::scope(file.workspace_id),
                     fact.id,
                     fact.id,
+                    fact.bytes.clone(),
                 ))
                 .row_mutation(RowMutation::InsertValues(content_file_row(fact.id, &file))),
             file.workspace_id,
@@ -544,7 +544,7 @@ fn context_payload<'a>(
     context: &'a ProjectionContext,
     need: &crate::core::context::ContextNeed,
     label: &str,
-) -> Result<Option<&'a Fact>, String> {
+) -> Result<Option<&'a MatchedContext>, String> {
     project::context_payload(context, need, label)
 }
 
@@ -575,38 +575,35 @@ fn content_file_delete(workspace_id: FactId, file_fact_id: FactId) -> TableDelet
     }
 }
 
-fn parent_message_context<'a>(
-    payload: &'a Fact,
+fn parent_message_context(
+    matched: &MatchedContext,
     expected_scope: &FactScope,
     workspace_id: crate::core::facts::FactId,
     message_id: crate::core::facts::FactId,
     label: &str,
-) -> Result<ParentMessageContext<'a>, String> {
-    if payload.id != message_id {
-        return Err("file parent context payload id mismatch".to_string());
+) -> Result<ParentMessageContext, String> {
+    if matched.offer_owner() != message_id {
+        return Err("file parent matched offer owner mismatch".to_string());
     }
-    if &payload.scope != expected_scope {
+    if &matched.offer_owner_scope != expected_scope {
         return Err("file parent context scope does not match file workspace".to_string());
     }
-    let parent = decode_parent_message_payload(payload, label)?;
+    let parent = decode_parent_message_offer(matched, label)?;
     if parent.workspace_id != workspace_id {
         return Err("file parent message workspace does not match file".to_string());
     }
-    Ok(ParentMessageContext {
-        _payload: payload,
-        message: parent,
-    })
+    Ok(ParentMessageContext { message: parent })
 }
 
 fn validate_author_user(
-    payload: &Fact,
+    matched: &MatchedContext,
     workspace_id: crate::core::facts::FactId,
     author_user_id: crate::core::facts::FactId,
 ) -> Result<(), String> {
-    if payload.id != author_user_id {
-        return Err("file author context payload id mismatch".to_string());
+    if matched.offer_owner() != author_user_id {
+        return Err("file author matched offer owner mismatch".to_string());
     }
-    let author = crate::protocol::auth::user::decode_fact_payload(payload.body())
+    let author = crate::protocol::auth::user::decode_fact_payload(matched.value())
         .map_err(|_| "file author context is not an identity user".to_string())?;
     if author.workspace_id != workspace_id {
         return Err("file author workspace does not match file".to_string());
@@ -615,12 +612,12 @@ fn validate_author_user(
 }
 
 fn validate_file_deletion(
-    payload: &Fact,
+    matched: &MatchedContext,
     workspace_id: crate::core::facts::FactId,
     target_file_id: crate::core::facts::FactId,
     author_user_id: crate::core::facts::FactId,
 ) -> Result<(), String> {
-    let deletion = file_deletion::decode_fact_payload(payload.body())
+    let deletion = file_deletion::decode_fact_payload(matched.value())
         .map_err(|_| "file deletion context is not a content file deletion".to_string())?;
     if deletion.workspace_id != workspace_id {
         return Err("file deletion workspace does not match file".to_string());
@@ -635,14 +632,14 @@ fn validate_file_deletion(
 }
 
 fn validate_message_deletion(
-    payload: &Fact,
+    matched: &MatchedContext,
     workspace_id: crate::core::facts::FactId,
     target_frontier_id: crate::core::facts::FactId,
     target_minute: u64,
     target_message_id: crate::core::facts::FactId,
     author_user_id: crate::core::facts::FactId,
 ) -> Result<(), String> {
-    let deletion = message_deletion::decode_fact_payload(payload.body())
+    let deletion = message_deletion::decode_fact_payload(matched.value())
         .map_err(|_| "parent deletion context is not a content message deletion".to_string())?;
     if deletion.workspace_id != workspace_id {
         return Err("parent deletion workspace does not match file".to_string());
@@ -662,8 +659,7 @@ fn validate_message_deletion(
     Ok(())
 }
 
-struct ParentMessageContext<'a> {
-    _payload: &'a Fact,
+struct ParentMessageContext {
     message: ParentMessage,
 }
 
@@ -674,9 +670,12 @@ struct ParentMessage {
     author_user_id: crate::core::facts::FactId,
 }
 
-fn decode_parent_message_payload(payload: &Fact, label: &str) -> Result<ParentMessage, String> {
-    let message = project::decode_typed_fact(
-        payload,
+fn decode_parent_message_offer(
+    matched: &MatchedContext,
+    label: &str,
+) -> Result<ParentMessage, String> {
+    let message = project::decode_typed_context(
+        matched,
         message::TYPE_CONTENT_MESSAGE,
         label,
         message::decode_fact_payload,

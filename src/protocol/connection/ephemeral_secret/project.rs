@@ -299,11 +299,9 @@ impl ConnectionEphemeralSecretProjector {
 
         // 2. Close gate.
         let close_need = close::ephemeral_secret_closed_need(fact.id, fact.id);
-        if let Some(close_fact) = _context.payload_for(&close_need) {
-            if close_fact.scope != FactScope::Local {
-                return Err("connection ephemeral close context must be local".to_string());
-            }
-            let close = close::decode_fact_payload(close_fact.body()).map_err(|_| {
+        if let Some(close_fact) = _context.match_for(&close_need) {
+            close_fact.require_owner_scope(&FactScope::Local, "connection ephemeral close")?;
+            let close = close::decode_fact_payload(close_fact.value()).map_err(|_| {
                 "connection ephemeral close context is not a connection close".to_string()
             })?;
             if close.connection_id == [0; 32] {
@@ -325,12 +323,14 @@ impl ConnectionEphemeralSecretProjector {
                 CONNECTION_EPHEMERAL_SECRET_ROLE,
                 FactScope::Local,
                 fact.id,
+                fact.bytes.clone(),
             ))
             .offer(ContextOffer::for_key(
                 fact.id,
                 CONNECTION_EPHEMERAL_SECRET_PUBLIC_KEY_ROLE,
                 FactScope::Local,
                 secret.ephemeral_public_key,
+                fact.bytes.clone(),
             ))
             .row_mutation(RowMutation::InsertValues(connection_ephemeral_secret_row(
                 fact.id, &secret,
@@ -399,8 +399,13 @@ mod project_tests {
         );
         MatchedContext {
             need: close::ephemeral_secret_closed_need(owner, secret_id),
-            offer: close::ephemeral_secret_closed_offer(close_fact.id, secret_id),
-            payload: close_fact,
+            offer: close::ephemeral_secret_closed_offer(
+                close_fact.id,
+                secret_id,
+                close_fact.bytes.clone(),
+            ),
+            offer_owner_scope: close_fact.scope,
+            offer_owner_received_at: close_fact.timestamp,
         }
     }
 
@@ -491,6 +496,9 @@ mod project_tests {
             .project(&fact, &context)
             .expect_err("non-local close context should reject");
 
-        assert_eq!(err, "connection ephemeral close context must be local");
+        assert_eq!(
+            err,
+            "connection ephemeral close matched offer scope mismatch"
+        );
     }
 }

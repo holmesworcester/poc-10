@@ -387,12 +387,17 @@ pub fn connection_fact_receipt_need(owner: FactId, received_fact_id: FactId) -> 
     )
 }
 
-pub fn connection_fact_receipt_offer(owner: FactId, received_fact_id: FactId) -> ContextOffer {
+pub fn connection_fact_receipt_offer(
+    owner: FactId,
+    received_fact_id: FactId,
+    value: impl Into<Vec<u8>>,
+) -> ContextOffer {
     ContextOffer::for_key(
         owner,
         CONNECTION_FACT_RECEIPT_ROLE,
         FactScope::Local,
         received_fact_id,
+        value,
     )
 }
 
@@ -477,6 +482,7 @@ mod tests {
             vec![connection_fact_receipt_offer(
                 fact.id,
                 receipt.received_fact_id,
+                fact.bytes.clone(),
             )]
         );
         assert_eq!(
@@ -539,6 +545,7 @@ impl ConnectionFactReceiptProjector {
             .offer(connection_fact_receipt_offer(
                 fact.id,
                 received.received_fact_id,
+                fact.bytes.clone(),
             ))
             .row_mutation(RowMutation::InsertValues(
                 super::connection_fact_receipt_row(fact.id, &received)?,

@@ -256,6 +256,7 @@ impl LocalSignerSecretProjector {
                 workspace_scope(secret.workspace_id),
                 secret.signer_id,
                 secret.signer_id,
+                fact.bytes.clone(),
             )),
         )
     }

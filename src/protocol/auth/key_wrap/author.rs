@@ -5,7 +5,7 @@
 //! secret material, or validate derived local material.
 
 use crate::core::crypto;
-use crate::core::facts::{Fact, FactScope};
+use crate::core::facts::{Fact, FactId, FactScope};
 
 use crate::protocol::auth::key_wrap_creation::fact::KeyWrapCreationFact;
 use crate::protocol::auth::key_wrap_recovery::fact::KeyWrapRecoveryFact;
@@ -44,11 +44,14 @@ struct WrapMaterial {
 
 pub fn create_key_wrap_fact(
     creation: &KeyWrapCreationFact,
-    recipient_fact: &Fact,
-    source_fact: &Fact,
+    recipient_fact_id: FactId,
+    recipient_fact_bytes: &[u8],
+    source_fact_id: FactId,
+    source_fact_received_at: u64,
+    source_fact_bytes: &[u8],
 ) -> Result<Fact, String> {
-    let recipient = recipient_key_layout::decode_recipient_key(&recipient_fact.bytes)?;
-    if recipient_fact.id != creation.recipient_key_id {
+    let recipient = recipient_key_layout::decode_recipient_key(recipient_fact_bytes)?;
+    if recipient_fact_id != creation.recipient_key_id {
         return Err("recipient fact id does not match key_wrap_creation fact".to_string());
     }
     if recipient.workspace_id != creation.workspace_id {
@@ -58,7 +61,12 @@ pub fn create_key_wrap_fact(
         return Err("recipient key material cannot be empty".to_string());
     }
 
-    let material = wrap_material(creation, source_fact)?;
+    let material = wrap_material(
+        creation,
+        source_fact_id,
+        source_fact_received_at,
+        source_fact_bytes,
+    )?;
     let sender_wrap_secret = deterministic_sender_wrap_secret(creation, &recipient, &material);
     let sender_wrap_public_key = crypto::x25519_public_key(&sender_wrap_secret);
     let nonce = deterministic_nonce(creation, &recipient, &material);
@@ -101,42 +109,45 @@ pub fn create_key_wrap_fact(
 
 pub fn unwrap_key_wrap_fact(
     recovery: &KeyWrapRecoveryFact,
-    key_wrap_fact: &Fact,
-    local_recipient_key_fact: &Fact,
-    recipient_fact: &Fact,
-    frontier_fact: &Fact,
+    key_wrap_fact_id: FactId,
+    key_wrap_fact_bytes: &[u8],
+    local_recipient_key_fact_id: FactId,
+    local_recipient_key_fact_bytes: &[u8],
+    recipient_fact_id: FactId,
+    recipient_fact_bytes: &[u8],
+    frontier_fact_id: FactId,
+    frontier_fact_bytes: &[u8],
 ) -> Result<Fact, String> {
-    if key_wrap_fact.id != recovery.key_wrap_id {
+    if key_wrap_fact_id != recovery.key_wrap_id {
         return Err("key wrap fact id does not match key_wrap_recovery fact".to_string());
     }
-    if local_recipient_key_fact.id != recovery.local_recipient_key_id {
+    if local_recipient_key_fact_id != recovery.local_recipient_key_id {
         return Err(
             "local recipient key fact id does not match key_wrap_recovery fact".to_string(),
         );
     }
-    if recipient_fact.id != recovery.recipient_key_id {
+    if recipient_fact_id != recovery.recipient_key_id {
         return Err("recipient fact id does not match key_wrap_recovery fact".to_string());
     }
-    if frontier_fact.id != recovery.frontier_id {
+    if frontier_fact_id != recovery.frontier_id {
         return Err("frontier fact id does not match key_wrap_recovery fact".to_string());
     }
 
-    let wrap = decode::decode_key_wrap(&key_wrap_fact.bytes)?;
+    let wrap = decode::decode_key_wrap(key_wrap_fact_bytes)?;
     require_unwrap_coordinate(recovery, &wrap)?;
 
-    let recipient = recipient_key_layout::decode_recipient_key(&recipient_fact.bytes)?;
+    let recipient = recipient_key_layout::decode_recipient_key(recipient_fact_bytes)?;
     if recipient.workspace_id != recovery.workspace_id {
         return Err("recipient key workspace does not match key_wrap_recovery fact".to_string());
     }
-    let frontier = removal_frontier_decode::decode_removal_frontier(&frontier_fact.bytes)?;
+    let frontier = removal_frontier_decode::decode_removal_frontier(frontier_fact_bytes)?;
     if frontier.workspace_id != recovery.workspace_id {
         return Err("removal frontier workspace does not match key_wrap_recovery fact".to_string());
     }
     if frontier.owner_endpoint_id != wrap.signer_endpoint_id {
         return Err("key wrap signer does not own unwrap frontier".to_string());
     }
-    let local =
-        local_recipient_layout::decode_local_recipient_key(&local_recipient_key_fact.bytes)?;
+    let local = local_recipient_layout::decode_local_recipient_key(local_recipient_key_fact_bytes)?;
     require_local_recipient_key(recovery, &recipient, &local)?;
 
     let plaintext = crypto::x25519_xchacha20poly1305_decrypt(
@@ -163,13 +174,24 @@ pub fn unwrap_key_wrap_fact(
 
 pub fn create_validated_key_wrap_facts(
     creation: &KeyWrapCreationFact,
-    recipient_fact: &Fact,
-    source_fact: &Fact,
-    signer_secret_fact: &Fact,
+    recipient_fact_id: FactId,
+    recipient_fact_bytes: &[u8],
+    source_fact_id: FactId,
+    source_fact_received_at: u64,
+    source_fact_bytes: &[u8],
+    signer_secret_fact_id: FactId,
+    signer_secret_fact_bytes: &[u8],
 ) -> Result<[Fact; 2], String> {
-    let wrap = create_key_wrap_fact(creation, recipient_fact, source_fact)?;
-    let signer = local_signer_secret_layout::decode_fact(&signer_secret_fact.bytes)?;
-    if signer_secret_fact.id != creation.signer_secret_fact_id {
+    let wrap = create_key_wrap_fact(
+        creation,
+        recipient_fact_id,
+        recipient_fact_bytes,
+        source_fact_id,
+        source_fact_received_at,
+        source_fact_bytes,
+    )?;
+    let signer = local_signer_secret_layout::decode_fact(signer_secret_fact_bytes)?;
+    if signer_secret_fact_id != creation.signer_secret_fact_id {
         return Err("signer secret fact id does not match key_wrap_creation fact".to_string());
     }
     if signer.workspace_id != creation.workspace_id {
@@ -199,15 +221,17 @@ pub fn admit_key_wrap_fact(bytes: Vec<u8>) -> Result<Fact, String> {
 
 fn wrap_material(
     creation: &KeyWrapCreationFact,
-    source_fact: &Fact,
+    source_fact_id: FactId,
+    source_fact_received_at: u64,
+    source_fact_bytes: &[u8],
 ) -> Result<WrapMaterial, String> {
-    if source_fact.id != creation.source_fact_id {
+    if source_fact_id != creation.source_fact_id {
         return Err("source fact id does not match key_wrap_creation fact".to_string());
     }
     match creation.source {
         WrapSourceKind::FrontierRoot => {
             let source =
-                local_key_secret_layout_decode::decode_local_key_secret(&source_fact.bytes)?;
+                local_key_secret_layout_decode::decode_local_key_secret(source_fact_bytes)?;
             require_source_workspace_and_frontier(
                 creation,
                 source.workspace_id,
@@ -221,7 +245,7 @@ fn wrap_material(
                     "root source timestamp does not match key_wrap_creation fact".to_string(),
                 );
             }
-            Ok(root_material(source_fact.id, source))
+            Ok(root_material(source_fact_id, source))
         }
         WrapSourceKind::HistoryNode {
             range_start,
@@ -230,7 +254,7 @@ fn wrap_material(
             fact_id_prefix,
         } => {
             let source =
-                local_history_layout_decode::decode_local_history_node_secret(&source_fact.bytes)?;
+                local_history_layout_decode::decode_local_history_node_secret(source_fact_bytes)?;
             require_source_workspace_and_frontier(
                 creation,
                 source.workspace_id,
@@ -251,8 +275,8 @@ fn wrap_material(
                 );
             }
             Ok(history_material(
-                source_fact.id,
-                source_fact.timestamp,
+                source_fact_id,
+                source_fact_received_at,
                 source,
             ))
         }

@@ -242,11 +242,11 @@ use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::facts::Fact;
 use crate::core::intents::{RowMutation, TableInsert, Value};
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, MatchedContext, ProjectionContext, ProjectionOutput, Projector,
 };
 use crate::protocol::auth::endpoint_shared;
 use crate::protocol::auth::key_wrap::project::{
-    add_signer_needs_for_matching_sources, matched_payload_fact, matching_wrap_sources_with_signer,
+    add_signer_needs_for_matching_sources, matching_wrap_sources_with_signer,
     proactive_wrap_source_need, require_fact_scope,
 };
 use crate::protocol::auth::key_wrap_creation::key_wrap_creation_fact;
@@ -315,20 +315,14 @@ fn recipient_key(
         fact.id,
         recipient.signer_public_key,
     )?;
-    let signer_need = ContextNeed::range(
+    let signer_need = ContextNeed::for_key(
         fact.id,
         "content_signer",
         scope.clone(),
         recipient.endpoint_id,
-        recipient.endpoint_id,
     );
-    let superseded_need = ContextNeed::range(
-        fact.id,
-        "recipient_superseded",
-        scope.clone(),
-        fact.id,
-        fact.id,
-    );
+    let superseded_need =
+        ContextNeed::for_key(fact.id, "recipient_superseded", scope.clone(), fact.id);
     let min_frontier_created_at_ms =
         if recipient.previous_recipient_key_id == NO_PREVIOUS_RECIPIENT_KEY {
             0
@@ -362,28 +356,28 @@ fn recipient_key(
     }
 
     if recipient.previous_recipient_key_id != NO_PREVIOUS_RECIPIENT_KEY {
-        let previous_need = ContextNeed::range(
+        let previous_need = ContextNeed::for_key(
             fact.id,
             "recipient_key",
             scope.clone(),
             recipient.previous_recipient_key_id,
-            recipient.previous_recipient_key_id,
         );
         output = output.need(previous_need.clone());
-        let Some(previous_fact) = matched_payload_fact(projection_context, &previous_need) else {
+        let Some(previous_fact) = projection_context.match_for(&previous_need) else {
             return Ok(output);
         };
         validate_previous_recipient_key(previous_fact, &recipient)?;
-        context_have.push(previous_fact.id);
+        context_have.push(previous_fact.offer_owner());
         previous_superseded_offer = Some(ContextOffer::range(
             fact.id,
             "recipient_superseded",
             scope.clone(),
             recipient.previous_recipient_key_id,
             recipient.previous_recipient_key_id,
+            fact.bytes.clone(),
         ));
     }
-    let Some(signer_fact) = projection_context.payload_for(&signer_need) else {
+    let Some(signer_fact) = projection_context.match_for(&signer_need) else {
         return Ok(output);
     };
     validate_recipient_signer(signer_fact, &recipient)?;
@@ -408,6 +402,7 @@ fn recipient_key(
             scope.clone(),
             fact.id,
             fact.id,
+            fact.bytes.clone(),
         )),
         recipient.workspace_id,
         fact,
@@ -456,13 +451,14 @@ fn recipient_key(
 }
 
 fn validate_previous_recipient_key(
-    previous_fact: &Fact,
+    previous_fact: &MatchedContext,
     recipient: &RecipientKeyFact,
 ) -> Result<(), String> {
-    if previous_fact.id != recipient.previous_recipient_key_id {
-        return Err("recipient key supersession previous context payload id mismatch".to_string());
-    }
-    let previous = super::decode_fact_payload(&previous_fact.bytes).map_err(|_| {
+    previous_fact.require_owner(
+        recipient.previous_recipient_key_id,
+        "recipient key supersession previous",
+    )?;
+    let previous = super::decode_fact_payload(previous_fact.value()).map_err(|_| {
         "recipient key supersession previous dependency is not a recipient key".to_string()
     })?;
     if previous.workspace_id != recipient.workspace_id {
@@ -482,10 +478,10 @@ fn validate_previous_recipient_key(
 }
 
 fn validate_recipient_signer(
-    signer_fact: &Fact,
+    signer_fact: &MatchedContext,
     recipient: &RecipientKeyFact,
 ) -> Result<(), String> {
-    let signer = endpoint_shared::decode_fact_payload(signer_fact.body())
+    let signer = endpoint_shared::decode_fact_payload(signer_fact.value())
         .map_err(|_| "recipient key signer context must be endpoint_shared".to_string())?;
     if signer.workspace_id != recipient.workspace_id {
         return Err("recipient key signer workspace mismatch".to_string());

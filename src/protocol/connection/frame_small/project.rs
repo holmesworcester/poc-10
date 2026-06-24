@@ -294,7 +294,8 @@ use crate::core::context::ContextNeed;
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::project_fact::{
-    FactProjectorInfo, IncomingMetadata, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, IncomingMetadata, MatchedContext, ProjectionContext, ProjectionOutput,
+    Projector,
 };
 use crate::protocol::connection::fact_receipt::fact::ReceiptPathInput;
 use crate::protocol::connection::fact_receipt::project::connection_fact_receipt_for_path;
@@ -360,12 +361,10 @@ pub fn project_observed_frame(
     };
 
     let connection_need = connection::connection::project::connection_need(fact.id, connection_id);
-    let Some(connection_fact) = context.payload_for(&connection_need) else {
+    let Some(connection_fact) = context.match_for(&connection_need) else {
         return Ok(frame_observation_output(fact, context)?.need(connection_need));
     };
-    if connection_fact.scope != FactScope::Local {
-        return Err("connection frame context must be local".to_string());
-    }
+    connection_fact.require_owner_scope(&FactScope::Local, "connection frame context")?;
     let material = match connection_material_from_context(connection_fact, context, fact.id) {
         ConnectionMaterialContext::Open(material) => material,
         ConnectionMaterialContext::Needs(needs) => {
@@ -410,14 +409,12 @@ fn observed_frame_origin(
     }
     let need =
         connection::frame_observation::project::connection_frame_observation_need(fact.id, fact.id);
-    let Some(observation_fact) = context.payload_for(&need) else {
+    let Some(observation_fact) = context.match_for(&need) else {
         return Ok(None);
     };
-    if observation_fact.scope != FactScope::Local {
-        return Err("connection frame observation context must be local".to_string());
-    }
+    observation_fact.require_owner_scope(&FactScope::Local, "connection frame observation")?;
     let observed =
-        connection::frame_observation::project::decode::decode_fact(observation_fact.body())
+        connection::frame_observation::project::decode::decode_fact(observation_fact.value())
             .map_err(|_| "connection frame observation context is malformed".to_string())?;
     if observed.frame_fact_id != fact.id {
         return Err("connection frame observation does not bind frame".to_string());
@@ -565,34 +562,35 @@ enum ConnectionMaterialContext {
 }
 
 fn connection_material_from_context(
-    fact: &Fact,
+    fact: &MatchedContext,
     context: &ProjectionContext,
     owner: FactId,
 ) -> ConnectionMaterialContext {
-    if connection::connection::project::decode::validate_sealed_fact(fact.body()).is_err() {
+    if connection::connection::project::decode::validate_sealed_fact(fact.value()).is_err() {
         return ConnectionMaterialContext::Invalid;
     }
     let Ok(endpoint_id) =
-        connection::connection::project::decode::connection_header_to_endpoint(fact.body())
+        connection::connection::project::decode::connection_header_to_endpoint(fact.value())
     else {
         return ConnectionMaterialContext::Invalid;
     };
     let Ok(ephemeral_public_key) =
         connection::connection::project::decode::connection_header_ephemeral_public_key(
-            fact.body(),
+            fact.value(),
         )
     else {
         return ConnectionMaterialContext::Invalid;
     };
     let endpoint_need =
         ContextNeed::for_key(owner, "auth_local_endpoint", FactScope::Local, endpoint_id);
-    for (_, endpoint_fact) in context.matched_payloads_for(&endpoint_need) {
-        if let Ok(endpoint) = auth::endpoint::decode_fact_payload(endpoint_fact.body()) {
+    for endpoint_fact in context.matches_for(&endpoint_need) {
+        if let Ok(endpoint) = auth::endpoint::decode_fact_payload(endpoint_fact.value()) {
             if let Ok(connection) =
-                connection::connection::project::decode::open_fact(fact.body(), &endpoint)
+                connection::connection::project::decode::open_fact(fact.value(), &endpoint)
             {
                 return ConnectionMaterialContext::Open(material_from_connection_fact(
-                    fact.id, connection,
+                    fact.offer_owner(),
+                    connection,
                 ));
             }
         }
@@ -603,14 +601,15 @@ fn connection_material_from_context(
         FactScope::Local,
         ephemeral_public_key,
     );
-    for (_, secret_fact) in context.matched_payloads_for(&ephemeral_need) {
-        if let Ok(secret) = connection::ephemeral_secret::decode_fact_payload(secret_fact.body()) {
+    for secret_fact in context.matches_for(&ephemeral_need) {
+        if let Ok(secret) = connection::ephemeral_secret::decode_fact_payload(secret_fact.value()) {
             if let Ok(connection) = connection::connection::project::decode::open_fact_as_responder(
-                fact.body(),
+                fact.value(),
                 &secret,
             ) {
                 return ConnectionMaterialContext::Open(material_from_connection_fact(
-                    fact.id, connection,
+                    fact.offer_owner(),
+                    connection,
                 ));
             }
         }
@@ -983,9 +982,19 @@ mod material_tests {
     #[test]
     fn missing_material_needs_are_exact_from_connection_header() {
         let connection_fact = sealed_connection_fact();
+        let connection_context = MatchedContext {
+            need: connection::connection::project::connection_need([9; 32], connection_fact.id),
+            offer: connection::connection::project::connection_offer(
+                connection_fact.id,
+                connection_fact.id,
+                connection_fact.bytes.clone(),
+            ),
+            offer_owner_scope: connection_fact.scope.clone(),
+            offer_owner_received_at: connection_fact.timestamp,
+        };
 
         let ConnectionMaterialContext::Needs(needs) = connection_material_from_context(
-            &connection_fact,
+            &connection_context,
             &ProjectionContext::default(),
             [9; 32],
         ) else {
@@ -996,8 +1005,7 @@ mod material_tests {
             .iter()
             .find(|need| need.role.as_str() == "auth_local_endpoint")
             .expect("endpoint need");
-        assert_eq!(endpoint_need.start_key.as_bytes(), [2; 32]);
-        assert_eq!(endpoint_need.end_key.as_bytes(), [2; 32]);
+        assert_eq!(endpoint_need.key.as_bytes(), [2; 32]);
 
         let public_key = crypto::x25519_public_key(&[10; 32]);
         let secret_need = needs
@@ -1007,8 +1015,7 @@ mod material_tests {
                     == connection::ephemeral_secret::project::CONNECTION_EPHEMERAL_SECRET_PUBLIC_KEY_ROLE
             })
             .expect("ephemeral public-key need");
-        assert_eq!(secret_need.start_key.as_bytes(), public_key);
-        assert_eq!(secret_need.end_key.as_bytes(), public_key);
+        assert_eq!(secret_need.key.as_bytes(), public_key);
     }
 
     fn packed_inner_bundle(

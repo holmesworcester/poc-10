@@ -126,7 +126,7 @@ and return a mismatch error, intentionally support an old not-yet-replayed
 table shape with compatibility SQL, or act as a maintenance/diagnostic query
 that is allowed to inspect stale state. The normal user-facing path should
 require current storage unless the query documents a specific stale-storage
-compatibility path.
+reader contract.
 
 ## Boundaries
 

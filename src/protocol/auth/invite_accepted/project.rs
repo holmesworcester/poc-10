@@ -323,6 +323,7 @@ impl InviteAcceptedProjector {
                 crate::core::facts::FactScope::Local,
                 invite_secret_id,
                 invite_secret_id,
+                fact.bytes.clone(),
             ))
             .row_mutation(RowMutation::InsertValues(invite_accepted_row(
                 fact.id, &accepted,
@@ -331,6 +332,7 @@ impl InviteAcceptedProjector {
             output = output.offer(super::workspace_accepted_offer(
                 fact.id,
                 accepted.workspace_id,
+                fact.bytes.clone(),
             ));
         }
         Ok(output)

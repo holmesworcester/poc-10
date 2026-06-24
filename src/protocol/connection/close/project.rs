@@ -232,22 +232,33 @@ pub fn ephemeral_secret_closed_need(owner: FactId, secret_id: FactId) -> Context
     exact_local_need(owner, CONNECTION_EPHEMERAL_SECRET_CLOSED_ROLE, secret_id)
 }
 
-pub fn ephemeral_secret_closed_offer(owner: FactId, secret_id: FactId) -> ContextOffer {
-    exact_local_offer(owner, CONNECTION_EPHEMERAL_SECRET_CLOSED_ROLE, secret_id)
+pub fn ephemeral_secret_closed_offer(
+    owner: FactId,
+    secret_id: FactId,
+    value: impl Into<Vec<u8>>,
+) -> ContextOffer {
+    let key = ContextKey::from_bytes(secret_id);
+    ContextOffer {
+        owner,
+        role: Role::expect(CONNECTION_EPHEMERAL_SECRET_CLOSED_ROLE),
+        scope: FactScope::Local,
+        start_key: key.clone(),
+        end_key: key,
+        value: value.into(),
+    }
 }
 
 fn exact_local_need(owner: FactId, role: &'static str, key: FactId) -> ContextNeed {
-    let key = ContextKey::from_bytes(key);
     ContextNeed {
         owner,
         role: Role::expect(role),
         scope: FactScope::Local,
-        start_key: key.clone(),
-        end_key: key,
+        key: ContextKey::from_bytes(key),
     }
 }
 
 fn exact_local_offer(owner: FactId, role: &'static str, key: FactId) -> ContextOffer {
+    let value = key.to_vec();
     let key = ContextKey::from_bytes(key);
     ContextOffer {
         owner,
@@ -255,6 +266,7 @@ fn exact_local_offer(owner: FactId, role: &'static str, key: FactId) -> ContextO
         scope: FactScope::Local,
         start_key: key.clone(),
         end_key: key,
+        value,
     }
 }
 
@@ -311,16 +323,15 @@ mod tests {
         connection_id: FactId,
         scope: FactScope,
     ) -> MatchedContext {
-        let payload = Fact {
-            id: connection_id,
-            scope,
-            timestamp: 100,
-            bytes: b"connection-context".to_vec(),
-        };
         MatchedContext {
             need: connection::project::connection_need(close_fact_id, connection_id),
-            offer: connection::project::connection_offer(connection_id, connection_id),
-            payload,
+            offer: connection::project::connection_offer(
+                connection_id,
+                connection_id,
+                b"connection-context".to_vec(),
+            ),
+            offer_owner_scope: scope,
+            offer_owner_received_at: 100,
         }
     }
 
@@ -394,7 +405,7 @@ mod tests {
             .project(&fact, &context)
             .expect_err("non-local connection context should reject");
 
-        assert_eq!(err, "connection close context must be local");
+        assert_eq!(err, "connection close context matched offer scope mismatch");
     }
 }
 
@@ -427,12 +438,10 @@ impl ConnectionCloseProjector {
 
         // 2. Context.
         let connection_need = connection::project::connection_need(fact.id, close.connection_id);
-        let Some(connection_fact) = context.payload_for(&connection_need) else {
+        let Some(connection_fact) = context.match_for(&connection_need) else {
             return Ok(ProjectionOutput::new().need(connection_need));
         };
-        if connection_fact.scope != FactScope::Local {
-            return Err("connection close context must be local".to_string());
-        }
+        connection_fact.require_owner_scope(&FactScope::Local, "connection close context")?;
         // 3. Materialize close context for the target owners.
         Ok(ProjectionOutput::new()
             .need(connection_need)

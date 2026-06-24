@@ -227,7 +227,7 @@ pub mod adapt {
 use crate::core::facts::Fact;
 use crate::core::intents::{RowMutation, TableInsert, Value};
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, MatchedContext, ProjectionContext, ProjectionOutput, Projector,
 };
 
 use crate::protocol::auth::signature;
@@ -300,11 +300,10 @@ impl ContentMessageDeletionProjector {
             deletion.signer_public_key,
         )?;
         let signer_need = project::signer_need(fact.id, deletion.workspace_id, deletion.signer_id);
-        let author_need = crate::core::context::ContextNeed::range(
+        let author_need = crate::core::context::ContextNeed::for_key(
             fact.id,
             "auth_user",
             crate::core::facts::FactScope::Global,
-            deletion.author_user_id,
             deletion.author_user_id,
         );
         if !signature::project::signature_proof_ready(
@@ -374,6 +373,7 @@ impl ContentMessageDeletionProjector {
                         deletion.target_minute,
                         deletion.target_message_id,
                     ),
+                    fact.bytes.clone(),
                 ))
                 .row_mutation(RowMutation::InsertValues(row)),
             deletion.workspace_id,
@@ -387,7 +387,7 @@ fn context_payload<'a>(
     context: &'a ProjectionContext,
     need: &crate::core::context::ContextNeed,
     label: &str,
-) -> Result<Option<&'a Fact>, String> {
+) -> Result<Option<&'a MatchedContext>, String> {
     project::context_payload(context, need, label)
 }
 
@@ -402,12 +402,12 @@ fn output_with_needs(
 
 fn validate_author_user(
     deletion: &super::fact::ContentMessageDeletionFact,
-    author_fact: &Fact,
+    author_fact: &MatchedContext,
 ) -> Result<(), String> {
-    if author_fact.id != deletion.author_user_id {
-        return Err("message deletion author context payload id mismatch".to_string());
+    if author_fact.offer_owner() != deletion.author_user_id {
+        return Err("message deletion author matched offer owner mismatch".to_string());
     }
-    let author = user::decode_fact_payload(author_fact.body())
+    let author = user::decode_fact_payload(author_fact.value())
         .map_err(|_| "message deletion author context must be an identity user".to_string())?;
     if author.workspace_id != deletion.workspace_id {
         return Err("message deletion author workspace does not match deletion".to_string());
@@ -498,9 +498,9 @@ mod projector_tests {
         let signer_ctx = signer_match(&fact, &signer_fact);
         let author_ctx = author_match(&fact, &author_user_id);
         let mut expected_context_have = vec![
-            signature_ctx.payload.id,
-            signer_ctx.payload.id,
-            author_ctx.payload.id,
+            signature_ctx.offer_owner(),
+            signer_ctx.offer_owner(),
+            author_ctx.offer_owner(),
         ];
         expected_context_have.sort();
 
@@ -588,20 +588,18 @@ mod projector_tests {
             .any(|need| need.role.as_str() == "signature_proof"));
         assert!(output
             .needs
-            .contains(&crate::core::context::ContextNeed::range(
+            .contains(&crate::core::context::ContextNeed::for_key(
                 fact.id,
                 "content_signer",
                 crate::protocol::auth::workspace::scope(deletion.workspace_id),
-                CONTENT_SIGNER_ID,
                 CONTENT_SIGNER_ID
             )));
         assert!(output
             .needs
-            .contains(&crate::core::context::ContextNeed::range(
+            .contains(&crate::core::context::ContextNeed::for_key(
                 fact.id,
                 "auth_user",
                 crate::core::facts::FactScope::Global,
-                deletion.author_user_id,
                 deletion.author_user_id
             )));
     }
@@ -629,11 +627,10 @@ mod projector_tests {
         assert_eq!(output.needs.len(), 3);
         assert!(output
             .needs
-            .contains(&crate::core::context::ContextNeed::range(
+            .contains(&crate::core::context::ContextNeed::for_key(
                 fact.id,
                 "auth_user",
                 crate::core::facts::FactScope::Global,
-                deletion.author_user_id,
                 deletion.author_user_id
             )));
     }
@@ -792,9 +789,11 @@ mod projector_tests {
                 scope,
                 deletion_fact.id,
                 deletion.signer_public_key,
+                signature.bytes.clone(),
             )
             .expect("signature offer"),
-            payload: signature,
+            offer_owner_scope: signature.scope,
+            offer_owner_received_at: signature.timestamp,
         }
     }
 
@@ -802,11 +801,10 @@ mod projector_tests {
         let deletion = deletion_from_fact(deletion_fact);
         let scope = crate::protocol::auth::workspace::scope(deletion.workspace_id);
         MatchedContext {
-            need: crate::core::context::ContextNeed::range(
+            need: crate::core::context::ContextNeed::for_key(
                 deletion_fact.id,
                 "content_signer",
                 scope.clone(),
-                CONTENT_SIGNER_ID,
                 CONTENT_SIGNER_ID,
             ),
             offer: crate::core::context::ContextOffer::range(
@@ -815,8 +813,10 @@ mod projector_tests {
                 scope,
                 CONTENT_SIGNER_ID,
                 CONTENT_SIGNER_ID,
+                signer_fact.bytes.clone(),
             ),
-            payload: signer_fact.clone(),
+            offer_owner_scope: signer_fact.scope.clone(),
+            offer_owner_received_at: signer_fact.timestamp,
         }
     }
 
@@ -826,11 +826,10 @@ mod projector_tests {
 
     fn author_match(deletion_fact: &Fact, author_fact: &Fact) -> MatchedContext {
         MatchedContext {
-            need: crate::core::context::ContextNeed::range(
+            need: crate::core::context::ContextNeed::for_key(
                 deletion_fact.id,
                 "auth_user",
                 crate::core::facts::FactScope::Global,
-                author_fact.id,
                 author_fact.id,
             ),
             offer: crate::core::context::ContextOffer::range(
@@ -839,8 +838,10 @@ mod projector_tests {
                 crate::core::facts::FactScope::Global,
                 author_fact.id,
                 author_fact.id,
+                author_fact.bytes.clone(),
             ),
-            payload: author_fact.clone(),
+            offer_owner_scope: author_fact.scope.clone(),
+            offer_owner_received_at: author_fact.timestamp,
         }
     }
 }

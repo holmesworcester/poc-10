@@ -204,7 +204,7 @@ pub mod adapt {
 use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, MatchedContext, ProjectionContext, ProjectionOutput, Projector,
 };
 use crate::protocol::auth::{local_history_node_secret, local_key_secret};
 
@@ -216,22 +216,29 @@ pub fn secret_retired_need(owner: FactId, target_secret_id: FactId) -> ContextNe
     exact_local_need(owner, LOCAL_SECRET_RETIRED_ROLE, target_secret_id)
 }
 
-pub fn secret_retired_offer(owner: FactId, target_secret_id: FactId) -> ContextOffer {
-    exact_local_offer(owner, LOCAL_SECRET_RETIRED_ROLE, target_secret_id)
+pub fn secret_retired_offer(
+    owner: FactId,
+    target_secret_id: FactId,
+    value: impl Into<Vec<u8>>,
+) -> ContextOffer {
+    exact_local_offer(owner, LOCAL_SECRET_RETIRED_ROLE, target_secret_id, value)
 }
 
 fn exact_local_need(owner: FactId, role: &'static str, key: FactId) -> ContextNeed {
-    let key = ContextKey::from_bytes(key);
     ContextNeed {
         owner,
         role: Role::expect(role),
         scope: FactScope::Local,
-        start_key: key.clone(),
-        end_key: key,
+        key: ContextKey::from_bytes(key),
     }
 }
 
-fn exact_local_offer(owner: FactId, role: &'static str, key: FactId) -> ContextOffer {
+fn exact_local_offer(
+    owner: FactId,
+    role: &'static str,
+    key: FactId,
+    value: impl Into<Vec<u8>>,
+) -> ContextOffer {
     let key = ContextKey::from_bytes(key);
     ContextOffer {
         owner,
@@ -239,6 +246,7 @@ fn exact_local_offer(owner: FactId, role: &'static str, key: FactId) -> ContextO
         scope: FactScope::Local,
         start_key: key.clone(),
         end_key: key,
+        value: value.into(),
     }
 }
 
@@ -286,14 +294,13 @@ impl LocalSecretRetirementProjector {
         }
 
         // 2. Context.
-        let target_need = ContextNeed::range(
+        let target_need = ContextNeed::for_key(
             fact.id,
             "local_secret_source",
             FactScope::Local,
             retirement.target_secret_id,
-            retirement.target_secret_id,
         );
-        let Some(target) = context.payload_for(&target_need) else {
+        let Some(target) = context.match_for(&target_need) else {
             return Ok(ProjectionOutput::new().need(target_need));
         };
         validate_target_secret(target, &retirement)?;
@@ -301,27 +308,30 @@ impl LocalSecretRetirementProjector {
         // 3. Materialize.
         Ok(ProjectionOutput::new()
             .need(target_need)
-            .offer(secret_retired_offer(fact.id, retirement.target_secret_id)))
+            .offer(secret_retired_offer(
+                fact.id,
+                retirement.target_secret_id,
+                fact.bytes.clone(),
+            )))
     }
 }
 
 fn validate_target_secret(
-    target: &Fact,
+    target: &MatchedContext,
     retirement: &LocalSecretRetirementFact,
 ) -> Result<(), String> {
-    if target.id != retirement.target_secret_id {
-        return Err("local secret retirement target context payload id mismatch".to_string());
-    }
-    if target.scope != FactScope::Local {
-        return Err("local secret retirement target context must be local".to_string());
-    }
-    if let Ok(secret) = local_key_secret::decode_fact_payload(target.body()) {
+    target.require_owner(
+        retirement.target_secret_id,
+        "local secret retirement target",
+    )?;
+    target.require_owner_scope(&FactScope::Local, "local secret retirement target")?;
+    if let Ok(secret) = local_key_secret::decode_fact_payload(target.value()) {
         if secret.workspace_id != retirement.workspace_id {
             return Err("local key secret retirement workspace mismatch".to_string());
         }
         return Ok(());
     }
-    if let Ok(secret) = local_history_node_secret::decode_fact_payload(target.body()) {
+    if let Ok(secret) = local_history_node_secret::decode_fact_payload(target.value()) {
         if secret.workspace_id != retirement.workspace_id {
             return Err("local history secret retirement workspace mismatch".to_string());
         }

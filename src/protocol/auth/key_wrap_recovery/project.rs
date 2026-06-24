@@ -95,9 +95,9 @@ pub mod adapt {
 use crate::core::context::ContextNeed;
 use crate::core::facts::Fact;
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, MatchedContext, ProjectionContext, ProjectionOutput, Projector,
 };
-use crate::protocol::auth::key_wrap::project::{matched_payload_fact, require_local_scope};
+use crate::protocol::auth::key_wrap::project::require_local_scope;
 use crate::protocol::auth::key_wrap::unwrap_key_wrap_fact;
 
 use super::fact::KeyWrapRecoveryFact;
@@ -152,32 +152,28 @@ fn project_key_wrap_recovery(
     let scope = crate::protocol::auth::workspace::scope(recovery.workspace_id);
 
     // 2. Context: exact wrap, recipient, frontier, and local recipient facts.
-    let key_wrap_need = ContextNeed::range(
+    let key_wrap_need = ContextNeed::for_key(
         fact.id,
         "sync_key_wrap",
         scope.clone(),
         recovery.key_wrap_id,
-        recovery.key_wrap_id,
     );
-    let recipient_need = ContextNeed::range(
+    let recipient_need = ContextNeed::for_key(
         fact.id,
         "recipient_key",
         scope.clone(),
         recovery.recipient_key_id,
-        recovery.recipient_key_id,
     );
-    let frontier_need = ContextNeed::range(
+    let frontier_need = ContextNeed::for_key(
         fact.id,
         "auth_removal_frontier",
         scope.clone(),
         recovery.frontier_id,
-        recovery.frontier_id,
     );
-    let local_recipient_need = ContextNeed::range(
+    let local_recipient_need = ContextNeed::for_key(
         fact.id,
         "local_recipient_key",
         scope,
-        recovery.recipient_key_id,
         recovery.recipient_key_id,
     );
     let output = ProjectionOutput::new()
@@ -185,13 +181,13 @@ fn project_key_wrap_recovery(
         .need(recipient_need.clone())
         .need(frontier_need.clone())
         .need(local_recipient_need.clone());
-    let Some(key_wrap_fact) = matched_payload_fact(projection_context, &key_wrap_need) else {
+    let Some(key_wrap_fact) = projection_context.match_for(&key_wrap_need) else {
         return Ok(output);
     };
-    let Some(recipient_fact) = matched_payload_fact(projection_context, &recipient_need) else {
+    let Some(recipient_fact) = projection_context.match_for(&recipient_need) else {
         return Ok(output);
     };
-    let Some(frontier_fact) = matched_payload_fact(projection_context, &frontier_need) else {
+    let Some(frontier_fact) = projection_context.match_for(&frontier_need) else {
         return Ok(output);
     };
     let Some(local_recipient_fact) =
@@ -202,10 +198,14 @@ fn project_key_wrap_recovery(
     // 3. Materialize: recovered local secret fact.
     Ok(output.fact(unwrap_key_wrap_fact(
         &recovery,
-        key_wrap_fact,
-        local_recipient_fact,
-        recipient_fact,
-        frontier_fact,
+        key_wrap_fact.offer_owner(),
+        key_wrap_fact.value(),
+        local_recipient_fact.offer_owner(),
+        local_recipient_fact.value(),
+        recipient_fact.offer_owner(),
+        recipient_fact.value(),
+        frontier_fact.offer_owner(),
+        frontier_fact.value(),
     )?))
 }
 
@@ -213,11 +213,10 @@ fn matching_local_recipient_fact<'a>(
     projection_context: &'a ProjectionContext,
     need: &'a ContextNeed,
     recovery: &KeyWrapRecoveryFact,
-) -> Option<&'a Fact> {
+) -> Option<&'a MatchedContext> {
     projection_context
-        .matched_payloads_for(need)
-        .map(|(_, payload)| payload)
-        .find(|payload| payload.id == recovery.local_recipient_key_id)
+        .matches_for(need)
+        .find(|matched| matched.offer_owner() == recovery.local_recipient_key_id)
 }
 
 // Tests.
@@ -247,33 +246,29 @@ mod tests {
 
         assert!(output.effects.facts.is_empty());
         assert_eq!(output.needs.len(), 4);
-        assert!(output.needs.contains(&ContextNeed::range(
+        assert!(output.needs.contains(&ContextNeed::for_key(
             fact.id,
             "sync_key_wrap",
             scope.clone(),
-            recovery.key_wrap_id,
-            recovery.key_wrap_id,
+            recovery.key_wrap_id
         )));
-        assert!(output.needs.contains(&ContextNeed::range(
+        assert!(output.needs.contains(&ContextNeed::for_key(
             fact.id,
             "recipient_key",
             scope.clone(),
-            recovery.recipient_key_id,
-            recovery.recipient_key_id,
+            recovery.recipient_key_id
         )));
-        assert!(output.needs.contains(&ContextNeed::range(
+        assert!(output.needs.contains(&ContextNeed::for_key(
             fact.id,
             "auth_removal_frontier",
             scope.clone(),
-            recovery.frontier_id,
-            recovery.frontier_id,
+            recovery.frontier_id
         )));
-        assert!(output.needs.contains(&ContextNeed::range(
+        assert!(output.needs.contains(&ContextNeed::for_key(
             fact.id,
             "local_recipient_key",
             scope,
-            recovery.recipient_key_id,
-            recovery.recipient_key_id,
+            recovery.recipient_key_id
         )));
     }
 

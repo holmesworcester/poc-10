@@ -290,11 +290,10 @@ impl UserProjector {
             fact.id,
             user.signer_public_key,
         )?;
-        let invite_need = crate::core::context::ContextNeed::range(
+        let invite_need = crate::core::context::ContextNeed::for_key(
             fact.id,
             "auth_user_invite",
             crate::core::facts::FactScope::Global,
-            user.signer_id,
             user.signer_id,
         );
         let waiting = ProjectionOutput::new()
@@ -310,13 +309,11 @@ impl UserProjector {
         )? {
             return Ok(waiting);
         }
-        let Some(invite_fact) = context.payload_for(&invite_need) else {
+        let Some(invite_fact) = context.match_for(&invite_need) else {
             return Ok(waiting);
         };
-        if invite_fact.id != user.signer_id {
-            return Err("user signer context payload id mismatch".to_string());
-        }
-        let invite = user_invite::decode_fact_payload(invite_fact.body())
+        invite_fact.require_owner(user.signer_id, "user signer")?;
+        let invite = user_invite::decode_fact_payload(invite_fact.value())
             .map_err(|_| "user signer context must be a user_invite fact".to_string())?;
         if invite.workspace_id != user.workspace_id {
             return Err("user workspace does not match user_invite workspace".to_string());
@@ -326,7 +323,7 @@ impl UserProjector {
                 "user signature signer key does not match user_invite public key".to_string(),
             );
         }
-        let user_invite_id = invite_fact.id;
+        let user_invite_id = invite_fact.offer_owner();
         let context_have = context_have_from_needs(context, [&signature_need, &invite_need]);
 
         // 3. Materialize.
@@ -338,6 +335,7 @@ impl UserProjector {
                     crate::core::facts::FactScope::Global,
                     fact.id,
                     fact.id,
+                    fact.bytes.clone(),
                 ))
                 .row_mutation(RowMutation::InsertValues(user_row(
                     fact.id,

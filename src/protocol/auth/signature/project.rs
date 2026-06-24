@@ -208,7 +208,7 @@ use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::crypto::Ed25519PublicKey;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, MatchedContext, ProjectionContext, ProjectionOutput, Projector,
 };
 use crate::protocol::sync::shared_fact::project::share_fact_with_sync;
 
@@ -265,6 +265,7 @@ impl SignatureProjector {
             scope,
             signature.target_fact_id,
             signature.signer_public_key,
+            fact.bytes.clone(),
         )?);
         Ok(share_fact_with_sync(
             output,
@@ -297,6 +298,7 @@ pub fn signature_proof_offer(
     scope: FactScope,
     target_fact_id: FactId,
     signer_public_key: Ed25519PublicKey,
+    value: impl Into<Vec<u8>>,
 ) -> Result<ContextOffer, String> {
     ContextOffer::for_key_parts(
         owner,
@@ -306,23 +308,24 @@ pub fn signature_proof_offer(
             crate::core::context::ContextKeyPart::bytes(&target_fact_id),
             crate::core::context::ContextKeyPart::bytes(&signer_public_key),
         ],
+        value,
     )
 }
 
-pub fn validate_signature_proof_payload(
-    payload: &Fact,
+pub fn validate_signature_proof_context(
+    matched: &MatchedContext,
     need: &ContextNeed,
     workspace_id: FactId,
     target_fact_id: FactId,
     signer_public_key: Ed25519PublicKey,
     label: &str,
 ) -> Result<(), String> {
-    if payload.scope != need.scope {
+    if matched.offer_owner_scope != need.scope {
         return Err(format!(
             "{label} signature proof scope does not match target"
         ));
     }
-    let proof = crate::protocol::auth::signature::decode_fact_payload(payload.body())
+    let proof = crate::protocol::auth::signature::decode_fact_payload(matched.value())
         .map_err(|_| format!("{label} signature proof is not a signature fact"))?;
     if proof.workspace_id != workspace_id {
         return Err(format!(
@@ -350,11 +353,11 @@ pub fn signature_proof_ready(
     signer_public_key: Ed25519PublicKey,
     label: &str,
 ) -> Result<bool, String> {
-    let Some(payload) = context.payload_for(need) else {
+    let Some(matched) = context.match_for(need) else {
         return Ok(false);
     };
-    validate_signature_proof_payload(
-        payload,
+    validate_signature_proof_context(
+        matched,
         need,
         workspace_id,
         target_fact_id,
@@ -401,7 +404,8 @@ mod tests {
                 fact.id,
                 crate::protocol::auth::workspace::scope(workspace_id),
                 target,
-                signer_public_key
+                signer_public_key,
+                fact.bytes.clone(),
             )
             .expect("offer")
         );
@@ -421,11 +425,17 @@ mod tests {
         let signer_public_key = crate::core::crypto::ed25519_public_key(&PRIVATE_KEY);
         let need = signature_proof_need([1; 32], FactScope::Global, target, signer_public_key)
             .expect("need");
-        let offer = signature_proof_offer([2; 32], FactScope::Global, target, signer_public_key)
-            .expect("offer");
+        let offer = signature_proof_offer(
+            [2; 32],
+            FactScope::Global,
+            target,
+            signer_public_key,
+            b"signature".to_vec(),
+        )
+        .expect("offer");
 
         assert_eq!(need.role, SIGNATURE_PROOF_ROLE);
-        assert_eq!(need.start_key, offer.start_key);
-        assert_eq!(need.end_key, offer.end_key);
+        assert_eq!(need.key, offer.start_key);
+        assert_eq!(offer.start_key, offer.end_key);
     }
 }
