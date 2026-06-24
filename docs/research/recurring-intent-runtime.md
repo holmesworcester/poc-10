@@ -158,6 +158,170 @@ declared columns, canonical value encodings, and transaction atomicity. Core
 does not need to understand the semantic difference between a materialized
 message row and an emitted intent row.
 
+## Proof-Friendly Forms
+
+The target above can be implemented in several proof-friendly shapes. These are
+options for reducing the amount of Verus work required over SQL details; they do
+not change the intent-only queue model.
+
+### Typed Store Algebra
+
+One useful split is a small typed storage algebra for projection and queue work,
+with two implementations:
+
+```rust
+trait ProjectionStore {
+    fn retained_fact(&self, id: FactId) -> Option<Fact>;
+    fn replace_context_for_owner(
+        &mut self,
+        owner: FactId,
+        next: ContextSet,
+    ) -> ContextSetAdditions;
+    fn overlapping_offers_for_need(&self, need: &ContextNeed) -> Vec<ContextOffer>;
+    fn overlapping_needs_for_offer(&self, offer: &ContextOffer) -> Vec<ContextNeed>;
+    fn record_pending_match(&mut self, need: ContextNeed, offer: ContextOffer);
+    fn pending_context_for_owner(&self, owner: FactId) -> ProjectionContext;
+}
+```
+
+The proof implementation can use `BTreeMap` and `BTreeSet`; the production
+implementation can use SQLite. Verus then proves the queue and projection
+semantics over typed collections, while the SQLite implementation is an explicit
+storage-refinement assumption:
+
+```text
+SqliteProjectionStore refines BTreeProjectionStore for each typed operation.
+```
+
+This is not whole-SQL proof coverage. It is a deliberately named trust
+boundary. The boundary stays small if SQLite code implements domain operations
+such as `replace_context_for_owner`, `record_pending_match`, and
+`claim_next_projection`, rather than exposing raw rows or general query
+construction to projectors and workers.
+
+### Capability-Owned Tables
+
+The row-write boundary can be made a Rust type property. Instead of letting any
+worker with a database handle write any table, each table family gets a small
+capability type:
+
+```rust
+struct ProjectionWriteTx<'a> { /* private */ }
+struct IntentQueueWriteTx<'a, Q> { /* private */ }
+struct TransportWriteTx<'a> { /* private */ }
+
+impl ProjectionWriteTx<'_> {
+    fn replace_context_for_owner(...);
+    fn write_projected_row<T: ProjectedRow>(row: T);
+    fn queue_projection(owner: FactId);
+}
+```
+
+Only the worker that owns a table family can construct that capability. Projectors
+and recurring workers return typed row batches or call owner-specific helpers;
+they do not receive a raw SQLite connection for authority-bearing tables.
+
+The proof fact this buys is simple and reusable:
+
+```text
+If a standing offer, projection queue row, or projected row is visible, it was
+written through the capability for that table family.
+```
+
+That lets producer and consumer proofs start from table ownership instead of
+auditing every SQL call site.
+
+### Typed Offers And Proven Context
+
+Intent-only queues still need a clear context authority surface. Generic offer
+rows are good for matching, but proof-bearing consumers should not interpret
+arbitrary role/key/value bytes directly. Core or the protocol substrate can
+provide routed, attested offers:
+
+```rust
+struct RoutedOffer {
+    offer: ContextOffer,
+    producer_route: ProjectionRouteEvidence,
+}
+
+struct AcceptedOfferContract {
+    role: Role,
+    scope: FactScope,
+    producer_route_id: FactRouteId,
+    offer_kind: OfferKindId,
+    predicate_version: u16,
+}
+```
+
+Protocol modules then define typed offer witnesses:
+
+```rust
+struct SignatureProofV1;
+
+impl OfferKind for SignatureProofV1 {
+    type Selector = SignatureProofSelector;
+    type Value = ();
+}
+
+struct ProvenOffer<K: OfferKind> {
+    owner: FactId,
+    selector: K::Selector,
+    value: K::Value,
+    producer_route: ProjectionRouteEvidence,
+}
+```
+
+Core should stay protocol-neutral: it filters by route, role, scope, kind, and
+version, and checks owner provenance. The protocol module decodes selector/value
+bytes and proves the semantic predicate for `ProvenOffer<K>`. This keeps SQL
+rows generic while making projector code consume typed authority witnesses
+instead of foreign fact payloads.
+
+For negative authority, such as deletion, retirement, removal, or revocation,
+the accepted contract also needs a completeness theorem. A positive grant can be
+absent safely; a missed revocation can make stale state look valid. The matcher
+or context loader therefore needs a proof surface that all in-scope negative
+offers for the accepted contract were loaded before a gated materialization row
+is written.
+
+### Producer-Stamped Output Builders
+
+Per-projector proofs should focus on semantic truth, not on proving that each
+projector labeled its rows and offers with its own route. The route label can be
+stamped by Rust types:
+
+```rust
+struct ProjectionBuilder<P: RegisteredProjector> {
+    owner: FactId,
+    _producer: PhantomData<P>,
+}
+
+impl<P: RegisteredProjector> ProjectionBuilder<P> {
+    fn offer<K>(&mut self, selector: K::Selector, value: K::Value)
+    where
+        K: OfferKind<Producer = P>;
+
+    fn queue<Q>(&mut self, row: Q::Row)
+    where
+        Q: QueueOwnedBy<P>;
+}
+```
+
+The builder stamps the producer route, owner, table family, and offer kind from
+the projector type and queue/offer type. A projector cannot claim to emit another
+projector's offer kind because the type parameter does not allow it. Verus then
+proves the builder once, and projector-local proofs prove only statements like:
+
+```text
+Given this authenticated fact and these proven inputs, emitting
+SignatureProofV1 means the signature predicate holds.
+```
+
+Meta checks can cover the remaining registry discipline: every registered
+projector has a proof module, every emitted offer kind has a producer theorem,
+every accepted offer kind has a consumer contract, and every negative offer kind
+has a completeness theorem.
+
 ## Recurring Intent Classes
 
 The following current runtime responsibilities become recurring intents:
