@@ -61,6 +61,56 @@ defines the order and gives the worker `now_ms` plus host context. The worker
 decides from SQL whether it should claim work, skip because a retry window has
 not elapsed, or no-op because the host does not have the required IO resource.
 
+## Intent Queue Durability
+
+Intent queues are ordinary schema declarations with a durability choice:
+
+- **persisted queues** survive restart and rebuild. They are for durable
+  operational obligations whose loss would change protocol-visible behavior.
+- **volatile queues** are temp or memory-local tables. They are for host input,
+  sockets, in-flight bytes, and other process observations that can disappear
+  on restart.
+
+The queue's owning module defines the table, row shape, claim order, and
+idempotence key. Core only applies the schema source and gives the recurring
+worker a database handle. The same recurring-intent interface drains both
+persisted and volatile queues; restart semantics come from the table
+declaration, not from a separate core local-intent path.
+
+## Network Ingress
+
+Network ingress should be a volatile incoming-intent row, not a core incoming
+fact table. The host adapter accepts bytes from the socket and calls the
+protocol-declared network-ingress enqueue function once per received frame. The
+enqueue function writes a row to a volatile incoming-frame intent queue with:
+
+- opaque frame bytes
+- host `received_at_ms`
+- origin observation, such as peer socket address and transport metadata
+
+Core does not parse the bytes and does not decide whether the origin
+observation is durable evidence. It only performs host IO, captures the local
+observation, and admits the volatile row through the protocol's declared
+ingress table helper.
+
+A recurring incoming-frame worker drains that volatile queue. It may classify a
+connection request, established frame, receipt, bundle, or unknown bytes. If
+the observation needs to survive parking, replay, or later proof, the worker or
+the projector it reaches must write an ordinary durable observation fact or
+row. If the process crashes before the volatile row is handled, only the
+unclassified host observation is lost; durable protocol state changes only
+after protocol-owned row writes commit.
+
+The ingress path is therefore:
+
+```text
+socket frame
+  -> host adapter captures received_at_ms + origin observation
+  -> volatile incoming-frame intent row
+  -> recurring incoming-frame worker
+  -> protocol-owned row writes, facts, offers, or follow-up queue rows
+```
+
 ## Projector Output
 
 Projector output becomes row writes. A projector does not return a separate
@@ -102,6 +152,9 @@ The following current runtime responsibilities become recurring intents:
   matching stateful worker.
 - **transport workers**: move opaque bytes between protocol-owned transport
   rows and host IO resources.
+- **incoming-frame workers**: claim one volatile network-ingress row, classify
+  opaque frame bytes, and write any durable observation or fact-input rows that
+  the protocol can justify.
 - **version/update workers**: inspect protocol-owned storage markers and emit
   update work when needed.
 
@@ -159,6 +212,9 @@ by the protocol proof attached to that worker.
 - Recurring workers become the only moving parts with arbitrary SQL reads and
   writes. Their proofs are queue discipline and idempotence proofs, not fact
   semantic proofs.
+- Inbound network bytes have explicit restart semantics: unclassified frames
+  are volatile, while durable origin evidence must be promoted by protocol row
+  writes.
 - Replay becomes "rebuild protocol-owned rows from retained facts and run the
   recurring workers needed for materialization" rather than a core-owned
   projection/time/intent fixpoint.
@@ -180,20 +236,27 @@ by the protocol proof attached to that worker.
   durable rows without hiding restart semantics.
 - Whether need/offer matching should be one global protocol worker or multiple
   table-local workers generated from context-role declarations.
+- Whether the network host adapter should call an enqueue function that writes
+  the volatile row directly, or return a typed row batch that core commits
+  through the same row-write validation path as projectors.
 
 ## Migration Sketch
 
 1. Introduce protocol-owned queue tables for one narrow path while keeping the
    existing core queue as the driver.
-2. Move projector output for that path to typed row writes, including emitted
+2. Add queue schema declarations that name persisted versus volatile queue
+   tables and their claim order.
+3. Route incoming network frames into a volatile incoming-frame intent queue
+   with frame bytes, received time, and origin observation.
+4. Move projector output for that path to typed row writes, including emitted
    intent rows.
-3. Add a recurring worker that drains the protocol-owned queue through the
+5. Add a recurring worker that drains the protocol-owned queue through the
    current handler/projector implementation.
-4. Move need/offer matching from core commit code into a recurring matcher that
+6. Move need/offer matching from core commit code into a recurring matcher that
    consumes protocol-owned need/offer delta rows.
-5. Replace core time-wake admission with a recurring time-offer worker that
+7. Replace core time-wake admission with a recurring time-offer worker that
    receives `now_ms`.
-6. Collapse the core runtime turn into ordered recurring intent execution after
+8. Collapse the core runtime turn into ordered recurring intent execution after
    all durable queue paths have protocol owners.
-7. Commit the completed work on that same worktree branch before handoff or
+9. Commit the completed work on that same worktree branch before handoff or
    review.
