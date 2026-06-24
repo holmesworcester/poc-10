@@ -450,3 +450,102 @@ by the protocol proof attached to that worker.
    all durable queue paths have protocol owners.
 10. Commit the completed work on that same worktree branch before handoff or
    review.
+
+## Reconciling The Target With Current Core
+
+Much of this target is a re-homing of mechanism that already exists, not new
+construction. Sizing the migration honestly means separating what the current
+turn already does from the cases that change shape when ownership moves to the
+protocol.
+
+The current turn already implements the recurring-intent skeleton:
+
+- Recurring intents are already a first-class, in-memory, declaration-ordered
+  mechanism. `RecurringScheduler` installs one entry per handler route with a
+  recurrence and offers each builder a chance to enqueue local work at the start
+  of every turn, fired as the first stage of `run_turn`.
+- Projection is already the universal producer. A projector returns one
+  declarative batch carrying rows, needs, offers, time wakes, and both durable
+  and process-local follow-up intents (`effects.rs:50,58,62,64`), which core
+  commits atomically. The "projector writes typed rows instead of returning
+  effect kinds" change is a re-typing of this batch, not a new data path.
+- The outer fixpoint already exists operationally. The daemon calls `run_turn`
+  repeatedly and stops when a turn reports no activity (`app.rs:126`), so "run
+  recurring intents until quiescent" is the current emergent behavior, expressed
+  as bounded turns for fairness and crash granularity rather than one unbounded
+  turn.
+- The need/offer match step is already confluent and idempotent. Matching wakes
+  only on the additions delta a fact contributes (`context_set_additions`,
+  `context_db.rs:83`, consumed by `wake_context_matches_in_tx`,
+  `context_db.rs:674`), which is what keeps it from re-waking owners it has
+  already matched.
+
+## Objections That Do Not Apply To This Target
+
+Three objections that would sink a naive "make everything a recurring intent"
+rewrite do not apply here, because the target redefines their premises:
+
+- **Protocol-neutrality is the goal, not a casualty.** Moving fact storage,
+  queues, and ingress into protocol-owned tables is the mechanism by which core
+  becomes neutral. Host IO stays in the adapter, which captures the origin
+  observation and enqueues an opaque volatile row; core never parses bytes (see
+  Network Ingress). Core ends up owning less protocol meaning, not more.
+- **Replay does not depend on recurring intents firing during replay.** Replay
+  rebuilds protocol-owned derived rows from retained fact storage and lets live
+  turns re-derive what is due from the current clock; timers are rebuilt as
+  rows, not replayed as wall-clock events (see Time-Based Offers and
+  Consequences). Queued intents are droppable across rebuild because required
+  work is recreated from retained facts and live scheduling. Determinism rests on
+  faithful row rebuild, not on reproducing recurring-worker fire order.
+- **No blocking IO runs inside a write transaction.** Transport and ingress
+  workers move opaque bytes between protocol-owned rows and host IO; the socket
+  accept and connect live in the host adapter outside the transaction. The
+  matcher and projection workers touch rows only.
+
+These also reframe the success metric. The target is judged by proof focus — a
+smaller, uniform safety boundary where projector proofs reduce to "a valid fact
+plus trusted context justifies exactly these row writes" — not by core line
+count. A uniform row-write model can add core plumbing while still shrinking the
+surface that has to be proved, which is the trade this note is buying.
+
+## Residual Hard Cases
+
+These cases do change shape under the target, and are where the Open Questions
+need concrete answers before the matching Migration Sketch step lands:
+
+- **Matcher termination once matching leaves the commit.** Today the matcher
+  consumes the additions delta computed inside the same transaction that stored
+  the fact's context (`context_db.rs:83`, `:674`), which bounds the work and
+  prevents re-matching settled owners. A standalone recurring matcher consuming
+  need/offer delta rows must carry an equivalent monotone delta or idempotence
+  key in those rows; without it, a matcher that re-scans standing context can
+  re-queue owners every turn and never quiesce. This is the safety-relevant half
+  of the Open Question "one global matcher versus table-local matchers".
+- **Purge against rebuild-protected storage.** Purge mutates retained fact
+  storage, which is exactly the rebuild-protected set
+  (`CORE_REPLAY_PROTECTED_TABLES = [FACTS, LOCAL_FACT_ADMISSIONS]`,
+  `schema.rs:62`, applied via `purge_fact_in_tx`, `project_fact.rs:2284`, driven
+  by `effects.purged_facts`). If purge becomes a deferred recurring worker, the
+  obligation cannot live only in a reset or volatile queue: on rebuild-from-
+  retained the un-purged fact is projection-eligible again until the worker
+  re-derives the obligation. The obligation must itself be a retained,
+  rebuildable row (a tombstone the projection worker re-honors), and the
+  tombstone-and-purge pair must commit atomically.
+- **Transaction granularity versus fairness and crash loss.** The current stages
+  commit bounded work per turn (`work_limit`, `drain_bounded_work`,
+  `runtime.rs:906`), which yields cooperative shutdown between turns and bounds
+  how much work a crash discards. The Open Question "one transaction each versus
+  claim multiple bounded items" is therefore not only a throughput choice:
+  per-item or bounded-batch commit preserves the current fairness and
+  crash-granularity, while one transaction per worker over an unbounded claim
+  trades both away.
+- **Single-turn hosts have no "next turn".** One-shot CLI commands run `run_turn`
+  exactly once and exit (`app.rs:247`); only the daemon loops (`app.rs:126`). Any
+  worker that enqueues local follow-up work expecting a later turn to drain it
+  will orphan that work under a single-turn host. The manifest loop must drive
+  recurring intents to quiescence within one invocation, or each worker must
+  complete its follow-up inline before the turn returns.
+
+One cleanup is already independent of the migration: the
+`RuntimeEffects::purge_fact` builder (`effects.rs:129`) has no callers, and under
+the projector-writes-rows model the purge effect kind disappears entirely.
