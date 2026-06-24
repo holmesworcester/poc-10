@@ -122,12 +122,13 @@ fn exact_match(
     role: &'static str,
     scope: FactScope,
     key: [u8; 32],
-    payload: Fact,
+    fact: Fact,
 ) -> MatchedContext {
     MatchedContext {
         need: ContextNeed::for_key(owner, role, scope.clone(), key),
-        offer: ContextOffer::for_key(payload.id, role, scope, key),
-        payload,
+        offer: ContextOffer::for_key(fact.id, role, scope, key, fact.bytes.clone()),
+        offer_owner_scope: fact.scope,
+        offer_owner_received_at: fact.timestamp,
     }
 }
 
@@ -156,8 +157,10 @@ fn local_endpoint_match(frame_fact_id: [u8; 32], endpoint: &EndpointFact) -> Mat
             "auth_local_endpoint",
             FactScope::Local,
             endpoint.endpoint,
+            endpoint_fact.bytes.clone(),
         ),
-        payload: endpoint_fact,
+        offer_owner_scope: endpoint_fact.scope,
+        offer_owner_received_at: endpoint_fact.timestamp,
     }
 }
 

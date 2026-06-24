@@ -113,21 +113,22 @@ the branch. It does not merely say "match the option."
 Projectors must read matched context by the exact `ContextNeed` they declared.
 Use:
 
-- `payload_for(&need)` for one exact payload.
-- `payload_for_checked(&need, label)` when the module wants the shared
-  offer/payload consistency check.
-- `matched_payloads_for(&need)` only for intentional multi-match roles, such as
-  connection fact receipts or range roots.
+- `match_for(&need)` for one exact matched offer.
+- `match_for_checked(&need, label)` when the module wants the shared matched
+  offer validation.
+- `matches_for(&need)` only for intentional multi-match roles, such as
+  connection fact receipts or range-backed offers.
+- `value_for(&need)` when only the matched offer value is needed.
 
-Do not call `matched_context()` from protocol projectors. Do not scan
-`context.offers()` to infer whether a declared need is satisfied. A matched
-offer's payload is the offer owner's fact; projectors should reach it only
-through the `ProjectionContext` helper anchored to the need they emitted.
+Do not scan the raw context collection from protocol projectors to infer
+whether a declared need is satisfied. A matched offer exposes only its semantic
+value plus core-stamped owner metadata; projectors should reach it only through
+the `ProjectionContext` helper anchored to the need they emitted.
 
 Good:
 
 ```rust
-let Some(user_fact) = context.payload_for(&needs.user) else {
+let Some(user_match) = context.match_for(&needs.user) else {
     // Missing user authority context: park until the exact user need matches.
     return Ok(needs.output());
 };
@@ -137,12 +138,11 @@ Intentional multi-match:
 
 ```rust
 let receive = context
-    .matched_payloads_for(&needs.receive)
-    .map(|(_, fact)| fact)
-    .min_by_key(|fact| fact.id);
+    .matches_for(&needs.receive)
+    .min_by_key(|matched| matched.offer_owner());
 ```
 
-The need is still concrete. The projector is choosing among multiple payloads
+The need is still concrete. The projector is choosing among multiple offers
 that matched that one need.
 
 ## Typed Facts
@@ -219,13 +219,13 @@ impl UserSignedNeeds {
 This keeps every context proof named at the call site:
 
 ```rust
-let Some(workspace_fact) = context.payload_for(&needs.workspace) else {
+let Some(workspace_fact) = context.match_for(&needs.workspace) else {
     return Ok(needs.output());
 };
-let Some(user_fact) = context.payload_for(&needs.user) else {
+let Some(user_fact) = context.match_for(&needs.user) else {
     return Ok(needs.output());
 };
-let Some(user_invite_fact) = context.payload_for(&needs.user_invite) else {
+let Some(user_invite_fact) = context.match_for(&needs.user_invite) else {
     return Ok(needs.output());
 };
 ```
@@ -242,13 +242,13 @@ wake-loop contract.
 Examples:
 
 ```rust
-let Some(invite_fact) = context.payload_for(&invite_need) else {
+let Some(invite_match) = context.match_for(&invite_need) else {
     // Missing invite secret: keep the row unmaterialized until local context
     // proves this bootstrap request is authorized.
     return Ok(output.need(invite_need));
 };
 
-if invite_fact.scope != FactScope::Local {
+if invite_match.offer_owner_scope != FactScope::Local {
     return Err("connection request invite context must be local".to_string());
 }
 ```
@@ -319,7 +319,7 @@ in a projector file.
 
 - Numbered policy comments for non-trivial projectors.
 - Named needs structs for multi-context branches.
-- `payload_for`, `payload_for_checked`, and `matched_payloads_for`.
+- `match_for`, `match_for_checked`, `matches_for`, and `value_for`.
 - Comments explaining why a branch parks and what future context will prove.
 - Inline cross-field security checks where the reader can see the full rule.
 - Small helpers for structural mechanics: decoding, row construction, transcript

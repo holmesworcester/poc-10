@@ -267,7 +267,7 @@ pub mod adapt {
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, MatchedContext, ProjectionContext, ProjectionOutput, Projector,
 };
 use crate::protocol::auth;
 use crate::protocol::content::message;
@@ -325,37 +325,33 @@ impl RetentionPolicyProjector {
             policy.signer_public_key,
         )?;
         let authority_need = if bootstrap_root {
-            crate::core::context::ContextNeed::range(
+            crate::core::context::ContextNeed::for_key(
                 fact.id,
                 "auth_workspace",
                 crate::core::facts::FactScope::Global,
                 policy.workspace_id,
-                policy.workspace_id,
             )
         } else {
-            crate::core::context::ContextNeed::range(
+            crate::core::context::ContextNeed::for_key(
                 fact.id,
                 "auth_admin",
                 auth::workspace::scope(policy.workspace_id),
                 policy.author_user_id,
-                policy.author_user_id,
             )
         };
         let signer_need = (!bootstrap_root).then(|| {
-            crate::core::context::ContextNeed::range(
+            crate::core::context::ContextNeed::for_key(
                 fact.id,
                 "content_signer",
                 auth::workspace::scope(policy.workspace_id),
                 policy.signer_id,
-                policy.signer_id,
             )
         });
         let previous_need = policy.supersedes_policy_id.map(|previous_id| {
-            crate::core::context::ContextNeed::range(
+            crate::core::context::ContextNeed::for_key(
                 fact.id,
                 "sync_exact_fact",
                 FactScope::Global,
-                previous_id,
                 previous_id,
             )
         });
@@ -379,11 +375,11 @@ impl RetentionPolicyProjector {
         )? {
             return Ok(waiting);
         }
-        let Some(authority_fact) = projection_context.payload_for(&authority_need) else {
+        let Some(authority_fact) = projection_context.match_for(&authority_need) else {
             return Ok(waiting);
         };
         let previous_fact = if let Some(need) = &previous_need {
-            let Some(payload) = projection_context.payload_for(need) else {
+            let Some(payload) = projection_context.match_for(need) else {
                 return Ok(waiting);
             };
             Some(payload)
@@ -391,7 +387,7 @@ impl RetentionPolicyProjector {
             None
         };
         let signer_fact = if let Some(need) = &signer_need {
-            let Some(payload) = projection_context.payload_for(need) else {
+            let Some(payload) = projection_context.match_for(need) else {
                 return Ok(waiting);
             };
             Some(payload)
@@ -428,8 +424,13 @@ impl RetentionPolicyProjector {
                     FactScope::Global,
                     fact.id,
                     fact.id,
+                    fact.bytes.clone(),
                 ))
-                .offer(message::retention_floor_offer(fact.id, policy.workspace_id))
+                .offer(message::retention_floor_offer(
+                    fact.id,
+                    policy.workspace_id,
+                    fact.bytes.clone(),
+                ))
                 .row_mutation(RowMutation::InsertValues(row)),
             policy.workspace_id,
             fact,
@@ -438,7 +439,10 @@ impl RetentionPolicyProjector {
     }
 }
 
-fn validate_authority(authority_fact: &Fact, policy: &RetentionPolicyFact) -> Result<(), String> {
+fn validate_authority(
+    authority_fact: &MatchedContext,
+    policy: &RetentionPolicyFact,
+) -> Result<(), String> {
     if let Ok(admin) = decode_admin_payload(authority_fact) {
         if admin.workspace_id != policy.workspace_id {
             return Err("retention policy authority admin workspace mismatch".to_string());
@@ -450,9 +454,9 @@ fn validate_authority(authority_fact: &Fact, policy: &RetentionPolicyFact) -> Re
     }
 
     if policy.supersedes_policy_id.is_none()
-        && authority_fact.id == policy.workspace_id
+        && authority_fact.offer_owner() == policy.workspace_id
         && policy.author_user_id == policy.workspace_id
-        && auth::workspace::decode_fact_payload(authority_fact.body()).is_ok()
+        && auth::workspace::decode_fact_payload(authority_fact.value()).is_ok()
     {
         return Ok(());
     }
@@ -460,12 +464,15 @@ fn validate_authority(authority_fact: &Fact, policy: &RetentionPolicyFact) -> Re
     Err("retention policy authority context is not valid admin authority".to_string())
 }
 
-fn decode_admin_payload(fact: &Fact) -> Result<auth::admin::fact::AdminFact, String> {
-    auth::admin::decode_fact_payload(fact.body())
+fn decode_admin_payload(fact: &MatchedContext) -> Result<auth::admin::fact::AdminFact, String> {
+    auth::admin::decode_fact_payload(fact.value())
 }
 
-fn validate_signer(signer_fact: &Fact, policy: &RetentionPolicyFact) -> Result<(), String> {
-    let signer = auth::endpoint_shared::decode_fact_payload(signer_fact.body())
+fn validate_signer(
+    signer_fact: &MatchedContext,
+    policy: &RetentionPolicyFact,
+) -> Result<(), String> {
+    let signer = auth::endpoint_shared::decode_fact_payload(signer_fact.value())
         .map_err(|_| "retention policy signer context must be endpoint_shared".to_string())?;
     if signer.workspace_id != policy.workspace_id {
         return Err("retention policy signer workspace mismatch".to_string());
@@ -483,10 +490,10 @@ fn validate_signer(signer_fact: &Fact, policy: &RetentionPolicyFact) -> Result<(
 }
 
 fn validate_workspace_bootstrap_signer(
-    workspace_fact: &Fact,
+    workspace_fact: &MatchedContext,
     policy: &RetentionPolicyFact,
 ) -> Result<(), String> {
-    let workspace = auth::workspace::decode_fact_payload(workspace_fact.body())
+    let workspace = auth::workspace::decode_fact_payload(workspace_fact.value())
         .map_err(|_| "retention policy bootstrap authority must be workspace".to_string())?;
     if workspace.public_key != policy.signer_public_key {
         return Err("retention policy bootstrap key does not match workspace".to_string());
@@ -497,11 +504,14 @@ fn validate_workspace_bootstrap_signer(
     Ok(())
 }
 
-fn validate_previous(previous_fact: &Fact, policy: &RetentionPolicyFact) -> Result<(), String> {
-    if Some(previous_fact.id) != policy.supersedes_policy_id {
-        return Err("retention policy previous context payload id mismatch".to_string());
+fn validate_previous(
+    previous_fact: &MatchedContext,
+    policy: &RetentionPolicyFact,
+) -> Result<(), String> {
+    if Some(previous_fact.offer_owner()) != policy.supersedes_policy_id {
+        return Err("retention policy previous matched offer owner mismatch".to_string());
     }
-    let previous = super::decode_fact_payload(&previous_fact.bytes).map_err(|_| {
+    let previous = super::decode_fact_payload(previous_fact.value()).map_err(|_| {
         "retention policy previous context must be a retention policy fact".to_string()
     })?;
     if previous.workspace_id != policy.workspace_id
@@ -760,11 +770,10 @@ mod projector_tests {
         authority: Fact,
     ) -> MatchedContext {
         matched(
-            crate::core::context::ContextNeed::range(
+            crate::core::context::ContextNeed::for_key(
                 owner,
                 "auth_admin",
                 auth::workspace::scope(policy.workspace_id),
-                policy.author_user_id,
                 policy.author_user_id,
             ),
             crate::core::context::ContextOffer::range(
@@ -773,6 +782,7 @@ mod projector_tests {
                 auth::workspace::scope(policy.workspace_id),
                 policy.author_user_id,
                 policy.author_user_id,
+                authority.bytes.clone(),
             ),
             authority,
         )
@@ -780,11 +790,10 @@ mod projector_tests {
 
     fn signer_match(owner: [u8; 32], policy: &RetentionPolicyFact, signer: Fact) -> MatchedContext {
         matched(
-            crate::core::context::ContextNeed::range(
+            crate::core::context::ContextNeed::for_key(
                 owner,
                 "content_signer",
                 auth::workspace::scope(policy.workspace_id),
-                policy.signer_id,
                 policy.signer_id,
             ),
             crate::core::context::ContextOffer::range(
@@ -793,6 +802,7 @@ mod projector_tests {
                 auth::workspace::scope(policy.workspace_id),
                 policy.signer_id,
                 policy.signer_id,
+                signer.bytes.clone(),
             ),
             signer,
         )
@@ -800,11 +810,10 @@ mod projector_tests {
 
     fn previous_match(owner: [u8; 32], previous: Fact) -> MatchedContext {
         matched(
-            crate::core::context::ContextNeed::range(
+            crate::core::context::ContextNeed::for_key(
                 owner,
                 "sync_exact_fact",
                 FactScope::Global,
-                previous.id,
                 previous.id,
             ),
             crate::core::context::ContextOffer::range(
@@ -813,6 +822,7 @@ mod projector_tests {
                 FactScope::Global,
                 previous.id,
                 previous.id,
+                previous.bytes.clone(),
             ),
             previous,
         )
@@ -841,6 +851,7 @@ mod projector_tests {
                 scope,
                 owner,
                 policy.signer_public_key,
+                signature.bytes.clone(),
             )
             .expect("signature offer"),
             signature,
@@ -850,12 +861,13 @@ mod projector_tests {
     fn matched(
         need: topo::core::context::ContextNeed,
         offer: topo::core::context::ContextOffer,
-        payload: Fact,
+        fact: Fact,
     ) -> MatchedContext {
         MatchedContext {
             need,
             offer,
-            payload,
+            offer_owner_scope: fact.scope,
+            offer_owner_received_at: fact.timestamp,
         }
     }
 

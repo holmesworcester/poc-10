@@ -201,11 +201,11 @@ pub mod adapt {
 use crate::core::context::ContextNeed;
 use crate::core::facts::Fact;
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, MatchedContext, ProjectionContext, ProjectionOutput, Projector,
 };
 use crate::protocol::auth::endpoint_shared;
 use crate::protocol::auth::key_wrap::project::{
-    add_signer_needs_for_matching_sources, matched_payload_fact, matching_wrap_sources_with_signer,
+    add_signer_needs_for_matching_sources, matching_wrap_sources_with_signer,
     requested_wrap_source_need, require_fact_scope,
 };
 use crate::protocol::auth::key_wrap_creation::key_wrap_creation_fact;
@@ -273,25 +273,22 @@ fn key_request(
         fact.id,
         request.signer_public_key,
     )?;
-    let requester_need = ContextNeed::range(
+    let requester_need = ContextNeed::for_key(
         fact.id,
         "content_signer",
         scope.clone(),
         request.requester_endpoint_id,
-        request.requester_endpoint_id,
     );
-    let recipient_need = ContextNeed::range(
+    let recipient_need = ContextNeed::for_key(
         fact.id,
         "recipient_key",
         scope.clone(),
         request.recipient_key_id,
-        request.recipient_key_id,
     );
-    let frontier_need = ContextNeed::range(
+    let frontier_need = ContextNeed::for_key(
         fact.id,
         "auth_removal_frontier",
         scope.clone(),
-        request.frontier_id,
         request.frontier_id,
     );
     let source_need = requested_wrap_source_need(
@@ -301,8 +298,8 @@ fn key_request(
         request.frontier_id,
     );
 
-    let recipient_fact = matched_payload_fact(projection_context, &recipient_need);
-    let frontier_fact = matched_payload_fact(projection_context, &frontier_need);
+    let recipient_fact = projection_context.match_for(&recipient_need);
+    let frontier_fact = projection_context.match_for(&frontier_need);
     let mut waiting = ProjectionOutput::new()
         .need(signature_need.clone())
         .need(requester_need.clone())
@@ -320,7 +317,7 @@ fn key_request(
     )? {
         return Ok(waiting);
     }
-    let Some(requester_fact) = projection_context.payload_for(&requester_need) else {
+    let Some(requester_fact) = projection_context.match_for(&requester_need) else {
         return Ok(waiting);
     };
     validate_requester_signer(requester_fact, &request)?;
@@ -339,20 +336,16 @@ fn key_request(
     let (Some(recipient_fact), Some(frontier_fact)) = (recipient_fact, frontier_fact) else {
         return Ok(output);
     };
-    if recipient_fact.id != request.recipient_key_id {
-        return Err("key request recipient context payload id mismatch".to_string());
-    }
-    let recipient = recipient_key::decode_fact_payload(&recipient_fact.bytes)?;
+    recipient_fact.require_owner(request.recipient_key_id, "key request recipient")?;
+    let recipient = recipient_key::decode_fact_payload(recipient_fact.value())?;
     if recipient.workspace_id != request.workspace_id {
         return Err("key request recipient workspace mismatch".to_string());
     }
     if recipient.endpoint_id != request.requester_endpoint_id {
         return Err("key request recipient is not requester endpoint".to_string());
     }
-    if frontier_fact.id != request.frontier_id {
-        return Err("key request frontier context payload id mismatch".to_string());
-    }
-    let frontier = removal_frontier::decode_fact_payload(&frontier_fact.bytes)?;
+    frontier_fact.require_owner(request.frontier_id, "key request frontier")?;
+    let frontier = removal_frontier::decode_fact_payload(frontier_fact.value())?;
     if frontier.workspace_id != request.workspace_id {
         return Err("key request frontier workspace mismatch".to_string());
     }
@@ -386,10 +379,10 @@ fn key_request(
 }
 
 fn validate_requester_signer(
-    requester_fact: &Fact,
+    requester_fact: &MatchedContext,
     request: &KeyRequestFact,
 ) -> Result<(), String> {
-    let signer = endpoint_shared::decode_fact_payload(requester_fact.body())
+    let signer = endpoint_shared::decode_fact_payload(requester_fact.value())
         .map_err(|_| "key request requester context must be endpoint_shared".to_string())?;
     if signer.workspace_id != request.workspace_id {
         return Err("key request requester workspace mismatch".to_string());
@@ -536,46 +529,45 @@ mod projector_tests {
 
     fn requester_need(request: &Fact) -> ContextNeed {
         let decoded = decode::decode_key_request(&request.bytes).expect("decode request");
-        ContextNeed::range(
+        ContextNeed::for_key(
             request.id,
             "content_signer",
             request.scope.clone(),
-            decoded.requester_endpoint_id,
             decoded.requester_endpoint_id,
         )
     }
 
     fn recipient_need(request: &Fact, recipient_key_id: [u8; 32]) -> ContextNeed {
-        ContextNeed::range(
+        ContextNeed::for_key(
             request.id,
             "recipient_key",
             request.scope.clone(),
-            recipient_key_id,
             recipient_key_id,
         )
     }
 
     fn frontier_need(request: &Fact, frontier_id: [u8; 32]) -> ContextNeed {
-        ContextNeed::range(
+        ContextNeed::for_key(
             request.id,
             "auth_removal_frontier",
             request.scope.clone(),
             frontier_id,
-            frontier_id,
         )
     }
 
-    fn matched(need: ContextNeed, payload: Fact) -> MatchedContext {
+    fn matched(need: ContextNeed, fact: Fact) -> MatchedContext {
         MatchedContext {
             offer: ContextOffer::range(
-                payload.id,
+                fact.id,
                 need.role.clone(),
                 need.scope.clone(),
-                need.start_key.as_bytes(),
-                need.end_key.as_bytes(),
+                need.key.as_bytes(),
+                need.key.as_bytes(),
+                fact.bytes.clone(),
             ),
+            offer_owner_scope: fact.scope,
+            offer_owner_received_at: fact.timestamp,
             need,
-            payload,
         }
     }
 

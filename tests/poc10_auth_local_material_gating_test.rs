@@ -106,7 +106,7 @@ fn local_history_node_waits_for_frontier_source_and_tombstone_context() {
     assert!(waiting_for_tombstone
         .needs
         .iter()
-        .any(|need| need.start_key.as_bytes() == &[9u8; 32][..]));
+        .any(|need| need.key.as_bytes() == &[9u8; 32][..]));
 }
 
 fn frontier_fact(workspace_id: [u8; 32], owner_endpoint_id: [u8; 32], created_at_ms: u64) -> Fact {
@@ -175,11 +175,10 @@ fn history_node_fact(
 fn frontier_match(owner: [u8; 32], workspace_id: [u8; 32], frontier: Fact) -> MatchedContext {
     let scope = topo::protocol::auth::workspace::scope(workspace_id);
     matched(
-        topo::core::context::ContextNeed::range(
+        topo::core::context::ContextNeed::for_key(
             owner,
             "auth_removal_frontier",
             scope.clone(),
-            frontier.id,
             frontier.id,
         ),
         topo::core::context::ContextOffer::range(
@@ -188,6 +187,7 @@ fn frontier_match(owner: [u8; 32], workspace_id: [u8; 32], frontier: Fact) -> Ma
             scope,
             frontier.id,
             frontier.id,
+            frontier.bytes.clone(),
         ),
         frontier,
     )
@@ -195,11 +195,10 @@ fn frontier_match(owner: [u8; 32], workspace_id: [u8; 32], frontier: Fact) -> Ma
 
 fn source_match(owner: [u8; 32], source_secret_id: [u8; 32], source: Fact) -> MatchedContext {
     matched(
-        topo::core::context::ContextNeed::range(
+        topo::core::context::ContextNeed::for_key(
             owner,
             "local_secret_source",
             topo::core::facts::FactScope::Local,
-            source_secret_id,
             source_secret_id,
         ),
         topo::core::context::ContextOffer::range(
@@ -208,6 +207,7 @@ fn source_match(owner: [u8; 32], source_secret_id: [u8; 32], source: Fact) -> Ma
             topo::core::facts::FactScope::Local,
             source.id,
             source.id,
+            source.bytes.clone(),
         ),
         source,
     )
@@ -216,11 +216,12 @@ fn source_match(owner: [u8; 32], source_secret_id: [u8; 32], source: Fact) -> Ma
 fn matched(
     need: topo::core::context::ContextNeed,
     offer: topo::core::context::ContextOffer,
-    payload: Fact,
+    fact: Fact,
 ) -> MatchedContext {
     MatchedContext {
         need,
         offer,
-        payload,
+        offer_owner_scope: fact.scope,
+        offer_owner_received_at: fact.timestamp,
     }
 }

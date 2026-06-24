@@ -234,7 +234,7 @@ use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, MatchedContext, ProjectionContext, ProjectionOutput, Projector,
 };
 use crate::protocol::auth::device_invite::fact::DeviceInviteFact;
 use crate::protocol::auth::{endpoint_shared, signature, user, user_invite, workspace};
@@ -328,13 +328,13 @@ fn project_user_authorized(
     signature_need: ContextNeed,
 ) -> Result<ProjectionOutput, String> {
     let needs = UserAuthorityNeeds::new(fact.id, invite, user_invite_fact_id, signature_need);
-    let Some(workspace_fact) = context.payload_for(&needs.workspace) else {
+    let Some(workspace_fact) = context.match_for(&needs.workspace) else {
         return Ok(needs.output());
     };
-    let Some(user_fact) = context.payload_for(&needs.user) else {
+    let Some(user_fact) = context.match_for(&needs.user) else {
         return Ok(needs.output());
     };
-    let Some(user_invite_fact) = context.payload_for(&needs.user_invite) else {
+    let Some(user_invite_fact) = context.match_for(&needs.user_invite) else {
         return Ok(needs.output());
     };
 
@@ -343,10 +343,8 @@ fn project_user_authorized(
     if invite.signer_id != invite.user_authority_fact_id {
         return Err("user-authorized device_invite authority must match signer user".to_string());
     }
-    if user_fact.id != invite.user_authority_fact_id {
-        return Err("device_invite user context payload id mismatch".to_string());
-    }
-    let user = user::decode_fact_payload(user_fact.body())
+    user_fact.require_owner(invite.user_authority_fact_id, "device_invite user")?;
+    let user = user::decode_fact_payload(user_fact.value())
         .map_err(|_| "device_invite user signer payload is invalid".to_string())?;
     if invite.signer_public_key != user.public_key {
         return Err("device_invite signer public key does not match user".to_string());
@@ -360,10 +358,8 @@ fn project_user_authorized(
             "device_invite user_invite dependency does not match authorized user".to_string(),
         );
     }
-    if user_invite_fact.id != user_invite_fact_id {
-        return Err("device_invite user_invite context payload id mismatch".to_string());
-    }
-    let user_invite = user_invite::decode_fact_payload(user_invite_fact.body())
+    user_invite_fact.require_owner(user_invite_fact_id, "device_invite user_invite")?;
+    let user_invite = user_invite::decode_fact_payload(user_invite_fact.value())
         .map_err(|_| "device_invite user_invite context is not a user_invite fact".to_string())?;
     if user_invite.workspace_id != invite.workspace_id {
         return Err("device_invite user_invite belongs to a different workspace".to_string());
@@ -392,19 +388,17 @@ fn project_endpoint_authorized(
     signature_need: ContextNeed,
 ) -> Result<ProjectionOutput, String> {
     let needs = EndpointAuthorityNeeds::new(fact.id, invite, invite.signer_id, signature_need);
-    let Some(workspace_fact) = context.payload_for(&needs.workspace) else {
+    let Some(workspace_fact) = context.match_for(&needs.workspace) else {
         return Ok(needs.output());
     };
-    let Some(signer_fact) = context.payload_for(&needs.endpoint_shared) else {
+    let Some(signer_fact) = context.match_for(&needs.endpoint_shared) else {
         return Ok(needs.output());
     };
 
     validate_workspace_context(workspace_fact, invite.workspace_id)?;
 
-    if signer_fact.id != invite.signer_id {
-        return Err("device_invite endpoint_shared context payload id mismatch".to_string());
-    }
-    let signer = endpoint_shared::decode_fact_payload(signer_fact.body())
+    signer_fact.require_owner(invite.signer_id, "device_invite endpoint_shared")?;
+    let signer = endpoint_shared::decode_fact_payload(signer_fact.value())
         .map_err(|_| "device_invite endpoint_shared signer payload is invalid".to_string())?;
     if invite.signer_public_key != signer.signing_public_key {
         return Err(
@@ -447,25 +441,22 @@ impl UserAuthorityNeeds {
     ) -> Self {
         Self {
             signature,
-            workspace: crate::core::context::ContextNeed::range(
+            workspace: crate::core::context::ContextNeed::for_key(
                 owner,
                 "auth_workspace",
                 crate::core::facts::FactScope::Global,
                 invite.workspace_id,
-                invite.workspace_id,
             ),
-            user: crate::core::context::ContextNeed::range(
+            user: crate::core::context::ContextNeed::for_key(
                 owner,
                 "auth_user",
                 crate::core::facts::FactScope::Global,
                 invite.user_authority_fact_id,
-                invite.user_authority_fact_id,
             ),
-            user_invite: crate::core::context::ContextNeed::range(
+            user_invite: crate::core::context::ContextNeed::for_key(
                 owner,
                 "auth_user_invite",
                 crate::core::facts::FactScope::Global,
-                user_invite_fact_id,
                 user_invite_fact_id,
             ),
         }
@@ -495,18 +486,16 @@ impl EndpointAuthorityNeeds {
     ) -> Self {
         Self {
             signature,
-            workspace: crate::core::context::ContextNeed::range(
+            workspace: crate::core::context::ContextNeed::for_key(
                 owner,
                 "auth_workspace",
                 crate::core::facts::FactScope::Global,
                 invite.workspace_id,
-                invite.workspace_id,
             ),
-            endpoint_shared: crate::core::context::ContextNeed::range(
+            endpoint_shared: crate::core::context::ContextNeed::for_key(
                 owner,
                 "auth_endpoint_shared",
                 crate::core::facts::FactScope::Global,
-                signer_id,
                 signer_id,
             ),
         }
@@ -520,11 +509,12 @@ impl EndpointAuthorityNeeds {
     }
 }
 
-fn validate_workspace_context(workspace_fact: &Fact, workspace_id: FactId) -> Result<(), String> {
-    if workspace_fact.id != workspace_id {
-        return Err("device_invite workspace context payload id mismatch".to_string());
-    }
-    workspace::decode_fact_payload(workspace_fact.body())
+fn validate_workspace_context(
+    workspace_fact: &MatchedContext,
+    workspace_id: FactId,
+) -> Result<(), String> {
+    workspace_fact.require_owner(workspace_id, "device_invite workspace")?;
+    workspace::decode_fact_payload(workspace_fact.value())
         .map_err(|_| "device_invite workspace dependency is not a workspace".to_string())?;
     Ok(())
 }
@@ -547,6 +537,7 @@ fn materialized_output(
                 crate::core::facts::FactScope::Global,
                 fact.id,
                 fact.id,
+                fact.bytes.clone(),
             ))
             .offer(crate::core::context::ContextOffer::range(
                 fact.id,
@@ -554,6 +545,7 @@ fn materialized_output(
                 crate::protocol::auth::workspace::scope(invite.workspace_id),
                 device_invite_key.clone(),
                 device_invite_key,
+                fact.bytes.clone(),
             )),
         invite.workspace_id,
         fact,
@@ -735,9 +727,11 @@ mod tests {
                     workspace::scope(invite_body.workspace_id),
                     invite_fact.id,
                     invite_body.signer_public_key,
+                    signature_fact.bytes.clone(),
                 )
                 .expect("signature offer"),
-                payload: signature_fact.clone(),
+                offer_owner_scope: signature_fact.scope.clone(),
+                offer_owner_received_at: signature_fact.timestamp,
             },
             MatchedContext {
                 need: needs.workspace,
@@ -747,8 +741,10 @@ mod tests {
                     FactScope::Global,
                     workspace_fact.id,
                     workspace_fact.id,
+                    workspace_fact.bytes.clone(),
                 ),
-                payload: workspace_fact.clone(),
+                offer_owner_scope: workspace_fact.scope.clone(),
+                offer_owner_received_at: workspace_fact.timestamp,
             },
             MatchedContext {
                 need: needs.user,
@@ -758,8 +754,10 @@ mod tests {
                     FactScope::Global,
                     user_fact.id,
                     user_fact.id,
+                    user_fact.bytes.clone(),
                 ),
-                payload: user_fact.clone(),
+                offer_owner_scope: user_fact.scope.clone(),
+                offer_owner_received_at: user_fact.timestamp,
             },
             MatchedContext {
                 need: needs.user_invite,
@@ -769,8 +767,10 @@ mod tests {
                     FactScope::Global,
                     user_invite_fact.id,
                     user_invite_fact.id,
+                    user_invite_fact.bytes.clone(),
                 ),
-                payload: user_invite_fact.clone(),
+                offer_owner_scope: user_invite_fact.scope.clone(),
+                offer_owner_received_at: user_invite_fact.timestamp,
             },
         ])
     }

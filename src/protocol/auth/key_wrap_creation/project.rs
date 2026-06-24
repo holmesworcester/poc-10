@@ -124,10 +124,10 @@ pub mod adapt {
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactScope};
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, MatchedContext, ProjectionContext, ProjectionOutput, Projector,
 };
 use crate::protocol::auth::key_wrap::create_validated_key_wrap_facts;
-use crate::protocol::auth::key_wrap::project::{matched_payload_fact, require_local_scope};
+use crate::protocol::auth::key_wrap::project::require_local_scope;
 
 use super::fact::KeyWrapCreationFact;
 
@@ -181,35 +181,32 @@ fn project_key_wrap_creation(
     let scope = crate::protocol::auth::workspace::scope(creation.workspace_id);
 
     // 2. Context: exact recipient, source, and signer facts named by this work fact.
-    let recipient_need = ContextNeed::range(
+    let recipient_need = ContextNeed::for_key(
         fact.id,
         "recipient_key",
         scope.clone(),
         creation.recipient_key_id,
-        creation.recipient_key_id,
     );
-    let source_need = ContextNeed::range(
+    let source_need = ContextNeed::for_key(
         fact.id,
         "local_secret_source",
         FactScope::Local,
         creation.source_fact_id,
-        creation.source_fact_id,
     );
-    let signer_need = ContextNeed::range(
+    let signer_need = ContextNeed::for_key(
         fact.id,
         "local_signer_secret",
         scope,
-        creation.owner_endpoint_id,
         creation.owner_endpoint_id,
     );
     let output = ProjectionOutput::new()
         .need(recipient_need.clone())
         .need(source_need.clone())
         .need(signer_need.clone());
-    let Some(recipient_fact) = matched_payload_fact(projection_context, &recipient_need) else {
+    let Some(recipient_fact) = projection_context.match_for(&recipient_need) else {
         return Ok(output);
     };
-    let Some(source_fact) = matched_payload_fact(projection_context, &source_need) else {
+    let Some(source_fact) = projection_context.match_for(&source_need) else {
         return Ok(output);
     };
     let Some(signer_secret_fact) =
@@ -220,9 +217,13 @@ fn project_key_wrap_creation(
     // 3. Materialize: deterministic shared key-wrap fact plus signer proof.
     let [key_wrap_fact, signature_fact] = create_validated_key_wrap_facts(
         &creation,
-        recipient_fact,
-        source_fact,
-        signer_secret_fact,
+        recipient_fact.offer_owner(),
+        recipient_fact.value(),
+        source_fact.offer_owner(),
+        source_fact.offer_owner_received_at,
+        source_fact.value(),
+        signer_secret_fact.offer_owner(),
+        signer_secret_fact.value(),
     )?;
     Ok(output.fact(key_wrap_fact).fact(signature_fact))
 }
@@ -231,11 +232,10 @@ fn matching_signer_secret_fact<'a>(
     projection_context: &'a ProjectionContext,
     need: &'a ContextNeed,
     creation: &KeyWrapCreationFact,
-) -> Option<&'a Fact> {
+) -> Option<&'a MatchedContext> {
     projection_context
-        .matched_payloads_for(need)
-        .map(|(_, payload)| payload)
-        .find(|payload| payload.id == creation.signer_secret_fact_id)
+        .matches_for(need)
+        .find(|matched| matched.offer_owner() == creation.signer_secret_fact_id)
 }
 
 // Tests.
@@ -264,26 +264,23 @@ mod tests {
 
         assert!(output.effects.facts.is_empty());
         assert_eq!(output.needs.len(), 3);
-        assert!(output.needs.contains(&ContextNeed::range(
+        assert!(output.needs.contains(&ContextNeed::for_key(
             fact.id,
             "recipient_key",
             crate::protocol::auth::workspace::scope(creation.workspace_id),
-            creation.recipient_key_id,
-            creation.recipient_key_id,
+            creation.recipient_key_id
         )));
-        assert!(output.needs.contains(&ContextNeed::range(
+        assert!(output.needs.contains(&ContextNeed::for_key(
             fact.id,
             "local_secret_source",
             FactScope::Local,
-            creation.source_fact_id,
-            creation.source_fact_id,
+            creation.source_fact_id
         )));
-        assert!(output.needs.contains(&ContextNeed::range(
+        assert!(output.needs.contains(&ContextNeed::for_key(
             fact.id,
             "local_signer_secret",
             crate::protocol::auth::workspace::scope(creation.workspace_id),
-            creation.owner_endpoint_id,
-            creation.owner_endpoint_id,
+            creation.owner_endpoint_id
         )));
     }
 

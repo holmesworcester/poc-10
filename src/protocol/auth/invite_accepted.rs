@@ -91,11 +91,10 @@ pub fn workspace_accepted_need(
     owner: crate::core::facts::FactId,
     workspace_id: crate::core::facts::FactId,
 ) -> crate::core::context::ContextNeed {
-    crate::core::context::ContextNeed::range(
+    crate::core::context::ContextNeed::for_key(
         owner,
         AUTH_WORKSPACE_ACCEPTED_ROLE,
         crate::core::facts::FactScope::Global,
-        workspace_id,
         workspace_id,
     )
 }
@@ -103,6 +102,7 @@ pub fn workspace_accepted_need(
 pub fn workspace_accepted_offer(
     owner: crate::core::facts::FactId,
     workspace_id: crate::core::facts::FactId,
+    value: impl Into<Vec<u8>>,
 ) -> crate::core::context::ContextOffer {
     crate::core::context::ContextOffer::range(
         owner,
@@ -110,5 +110,6 @@ pub fn workspace_accepted_offer(
         crate::core::facts::FactScope::Global,
         workspace_id,
         workspace_id,
+        value,
     )
 }

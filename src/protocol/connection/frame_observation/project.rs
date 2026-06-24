@@ -231,18 +231,22 @@ pub fn connection_frame_observation_need(owner: FactId, frame_fact_id: FactId) -
         owner,
         role: Role::expect(CONNECTION_FRAME_OBSERVATION_ROLE),
         scope: FactScope::Local,
-        start_key: ContextKey::from_bytes(frame_fact_id),
-        end_key: ContextKey::from_bytes(frame_fact_id),
+        key: ContextKey::from_bytes(frame_fact_id),
     }
 }
 
-pub fn connection_frame_observation_offer(owner: FactId, frame_fact_id: FactId) -> ContextOffer {
+pub fn connection_frame_observation_offer(
+    owner: FactId,
+    frame_fact_id: FactId,
+    value: impl Into<Vec<u8>>,
+) -> ContextOffer {
     ContextOffer {
         owner,
         role: Role::expect(CONNECTION_FRAME_OBSERVATION_ROLE),
         scope: FactScope::Local,
         start_key: ContextKey::from_bytes(frame_fact_id),
         end_key: ContextKey::from_bytes(frame_fact_id),
+        value: value.into(),
     }
 }
 
@@ -317,6 +321,7 @@ mod tests {
             vec![connection_frame_observation_offer(
                 fact.id,
                 observed.frame_fact_id,
+                fact.bytes.clone(),
             )]
         );
         assert!(output.effects.row_mutations.is_empty());
@@ -372,6 +377,7 @@ impl ConnectionFrameObservationProjector {
             ProjectionOutput::new().offer(connection_frame_observation_offer(
                 fact.id,
                 observed.frame_fact_id,
+                fact.bytes.clone(),
             )),
         )
     }

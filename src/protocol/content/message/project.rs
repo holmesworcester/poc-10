@@ -266,7 +266,7 @@ use crate::core::crypto;
 use crate::core::facts::{Fact, FactId};
 use crate::core::intents::{RowMutation, TableDeleteWhere, TableInsert, TypedTableSchema, Value};
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector, TimeWake,
+    FactProjectorInfo, MatchedContext, ProjectionContext, ProjectionOutput, Projector, TimeWake,
 };
 use crate::protocol::auth;
 use crate::protocol::auth::local_history_node_secret::project as coverage;
@@ -338,18 +338,18 @@ pub fn retention_floor_need(
     workspace_id: crate::core::facts::FactId,
 ) -> crate::core::context::ContextNeed {
     let key = workspace_id.to_vec();
-    crate::core::context::ContextNeed::range(
+    crate::core::context::ContextNeed::for_key(
         owner,
         crate::core::context::Role::expect(RETENTION_FLOOR_ROLE),
         crate::protocol::auth::workspace::scope(workspace_id),
         key.clone(),
-        key,
     )
 }
 
 pub fn retention_floor_offer(
     owner: crate::core::facts::FactId,
     workspace_id: crate::core::facts::FactId,
+    value: impl Into<Vec<u8>>,
 ) -> crate::core::context::ContextOffer {
     let key = workspace_id.to_vec();
     crate::core::context::ContextOffer::range(
@@ -358,6 +358,7 @@ pub fn retention_floor_offer(
         crate::protocol::auth::workspace::scope(workspace_id),
         key.clone(),
         key,
+        value,
     )
 }
 
@@ -470,11 +471,10 @@ impl ContentMessageProjector {
             fact.id,
             message.signer_public_key,
         )?;
-        let signer_need = crate::core::context::ContextNeed::range(
+        let signer_need = crate::core::context::ContextNeed::for_key(
             fact.id,
             "content_signer",
             scope.clone(),
-            message.signer_id,
             message.signer_id,
         );
         let deletion_need = crate::core::project_fact::fact_purged_need(
@@ -483,11 +483,10 @@ impl ContentMessageProjector {
             fact_purged_key(message.frontier_id, message.minute, fact.id),
         );
         let retention_floor_need = retention_floor_need(fact.id, message.workspace_id);
-        let author_need = crate::core::context::ContextNeed::range(
+        let author_need = crate::core::context::ContextNeed::for_key(
             fact.id,
             "auth_user",
             crate::core::facts::FactScope::Global,
-            message.author_user_id,
             message.author_user_id,
         );
         let secret_need = coverage::secret_need(
@@ -511,20 +510,20 @@ impl ContentMessageProjector {
                 secret_need.clone(),
             ],
         );
-        let Some(signature_payload) =
+        let Some(signature_match) =
             context_payload(context, &signature_need, "message signature proof")?
         else {
             return Ok(base_output);
         };
-        signature::project::validate_signature_proof_payload(
-            signature_payload,
+        signature::project::validate_signature_proof_context(
+            signature_match,
             &signature_need,
             message.workspace_id,
             fact.id,
             message.signer_public_key,
             "content message",
         )?;
-        let Some(signer_payload) = context.payload_for(&signer_need) else {
+        let Some(signer_payload) = context.match_for(&signer_need) else {
             return Ok(base_wait_output(
                 fact,
                 &message,
@@ -585,7 +584,7 @@ impl ContentMessageProjector {
             )?;
             return Ok(author_deletion_output(fact.id, &message));
         }
-        let Some(secret_payload) = matched_secret_payload(context, &secret_need)? else {
+        let Some(secret_match) = matched_secret_offer(context, &secret_need)? else {
             return Ok(base_wait_output(
                 fact,
                 &message,
@@ -599,7 +598,7 @@ impl ContentMessageProjector {
                 ],
             ));
         };
-        let text = decrypt_text(&message, secret_payload)?;
+        let text = decrypt_text(&message, secret_match)?;
 
         // 3. Materialize.
         Ok(share_fact_with_sync(
@@ -610,6 +609,7 @@ impl ContentMessageProjector {
                     scope,
                     fact.id,
                     fact.id,
+                    fact.bytes.clone(),
                 ))
                 .row_mutation(RowMutation::InsertValues(content_message_row(
                     fact.id, &message,
@@ -661,11 +661,11 @@ fn ready_message_output(
 }
 
 fn validate_message_signer_context(
-    payload: &Fact,
+    matched: &MatchedContext,
     _need: &ContextNeed,
     message: &super::fact::ContentMessageFact,
 ) -> Result<(), String> {
-    let endpoint = endpoint_shared_signer(payload)
+    let endpoint = endpoint_shared_signer(matched)
         .ok_or_else(|| "content message signer context must be endpoint_shared".to_string())?;
     if endpoint.workspace_id != message.workspace_id {
         return Err("content message signer endpoint workspace does not match message".to_string());
@@ -688,20 +688,20 @@ fn validate_message_signer_context(
 }
 
 fn endpoint_shared_signer(
-    payload: &Fact,
+    matched: &MatchedContext,
 ) -> Option<auth::endpoint_shared::fact::EndpointSharedFact> {
-    auth::endpoint_shared::decode_fact_payload(payload.body()).ok()
+    auth::endpoint_shared::decode_fact_payload(matched.value()).ok()
 }
 
 fn validate_author_user(
-    payload: &Fact,
+    matched: &MatchedContext,
     workspace_id: crate::core::facts::FactId,
     author_user_id: crate::core::facts::FactId,
 ) -> Result<(), String> {
-    if payload.id != author_user_id {
-        return Err("message author context payload id mismatch".to_string());
+    if matched.offer_owner() != author_user_id {
+        return Err("message author matched offer owner mismatch".to_string());
     }
-    let author = crate::protocol::auth::user::decode_fact_payload(payload.body())
+    let author = crate::protocol::auth::user::decode_fact_payload(matched.value())
         .map_err(|_| "message author context is not an identity user".to_string())?;
     if author.workspace_id != workspace_id {
         return Err("message author workspace does not match message".to_string());
@@ -710,14 +710,14 @@ fn validate_author_user(
 }
 
 fn validate_message_deletion(
-    payload: &Fact,
+    matched: &MatchedContext,
     workspace_id: crate::core::facts::FactId,
     target_frontier_id: crate::core::facts::FactId,
     target_minute: u64,
     target_message_id: crate::core::facts::FactId,
     author_user_id: crate::core::facts::FactId,
 ) -> Result<(), String> {
-    if let Ok(deletion) = message_deletion::decode_fact_payload(payload.body()) {
+    if let Ok(deletion) = message_deletion::decode_fact_payload(matched.value()) {
         if deletion.workspace_id != workspace_id {
             return Err("message deletion workspace does not match message".to_string());
         }
@@ -739,21 +739,21 @@ fn validate_message_deletion(
     Err("message deletion context is not a content message deletion".to_string())
 }
 
-fn matched_secret_payload<'a>(
+fn matched_secret_offer<'a>(
     context: &'a ProjectionContext,
     need: &'a ContextNeed,
-) -> Result<Option<&'a Fact>, String> {
-    for (offer, payload) in context.matched_payloads_for(need) {
-        if !coverage::secret_coverage_offer_valid_for_need(need, offer) {
+) -> Result<Option<&'a MatchedContext>, String> {
+    for matched in context.matches_for(need) {
+        if !coverage::secret_coverage_offer_valid_for_need(need, &matched.offer) {
             return Err("content message secret context offer does not match need".to_string());
         }
-        if auth::local_key_secret::project::decode::decode_local_key_secret(payload.body()).is_ok()
+        if auth::local_key_secret::project::decode::decode_local_key_secret(matched.value()).is_ok()
             || auth::local_history_node_secret::project::decode::decode_local_history_node_secret(
-                payload.body(),
+                matched.value(),
             )
             .is_ok()
         {
-            return Ok(Some(payload));
+            return Ok(Some(matched));
         }
     }
     Ok(None)
@@ -761,10 +761,10 @@ fn matched_secret_payload<'a>(
 
 fn decrypt_text(
     message: &super::fact::ContentMessageFact,
-    secret_payload: &Fact,
+    secret_match: &MatchedContext,
 ) -> Result<String, String> {
     let key = if let Ok(secret) =
-        auth::local_key_secret::project::decode::decode_local_key_secret(secret_payload.body())
+        auth::local_key_secret::project::decode::decode_local_key_secret(secret_match.value())
     {
         if secret.workspace_id != message.workspace_id || secret.frontier_id != message.frontier_id
         {
@@ -774,7 +774,7 @@ fn decrypt_text(
     } else {
         let node =
             auth::local_history_node_secret::project::decode::decode_local_history_node_secret(
-                secret_payload.body(),
+                secret_match.value(),
             )
             .map_err(|_| "content message secret context is not local key material".to_string())?;
         if node.workspace_id != message.workspace_id || node.frontier_id != message.frontier_id {
@@ -811,8 +811,8 @@ fn retention_floor_reached(
     message: &super::fact::ContentMessageFact,
 ) -> Result<Option<u64>, String> {
     let mut floor = 0u64;
-    for (_offer, payload) in context.matched_payloads_for(need) {
-        let policy = retention_policy::decode_fact_payload(payload.body()).map_err(|_| {
+    for matched in context.matches_for(need) {
+        let policy = retention_policy::decode_fact_payload(matched.value()).map_err(|_| {
             "content message retention floor context is not a retention policy".to_string()
         })?;
         if policy.workspace_id != message.workspace_id {
@@ -951,7 +951,7 @@ pub struct FactSigner {
     pub signer_public_key: [u8; 32],
 }
 
-/// Returns a direct semantic payload after checking the expected fact tag.
+/// Returns direct fact bytes after checking the expected fact tag.
 pub fn decode_payload(fact: &Fact, expected_type: u8, label: &str) -> Result<Vec<u8>, String> {
     if fact.bytes.first().copied() == Some(expected_type) {
         Ok(fact.bytes.clone())
@@ -969,17 +969,37 @@ pub fn decode_typed_fact<T>(
     decode(&decode_payload(fact, expected_type, label)?)
 }
 
+pub fn decode_context_value<'a>(
+    matched: &'a MatchedContext,
+    expected_type: u8,
+    label: &str,
+) -> Result<&'a [u8], String> {
+    if matched.value().first().copied() == Some(expected_type) {
+        Ok(matched.value())
+    } else {
+        Err(format!("{label} context has the wrong type tag"))
+    }
+}
+
+pub fn decode_typed_context<T>(
+    matched: &MatchedContext,
+    expected_type: u8,
+    label: &str,
+    decode: impl FnOnce(&[u8]) -> Result<T, String>,
+) -> Result<T, String> {
+    decode(decode_context_value(matched, expected_type, label)?)
+}
+
 pub fn signer_need(owner: FactId, workspace_id: FactId, signer_id: FactId) -> ContextNeed {
-    crate::core::context::ContextNeed::range(
+    crate::core::context::ContextNeed::for_key(
         owner,
         "content_signer",
         crate::protocol::auth::workspace::scope(workspace_id),
         signer_id,
-        signer_id,
     )
 }
 
-/// Checks that the context payload satisfying a signer need is the endpoint
+/// Checks that the matched offer satisfying a signer need is the endpoint
 /// authority the content fact relies on.
 pub fn validate_signer_context(
     context: &ProjectionContext,
@@ -989,10 +1009,10 @@ pub fn validate_signer_context(
     author_user_id: Option<FactId>,
     label: &str,
 ) -> Result<bool, String> {
-    let Some(payload) = context_payload(context, need, &format!("{label} signer"))? else {
+    let Some(matched) = context_payload(context, need, &format!("{label} signer"))? else {
         return Ok(false);
     };
-    let endpoint = auth::endpoint_shared::decode_fact_payload(payload.body())
+    let endpoint = auth::endpoint_shared::decode_fact_payload(matched.value())
         .map_err(|_| format!("{label} signer context is not an endpoint_shared"))?;
     if endpoint.workspace_id != workspace_id {
         return Err(format!(
@@ -1021,8 +1041,8 @@ pub fn context_payload<'a>(
     context: &'a ProjectionContext,
     need: &ContextNeed,
     label: &str,
-) -> Result<Option<&'a Fact>, String> {
-    context.payload_for_checked(need, label)
+) -> Result<Option<&'a MatchedContext>, String> {
+    context.match_for_checked(need, label)
 }
 
 // Tests.
@@ -1440,6 +1460,7 @@ mod projector_tests {
             [2; 32],
             scope.clone(),
             project::fact_purged_key(frontier_id, 10, message_id),
+            b"purged".to_vec(),
         );
         let (range_start, range_end) = project::fact_purged_minute_range_keys(frontier_id, 9, 11);
         let range_offer = topo::core::project_fact::fact_purged_range_offer(
@@ -1447,6 +1468,7 @@ mod projector_tests {
             scope.clone(),
             range_start,
             range_end,
+            b"purged".to_vec(),
         );
         let other_frontier_need = topo::core::project_fact::fact_purged_need(
             owner,
@@ -1454,13 +1476,13 @@ mod projector_tests {
             project::fact_purged_key([8; 32], 10, message_id),
         );
 
-        assert_eq!(message_need.start_key, exact_offer.start_key);
-        assert_eq!(message_need.end_key, exact_offer.end_key);
-        assert!(range_offer.start_key <= message_need.start_key);
-        assert!(range_offer.end_key >= message_need.end_key);
+        assert_eq!(message_need.key, exact_offer.start_key);
+        assert_eq!(exact_offer.start_key, exact_offer.end_key);
+        assert!(range_offer.start_key <= message_need.key);
+        assert!(range_offer.end_key >= message_need.key);
         assert!(
-            range_offer.end_key < other_frontier_need.start_key
-                || range_offer.start_key > other_frontier_need.end_key
+            range_offer.end_key < other_frontier_need.key
+                || range_offer.start_key > other_frontier_need.key
         );
     }
 
@@ -1583,11 +1605,10 @@ mod projector_tests {
     ) -> MatchedContext {
         let scope = crate::protocol::auth::workspace::scope(message.workspace_id);
         MatchedContext {
-            need: crate::core::context::ContextNeed::range(
+            need: crate::core::context::ContextNeed::for_key(
                 message_fact.id,
                 "content_signer",
                 scope.clone(),
-                message.signer_id,
                 message.signer_id,
             ),
             offer: crate::core::context::ContextOffer::range(
@@ -1596,8 +1617,10 @@ mod projector_tests {
                 scope,
                 message.signer_id,
                 message.signer_id,
+                signer.bytes.clone(),
             ),
-            payload: signer.clone(),
+            offer_owner_scope: signer.scope.clone(),
+            offer_owner_received_at: signer.timestamp,
         }
     }
 
@@ -1620,9 +1643,11 @@ mod projector_tests {
                 scope,
                 message_fact.id,
                 message.signer_public_key,
+                signature.bytes.clone(),
             )
             .expect("signature offer"),
-            payload: signature.clone(),
+            offer_owner_scope: signature.scope.clone(),
+            offer_owner_received_at: signature.timestamp,
         }
     }
 
@@ -1632,11 +1657,10 @@ mod projector_tests {
         author: &Fact,
     ) -> MatchedContext {
         MatchedContext {
-            need: crate::core::context::ContextNeed::range(
+            need: crate::core::context::ContextNeed::for_key(
                 message_fact.id,
                 "auth_user",
                 crate::core::facts::FactScope::Global,
-                message.author_user_id,
                 message.author_user_id,
             ),
             offer: crate::core::context::ContextOffer::range(
@@ -1645,8 +1669,10 @@ mod projector_tests {
                 crate::core::facts::FactScope::Global,
                 author.id,
                 author.id,
+                author.bytes.clone(),
             ),
-            payload: author.clone(),
+            offer_owner_scope: author.scope.clone(),
+            offer_owner_received_at: author.timestamp,
         }
     }
 
@@ -1674,8 +1700,10 @@ mod projector_tests {
                 u64::MAX,
                 0,
                 [0; 32],
+                secret.bytes.clone(),
             ),
-            payload: secret.clone(),
+            offer_owner_scope: secret.scope.clone(),
+            offer_owner_received_at: secret.timestamp,
         }
     }
 
@@ -1695,8 +1723,10 @@ mod projector_tests {
                 deletion_fact.id,
                 scope,
                 project::fact_purged_key(message.frontier_id, message.minute, message_fact.id),
+                deletion_fact.bytes.clone(),
             ),
-            payload: deletion_fact.clone(),
+            offer_owner_scope: deletion_fact.scope.clone(),
+            offer_owner_received_at: deletion_fact.timestamp,
         }
     }
 }

@@ -229,7 +229,7 @@ use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::{RowMutation, TableDeleteWhere, TableInsert, Value};
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, MatchedContext, ProjectionContext, ProjectionOutput, Projector,
 };
 use crate::protocol::auth::key_wrap::project::{
     history_node_wrap_source_offers, require_local_scope,
@@ -264,13 +264,7 @@ pub fn secret_need(
     leaf_id: FactId,
 ) -> ContextNeed {
     let key = secret_need_key(workspace_id, frontier_id, minute, leaf_id);
-    ContextNeed::range(
-        owner,
-        secret_role(),
-        scope,
-        key.as_bytes().to_vec(),
-        key.as_bytes().to_vec(),
-    )
+    ContextNeed::for_key(owner, secret_role(), scope, key.as_bytes().to_vec())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -283,6 +277,7 @@ pub fn secret_offer(
     end_minute: u64,
     prefix_bytes: u8,
     leaf_prefix: FactId,
+    value: impl Into<Vec<u8>>,
 ) -> ContextOffer {
     let prefix_bytes = prefix_bytes.min(32);
     let start = secret_range_key(
@@ -297,7 +292,7 @@ pub fn secret_offer(
         end_minute,
         prefix_bound(leaf_prefix, prefix_bytes, BoundSide::High),
     );
-    ContextOffer::range(owner, secret_role(), scope, start, end)
+    ContextOffer::range(owner, secret_role(), scope, start, end, value)
 }
 
 pub fn secret_need_key(
@@ -402,10 +397,7 @@ pub fn secret_coverage_offer_valid_for_need(need: &ContextNeed, offer: &ContextO
     if need.role != offer.role || need.scope != offer.scope {
         return false;
     }
-    if need.start_key != need.end_key {
-        return false;
-    }
-    let Some(need) = decode_secret_need_key(&need.start_key) else {
+    let Some(need) = decode_secret_need_key(&need.key) else {
         return false;
     };
     let Some(offer_range) = decode_secret_offer_range(offer) else {
@@ -482,28 +474,25 @@ fn project_local_history_node_secret(
     let scope = crate::protocol::auth::workspace::scope(node.workspace_id);
     require_local_scope(fact)?;
     // 2. Context and path validation.
-    let frontier_need = ContextNeed::range(
+    let frontier_need = ContextNeed::for_key(
         fact.id,
         "auth_removal_frontier",
         scope.clone(),
         node.frontier_id,
-        node.frontier_id,
     );
-    let source_need = ContextNeed::range(
+    let source_need = ContextNeed::for_key(
         fact.id,
         "local_secret_source",
         FactScope::Local,
-        node.source_secret_id,
         node.source_secret_id,
     );
     let tombstone_need = if node.tombstone_node_id == [0; 32] {
         None
     } else {
-        Some(ContextNeed::range(
+        Some(ContextNeed::for_key(
             fact.id,
             "local_secret_source",
             FactScope::Local,
-            node.tombstone_node_id,
             node.tombstone_node_id,
         ))
     };
@@ -515,7 +504,7 @@ fn project_local_history_node_secret(
     if let Some(need) = &tombstone_need {
         waiting = waiting.need(need.clone());
     }
-    if let Some(retirement_fact) = projection_context.payload_for(&retirement_need) {
+    if let Some(retirement_fact) = projection_context.match_for(&retirement_need) {
         validate_history_retirement(retirement_fact, fact.id, &node)?;
         return Ok(ProjectionOutput::new()
             .row_mutation(RowMutation::DeleteWhere(TableDeleteWhere {
@@ -538,14 +527,14 @@ fn project_local_history_node_secret(
             .purge_self(fact.id));
     }
 
-    let Some(frontier_fact) = projection_context.payload_for(&frontier_need) else {
+    let Some(frontier_fact) = projection_context.match_for(&frontier_need) else {
         return Ok(waiting);
     };
-    let Some(source_fact) = projection_context.payload_for(&source_need) else {
+    let Some(source_fact) = projection_context.match_for(&source_need) else {
         return Ok(waiting);
     };
     let tombstone_fact = if let Some(need) = &tombstone_need {
-        let Some(payload) = projection_context.payload_for(need) else {
+        let Some(payload) = projection_context.match_for(need) else {
             return Ok(waiting);
         };
         Some(payload)
@@ -601,6 +590,7 @@ fn project_local_history_node_secret(
         node.range_width,
         node.bit_depth,
         node.fact_id_prefix,
+        fact.bytes.clone(),
     ) {
         output = output.offer(offer);
     }
@@ -608,6 +598,7 @@ fn project_local_history_node_secret(
         output = output.offer(local_secret_retirement::secret_retired_offer(
             fact.id,
             node.tombstone_node_id,
+            fact.bytes.clone(),
         ));
     }
     output = output.row_mutation(RowMutation::InsertValues(TableInsert {
@@ -656,6 +647,7 @@ fn project_local_history_node_secret(
             FactScope::Local,
             fact.id,
             fact.id,
+            fact.bytes.clone(),
         ))
         .offer(secret_offer(
             fact.id,
@@ -666,6 +658,7 @@ fn project_local_history_node_secret(
             end_minute,
             prefix_bytes,
             node.fact_id_prefix,
+            fact.bytes.clone(),
         )))
 }
 
@@ -684,13 +677,11 @@ struct HistoryNodeAddress {
 }
 
 fn validate_history_frontier(
-    frontier_fact: &Fact,
+    frontier_fact: &MatchedContext,
     node: &LocalHistoryNodeSecretFact,
 ) -> Result<(), String> {
-    if frontier_fact.id != node.frontier_id {
-        return Err("local history node frontier context payload id mismatch".to_string());
-    }
-    let frontier = removal_frontier::decode_fact_payload(&frontier_fact.bytes).map_err(|_| {
+    frontier_fact.require_owner(node.frontier_id, "local history node frontier")?;
+    let frontier = removal_frontier::decode_fact_payload(frontier_fact.value()).map_err(|_| {
         "local history node frontier context must be a removal frontier".to_string()
     })?;
     if frontier.workspace_id != node.workspace_id {
@@ -703,13 +694,11 @@ fn validate_history_frontier(
 }
 
 fn validate_history_source(
-    source_fact: &Fact,
+    source_fact: &MatchedContext,
     node: &LocalHistoryNodeSecretFact,
 ) -> Result<HistorySourceKind, String> {
-    if source_fact.id != node.source_secret_id {
-        return Err("local history node source context payload id mismatch".to_string());
-    }
-    if let Ok(source) = local_key_secret::decode_fact_payload(&source_fact.bytes) {
+    source_fact.require_owner(node.source_secret_id, "local history node source")?;
+    if let Ok(source) = local_key_secret::decode_fact_payload(source_fact.value()) {
         if source.workspace_id != node.workspace_id
             || source.frontier_id != node.frontier_id
             || source.owner_endpoint_id != node.owner_endpoint_id
@@ -720,7 +709,7 @@ fn validate_history_source(
         }
         return Ok(HistorySourceKind::Root);
     }
-    if let Ok(source) = super::decode_fact_payload(&source_fact.bytes) {
+    if let Ok(source) = super::decode_fact_payload(source_fact.value()) {
         if source.workspace_id != node.workspace_id
             || source.frontier_id != node.frontier_id
             || source.owner_endpoint_id != node.owner_endpoint_id
@@ -740,14 +729,12 @@ fn validate_history_source(
 }
 
 fn validate_history_retirement(
-    retirement_fact: &Fact,
+    retirement_fact: &MatchedContext,
     target_id: FactId,
     node: &LocalHistoryNodeSecretFact,
 ) -> Result<(), String> {
-    if retirement_fact.scope != FactScope::Local {
-        return Err("local history node retirement context must be local".to_string());
-    }
-    if let Ok(retirement) = local_secret_retirement::decode_fact_payload(retirement_fact.body()) {
+    retirement_fact.require_owner_scope(&FactScope::Local, "local history node retirement")?;
+    if let Ok(retirement) = local_secret_retirement::decode_fact_payload(retirement_fact.value()) {
         if retirement.workspace_id != node.workspace_id {
             return Err("local history node retirement workspace mismatch".to_string());
         }
@@ -757,7 +744,7 @@ fn validate_history_retirement(
         return Ok(());
     }
 
-    let tombstone = super::decode_fact_payload(retirement_fact.body()).map_err(|_| {
+    let tombstone = super::decode_fact_payload(retirement_fact.value()).map_err(|_| {
         "local history node retirement context is not a retirement or history node".to_string()
     })?;
     if tombstone.workspace_id != node.workspace_id
@@ -773,13 +760,11 @@ fn validate_history_retirement(
 }
 
 fn validate_history_tombstone(
-    tombstone_fact: &Fact,
+    tombstone_fact: &MatchedContext,
     node: &LocalHistoryNodeSecretFact,
 ) -> Result<(), String> {
-    if tombstone_fact.id != node.tombstone_node_id {
-        return Err("local history node tombstone context payload id mismatch".to_string());
-    }
-    let tombstone = super::decode_fact_payload(&tombstone_fact.bytes)
+    tombstone_fact.require_owner(node.tombstone_node_id, "local history node tombstone")?;
+    let tombstone = super::decode_fact_payload(tombstone_fact.value())
         .map_err(|_| "local history node tombstone context is not a history node".to_string())?;
     if tombstone.workspace_id != node.workspace_id
         || tombstone.frontier_id != node.frontier_id
@@ -880,7 +865,17 @@ mod coverage_tests {
         let mut leaf = [0; 32];
         leaf[0] = 0b1010_1111;
         let need = secret_need([3; 32], scope.clone(), workspace, frontier, 42, leaf);
-        let offer = secret_offer([4; 32], scope, workspace, frontier, 40, 50, 1, prefix);
+        let offer = secret_offer(
+            [4; 32],
+            scope,
+            workspace,
+            frontier,
+            40,
+            50,
+            1,
+            prefix,
+            b"secret".to_vec(),
+        );
 
         assert!(secret_coverage_offer_valid_for_need(&need, &offer));
     }
@@ -895,7 +890,17 @@ mod coverage_tests {
         let mut leaf = [0; 32];
         leaf[0] = 0b1010_1111;
         let need = secret_need([3; 32], scope.clone(), workspace, frontier, 42, leaf);
-        let offer = secret_offer([4; 32], scope, workspace, frontier, 40, 50, 1, prefix);
+        let offer = secret_offer(
+            [4; 32],
+            scope,
+            workspace,
+            frontier,
+            40,
+            50,
+            1,
+            prefix,
+            b"secret".to_vec(),
+        );
 
         assert!(!secret_coverage_offer_valid_for_need(&need, &offer));
     }
@@ -906,7 +911,17 @@ mod coverage_tests {
         let frontier = [2; 32];
         let scope = scope(workspace);
         let need = secret_need([3; 32], scope.clone(), workspace, frontier, 42, [9; 32]);
-        let offer = secret_offer([4; 32], scope, workspace, frontier, 50, 40, 0, [0; 32]);
+        let offer = secret_offer(
+            [4; 32],
+            scope,
+            workspace,
+            frontier,
+            50,
+            40,
+            0,
+            [0; 32],
+            b"secret".to_vec(),
+        );
 
         assert!(!secret_coverage_offer_valid_for_need(&need, &offer));
     }

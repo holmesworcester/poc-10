@@ -75,9 +75,9 @@ Fact-boundary validation does not:
 
 Missing context is represented by projector needs. The projector builds the
 exact `ContextNeed`, returns a non-error `ProjectionOutput`, and later reads the
-matched payload from `ProjectionContext` when core wakes the fact. A present
-payload must still be checked for compatibility with the current fact before it
-is accepted.
+matched offer value from `ProjectionContext` when core wakes the fact. A present
+value must still be checked for consistency with the current fact before it is
+accepted.
 
 ## Signatures, Encryption, And Container Facts
 
@@ -122,8 +122,8 @@ call site for the local flow: decode, validate, adapt, project. Repetition is
 acceptable when it keeps the boundary visible. Shared helpers should stay
 protocol-local and should make an individual projector easier to read.
 
-Context payload facts are loaded by core through matched needs/offers. The
-consuming projector decodes the payload through the owning module's typed helper
+Context offer values are hydrated by core through matched needs/offers. The
+consuming projector decodes the value through the owning module's typed helper
 when it needs fields. It does not scan the store or re-run the producer's full
 policy; the offer exists because the owner already projected enough to publish
 that context. The consumer still proves relationships, role, scope, range, and

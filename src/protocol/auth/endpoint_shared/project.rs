@@ -379,6 +379,7 @@ impl EndpointSharedProjector {
                     crate::protocol::auth::workspace::scope(shared.workspace_id),
                     shared.endpoint_id,
                     shared.endpoint_id,
+                    fact.bytes.clone(),
                 ))
                 .offer(crate::core::context::ContextOffer::range(
                     fact.id,
@@ -386,6 +387,7 @@ impl EndpointSharedProjector {
                     crate::core::facts::FactScope::Global,
                     fact.id,
                     fact.id,
+                    fact.bytes.clone(),
                 ))
                 .row_mutation(RowMutation::InsertValues(endpoint_shared_row(
                     fact.id, &shared,
@@ -403,18 +405,16 @@ fn authority_need(
     signer_id: [u8; 32],
 ) -> ContextNeed {
     match shared.endpoint_role {
-        EndpointRole::InviteServer => crate::core::context::ContextNeed::range(
+        EndpointRole::InviteServer => crate::core::context::ContextNeed::for_key(
             fact.id,
             "auth_invite_server",
             crate::core::facts::FactScope::Global,
             signer_id,
-            signer_id,
         ),
-        EndpointRole::Device => crate::core::context::ContextNeed::range(
+        EndpointRole::Device => crate::core::context::ContextNeed::for_key(
             fact.id,
             "auth_device_invite",
             crate::core::facts::FactScope::Global,
-            signer_id,
             signer_id,
         ),
     }
@@ -425,17 +425,13 @@ fn has_valid_authority(
     shared: &super::fact::EndpointSharedFact,
     context: &ProjectionContext,
 ) -> Result<bool, String> {
-    let Some(authority_fact) = context.payload_for(need) else {
+    let Some(authority_fact) = context.match_for(need) else {
         return Ok(false);
     };
-    if authority_fact.id != shared.signer_id {
-        return Err("endpoint_shared authority context payload id mismatch".to_string());
-    }
-    if authority_fact.scope != FactScope::Global {
-        return Err("endpoint_shared authority must have global scope".to_string());
-    }
+    authority_fact.require_owner(shared.signer_id, "endpoint_shared authority")?;
+    authority_fact.require_owner_scope(&FactScope::Global, "endpoint_shared authority")?;
     if shared.endpoint_role == EndpointRole::Device {
-        let invite = device_invite::decode_fact_payload(authority_fact.body()).map_err(|_| {
+        let invite = device_invite::decode_fact_payload(authority_fact.value()).map_err(|_| {
             "endpoint_shared dependency is not an authorized endpoint invite".to_string()
         })?;
         if invite.public_key != shared.signer_public_key {
@@ -453,7 +449,7 @@ fn has_valid_authority(
     }
 
     let invite_server =
-        invite_server::decode_fact_payload(authority_fact.body()).map_err(|_| {
+        invite_server::decode_fact_payload(authority_fact.value()).map_err(|_| {
             "endpoint_shared dependency is not an authorized endpoint invite".to_string()
         })?;
     if invite_server.workspace_id != shared.workspace_id {
@@ -618,9 +614,11 @@ mod tests {
                     crate::protocol::auth::workspace::scope(shared_body.workspace_id),
                     shared_fact.id,
                     shared_body.signer_public_key,
+                    signature_fact.bytes.clone(),
                 )
                 .expect("signature offer"),
-                payload: signature_fact.clone(),
+                offer_owner_scope: signature_fact.scope.clone(),
+                offer_owner_received_at: signature_fact.timestamp,
             },
             MatchedContext {
                 need: authority_need,
@@ -630,8 +628,10 @@ mod tests {
                     FactScope::Global,
                     authority_fact.id,
                     authority_fact.id,
+                    authority_fact.bytes.clone(),
                 ),
-                payload: authority_fact.clone(),
+                offer_owner_scope: authority_fact.scope.clone(),
+                offer_owner_received_at: authority_fact.timestamp,
             },
         ])
     }

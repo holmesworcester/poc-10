@@ -262,7 +262,7 @@ pub mod authenticate {
 
     use crate::core::context::ContextNeed;
     use crate::core::facts::{Fact, FactId, FactScope};
-    use crate::core::project_fact::{verify_fact_id, ProjectionContext};
+    use crate::core::project_fact::{verify_fact_id, MatchedContext, ProjectionContext};
     use crate::protocol::auth::endpoint;
     use crate::protocol::connection::ephemeral_secret;
     use crate::protocol::connection::request;
@@ -317,7 +317,7 @@ pub mod authenticate {
             Err(error) => return Err(error),
         };
         let request_need = request::project::connection_request_need(fact.id, request_id);
-        let Some(request_fact) = context.payload_for(&request_need) else {
+        let Some(request_fact) = context.match_for(&request_need) else {
             return Ok(Authentication::NeedsContext(vec![request_need]));
         };
         let opened_request = match open_request_from_context(request_fact, context, fact.id) {
@@ -338,11 +338,9 @@ pub mod authenticate {
             fact.id,
             decode::connection_header_ephemeral_public_key(fact.body())?,
         );
-        for (_, secret_fact) in context.matched_payloads_for(&responder_secret_need) {
-            if secret_fact.scope != FactScope::Local {
-                return Err("connection responder secret context must be local".to_string());
-            }
-            let secret = match ephemeral_secret::decode_fact_payload(secret_fact.body())
+        for secret_fact in context.matches_for(&responder_secret_need) {
+            secret_fact.require_owner_scope(&FactScope::Local, "connection responder secret")?;
+            let secret = match ephemeral_secret::decode_fact_payload(secret_fact.value())
                 .map_err(|_| "connection responder context is not an ephemeral secret".to_string())
             {
                 Ok(secret) => secret,
@@ -354,12 +352,12 @@ pub mod authenticate {
             if let Err(error) = validate_connection(fact.id, &connection, &request) {
                 return Err(error);
             }
-            if connection.responder_ephemeral_secret_fact_id != secret_fact.id {
+            if connection.responder_ephemeral_secret_fact_id != secret_fact.offer_owner() {
                 return Err("connection responder secret id does not match".to_string());
             }
             let invite_need = bootstrap_invite_need(fact.id, &request);
             if let Some(invite_need) = &invite_need {
-                if context.payload_for(invite_need).is_none() {
+                if context.match_for(invite_need).is_none() {
                     return Ok(Authentication::NeedsContext(vec![
                         request_need.clone(),
                         request_opener_need.clone(),
@@ -384,11 +382,9 @@ pub mod authenticate {
 
         let endpoint_need =
             local_endpoint_need(fact.id, decode::connection_header_to_endpoint(fact.body())?);
-        for (_, endpoint_fact) in context.matched_payloads_for(&endpoint_need) {
-            if endpoint_fact.scope != FactScope::Local {
-                return Err("connection endpoint context must be local".to_string());
-            }
-            let local_endpoint = match endpoint::decode_fact_payload(endpoint_fact.body())
+        for endpoint_fact in context.matches_for(&endpoint_need) {
+            endpoint_fact.require_owner_scope(&FactScope::Local, "connection endpoint")?;
+            let local_endpoint = match endpoint::decode_fact_payload(endpoint_fact.value())
                 .map_err(|_| "connection endpoint context is malformed".to_string())
             {
                 Ok(endpoint) => endpoint,
@@ -406,7 +402,7 @@ pub mod authenticate {
                 FactScope::Local,
                 connection.initiator_ephemeral_secret_fact_id,
             );
-            let Some(initiator_fact) = context.payload_for(&initiator_need) else {
+            let Some(initiator_fact) = context.match_for(&initiator_need) else {
                 return Ok(Authentication::NeedsContext(vec![
                     request_need.clone(),
                     request_opener_need.clone(),
@@ -414,8 +410,9 @@ pub mod authenticate {
                     initiator_need,
                 ]));
             };
+            initiator_fact.require_owner_scope(&FactScope::Local, "connection initiator secret")?;
             let initiator_secret =
-                match ephemeral_secret::decode_fact_payload(initiator_fact.body()).map_err(|_| {
+                match ephemeral_secret::decode_fact_payload(initiator_fact.value()).map_err(|_| {
                     "connection initiator context is not an ephemeral secret".to_string()
                 }) {
                     Ok(secret) => secret,
@@ -423,7 +420,7 @@ pub mod authenticate {
                 };
             let invite_need = bootstrap_invite_need(fact.id, &request);
             if let Some(invite_need) = &invite_need {
-                if context.payload_for(invite_need).is_none() {
+                if context.match_for(invite_need).is_none() {
                     return Ok(Authentication::NeedsContext(vec![
                         request_need.clone(),
                         request_opener_need.clone(),
@@ -463,15 +460,15 @@ pub mod authenticate {
     }
 
     fn open_request_from_context(
-        request_fact: &Fact,
+        request_fact: &MatchedContext,
         context: &ProjectionContext,
         owner: FactId,
     ) -> Result<OpenedRequest, String> {
         let (endpoint_need, secret_need) = request_opener_needs(owner, request_fact)?;
-        for (_, endpoint_fact) in context.matched_payloads_for(&endpoint_need) {
-            if let Ok(endpoint) = endpoint::decode_fact_payload(endpoint_fact.body()) {
+        for endpoint_fact in context.matches_for(&endpoint_need) {
+            if let Ok(endpoint) = endpoint::decode_fact_payload(endpoint_fact.value()) {
                 if let Ok(request) =
-                    request::project::decode::open_fact(request_fact.body(), &endpoint)
+                    request::project::decode::open_fact(request_fact.value(), &endpoint)
                 {
                     return Ok(OpenedRequest {
                         opener_need: endpoint_need.clone(),
@@ -480,10 +477,10 @@ pub mod authenticate {
                 }
             }
         }
-        for (_, secret_fact) in context.matched_payloads_for(&secret_need) {
-            if let Ok(secret) = ephemeral_secret::decode_fact_payload(secret_fact.body()) {
+        for secret_fact in context.matches_for(&secret_need) {
+            if let Ok(secret) = ephemeral_secret::decode_fact_payload(secret_fact.value()) {
                 if let Ok(request) =
-                    request::project::decode::open_fact_as_sender(request_fact.body(), &secret)
+                    request::project::decode::open_fact_as_sender(request_fact.value(), &secret)
                 {
                     return Ok(OpenedRequest {
                         opener_need: secret_need.clone(),
@@ -497,16 +494,18 @@ pub mod authenticate {
 
     fn request_opener_needs(
         owner: FactId,
-        request_fact: &Fact,
+        request_fact: &MatchedContext,
     ) -> Result<(ContextNeed, ContextNeed), String> {
         Ok((
             local_endpoint_need(
                 owner,
-                request::project::decode::request_header_to_endpoint(request_fact.body())?,
+                request::project::decode::request_header_to_endpoint(request_fact.value())?,
             ),
             ephemeral_secret_public_key_need(
                 owner,
-                request::project::decode::request_header_ephemeral_public_key(request_fact.body())?,
+                request::project::decode::request_header_ephemeral_public_key(
+                    request_fact.value(),
+                )?,
             ),
         ))
     }
@@ -557,15 +556,13 @@ pub mod authenticate {
                     FactScope::Local,
                     request.invite_secret_fact_id,
                 );
-                let Some(fact) = context.payload_for(&need) else {
+                let Some(fact) = context.match_for(&need) else {
                     return Err("connection bootstrap invite context is missing".to_string());
                 };
-                Some(
-                    request::project::authenticate::invite_secret_from_context_fact(
-                        fact,
-                        request.invite_secret_fact_id,
-                    )?,
-                )
+                Some(request::project::authenticate::invite_secret_from_context(
+                    fact,
+                    request.invite_secret_fact_id,
+                )?)
             }
             REQUEST_MODE_MEMBERSHIP => None,
             other => return Err(format!("unknown connection request mode {other}")),
@@ -718,8 +715,10 @@ pub mod authenticate {
                 offer: crate::protocol::connection::request::project::connection_request_offer(
                     request_fact.id,
                     request_fact.id,
+                    request_fact.bytes.clone(),
                 ),
-                payload: request_fact.clone(),
+                offer_owner_scope: request_fact.scope.clone(),
+                offer_owner_received_at: request_fact.timestamp,
             }
         }
 
@@ -736,15 +735,16 @@ pub mod authenticate {
                     "auth_local_endpoint",
                     FactScope::Local,
                     endpoint.endpoint,
+                    endpoint_fact.bytes.clone(),
                 ),
-                payload: endpoint_fact,
+                offer_owner_scope: endpoint_fact.scope,
+                offer_owner_received_at: endpoint_fact.timestamp,
             }
         }
 
         fn assert_exact_need(need: &ContextNeed, role: &str, key: FactId) {
             assert_eq!(need.role.as_str(), role);
-            assert_eq!(need.start_key.as_bytes(), key);
-            assert_eq!(need.end_key.as_bytes(), key);
+            assert_eq!(need.key.as_bytes(), key);
         }
 
         fn exact_need_with_key<'a>(
@@ -754,11 +754,7 @@ pub mod authenticate {
         ) -> &'a ContextNeed {
             needs
                 .iter()
-                .find(|need| {
-                    need.role.as_str() == role
-                        && need.start_key.as_bytes() == key
-                        && need.end_key.as_bytes() == key
-                })
+                .find(|need| need.role.as_str() == role && need.key.as_bytes() == key)
                 .expect("exact need")
         }
 
@@ -976,8 +972,18 @@ pub fn connection_need(owner: FactId, connection_id: FactId) -> ContextNeed {
     ContextNeed::for_key(owner, CONNECTION_ROLE, FactScope::Local, connection_id)
 }
 
-pub fn connection_offer(owner: FactId, connection_id: FactId) -> ContextOffer {
-    ContextOffer::for_key(owner, CONNECTION_ROLE, FactScope::Local, connection_id)
+pub fn connection_offer(
+    owner: FactId,
+    connection_id: FactId,
+    value: impl Into<Vec<u8>>,
+) -> ContextOffer {
+    ContextOffer::for_key(
+        owner,
+        CONNECTION_ROLE,
+        FactScope::Local,
+        connection_id,
+        value,
+    )
 }
 
 /// Projector route metadata for the connection fact.
@@ -1035,10 +1041,8 @@ impl ConnectionProjector {
         }
         // 2. Context.
         let close_need = close::connection_closed_need(fact.id, fact.id);
-        if let Some(close_fact) = context.payload_for(&close_need) {
-            if close_fact.scope != FactScope::Local {
-                return Err("connection close context must be local".to_string());
-            }
+        if let Some(close_fact) = context.match_for(&close_need) {
+            close_fact.require_owner_scope(&FactScope::Local, "connection close context")?;
             return Ok(ProjectionOutput::new()
                 .row_mutation(RowMutation::DeleteWhere(
                     CONNECTION_TABLE.delete_by_key(vec![Value::Bytes(fact.id.to_vec())]),
@@ -1067,6 +1071,7 @@ impl ConnectionProjector {
                     .offer(request::project::connection_for_request_offer(
                         fact.id,
                         connection.request_id,
+                        fact.bytes.clone(),
                     ))
                     .intent(seed_connection_sync_intent(SeedConnectionSync {
                         connection_id: fact.id,
@@ -1160,7 +1165,7 @@ fn attach_connection_observation_if_available(
     output: ProjectionOutput,
 ) -> Result<ProjectionOutput, String> {
     let need = frame_observation::project::connection_frame_observation_need(fact.id, fact.id);
-    if context.incoming_metadata().is_none() && context.payload_for(&need).is_none() {
+    if context.incoming_metadata().is_none() && context.match_for(&need).is_none() {
         return Ok(output);
     }
     let observation = connection_observation(fact, context)?;
@@ -1192,13 +1197,11 @@ fn connection_observation(
         });
     }
 
-    let Some(observation_fact) = context.payload_for(&need) else {
+    let Some(observation_fact) = context.match_for(&need) else {
         return Ok(ObservationResolution::Missing { output });
     };
-    if observation_fact.scope != FactScope::Local {
-        return Err("connection observation context must be local".to_string());
-    }
-    let observed = frame_observation::project::decode::decode_fact(observation_fact.body())
+    observation_fact.require_owner_scope(&FactScope::Local, "connection observation")?;
+    let observed = frame_observation::project::decode::decode_fact(observation_fact.value())
         .map_err(|_| "connection observation context is malformed".to_string())?;
     if observed.frame_fact_id != fact.id {
         return Err("connection observation does not bind connection".to_string());
@@ -1225,7 +1228,7 @@ fn merge_projection_output(
 
 fn materialized_output(fact: &Fact, connection: &ConnectionFact) -> ProjectionOutput {
     ProjectionOutput::new()
-        .offer(connection_offer(fact.id, fact.id))
+        .offer(connection_offer(fact.id, fact.id, fact.bytes.clone()))
         .row_mutation(RowMutation::InsertValues(
             connection_row(ConnectionRowFields {
                 connection_id: fact.id,
@@ -1367,8 +1370,10 @@ mod tests {
             offer: frame_observation::project::connection_frame_observation_offer(
                 observation.id,
                 owner,
+                observation.bytes.clone(),
             ),
-            payload: observation,
+            offer_owner_scope: observation.scope,
+            offer_owner_received_at: observation.timestamp,
         }
     }
 

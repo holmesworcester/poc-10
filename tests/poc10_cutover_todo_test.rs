@@ -878,7 +878,6 @@ fn cutover_projectors_and_handlers_receive_typed_facts_not_raw_bytes() {
         &[
             "decode_fact(&fact.bytes",
             "decode_fact(&payload.bytes",
-            "decode_fact(&matched.payload.bytes",
             "decode_fact(&receive.bytes",
             "decode_fact(&request_context.bytes",
             "decode_fact(&invite_context.bytes",
@@ -899,19 +898,11 @@ fn cutover_context_predicates_replace_manual_payload_matching() {
     let root = root();
     let paths = project_files(&root);
 
-    let offenders = matching_production_code_lines(
-        &root,
-        paths,
-        &[
-            "matched_context()",
-            "payload_for_need(",
-            "matched.payload",
-            "matched.need",
-        ],
-    );
+    let offenders =
+        matching_production_code_lines(&root, paths, &["matched_context()", "matched.need"]);
     assert!(
         offenders.is_empty(),
-        "projectors should ask scope-local typed predicates whether context needs are met instead of manually walking matched payload rows:\n{}",
+        "projectors should ask scope-local typed predicates whether context needs are met instead of manually walking matched offer rows:\n{}",
         offenders.join("\n")
     );
 }

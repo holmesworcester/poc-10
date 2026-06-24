@@ -289,11 +289,11 @@ impl WorkspaceProjector {
             return Ok(waiting);
         }
         let Some(accepted_fact) =
-            _context.payload_for_checked(&accepted_need, "workspace accepted")?
+            _context.match_for_checked(&accepted_need, "workspace accepted")?
         else {
             return Ok(waiting);
         };
-        let accepted = invite_accepted::decode_fact_payload(accepted_fact.body())
+        let accepted = invite_accepted::decode_fact_payload(accepted_fact.value())
             .map_err(|_| "workspace accepted context is not invite_accepted".to_string())?;
         if accepted.workspace_id != fact.id {
             return Err("workspace accepted context points to a different workspace".to_string());
@@ -308,6 +308,7 @@ impl WorkspaceProjector {
                     crate::core::facts::FactScope::Global,
                     fact.id,
                     fact.id,
+                    fact.bytes.clone(),
                 ))
                 .row_mutation(RowMutation::InsertValues(super::workspace_insert(
                     fact.id, &workspace,
@@ -410,14 +411,18 @@ mod projector_tests {
     ) -> ProjectionContext {
         let need: ContextNeed =
             invite_accepted::workspace_accepted_need(workspace_id, workspace_id);
-        let offer: ContextOffer =
-            invite_accepted::workspace_accepted_offer(accepted.id, workspace_id);
+        let offer: ContextOffer = invite_accepted::workspace_accepted_offer(
+            accepted.id,
+            workspace_id,
+            accepted.bytes.clone(),
+        );
         ProjectionContext::from_matches(vec![
             signature_match(workspace_id),
             MatchedContext {
                 need,
                 offer,
-                payload: accepted.clone(),
+                offer_owner_scope: accepted.scope.clone(),
+                offer_owner_received_at: accepted.timestamp,
             },
         ])
     }
@@ -446,9 +451,11 @@ mod projector_tests {
                 scope,
                 workspace_id,
                 signer_public_key,
+                signature.bytes.clone(),
             )
             .expect("signature offer"),
-            payload: signature,
+            offer_owner_scope: signature.scope,
+            offer_owner_received_at: signature.timestamp,
         }
     }
 }

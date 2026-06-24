@@ -235,7 +235,7 @@ use crate::core::intents::TableInsert;
 use crate::core::intents::Value;
 use crate::core::intents::{RowMutation, TableDeleteWhere};
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, MatchedContext, ProjectionContext, ProjectionOutput, Projector,
 };
 
 use crate::protocol::auth::signature;
@@ -316,11 +316,10 @@ impl ContentFileSliceProjector {
             fact.id,
             slice.signer_public_key,
         )?;
-        let file_need = crate::core::context::ContextNeed::range(
+        let file_need = crate::core::context::ContextNeed::for_key(
             fact.id,
             "content_file",
             scope.clone(),
-            slice.file_id,
             slice.file_id,
         );
         if !signature::project::signature_proof_ready(
@@ -336,14 +335,14 @@ impl ContentFileSliceProjector {
         let Some(parent) = context_payload(context, &file_need, "file slice parent")? else {
             return Ok(ProjectionOutput::new().need(signature_need).need(file_need));
         };
-        let file = message_project::decode_typed_fact(
+        let file = message_project::decode_typed_context(
             parent,
             file::TYPE_CONTENT_FILE,
             "file slice parent",
             file::decode_fact_payload,
         )
         .map_err(|_| "file slice parent context is not a content file".to_string())?;
-        if parent.scope != scope {
+        if parent.offer_owner_scope != scope {
             return Err("file slice parent scope does not match slice".to_string());
         }
         if file.workspace_id != slice.workspace_id {
@@ -359,11 +358,10 @@ impl ContentFileSliceProjector {
             return Err("file slice index is out of range for parent file".to_string());
         }
         let verified_ciphertext = verified_slice_ciphertext(&slice, &file)?;
-        let message_need = crate::core::context::ContextNeed::range(
+        let message_need = crate::core::context::ContextNeed::for_key(
             fact.id,
             "content_message",
             scope.clone(),
-            file.message_id,
             file.message_id,
         );
         let Some(message_payload) =
@@ -374,7 +372,7 @@ impl ContentFileSliceProjector {
                 .need(file_need)
                 .need(message_need));
         };
-        let parent_message = message_project::decode_typed_fact(
+        let parent_message = message_project::decode_typed_context(
             message_payload,
             message::TYPE_CONTENT_MESSAGE,
             "file slice message parent",
@@ -386,7 +384,7 @@ impl ContentFileSliceProjector {
         let file_deletion_need = crate::core::project_fact::fact_purged_need(
             fact.id,
             scope.clone(),
-            file_deletion::project::file_purged_key(parent.id),
+            file_deletion::project::file_purged_key(parent.offer_owner()),
         );
         let parent_deletion_need = crate::core::project_fact::fact_purged_need(
             fact.id,
@@ -428,7 +426,12 @@ impl ContentFileSliceProjector {
         if let Some(deletion) =
             context_payload(context, &file_deletion_need, "file slice parent deletion")?
         {
-            validate_file_deletion(deletion, file.workspace_id, parent.id, file.author_user_id)?;
+            validate_file_deletion(
+                deletion,
+                file.workspace_id,
+                parent.offer_owner(),
+                file.author_user_id,
+            )?;
             return Ok(retract_fact_from_sync(
                 ProjectionOutput::new()
                     .need(file_deletion_need)
@@ -516,17 +519,17 @@ fn context_payload<'a>(
     context: &'a ProjectionContext,
     need: &ContextNeed,
     label: &str,
-) -> Result<Option<&'a Fact>, String> {
-    context.payload_for_checked(need, label)
+) -> Result<Option<&'a MatchedContext>, String> {
+    context.match_for_checked(need, label)
 }
 
 fn validate_file_deletion(
-    payload: &Fact,
+    matched: &MatchedContext,
     workspace_id: crate::core::facts::FactId,
     target_file_id: crate::core::facts::FactId,
     author_user_id: crate::core::facts::FactId,
 ) -> Result<(), String> {
-    let deletion = file_deletion::decode_fact_payload(payload.body()).map_err(|_| {
+    let deletion = file_deletion::decode_fact_payload(matched.value()).map_err(|_| {
         "file slice parent deletion context is not a content file deletion".to_string()
     })?;
     if deletion.workspace_id != workspace_id {
@@ -544,15 +547,15 @@ fn validate_file_deletion(
 }
 
 fn validate_message_deletion(
-    payload: &Fact,
+    matched: &MatchedContext,
     workspace_id: crate::core::facts::FactId,
     target_frontier_id: crate::core::facts::FactId,
     target_minute: u64,
     target_message_id: crate::core::facts::FactId,
     author_user_id: crate::core::facts::FactId,
 ) -> Result<(), String> {
-    let deletion = message_project::decode_typed_fact(
-        payload,
+    let deletion = message_project::decode_typed_context(
+        matched,
         message_deletion::TYPE_CONTENT_MESSAGE_DELETION,
         "file slice message parent deletion",
         message_deletion::decode_fact_payload,

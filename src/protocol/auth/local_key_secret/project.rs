@@ -196,7 +196,7 @@ use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::{RowMutation, TableDeleteWhere, TableInsert, Value};
 use crate::core::project_fact::{
-    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+    FactProjectorInfo, MatchedContext, ProjectionContext, ProjectionOutput, Projector,
 };
 use crate::protocol::auth::key_wrap::project::{
     frontier_root_wrap_source_offers, require_local_scope,
@@ -258,7 +258,7 @@ fn project_local_key_secret(
     require_local_scope(fact)?;
     // 2. Context: retirement and removal-frontier match.
     let retirement_need = local_secret_retirement::secret_retired_need(fact.id, fact.id);
-    if let Some(retirement_fact) = projection_context.payload_for(&retirement_need) {
+    if let Some(retirement_fact) = projection_context.match_for(&retirement_need) {
         validate_local_key_retirement(retirement_fact, fact.id, &secret)?;
         return Ok(ProjectionOutput::new()
             .row_mutation(RowMutation::DeleteWhere(TableDeleteWhere {
@@ -273,14 +273,13 @@ fn project_local_key_secret(
             .purge_self(fact.id));
     }
 
-    let frontier_need = ContextNeed::range(
+    let frontier_need = ContextNeed::for_key(
         fact.id,
         "auth_removal_frontier",
         scope.clone(),
         secret.frontier_id,
-        secret.frontier_id,
     );
-    let Some(frontier_fact) = projection_context.payload_for(&frontier_need) else {
+    let Some(frontier_fact) = projection_context.match_for(&frontier_need) else {
         return Ok(ProjectionOutput::new()
             .need(frontier_need)
             .need(retirement_need));
@@ -298,6 +297,7 @@ fn project_local_key_secret(
         secret.frontier_id,
         secret.owner_endpoint_id,
         secret.created_at_ms,
+        fact.bytes.clone(),
     ) {
         output = output.offer(offer);
     }
@@ -327,6 +327,7 @@ fn project_local_key_secret(
             FactScope::Local,
             fact.id,
             fact.id,
+            fact.bytes.clone(),
         ))
         .offer(secret_offer(
             fact.id,
@@ -337,18 +338,17 @@ fn project_local_key_secret(
             u64::MAX,
             0,
             [0; 32],
+            fact.bytes.clone(),
         )))
 }
 
 fn validate_local_key_retirement(
-    retirement_fact: &Fact,
+    retirement_fact: &MatchedContext,
     target_id: crate::core::facts::FactId,
     secret: &LocalKeySecretFact,
 ) -> Result<(), String> {
-    if retirement_fact.scope != FactScope::Local {
-        return Err("local key secret retirement context must be local".to_string());
-    }
-    let retirement = local_secret_retirement::decode_fact_payload(retirement_fact.body())
+    retirement_fact.require_owner_scope(&FactScope::Local, "local key secret retirement")?;
+    let retirement = local_secret_retirement::decode_fact_payload(retirement_fact.value())
         .map_err(|_| "local key secret retirement context is not a retirement fact".to_string())?;
     if retirement.workspace_id != secret.workspace_id {
         return Err("local key secret retirement workspace mismatch".to_string());
@@ -360,13 +360,11 @@ fn validate_local_key_retirement(
 }
 
 fn validate_local_key_frontier(
-    frontier_fact: &Fact,
+    frontier_fact: &MatchedContext,
     secret: &LocalKeySecretFact,
 ) -> Result<(), String> {
-    if frontier_fact.id != secret.frontier_id {
-        return Err("local key secret frontier context payload id mismatch".to_string());
-    }
-    let frontier = removal_frontier::decode_fact_payload(&frontier_fact.bytes)
+    frontier_fact.require_owner(secret.frontier_id, "local key secret frontier")?;
+    let frontier = removal_frontier::decode_fact_payload(frontier_fact.value())
         .map_err(|_| "local key secret frontier context must be a removal frontier".to_string())?;
     if frontier.workspace_id != secret.workspace_id {
         return Err("local key secret frontier workspace mismatch".to_string());
