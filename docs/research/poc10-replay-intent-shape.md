@@ -42,7 +42,7 @@ Add an explicit replay entry point to core runtime:
 1. Stop handler dispatch and network activity.
 2. Drop durable and local queued intents.
 3. Clear schema-declared replay-resettable state: read-model rows, sync
-   indexes, context edges, `time_wakes`, pending projection rows, pending time
+   indexes, context needs/offers, `time_wakes`, pending projection rows, pending time
    ranges, ephemeral projection inputs, intent queues, temp network queues, and
    local clock observations. The retained fact store (`facts` plus local
    admission metadata) is outside the resettable table set.
@@ -205,7 +205,7 @@ making replay a separate public upgrade command:
   retained update fact as audit history. Replay-mode projection of update facts
   is a no-op, so old update facts remain records without re-triggering rebuild.
 - `state-summary`: print a stable hashable summary of rebuild-relevant state:
-  retained facts, materialized rows, context edges, semantic time wakes, sync
+  retained facts, materialized rows, context needs/offers, semantic time wakes, sync
   indexes, local key-material rows, and connection-maintenance rows. The output
   should include one overall `state_hash` plus per-area hashes and counts for
   schema-declared summary tables, computed from canonical row serialization

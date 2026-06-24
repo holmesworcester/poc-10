@@ -430,7 +430,7 @@ fn wipe_derived_state(tx: &Db, schema: &ProtocolSchema) -> Result<()> {
 ```
 
 Retained facts are the durable protocol truth and survive replay. Incoming
-facts, pending queues, context edges, time wakes, intent queues, and derived
+facts, pending queues, context needs/offers, time wakes, intent queues, and derived
 protocol rows are wiped. Local runtime metadata needed to run the database,
 such as schema and replay lifecycle rows, may also survive, but it is not
 protocol truth.

@@ -281,7 +281,7 @@ alphabetically.
   markers, and applies typed row mutations. It does not know what a fact tag,
   context role, network frame, or protocol row means.
 - `schema.rs`: core-owned SQL table inventory. It declares facts, local
-  admissions, context edges, time wakes, pending projection, incoming facts,
+  admissions, context needs/offers, time wakes, pending projection, incoming facts,
   pending projection matches, the `pending_time_ranges` work table, intent
   queues, local network tables, and rebuild reset groups. Protocol rows live in
   protocol schema sources.

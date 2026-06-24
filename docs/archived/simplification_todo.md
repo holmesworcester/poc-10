@@ -91,7 +91,7 @@ Accountable criteria:
   pipeline modules instead of byte-row scans in `pipeline_storage.rs`.
 - Done in this branch: intent queue row encoding, decoding, and insertion live
   with dispatch, not in the generic fact/context storage module.
-- Done in this branch: context edge reads, context matching, and scope-key
+- Done in this branch: context need/offer reads, context matching, and scope-key
   handling use declared typed SQLite rows instead of byte-row scans.
 - Done in this branch: `context_db.rs` was removed as a sink. Standing
   context row access, matcher assembly, and context wake assembly now live in

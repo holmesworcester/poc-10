@@ -231,10 +231,10 @@ strings and key layouts they validate, emit exact needs with
 with `ContextOffer::for_key`, `ContextOffer::for_key_parts`, or
 `ContextOffer::range`. Nontrivial protocol byte layouts and candidate
 validation belong beside the domain that owns the semantics, such as auth
-secret coverage and wrap-source ranges under `src/protocol/auth/`. Fact modules must
-not define their own `matchers.rs`, `context.rs`, or `selectors.rs` files.
+secret coverage and wrap-source ranges under `src/protocol/auth/`. Fact modules
+must not define their own `matchers.rs`, `context.rs`, or `selectors.rs` files.
 Core only stores, indexes, overlaps, and wakes; projectors must decode and
-validate matched payloads before giving candidates semantic authority.
+validate matched offer values before giving candidates semantic authority.
 
 `auth` intentionally combines the old identity and key-agreement boundaries.
 Workspace authority, users, endpoints, invites, signed envelopes, recipient

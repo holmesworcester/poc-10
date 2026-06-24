@@ -142,8 +142,8 @@ atomic_runtime_effects_sound(output, graph)
 Core lemmas:
 
 ```text
-range matcher returns only same role and scope with overlapping selector ranges
-exact matcher is the equal-endpoint case of range matching
+range-offer matcher returns only same role and scope where the offer covers the exact need key
+exact-offer matcher is the equal-endpoint case of range-offer matching
 matched offer values are hydrated from the matched offer id
 matched value helpers preserve the need chosen by the projector
 context replacement preserves owner boundaries

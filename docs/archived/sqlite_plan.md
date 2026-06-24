@@ -117,7 +117,7 @@ during projection commit and inserts affected owners directly into
 - Projectors are pure over one fact plus supplied context.
 - Projectors emit needs, offers, time wakes, row mutations, durable intents, and
   ephemeral intents.
-- Projection commit replaces only the current fact's context edges and time
+- Projection commit replaces only the current fact's context needs/offers and time
   wakes.
 - Row writes flow through `PipelineEffects`; projectors do not write SQLite.
 - Handlers emit facts, purges, row mutations, and follow-up intents through the

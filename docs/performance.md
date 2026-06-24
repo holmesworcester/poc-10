@@ -157,8 +157,9 @@ The real nonlinear risks are broad range relationships:
 - Time wakes can wake every owner whose wake time falls in a queried range.
 - Key-tree or key-availability ranges can cover many facts if represented as
   broad ranges rather than exact key facts or aggregated checkpoints.
-- Any context range whose width grows with history can make one new offer or one
-  new need match many standing rows.
+- Any context range offer whose width grows with history can make one new offer
+  match many standing exact needs, or make one new exact need match many standing
+  offers.
 
 These are mathematically different from exact message dependencies. If a range
 can match `M` owners, then a single projection commit can enqueue `O(M)` work.
@@ -179,9 +180,9 @@ next performance work should keep the projection and context semantics intact:
   changing durable context semantics.
 - Use concurrency for independent projection or intent work once table ownership
   and commit boundaries are clear.
-- Treat broad range needs and offers as a separate optimization problem: avoid
-  needless ranges, aggregate large ranges, and make range wakeups proportional
-  to useful work.
+- Treat broad range offers and exact needs covered by broad ranges as a separate
+  optimization problem: avoid needless ranges, aggregate large ranges, and make
+  range wakeups proportional to useful work.
 
 The current evidence supports treating the storage tweaks as investigation
 results rather than merging them for their own sake.

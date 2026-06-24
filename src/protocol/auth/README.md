@@ -65,7 +65,7 @@ waiting for a named fact that arrived through replication. Auth publishes
 `sync_key_wrap` from accepted concrete `key_wrap` facts, so key-wrap
 availability for auth wraps is an auth offer, not a sync-owned offer. These
 contexts are only wake/proof locators: auth still decodes and validates the
-matched payload before trusting it.
+matched offer value before trusting it.
 
 ### Other Interfaces
 

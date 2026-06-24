@@ -123,7 +123,7 @@ shapes:
   - `sync/shared_fact` — fact scope must equal the body's workspace scope → single `sync_exact_fact` offer (no row).
   - `sync/range_request` — scope-match check → assert the scope-mismatch rejection.
 - **Context-wait → materialize.** Drive the projector twice: empty context
-  (assert it parks on the expected exact needs), then matched payloads (assert
+  (assert it parks on the expected exact needs), then matched offer values (assert
   the rows/offers it then emits).
   - `auth/key_wrap`, `auth/key_wrap_creation`, `auth/key_wrap_recovery` — signer/recipient/frontier context → wrap / local-recovery emission.
   - `auth/endpoint_shared` — device-invite vs invite-server authority gating.
