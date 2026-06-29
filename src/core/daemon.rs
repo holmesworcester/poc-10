@@ -30,7 +30,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-const START_USAGE: &str = "start --listen IP PORT [--tick-ms N] [--quiet-ms N]";
+const START_USAGE: &str = "start [--listen IP PORT] [--tick-ms N] [--quiet-ms N]";
+/// Default bind when `--listen` is omitted: loopback on an OS-assigned port.
+/// `network::listen` reports the chosen port via `local_addr` and it is recorded
+/// in the daemon lock, so callers (e.g. `invite`) can read it back.
+const DEFAULT_LISTEN: &str = "127.0.0.1:0";
 const STOP_USAGE: &str = "stop";
 const RESET_USAGE: &str = "reset";
 const DEFAULT_TICK_MS: u64 = 250;
@@ -189,7 +193,12 @@ fn parse_start_options(args: CliArgs<'_>) -> Result<StartOptions, String> {
         }
     }
     Ok(StartOptions {
-        listen: listen.ok_or_else(|| START_USAGE.to_string())?,
+        listen: match listen {
+            Some(addr) => addr,
+            None => DEFAULT_LISTEN
+                .parse::<SocketAddr>()
+                .expect("default listen addr parses"),
+        },
         quiet_ms: quiet_ms.unwrap_or(tick_ms),
         work_limit: runtime::DEFAULT_WORK_LIMIT,
     })

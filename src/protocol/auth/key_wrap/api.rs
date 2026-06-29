@@ -4,7 +4,7 @@
 //! removal frontiers, history nodes, and key wraps. They read projected auth
 //! state, construct facts, and return receipts suitable for CLI output.
 
-use crate::core::command::AuthoredFacts;
+use crate::core::command::{AuthoredFacts, LocalEncryptionCapability};
 use crate::core::crypto;
 use crate::core::db::Db;
 use crate::core::facts::{fact_from_storage_row, Fact, FactId};
@@ -65,6 +65,18 @@ pub struct CreateHistoryNodeReceipt {
     pub tombstone_node_id: FactId,
 }
 
+/// Local endpoint material needed to author a recipient key, gathered either
+/// from projected membership (`create_recipient_key`) or in-memory at accept
+/// time (`auto_recipient_key_on_accept`), before membership has been projected.
+pub struct RecipientKeyMaterial {
+    pub workspace_id: FactId,
+    pub endpoint_id: FactId,
+    pub signing_public_key: [u8; 32],
+    pub signing_private_key: crypto::Ed25519PrivateKey,
+    pub previous_recipient_key_id: FactId,
+    pub created_at_ms: u64,
+}
+
 pub fn create_recipient_key(
     store: &Db,
     input: CreateRecipientKey,
@@ -81,28 +93,44 @@ pub fn create_recipient_key(
     if signing.public_key != membership.signing_public_key {
         return Err("local signing capability public key does not match membership".to_string());
     }
+    recipient_key_facts(RecipientKeyMaterial {
+        workspace_id: input.workspace_id,
+        endpoint_id: membership.endpoint_id,
+        signing_public_key: signing.public_key,
+        signing_private_key: signing.private_key,
+        previous_recipient_key_id: input.previous_recipient_key_id,
+        created_at_ms: input.created_at_ms,
+    })
+}
+
+/// Author the recipient-key, its signature, and the matching local secret from
+/// already-validated endpoint material. Callers that read projected membership
+/// must perform their own authority checks before calling this.
+pub fn recipient_key_facts(
+    material: RecipientKeyMaterial,
+) -> Result<AuthoredFacts<CreateRecipientKeyReceipt>, String> {
     let recipient_secret = crypto::random_x25519_private_key();
     let recipient_key = crypto::x25519_public_key(&recipient_secret);
     let recipient_fact = auth::recipient_key::author::authored_recipient_key_fact(
-        input.workspace_id,
-        membership.endpoint_id,
+        material.workspace_id,
+        material.endpoint_id,
         recipient_key,
-        input.previous_recipient_key_id,
-        input.created_at_ms,
-        signing.public_key,
+        material.previous_recipient_key_id,
+        material.created_at_ms,
+        material.signing_public_key,
     )?;
     let recipient_signature = auth::signature::author::sign_fact(
-        input.workspace_id,
+        material.workspace_id,
         &recipient_fact,
-        &signing.private_key,
-        input.created_at_ms,
+        &material.signing_private_key,
+        material.created_at_ms,
     )?;
     let (_local, local_fact) = auth::local_recipient_key::author::recipient_key_fact(
-        input.workspace_id,
+        material.workspace_id,
         recipient_fact.id,
         recipient_key,
         recipient_secret,
-        input.created_at_ms,
+        material.created_at_ms,
     )?;
     Ok(AuthoredFacts::new(CreateRecipientKeyReceipt {
         local_recipient_key_id: local_fact.id,
@@ -116,6 +144,23 @@ pub fn create_key_frontier(
     store: &Db,
     input: CreateKeyFrontier,
 ) -> Result<AuthoredFacts<CreateKeyFrontierReceipt>, String> {
+    Ok(create_key_frontier_with_capability(store, input)?.authored)
+}
+
+/// A newly authored key frontier plus the in-memory encryption capability it
+/// establishes. Callers that want to author a frontier and immediately use its
+/// key (e.g. auto key setup on the first `send`, before projection has written
+/// `local_key_secret_rows`) need the capability here rather than re-reading it
+/// from the not-yet-projected row.
+pub struct AuthoredKeyFrontier {
+    pub authored: AuthoredFacts<CreateKeyFrontierReceipt>,
+    pub capability: LocalEncryptionCapability,
+}
+
+pub fn create_key_frontier_with_capability(
+    store: &Db,
+    input: CreateKeyFrontier,
+) -> Result<AuthoredKeyFrontier, String> {
     let endpoint = auth::endpoint::author::local_endpoint(store)?
         .ok_or_else(|| "local endpoint is not initialized".to_string())?;
     let membership = auth::workspace::queries::local_membership(store, input.workspace_id)?
@@ -135,7 +180,7 @@ pub fn create_key_frontier(
         &endpoint.signing_secret,
         input.created_at_ms,
     )?;
-    let (_local_secret, local_secret_fact) = auth::local_key_secret::author::random_secret_fact(
+    let (local_secret, local_secret_fact) = auth::local_key_secret::author::random_secret_fact(
         input.workspace_id,
         frontier_fact.id,
         endpoint.endpoint,
@@ -148,7 +193,14 @@ pub fn create_key_frontier(
         endpoint.signing_secret,
         input.created_at_ms,
     )?;
-    Ok(AuthoredFacts::new(CreateKeyFrontierReceipt {
+    let capability = LocalEncryptionCapability {
+        workspace_id: input.workspace_id,
+        frontier_id: frontier_fact.id,
+        owner_endpoint_id: endpoint.endpoint,
+        created_at_ms: input.created_at_ms,
+        key_secret: local_secret.key_secret,
+    };
+    let authored = AuthoredFacts::new(CreateKeyFrontierReceipt {
         workspace_id: input.workspace_id,
         removal_frontier_id: frontier_fact.id,
         local_key_secret_id: local_secret_fact.id,
@@ -159,7 +211,11 @@ pub fn create_key_frontier(
         frontier_signature,
         local_secret_fact,
         signer_fact,
-    ]))
+    ]);
+    Ok(AuthoredKeyFrontier {
+        authored,
+        capability,
+    })
 }
 
 pub fn create_history_node(

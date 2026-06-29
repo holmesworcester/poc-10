@@ -12,7 +12,7 @@ use crate::core::db::Db;
 
 use super::api;
 
-pub const INVITE_USAGE: &str = "invite [--workspace WORKSPACE_ID_HEX] --public-addr ADDR";
+pub const INVITE_USAGE: &str = "invite [--workspace WORKSPACE_ID_HEX] [--public-addr ADDR]";
 pub const INVITE_SERVER_USAGE: &str = "invite-server WORKSPACE_ID_HEX --public-addr ADDR";
 pub const ACCEPT_USAGE: &str = "accept INVITE_LINK [--username USER] [--devicename DEVICE]";
 pub const ACCEPT_INVITE_SERVER_USAGE: &str =
@@ -24,14 +24,33 @@ pub fn invite(
     store: &Db,
     clock: &dyn CommandClock,
     args: CliArgs<'_>,
+    from_listen_addr: Option<SocketAddr>,
 ) -> Result<AuthoredFacts<api::CreateInviteReceipt>, String> {
     let parsed = InviteArgs::parse(args)?;
+    // Only auto-fill from the daemon listen address when it is a concrete,
+    // dialable address. A wildcard bind (`0.0.0.0` / `[::]`) is a valid listen
+    // address but cannot be dialed by a peer, so copying it into the invite link
+    // would silently produce an unusable invite; require an explicit
+    // `--public-addr` in that case.
+    let dialable_listen_addr = from_listen_addr.filter(|addr| !addr.ip().is_unspecified());
+    let public_addr = parsed
+        .public_addr
+        .or(dialable_listen_addr)
+        .ok_or_else(|| {
+            let hint = match from_listen_addr {
+                Some(addr) if addr.ip().is_unspecified() => format!(
+                    "daemon listens on wildcard {addr}, which peers cannot dial — pass --public-addr ADDR"
+                ),
+                _ => "no daemon listen address found — start the daemon or pass --public-addr".to_string(),
+            };
+            format!("{INVITE_USAGE}; {hint}")
+        })?;
     api::create(
         store,
         api::CreateInvite {
             created_at_ms: clock.next_timestamp(),
             workspace_id: parsed.workspace_id,
-            public_addr: parsed.public_addr,
+            public_addr,
         },
     )
 }
@@ -127,6 +146,18 @@ pub fn invite_output(receipt: &api::CreateInviteReceipt) -> CliOutput {
     CliOutput::line(receipt.link.clone())
 }
 
+/// `invite_output` plus a copy-paste-ready accept line. Used by the workspace
+/// `invite` command (not `link`/`invite-server`, which accept differently).
+pub fn invite_output_with_next_step(receipt: &api::CreateInviteReceipt) -> CliOutput {
+    CliOutput::lines(vec![
+        receipt.link.clone(),
+        format!(
+            "next: con --db PEER.db accept {} --username NAME --devicename DEVICE",
+            receipt.link
+        ),
+    ])
+}
+
 pub fn accept_output(receipt: &api::AcceptInviteReceipt) -> CliOutput {
     let mut lines = vec![format!("connected: {}", receipt.connected_addr)];
     if let Some(workspace_id) = receipt.workspace_id {
@@ -150,7 +181,7 @@ pub fn accept_output(receipt: &api::AcceptInviteReceipt) -> CliOutput {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct InviteArgs {
     workspace_id: Option<[u8; 32]>,
-    public_addr: SocketAddr,
+    public_addr: Option<SocketAddr>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,7 +218,7 @@ impl InviteArgs {
         }
         Ok(Self {
             workspace_id,
-            public_addr: public_addr.ok_or_else(|| INVITE_USAGE.to_string())?,
+            public_addr,
         })
     }
 }

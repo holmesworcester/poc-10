@@ -481,11 +481,22 @@ fn same_endpoint_can_join_multiple_workspaces_but_not_same_workspace_twice() {
     let _ = beta_port;
     wait_for_workspaces_containing(&joiner, &["Alpha", "Beta", &alpha_id, &beta_id]);
 
-    wait_for_users_containing(&joiner, &alpha_id, &["alice-alpha", "bob-alpha"]);
-    let alpha_users = assert_success(topo(&["--db", &joiner, "users", &alpha_id]));
+    // Both workspaces appear in the joiner's numbered list; switch between them
+    // by position instead of pasting a 64-char id. The positions match the
+    // `workspaces`/`status` numbering and are stable across stores.
+    let listing = assert_success(topo(&["--db", &joiner, "workspaces"]));
+    let alpha_number = workspace_number(&listing, "Alpha");
+    let beta_number = workspace_number(&listing, "Beta");
+    assert_ne!(alpha_number, beta_number);
+
+    // Select Alpha by its number; an id-less `users` now targets the active one.
+    assert_success(topo(&["--db", &joiner, "use-workspace", &alpha_number.to_string()]));
+    let alpha_users = wait_for_active_users_containing(&joiner, &["alice-alpha", "bob-alpha"]);
     assert!(!alpha_users.contains("bob-beta"), "{alpha_users}");
-    wait_for_users_containing(&joiner, &beta_id, &["alice-beta", "bob-beta"]);
-    let beta_users = assert_success(topo(&["--db", &joiner, "users", &beta_id]));
+
+    // Switch to Beta by its number; the active selection follows.
+    assert_success(topo(&["--db", &joiner, "use-workspace", &beta_number.to_string()]));
+    let beta_users = wait_for_active_users_containing(&joiner, &["alice-beta", "bob-beta"]);
     assert!(!beta_users.contains("bob-alpha"), "{beta_users}");
 
     let duplicate_invite = workspace_invite_link(&host, &alpha_id, alpha_port);
@@ -881,6 +892,45 @@ fn wait_for_users_containing(db: &str, workspace_id: &str, users: &[&str]) {
         "users never contained {users:?}; connections={}:\n{last}",
         connection_count(db)
     );
+}
+
+/// Parse the 1-based position of a named workspace from `workspaces` output.
+/// Lines look like ` 2. name=Beta created_at_ms=... id=...` (with a leading `*`
+/// when active), so strip the marker and read the number before the dot.
+fn workspace_number(workspaces_output: &str, name: &str) -> usize {
+    let needle = format!("name={name} ");
+    let line = workspaces_output
+        .lines()
+        .find(|line| line.contains(&needle))
+        .unwrap_or_else(|| {
+            panic!("workspace {name} not in workspaces output:\n{workspaces_output}")
+        });
+    line.trim_start_matches(|c| c == '*' || c == ' ')
+        .split('.')
+        .next()
+        .and_then(|number| number.trim().parse::<usize>().ok())
+        .unwrap_or_else(|| panic!("could not parse workspace number from line: {line}"))
+}
+
+/// Poll the id-less `users` command (which targets the active workspace) until
+/// it contains every needle, or panic after the sync timeout.
+fn wait_for_active_users_containing(db: &str, values: &[&str]) -> String {
+    let start = Instant::now();
+    let mut last = String::new();
+    while start.elapsed() < Duration::from_secs(40) {
+        let output = topo(&["--db", db, "users"]);
+        if output.status.success() {
+            let text = stdout(&output);
+            if values.iter().all(|value| text.contains(value)) {
+                return text;
+            }
+            last = text;
+        } else {
+            last = stderr(&output);
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    panic!("id-less users never contained {values:?}:\n{last}");
 }
 
 fn wait_for_workspaces_containing(db: &str, values: &[&str]) {

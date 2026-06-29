@@ -13,6 +13,41 @@ pub const CREATE_WORKSPACE_USAGE: &str =
     "create-workspace (--public-key HEX64 --name NAME | NAME --username USER --devicename DEVICE)";
 pub const WORKSPACES_USAGE: &str = "workspaces";
 pub const COUNT_USAGE: &str = "count";
+pub const STATUS_USAGE: &str = "status";
+
+/// Format the `status` overview. The listen address is not projected state, so
+/// the command host reads it from the daemon lock and passes it in here.
+pub fn status_output(
+    report: &queries::StatusReport,
+    listen_addr: Option<std::net::SocketAddr>,
+) -> CliOutput {
+    let mut lines = vec![
+        format!(
+            "listen: {}",
+            listen_addr
+                .map(|addr| addr.to_string())
+                .unwrap_or_else(|| "stopped".to_string())
+        ),
+        format!(
+            "endpoint: {}",
+            report
+                .endpoint_id
+                .map(|id| encode_hex(&id))
+                .unwrap_or_else(|| "uninitialized".to_string())
+        ),
+        format!("workspaces: {}", report.workspaces.len()),
+    ];
+    for (index, workspace) in report.workspaces.iter().enumerate() {
+        let marker = if workspace.active { "*" } else { " " };
+        lines.push(format!(
+            "{marker}{}. {} id={}",
+            index + 1,
+            workspace.name,
+            encode_hex(&workspace.workspace_id)
+        ));
+    }
+    CliOutput::lines(lines)
+}
 
 pub fn create_workspace(
     store: &Db,
@@ -133,19 +168,28 @@ pub fn workspaces(store: &Db, args: CliArgs<'_>) -> Result<Vec<queries::Workspac
     queries::list_workspaces(store)
 }
 
-pub fn workspaces_output(workspaces: &[queries::WorkspaceSummary]) -> CliOutput {
+pub fn workspaces_output(
+    workspaces: &[queries::WorkspaceSummary],
+    active: Option<crate::core::facts::FactId>,
+) -> CliOutput {
     if workspaces.is_empty() {
         return CliOutput::line("workspaces: 0");
     }
 
     let mut lines = vec![format!("workspaces: {}", workspaces.len())];
-    for workspace in workspaces {
+    for (index, workspace) in workspaces.iter().enumerate() {
+        let marker = if active == Some(workspace.workspace_id) {
+            "*"
+        } else {
+            " "
+        };
         lines.push(format!(
-            "{} created_at_ms={} public_key={} name={}",
-            encode_hex(&workspace.workspace_id),
+            "{marker}{}. name={} created_at_ms={} public_key={} id={}",
+            index + 1,
+            workspace.name,
             workspace.created_at_ms,
             encode_hex(&workspace.public_key),
-            workspace.name
+            encode_hex(&workspace.workspace_id),
         ));
     }
     CliOutput::lines(lines)

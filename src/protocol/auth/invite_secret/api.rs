@@ -372,6 +372,24 @@ pub fn accept(
         })?;
         facts.extend(device_invite.into_facts());
         facts.extend(endpoint_shared.into_facts());
+
+        // Auto-author a recipient key so the joiner becomes a proactive
+        // content-key recipient without a separate `key-recipient` step. Built
+        // from in-memory endpoint material because membership has not been
+        // projected yet at accept time; the same endpoint signing key backs the
+        // endpoint_shared fact authored just above.
+        let recipient = auth::key_wrap::api::recipient_key_facts(
+            auth::key_wrap::api::RecipientKeyMaterial {
+                workspace_id: input.invite.workspace_id,
+                endpoint_id: local.endpoint,
+                signing_public_key: local.signing_public_key,
+                signing_private_key: local.signing_secret,
+                previous_recipient_key_id:
+                    auth::recipient_key::fact::NO_PREVIOUS_RECIPIENT_KEY,
+                created_at_ms: input.created_at_ms.saturating_add(8),
+            },
+        )?;
+        facts.extend(recipient.facts);
     }
     let accepted = auth::invite_accepted::api::accept(auth::invite_accepted::api::AcceptInvite {
         created_at_ms: input

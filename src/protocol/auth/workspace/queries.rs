@@ -59,6 +59,42 @@ pub fn list_workspaces(store: &Db) -> Result<Vec<WorkspaceSummary>, String> {
     .map_err(|err| format!("decode workspace rows: {err}"))
 }
 
+/// One workspace as seen by the `status` overview, with its active flag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusWorkspace {
+    pub workspace_id: FactId,
+    pub name: String,
+    pub active: bool,
+}
+
+/// Read-only `status` snapshot of this store: the local endpoint identity, plus
+/// each known workspace with the active-workspace selection marked. The daemon
+/// listen address is not projected state, so the command host supplies it to the
+/// formatter rather than this query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusReport {
+    pub endpoint_id: Option<FactId>,
+    pub workspaces: Vec<StatusWorkspace>,
+}
+
+pub fn status_report(store: &Db) -> Result<StatusReport, String> {
+    let endpoint_id =
+        auth::endpoint::queries::local_endpoint_public(store)?.map(|endpoint| endpoint.endpoint);
+    let active = auth::active_workspace::queries::current_active_workspace(store)?;
+    let workspaces = list_workspaces(store)?
+        .into_iter()
+        .map(|workspace| StatusWorkspace {
+            workspace_id: workspace.workspace_id,
+            name: workspace.name,
+            active: active == Some(workspace.workspace_id),
+        })
+        .collect();
+    Ok(StatusReport {
+        endpoint_id,
+        workspaces,
+    })
+}
+
 pub fn workspace_by_id(store: &Db, workspace_id: FactId) -> Result<WorkspaceSummary, String> {
     let row = store
         .conn()

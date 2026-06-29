@@ -52,14 +52,18 @@ pub fn send_message(
     text: &str,
 ) -> Result<AuthoredFacts<SendReceipt>, String> {
     let created_at_ms = clock.next_timestamp();
-    let facts = build_message_facts(store, workspace_id, text, created_at_ms)?;
+    let (facts, extra_facts) = build_message_facts(store, workspace_id, text, created_at_ms)?;
+    let message_fact_id = facts.message.id;
+    let mut authored = extra_facts;
+    authored.push(facts.message);
+    authored.push(facts.signature);
 
     Ok(AuthoredFacts::new(SendReceipt {
         workspace_id,
-        message_fact_id: facts.message.id,
+        message_fact_id,
         created_at_ms,
     })
-    .with_facts(vec![facts.message, facts.signature]))
+    .with_facts(authored))
 }
 
 pub fn generate_messages(
@@ -81,11 +85,13 @@ pub fn generate_messages(
         .checked_add((count - 1) as u64)
         .ok_or_else(|| "generate timestamp range overflows u64".to_string())?;
     let message_text_bytes = requested_message_text_bytes.min(MAX_TEXT_BYTES);
-    let authoring = crate::core::perf_profile::measure_result("authoring_snapshot", || {
-        prepare_authoring(store, workspace_id)
-    })?;
+    let (authoring, extra_facts) = crate::core::perf_profile::measure_result(
+        "authoring_snapshot",
+        || prepare_authoring(store, workspace_id, first_timestamp),
+    )?;
 
-    let mut facts = Vec::with_capacity(count.saturating_mul(2));
+    let mut facts = extra_facts;
+    facts.reserve(count.saturating_mul(2));
     let mut fact_ids = Vec::with_capacity(count);
     for index in 0..count {
         let timestamp = first_timestamp
@@ -116,10 +122,12 @@ pub fn generate_messages(
 fn prepare_authoring(
     store: &Db,
     workspace_id: WorkspaceId,
-) -> Result<MessageCommandAuthoring, String> {
+    created_at_ms: u64,
+) -> Result<(MessageCommandAuthoring, Vec<Fact>), String> {
     let signing = auth::endpoint::api::local_signing_capability(store, workspace_id)?;
     let signer_private_key = signing.private_key;
-    let encryption = local_encryption_capability(store, workspace_id)?;
+    let (encryption, extra_facts) =
+        ensure_local_encryption(store, workspace_id, created_at_ms)?;
     let author_user_id = local_author_user_id(store, workspace_id)?.unwrap_or(signing.signer_id);
     let active_policy = retention_policy::queries::active_for_workspace(store, workspace_id)?;
     let retained_floor_minute = retained_floor_from_tombstones(store, workspace_id)?;
@@ -131,10 +139,40 @@ fn prepare_authoring(
         active_policy,
         retained_floor_minute,
     )?;
-    Ok(MessageCommandAuthoring {
-        snapshot,
-        signer_private_key,
-    })
+    Ok((
+        MessageCommandAuthoring {
+            snapshot,
+            signer_private_key,
+        },
+        extra_facts,
+    ))
+}
+
+/// Resolve the local content-key capability, auto-authoring a key frontier when
+/// none exists yet. This makes the first `send` self-sufficient: the demo no
+/// longer needs a separate `key-frontier` step. The returned facts (empty when a
+/// frontier already exists) are admitted alongside the message so the frontier
+/// becomes durable and proactively wraps to known recipients.
+fn ensure_local_encryption(
+    store: &Db,
+    workspace_id: WorkspaceId,
+    created_at_ms: u64,
+) -> Result<(LocalEncryptionCapability, Vec<Fact>), String> {
+    match local_encryption_capability(store, workspace_id) {
+        Ok(capability) => Ok((capability, Vec::new())),
+        Err(err) if err.contains("no local key frontier") => {
+            let created = auth::key_wrap::api::create_key_frontier_with_capability(
+                store,
+                auth::key_wrap::api::CreateKeyFrontier {
+                    created_at_ms,
+                    workspace_id,
+                },
+            )?;
+            let (_, facts) = created.authored.into_parts();
+            Ok((created.capability, facts))
+        }
+        Err(err) => Err(err),
+    }
 }
 
 fn build_message_facts(
@@ -142,10 +180,11 @@ fn build_message_facts(
     workspace_id: WorkspaceId,
     text: &str,
     created_at_ms: u64,
-) -> Result<AuthoredMessageFacts, String> {
+) -> Result<(AuthoredMessageFacts, Vec<Fact>), String> {
     author::validate_message_text(text)?;
-    let authoring = prepare_authoring(store, workspace_id)?;
-    build_message_facts_from_authoring(&authoring, text, created_at_ms)
+    let (authoring, extra_facts) = prepare_authoring(store, workspace_id, created_at_ms)?;
+    let authored = build_message_facts_from_authoring(&authoring, text, created_at_ms)?;
+    Ok((authored, extra_facts))
 }
 
 fn build_message_facts_from_authoring(
