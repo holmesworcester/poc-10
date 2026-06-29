@@ -580,10 +580,20 @@ pub fn view(store: &Db, args: CliArgs<'_>) -> Result<CliOutput, String> {
 
 fn selected_workspace_id(store: &Db) -> Result<FactId, String> {
     let memberships = auth::workspace::queries::local_memberships(store)?;
+    if let Some(active) = auth::active_workspace::queries::current_active_workspace(store)? {
+        if memberships
+            .iter()
+            .any(|membership| membership.workspace_id == active)
+        {
+            return Ok(active);
+        }
+    }
     match memberships.as_slice() {
         [] => Err("no joined workspaces; create or accept one first".to_string()),
         [membership] => Ok(membership.workspace_id),
-        _ => Err("select a workspace: pass WORKSPACE_ID_HEX".to_string()),
+        _ => Err(
+            "select a workspace: pass WORKSPACE_ID_HEX or pick one with `use-workspace`".to_string(),
+        ),
     }
 }
 

@@ -20,6 +20,7 @@
 //! projection changes. Other modules should consume auth rows and context
 //! instead of duplicating auth policy.
 
+pub mod active_workspace;
 pub mod admin;
 pub mod device_invite;
 pub mod endpoint;

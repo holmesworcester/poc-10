@@ -18,6 +18,7 @@ use crate::core::cli::{decode_hex_32_named as decode_hex_32, encode_hex_32, CliA
 use crate::core::command::{AuthoredFacts, CommandClock};
 use crate::core::daemon;
 use crate::core::db::Db;
+use crate::core::facts::FactId;
 use crate::core::runtime::Runtime;
 use crate::protocol::connection;
 use crate::protocol::sync;
@@ -100,6 +101,91 @@ impl ContextCliContext {
             versioning::CURRENT_PROTOCOL_VERSION
         ))
     }
+
+    /// Produce an argv whose first positional value is a workspace id hex,
+    /// resolving an omitted (or non-workspace) leading argument to the active or
+    /// sole workspace. A leading argument that decodes as a *known* workspace id
+    /// is kept verbatim; anything else is treated as a non-workspace argument and
+    /// the resolved workspace id is prepended. This lets commands like
+    /// `send "hi"` or `messages` run without pasting the 64-char workspace id.
+    fn workspace_argv(&mut self, args: CliArgs<'_>) -> Result<Vec<String>, String> {
+        let values = args.values();
+        // For every command using this helper the first positional is, by design,
+        // the workspace id. A leading argument that decodes as a *known* workspace
+        // id is an explicit selection: pass argv through untouched. Anything else
+        // — absent, non-hex, or 32-byte hex that is not a workspace (e.g. the
+        // message id in `react <message_id> 👍`) — is a non-workspace argument, so
+        // we resolve the active/sole workspace and prepend it. The existence check
+        // is what keeps a hex-shaped non-workspace argument from being mistaken for
+        // an explicit workspace.
+        let leading_is_workspace = match values.first() {
+            Some(first) => match decode_hex_32(first, "workspace id") {
+                Ok(id) => self.query_db(move |store| workspace_exists(store, id))?,
+                Err(_) => false,
+            },
+            None => false,
+        };
+        if leading_is_workspace {
+            return Ok(values.to_vec());
+        }
+        let resolved = self.query_db(resolve_workspace)?;
+        let mut out = Vec::with_capacity(values.len() + 1);
+        out.push(encode_hex_32(&resolved));
+        out.extend(values.iter().cloned());
+        Ok(out)
+    }
+}
+
+/// Whether a workspace with this id is projected on this store.
+fn workspace_exists(store: &Db, workspace_id: FactId) -> Result<bool, String> {
+    Ok(auth::workspace::queries::list_workspaces(store)?
+        .iter()
+        .any(|workspace| workspace.workspace_id == workspace_id))
+}
+
+/// Resolve a `use-workspace` selector to a workspace id. A position indexes the
+/// same `list_workspaces` ordering that `workspaces`/`status` number, so
+/// `use-workspace 2` selects the workspace shown as `2.`.
+fn resolve_use_workspace_selector(
+    store: &Db,
+    selector: auth::active_workspace::cli::UseWorkspaceSelector,
+) -> Result<FactId, String> {
+    use auth::active_workspace::cli::UseWorkspaceSelector;
+    match selector {
+        UseWorkspaceSelector::Id(workspace_id) => {
+            if workspace_exists(store, workspace_id)? {
+                Ok(workspace_id)
+            } else {
+                Err("unknown workspace; run `workspaces` to list joined workspaces".to_string())
+            }
+        }
+        UseWorkspaceSelector::Position(position) => auth::workspace::queries::list_workspaces(store)?
+            .get(position - 1)
+            .map(|workspace| workspace.workspace_id)
+            .ok_or_else(|| {
+                format!("no workspace #{position}; run `workspaces` to list joined workspaces")
+            }),
+    }
+}
+
+/// Resolve the default workspace for a command that omitted one: the active
+/// workspace set via `use-workspace` if it still exists, otherwise the sole
+/// workspace, otherwise a clear error telling the user how to disambiguate.
+fn resolve_workspace(store: &Db) -> Result<FactId, String> {
+    if let Some(active) = auth::active_workspace::queries::current_active_workspace(store)? {
+        if workspace_exists(store, active)? {
+            return Ok(active);
+        }
+    }
+    let workspaces = auth::workspace::queries::list_workspaces(store)?;
+    match workspaces.as_slice() {
+        [only] => Ok(only.workspace_id),
+        [] => Err("no workspace yet; create or join one, or pass WORKSPACE_ID_HEX".to_string()),
+        _ => Err(
+            "multiple workspaces; pass WORKSPACE_ID_HEX or pick one with `use-workspace WORKSPACE_ID_HEX`"
+                .to_string(),
+        ),
+    }
 }
 
 pub(crate) fn accept(ctx: &mut ContextCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
@@ -173,14 +259,19 @@ pub(crate) fn identity(
 }
 
 pub(crate) fn peers(ctx: &mut ContextCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    ctx.query_db(|store| auth::endpoint_shared::cli::peers(store, args))
+    let argv = ctx.workspace_argv(args)?;
+    ctx.query_db(|store| auth::endpoint_shared::cli::peers(store, CliArgs::new(&argv)))
 }
 
 pub(crate) fn invite(ctx: &mut ContextCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    let output = ctx
-        .with_command_inputs(|store, clock| auth::invite_secret::cli::invite(store, clock, args))?;
+    let from_listen_addr = daemon::current_listen_addr(ctx.db_path("invite")?)?;
+    let output = ctx.with_command_inputs(|store, clock| {
+        auth::invite_secret::cli::invite(store, clock, args, from_listen_addr)
+    })?;
     let receipt = ctx.submit_authored_facts(output)?;
-    Ok(auth::invite_secret::cli::invite_output(&receipt))
+    Ok(auth::invite_secret::cli::invite_output_with_next_step(
+        &receipt,
+    ))
 }
 
 pub(crate) fn invite_server(
@@ -217,7 +308,28 @@ pub(crate) fn workspaces(
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     let output = ctx.query_db(|store| auth::workspace::cli::workspaces(store, args))?;
-    Ok(auth::workspace::cli::workspaces_output(&output))
+    let active = ctx.query_db(auth::active_workspace::queries::current_active_workspace)?;
+    Ok(auth::workspace::cli::workspaces_output(&output, active))
+}
+
+pub(crate) fn use_workspace(
+    ctx: &mut ContextCliContext,
+    args: CliArgs<'_>,
+) -> Result<CliOutput, String> {
+    let selector = auth::active_workspace::cli::parse_use_workspace_args(args)?;
+    let workspace_id = ctx.query_db(|store| resolve_use_workspace_selector(store, selector))?;
+    let output = ctx.with_command_inputs(|_store, clock| {
+        auth::active_workspace::author::author_active_workspace(clock, workspace_id)
+    })?;
+    let receipt = ctx.submit_authored_facts(output)?;
+    Ok(auth::active_workspace::cli::use_workspace_output(&receipt))
+}
+
+pub(crate) fn status(ctx: &mut ContextCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
+    args.require_len(0, auth::workspace::cli::STATUS_USAGE)?;
+    let listen_addr = daemon::current_listen_addr(ctx.db_path("status")?)?;
+    let report = ctx.query_db(auth::workspace::queries::status_report)?;
+    Ok(auth::workspace::cli::status_output(&report, listen_addr))
 }
 
 pub(crate) fn count(ctx: &mut ContextCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
@@ -227,7 +339,8 @@ pub(crate) fn count(ctx: &mut ContextCliContext, args: CliArgs<'_>) -> Result<Cl
 }
 
 pub(crate) fn users(ctx: &mut ContextCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    let output = ctx.query_db(|store| auth::user::cli::users(store, args))?;
+    let argv = ctx.workspace_argv(args)?;
+    let output = ctx.query_db(|store| auth::user::cli::users(store, CliArgs::new(&argv)))?;
     Ok(auth::user::cli::users_output(&output))
 }
 
@@ -235,8 +348,9 @@ pub(crate) fn key_recipient(
     ctx: &mut ContextCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
+    let argv = ctx.workspace_argv(args)?;
     let output = ctx.with_command_inputs(|store, clock| {
-        auth::key_wrap::cli::key_recipient(store, clock, args)
+        auth::key_wrap::cli::key_recipient(store, clock, CliArgs::new(&argv))
     })?;
     let receipt = ctx.submit_authored_facts(output)?;
     Ok(auth::key_wrap::cli::key_recipient_output(&receipt))
@@ -268,8 +382,9 @@ pub(crate) fn key_frontier(
     ctx: &mut ContextCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
+    let argv = ctx.workspace_argv(args)?;
     let output = ctx.with_command_inputs(|store, clock| {
-        auth::key_wrap::cli::key_frontier(store, clock, args)
+        auth::key_wrap::cli::key_frontier(store, clock, CliArgs::new(&argv))
     })?;
     let receipt = ctx.submit_authored_facts(output)?;
     Ok(auth::key_wrap::cli::key_frontier_output(&receipt))
@@ -432,6 +547,8 @@ pub(crate) fn disappearing_compact(
 }
 
 pub(crate) fn send(ctx: &mut ContextCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
+    let argv = ctx.workspace_argv(args)?;
+    let args = CliArgs::new(&argv);
     let _workspace_id = args
         .get(0)
         .ok_or_else(|| content::message::cli::SEND_USAGE.to_string())
@@ -448,6 +565,8 @@ pub(crate) fn send(ctx: &mut ContextCliContext, args: CliArgs<'_>) -> Result<Cli
 }
 
 pub(crate) fn react(ctx: &mut ContextCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
+    let argv = ctx.workspace_argv(args)?;
+    let args = CliArgs::new(&argv);
     let _workspace_id = args
         .get(0)
         .ok_or_else(|| content::message::cli::REACT_USAGE.to_string())
@@ -463,6 +582,8 @@ pub(crate) fn send_file(
     ctx: &mut ContextCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
+    let argv = ctx.workspace_argv(args)?;
+    let args = CliArgs::new(&argv);
     let _workspace_id = args
         .get(0)
         .ok_or_else(|| content::message::cli::SEND_FILE_USAGE.to_string())
@@ -475,7 +596,8 @@ pub(crate) fn send_file(
 }
 
 pub(crate) fn files(ctx: &mut ContextCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    ctx.query_db(|store| content::message::cli::files(store, args))
+    let argv = ctx.workspace_argv(args)?;
+    ctx.query_db(|store| content::message::cli::files(store, CliArgs::new(&argv)))
 }
 
 pub(crate) fn save_file(
@@ -532,7 +654,8 @@ pub(crate) fn messages(
     ctx: &mut ContextCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
-    ctx.query_db(|store| content::message::cli::messages(store, args))
+    let argv = ctx.workspace_argv(args)?;
+    ctx.query_db(|store| content::message::cli::messages(store, CliArgs::new(&argv)))
 }
 
 pub(crate) fn view(ctx: &mut ContextCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {

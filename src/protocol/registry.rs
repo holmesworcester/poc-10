@@ -402,6 +402,11 @@ pub(crate) fn authenticate_fact_for_admission(fact: &Fact) -> Result<(), String>
             sync::local_setting::decode_fact_payload,
             sync::local_setting::authenticate
         ),
+        auth::active_workspace::TYPE_ACTIVE_WORKSPACE => authenticate_admission_arm!(
+            fact,
+            auth::active_workspace::project::decode::decode_fact,
+            auth::active_workspace::project::authenticate::authenticate
+        ),
         versioning::local_update::encode::TYPE_VERSIONING_UPDATE => authenticate_admission_arm!(
             fact,
             versioning::local_update::encode::decode_update_fact,
@@ -493,6 +498,7 @@ const FACT_REPLAY_TABLES: &[TableName] = &[
     sync::shared_fact::index::NEGENTROPY_CONTEXT_HAVE_ROWS,
     sync::shared_fact::index::NEGENTROPY_NODE_ROWS,
     sync::local_setting::SYNC_LOCAL_SETTING_ROWS,
+    auth::active_workspace::ACTIVE_WORKSPACE_ROWS,
     read_models::MESSAGE_DELETION_ROWS,
     read_models::FILE_DELETION_ROWS,
     content::retention_policy::RETENTION_POLICY_ROWS,
@@ -898,6 +904,13 @@ CREATE TABLE IF NOT EXISTS sync_local_setting_rows (
 );
 CREATE INDEX IF NOT EXISTS sync_local_setting_rows_by_effective
     ON sync_local_setting_rows (effective_at_ms, setting_fact_id);
+CREATE TABLE IF NOT EXISTS active_workspace_rows (
+    setting_fact_id BLOB PRIMARY KEY NOT NULL,
+    workspace_id BLOB NOT NULL,
+    effective_at_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS active_workspace_rows_by_effective
+    ON active_workspace_rows (effective_at_ms, setting_fact_id);
 CREATE TEMP TABLE IF NOT EXISTS sync_maintenance_rows (
     kind TEXT PRIMARY KEY NOT NULL,
     last_run_ms INTEGER NOT NULL
@@ -991,6 +1004,7 @@ CREATE TABLE IF NOT EXISTS retention_policy_rows (
             sync::shared_fact::index::NEGENTROPY_CONTEXT_HAVE_ROWS,
             sync::shared_fact::index::NEGENTROPY_NODE_ROWS,
             sync::local_setting::SYNC_LOCAL_SETTING_ROWS,
+            auth::active_workspace::ACTIVE_WORKSPACE_ROWS,
             read_models::MESSAGE_DELETION_ROWS,
             read_models::FILE_DELETION_ROWS,
             content::retention_policy::RETENTION_POLICY_ROWS,
@@ -1049,6 +1063,12 @@ pub const CONTEXT_COMMANDS: &[CliCommand<ContextCliContext>] = &[
         auth::workspace::cli::WORKSPACES_USAGE,
         workspaces
     ),
+    cli_command!(
+        "use-workspace",
+        auth::active_workspace::cli::USE_WORKSPACE_USAGE,
+        use_workspace
+    ),
+    cli_command!("status", auth::workspace::cli::STATUS_USAGE, status),
     cli_command!("users", auth::user::cli::USERS_USAGE, users),
     cli_command!(
         "key-recipient",
@@ -1198,6 +1218,7 @@ pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
     sync::have_id::SYNC_HAVE_ID_ROWS,
     sync::need_id::SYNC_NEED_ID_ROWS,
     sync::local_setting::SYNC_LOCAL_SETTING_ROWS,
+    auth::active_workspace::ACTIVE_WORKSPACE_ROWS,
     versioning::local_update::PROTOCOL_VERSION_ROWS,
 ];
 
@@ -1287,6 +1308,7 @@ projector_routes! {
     project_sync_have_id => sync::have_id::encode::TYPE_SYNC_HAVE_ID, sync::have_id::project::SyncHaveIdProjector, sync::have_id::project::PROJECTOR_INFO, sync::have_id::project::STORAGE_REQUIREMENT;
     project_sync_need_id => sync::need_id::encode::TYPE_SYNC_NEED_ID, sync::need_id::project::SyncNeedIdProjector, sync::need_id::project::PROJECTOR_INFO, sync::need_id::project::STORAGE_REQUIREMENT;
     project_sync_local_setting => sync::local_setting::TYPE_SYNC_LOCAL_SETTING, sync::local_setting::SyncLocalSettingProjector, sync::local_setting::PROJECTOR_INFO, sync::local_setting::STORAGE_REQUIREMENT;
+    project_active_workspace => auth::active_workspace::TYPE_ACTIVE_WORKSPACE, auth::active_workspace::project::ActiveWorkspaceProjector, auth::active_workspace::project::PROJECTOR_INFO, auth::active_workspace::project::STORAGE_REQUIREMENT;
     project_versioning_local_update => versioning::local_update::encode::TYPE_VERSIONING_UPDATE, versioning::local_update::project::UpdateProjector, versioning::local_update::project::PROJECTOR_INFO, versioning::local_update::project::STORAGE_REQUIREMENT;
     project_connection_frame_small => connection::frame_small::encode::TYPE_CONNECTION_FRAME_SMALL, connection::frame_small::project::ConnectionFrameSmallProjector, connection::frame_small::project::PROJECTOR_INFO, connection::frame_small::project::STORAGE_REQUIREMENT;
     project_connection_frame_file_slice => connection::frame_file_slice::encode::TYPE_CONNECTION_FRAME_FILE_SLICE, connection::frame_file_slice::project::ConnectionFrameFileSliceProjector, connection::frame_file_slice::project::PROJECTOR_INFO, connection::frame_file_slice::project::STORAGE_REQUIREMENT;
