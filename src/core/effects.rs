@@ -1,17 +1,30 @@
-//! Shared side effects committed by runtime work.
+//! Shared side-effect language committed by runtime work.
 //!
-//! Commands, projection, and intent handlers all reduce to this language before
-//! the SQL pipeline commits their output.
+//! Commands, projection, and intent handlers all reduce to this structure
+//! before the SQL pipeline commits their output. The structure is intentionally
+//! mechanical: it names facts to admit, facts to purge, row mutations, durable
+//! intents, and restart-local intents. It does not contain callbacks, open
+//! sockets, command receipts, or protocol-specific execution state.
+//!
+//! If a new kind of runtime effect needs atomic commit with projection or
+//! intent dispatch, add it here and teach `pipeline::commit_effects` how to
+//! validate and write it. If it is only display data for a command, keep it in
+//! that command's receipt instead.
 
 use crate::core::facts::{Fact, FactId};
 use crate::core::intents::{Intent, RowMutation};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PipelineEffects {
+    /// New facts to admit and mark pending for projection.
     pub facts: Vec<Fact>,
+    /// Existing facts to remove with their derived core-owned rows.
     pub purged_facts: Vec<FactId>,
+    /// Protocol or core table mutations validated against the runtime allowlist.
     pub row_mutations: Vec<RowMutation>,
+    /// Durable idempotent work for handlers.
     pub intents: Vec<Intent>,
+    /// Connection-local idempotent work, dropped on restart.
     pub local_intents: Vec<Intent>,
 }
 

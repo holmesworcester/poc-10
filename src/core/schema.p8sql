@@ -1,5 +1,12 @@
-# Initial poc-10 core table inventory.
+# Core runtime table inventory.
+#
+# These tables are protocol-neutral mechanics. Protocol fact modules may cause
+# rows to be written here through projection, intent dispatch, and commands, but
+# they should not add semantic columns to this file. Put protocol-owned storage
+# beside the module that owns its row layout and queries.
 
+# Immutable fact bytes by content id. Scope and admission ordering are local
+# metadata in local_fact_admissions rather than part of the content hash.
 table facts {
   column id bytes(32);
   column bytes bytes;
@@ -21,6 +28,11 @@ table local_fact_admissions {
   unique index by_fact (fact_id);
   index by_scope_received_at (scope, scope_kind, scope_id, received_at);
 }
+
+# Standing context rows emitted by projection. `owner` is the fact whose
+# projection owns the row; replacing context deletes by owner and reinserts the
+# new complete set. `direction + role + scope_key + selector` is the matching
+# surface used by exact context and custom matcher SQL.
 table context_edges {
   column owner bytes(32);
   column direction text;
@@ -31,6 +43,10 @@ table context_edges {
   index by_match (direction, role, scope_key, selector);
   index by_owner (owner);
 }
+
+# Standing schedules emitted by projection. These are replacement rows owned by
+# the projecting fact. Due ranges are copied to pending_time_ranges when the
+# daemon admits a time wake, then cleared when that fact projects.
 table time_wakes {
   column timeline text;
   column at u64;
@@ -38,10 +54,17 @@ table time_wakes {
   row_key (timeline, at, owner);
   index by_owner (owner);
 }
+
+# Fact ids awaiting projection. Successful projection removes the row at the
+# same durable boundary as replacement context and effects. A failed projection
+# leaves the owner queued; a stale row whose fact was already removed is purged.
 table pending_projection {
   column owner bytes(32);
   row_key (owner);
 }
+
+# Transient due-time context for pending facts. Rows are produced from
+# time_wakes by the daemon and consumed by the next successful projection.
 table pending_time_ranges {
   column owner bytes(32);
   column timeline text;
@@ -50,18 +73,27 @@ table pending_time_ranges {
   column end_inclusive u64;
   row_key (owner, timeline, has_start, start_exclusive, end_inclusive);
 }
+
+# Durable idempotent handler work. Queue identity is `(kind, idempotence_key)`;
+# re-emitting the same payload is a no-op and a different payload is rejected.
 table intents {
   column kind text;
   column idempotence_key bytes;
   column payload bytes;
   row_key (kind, idempotence_key);
 }
+
+# Restart-local idempotent handler work. This table is SQLite TEMP storage, so
+# inbound network frames and other process-local work never survive restart.
 memory table local_intents {
   column kind text;
   column idempotence_key bytes;
   column payload bytes;
   row_key (kind, idempotence_key);
 }
+
+# Store-local logical clock used by CLI/test workflows to choose deterministic
+# timestamps. It is not protocol truth and is not synced.
 table clock {
   column key text;
   column timestamp u64;

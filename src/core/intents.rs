@@ -1,4 +1,16 @@
-//! Intent and handler contract types.
+//! Intent queues and handler contract types.
+//!
+//! An intent is idempotent queued work. Core persists durable intents in
+//! `intents`, stores restart-local intents in `local_intents`, and dispatches
+//! both through the same handler contract. The intent kind selects a handler;
+//! the key deduplicates equivalent work of that kind; the payload is opaque
+//! bytes owned by the protocol module that registered the handler.
+//!
+//! Handlers are reactive runtime code, not user-facing commands. They may ask
+//! core to load specific facts and may use query helpers through `Store`, then
+//! return `PipelineEffects` for the pipeline to commit atomically. If a handler
+//! needs to wait for missing input, return `retry_intent`; if it observes a
+//! semantic violation that should not be retried, return a fatal error.
 
 use crate::core::effects::PipelineEffects;
 use crate::core::facts::{Fact, FactId, FactScope};
@@ -7,10 +19,15 @@ use crate::core::store::{Store, TableName, TableRow};
 use std::collections::BTreeMap;
 use std::fmt;
 
+/// Stable queue routing key for an intent handler.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct IntentKind(String);
 
 impl IntentKind {
+    /// Build a stable handler routing key.
+    ///
+    /// Intent kinds are persisted and compared across runs, so they use the
+    /// same lowercase ASCII vocabulary rule as context roles and scope kinds.
     pub fn new(value: impl Into<String>) -> Result<Self, String> {
         let value = value.into();
         if value.is_empty() {
@@ -30,10 +47,18 @@ impl IntentKind {
     }
 }
 
+/// One idempotent unit of handler work.
+///
+/// `(kind, key)` is the queue identity. Re-emitting the same payload is a
+/// no-op; re-emitting a different payload for the same identity is rejected by
+/// the pipeline because it would make retries ambiguous.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Intent {
+    /// Handler routing key.
     pub kind: IntentKind,
+    /// Idempotence key within `kind`.
     pub key: Vec<u8>,
+    /// Opaque handler-owned payload bytes.
     pub payload: Vec<u8>,
 }
 
@@ -47,26 +72,46 @@ impl Intent {
     }
 }
 
+/// Delete one opaque row by key from a row table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableDelete {
+    /// Table to delete from.
     pub table: TableName,
+    /// Opaque row key to delete.
     pub key: Vec<u8>,
 }
 
+/// Insert a typed-table row by column values.
+///
+/// This is for schema-declared tables whose key is not the generic
+/// `row_key/row_value` shape. The insert is idempotent only when an existing
+/// row has exactly the same column values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableInsert {
+    /// Typed table to insert into.
     pub table: TableName,
+    /// Columns supplied by this insert.
     pub columns: &'static [&'static str],
+    /// Values corresponding to `columns`.
     pub values: Vec<SqlValue>,
 }
 
+/// Delete typed-table rows matching all supplied columns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableDeleteWhere {
+    /// Typed table to delete from.
     pub table: TableName,
+    /// Predicate columns.
     pub columns: &'static [&'static str],
+    /// Predicate values corresponding to `columns`.
     pub values: Vec<SqlValue>,
 }
 
+/// Row-level mutations a command, projector, or handler can request.
+///
+/// Core validates the target table against the runtime description before any
+/// mutation commits. The module that constructs the mutation owns the row
+/// layout and semantic meaning.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RowMutation {
     PutRow(TableRow),
@@ -80,9 +125,12 @@ pub enum RowMutation {
 /// Fact ids requested by a handler before it runs.
 pub type HandlerFactId = FactId;
 
+/// Handler failure mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HandlerError {
+    /// Transient failure. Dispatch leaves the intent queued for another pass.
     Retry(String),
+    /// Permanent failure. Dispatch reports the error and does not commit output.
     Fatal(String),
 }
 
@@ -124,6 +172,7 @@ impl From<&str> for HandlerError {
     }
 }
 
+/// Result returned by an intent handler before core commits its effects.
 pub type HandlerResult = Result<PipelineEffects, HandlerError>;
 
 /// Mark a handler failure as transient so dispatch leaves the intent queued.
@@ -131,6 +180,7 @@ pub fn retry_intent(reason: impl Into<String>) -> HandlerError {
     HandlerError::retry(reason)
 }
 
+/// Extract the retry reason when a handler asked dispatch to keep the row queued.
 pub fn retry_intent_reason(err: &HandlerError) -> Option<&str> {
     match err {
         HandlerError::Retry(reason) => Some(reason),
@@ -161,10 +211,12 @@ impl fmt::Debug for HandlerContext<'_> {
 }
 
 impl<'a> HandlerContext<'a> {
+    /// Build an empty handler context, mostly for tests.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Build context from preloaded facts.
     pub fn with_facts(facts: impl IntoIterator<Item = Fact>) -> Self {
         Self {
             facts: facts.into_iter().map(|fact| (fact.id, fact)).collect(),
@@ -172,29 +224,38 @@ impl<'a> HandlerContext<'a> {
         }
     }
 
+    /// Attach the store handle used by query helpers.
     pub fn with_store(mut self, store: &'a Store) -> Self {
         self.store = Some(store);
         self
     }
 
+    /// Borrow the store or return a fatal handler error if none was attached.
     pub fn store(&self) -> Result<&Store, HandlerError> {
         self.store
             .ok_or_else(|| HandlerError::fatal("handler context missing store"))
     }
 
+    /// Return a preloaded fact by id.
     pub fn fact(&self, id: &FactId) -> Option<&Fact> {
         self.facts.get(id)
     }
 
+    /// Iterate over all preloaded facts.
     pub fn facts(&self) -> impl Iterator<Item = &Fact> {
         self.facts.values()
     }
 
+    /// Require a preloaded fact, marking absence as retryable.
     pub fn require_fact(&self, id: &FactId) -> Result<&Fact, HandlerError> {
         self.fact(id)
             .ok_or_else(|| HandlerError::retry(format!("handler context missing fact {id:?}")))
     }
 
+    /// Require non-local fact bytes for outbound or sync-visible work.
+    ///
+    /// Local facts are deliberately rejected here so handlers do not accidentally
+    /// send store-private material through generic protocol paths.
     pub fn require_non_local_fact_bytes(&self, id: &FactId) -> Result<&[u8], HandlerError> {
         let fact = self.require_fact(id)?;
         if fact.scope == FactScope::Local {
@@ -208,10 +269,16 @@ impl<'a> HandlerContext<'a> {
 
 /// A protocol handler for one or more intent kinds.
 pub trait IntentHandler {
+    /// Fact ids core should load before calling `handle`.
+    ///
+    /// Missing facts do not fail dispatch here; the handler can call
+    /// `require_fact` and return `Retry` if the missing input is expected to
+    /// arrive later.
     fn input_fact_ids(&self, _intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
         Ok(Vec::new())
     }
 
+    /// Run one intent against its read-only context and return uncommitted effects.
     fn handle(&self, intent: &Intent, context: &HandlerContext<'_>) -> HandlerResult;
 }
 

@@ -5,6 +5,12 @@
 //! intent queues.
 //! Protocol code supplies the projector router, context matchers, handler
 //! registry, schema sources, and row mutation tables.
+//!
+//! This is the facade a protocol host should use when it wants the whole core
+//! engine. If code wants to change projection scheduling, intent queue
+//! dispatch, command-safe handler filtering, or due-time processing, this file
+//! is the place that composes those pieces. The pieces themselves stay in
+//! `pipeline`, `fact_store`, and protocol modules.
 
 use crate::core::command_context::{CommandClock, CommandContext, CommandOutput, IdentityVault};
 use crate::core::context::ContextOffer;
@@ -20,29 +26,56 @@ use std::path::Path;
 
 pub use crate::core::pipeline::WorkStatus;
 
+/// Factory for the protocol's projector implementation.
 pub type ProjectorFactory = fn() -> Box<dyn Projector>;
+/// Factory for the protocol's context matcher registry.
 pub type MatchersFactory = fn() -> ContextMatchers;
 
 /// Protocol-owned declarations needed by core's runtime engine.
+///
+/// The description is static so a runtime instance cannot drift after opening
+/// its store. `schema_sources` declare protocol tables, `row_mutation_tables`
+/// is the allowlist for effects, `projector` and `matchers` define projection,
+/// and `handlers` define the queued work core may dispatch.
 #[derive(Clone, Copy)]
 pub struct RuntimeDescription {
+    /// Protocol table declarations appended after the core schema.
     pub schema_sources: &'static [&'static str],
+    /// Tables protocol effects are allowed to mutate.
     pub row_mutation_tables: &'static [TableName],
+    /// Factory for the projector router.
     pub projector: ProjectorFactory,
+    /// Factory for exact and custom context matchers.
     pub matchers: MatchersFactory,
+    /// Intent handlers this runtime may dispatch.
     pub handlers: &'static [HandlerRoute],
+    /// Handler route names a synchronous command should not run.
     pub command_excluded_handlers: &'static [&'static str],
 }
 
+/// Factory for one protocol intent handler.
 pub type HandlerFactory = fn() -> Box<dyn IntentHandler>;
 
+/// One handler route in the protocol registry.
+///
+/// `name` is a human-facing route name used for exclusion lists. `intent_kind`
+/// is the queue routing key that selects this handler for both durable and
+/// restart-local intents.
 #[derive(Debug, Clone, Copy)]
 pub struct HandlerRoute {
+    /// Human-facing route name used for exclusion lists.
     pub name: &'static str,
+    /// Intent kind handled by this route.
     pub intent_kind: &'static str,
+    /// Handler factory.
     pub factory: HandlerFactory,
 }
 
+/// Instantiated handlers for one runtime pass.
+///
+/// The set owns concrete handler values so dispatch can borrow trait objects
+/// without rebuilding them for every queued row. Command processing builds a
+/// filtered set to avoid daemon/network side effects.
 struct HandlerSet {
     entries: Vec<HandlerEntry>,
 }
@@ -53,6 +86,7 @@ struct HandlerEntry {
 }
 
 impl HandlerSet {
+    /// Instantiate all declared routes.
     pub fn new(routes: &'static [HandlerRoute]) -> Self {
         Self {
             entries: routes
@@ -65,6 +99,7 @@ impl HandlerSet {
         }
     }
 
+    /// Instantiate every route except the protocol-declared command exclusions.
     pub fn new_excluding(routes: &'static [HandlerRoute], excluded_names: &[&str]) -> Self {
         Self {
             entries: routes
@@ -116,6 +151,11 @@ impl HandlerSet {
 }
 
 /// Runtime for one concrete protocol description.
+///
+/// `Runtime` owns a single SQLite connection. All durable and memory tables,
+/// projection, and dispatch operations happen through that handle so transaction
+/// boundaries stay visible and restart-local tables are actually local to this
+/// runtime instance.
 pub struct Runtime {
     description: &'static RuntimeDescription,
     store: Store,
@@ -125,6 +165,7 @@ pub struct Runtime {
 }
 
 impl Runtime {
+    /// Open an in-memory runtime with core and protocol schema sources applied.
     pub fn open_memory(description: &'static RuntimeDescription) -> Result<Self, String> {
         let schema_sources = runtime_schema_sources(description);
         let store = Store::open_memory_with_schema_sources(&schema_sources)
@@ -132,6 +173,7 @@ impl Runtime {
         Self::from_store(description, store)
     }
 
+    /// Open a disk-backed runtime with core and protocol schema sources applied.
     pub fn open_disk(
         description: &'static RuntimeDescription,
         path: impl AsRef<Path>,
@@ -152,22 +194,31 @@ impl Runtime {
         })
     }
 
+    /// Borrow the runtime's store handle.
+    ///
+    /// This exposes the concrete SQLite-backed store for query helpers and
+    /// daemon IO code that must share the same connection-local memory tables as
+    /// the runtime. New runtime flows should prefer the typed methods below so
+    /// projection and intent ordering stay centralized here.
     pub fn store(&self) -> &Store {
         &self.store
     }
 
+    /// Return all persisted facts known to this runtime.
     pub fn facts(&self) -> impl Iterator<Item = Fact> {
         persisted_facts(&self.store)
             .expect("runtime facts should load from store")
             .into_iter()
     }
 
+    /// Count facts currently queued for projection.
     pub fn pending_fact_count(&self) -> usize {
         self.store
             .table_row_count(PENDING_PROJECTION)
             .expect("runtime pending fact count should load from store")
     }
 
+    /// Count durable plus restart-local queued intents.
     pub fn pending_intent_count(&self) -> usize {
         let stored = self
             .store
@@ -180,6 +231,7 @@ impl Runtime {
         stored + local
     }
 
+    /// Build the narrow command context for a user-facing command.
     pub fn command_context<'a>(
         &'a self,
         clock: &'a dyn CommandClock,
@@ -188,15 +240,18 @@ impl Runtime {
         CommandContext::new(&self.store, clock, vault)
     }
 
+    /// Admit one fact and mark it pending for projection.
     pub fn submit_fact(&mut self, fact: Fact) -> bool {
         pipeline::submit_fact_to_store(&self.store, fact)
             .expect("runtime fact submission should persist")
     }
 
+    /// Admit many facts in one transaction.
     pub fn submit_facts(&mut self, facts: impl IntoIterator<Item = Fact>) -> Result<usize, String> {
         pipeline::submit_facts_to_store(&self.store, facts)
     }
 
+    /// Remove one fact and its core-owned derived rows.
     pub fn purge_fact(&mut self, fact_id: crate::core::facts::FactId) -> bool {
         pipeline::purge_fact_from_store(&self.store, fact_id)
             .expect("runtime fact purge should persist")
@@ -215,14 +270,24 @@ impl Runtime {
         )
     }
 
+    /// Queue durable idempotent work for the protocol handler registry.
+    ///
+    /// The handler selected by `intent.kind` may run in a later daemon or
+    /// command-safe drain pass. Use `submit_local_intent` for work that is only
+    /// valid on this process and should disappear on restart.
     pub fn submit_intent(&mut self, intent: Intent) -> Result<bool, String> {
         pipeline::submit_intent_to_store(&self.store, intent)
     }
 
+    /// Queue restart-local work for this runtime connection.
     pub fn submit_local_intent(&mut self, intent: Intent) -> Result<bool, String> {
         pipeline::submit_local_intent_to_store(&self.store, intent)
     }
 
+    /// Commit the effects returned by a user-facing command and return its receipt.
+    ///
+    /// Command receipts are not pipeline state. They return directly to the CLI
+    /// caller after the command's facts, rows, and intents have been committed.
     pub fn submit_command_output<T>(&mut self, output: CommandOutput<T>) -> Result<T, String> {
         let (receipt, effects) = output.into_parts();
         pipeline::commit_pipeline_effects_to_store(
@@ -247,6 +312,11 @@ impl Runtime {
         )
     }
 
+    /// Drain pending projection until no projection work remains or rounds expire.
+    ///
+    /// Each round processes at most `limit_per_round` facts, and newly emitted
+    /// context may enqueue more pending facts. Callers use this when they need
+    /// projection-visible state to settle without dispatching intent handlers.
     pub fn process_projection_until_idle(
         &mut self,
         max_rounds: usize,
@@ -263,10 +333,15 @@ impl Runtime {
         Err("projection work did not become idle within the round limit".to_string())
     }
 
+    /// Dispatch queued intents using the full protocol handler set.
     pub fn dispatch_intents(&mut self, limit: usize) -> Result<WorkStatus, String> {
         self.dispatch_with_handlers(&self.handlers, limit)
     }
 
+    /// Run one daemon tick's queue order after IO and time wakes have been handled.
+    ///
+    /// Projection runs before and after intent dispatch because handlers often
+    /// emit facts that should become visible before the next quiet sleep.
     pub fn drain_daemon_queues_once(&mut self, limit: usize) -> Result<WorkStatus, String> {
         let mut total = WorkStatus::idle();
         total.merge(self.process_projection_until_idle(4, limit)?);

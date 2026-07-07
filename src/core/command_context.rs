@@ -29,6 +29,7 @@ use crate::core::effects::PipelineEffects;
 use crate::core::facts::{Fact, FactId};
 use crate::core::store::Store;
 
+/// Fact id of a workspace in protocol-owned identity data.
 pub type WorkspaceId = FactId;
 
 /// A signing capability handed to a command by identity.

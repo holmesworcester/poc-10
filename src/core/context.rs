@@ -15,6 +15,7 @@ use crate::core::facts::{FactId, FactScope};
 use crate::core::wire::Writer;
 use std::collections::BTreeSet;
 
+/// Protocol-defined relationship role used for context matching.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Role(String);
 
@@ -42,6 +43,7 @@ impl Role {
     }
 }
 
+/// Opaque match selector within a context role and scope.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Selector(Vec<u8>);
 
@@ -68,9 +70,13 @@ impl Selector {
 /// or "stop needing this context".
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContextNeed {
+    /// Fact to wake when a compatible offer appears.
     pub owner: FactId,
+    /// Matching role.
     pub role: Role,
+    /// Matching scope.
     pub scope: FactScope,
+    /// Opaque selector interpreted by exact matching or a custom matcher.
     pub selector: Selector,
 }
 
@@ -80,12 +86,17 @@ pub struct ContextNeed {
 /// core should load and pass to the woken projector when this offer matches.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContextOffer {
+    /// Fact that emitted the offer and provides the payload.
     pub owner: FactId,
+    /// Matching role.
     pub role: Role,
+    /// Matching scope.
     pub scope: FactScope,
+    /// Opaque selector interpreted by exact matching or a custom matcher.
     pub selector: Selector,
 }
 
+/// Encode a fact scope into the stable bytes used by context match indexes.
 pub(crate) fn scope_key(scope: &FactScope) -> Vec<u8> {
     let mut out = Writer::new();
     encode_scope(&mut out, scope);
@@ -99,7 +110,9 @@ pub(crate) fn scope_key(scope: &FactScope) -> Vec<u8> {
 /// added or removed relationships produce a delta for matchers to inspect.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ContextSet {
+    /// Standing needs owned by one fact.
     pub needs: Vec<ContextNeed>,
+    /// Standing offers owned by one fact.
     pub offers: Vec<ContextOffer>,
 }
 
@@ -137,9 +150,13 @@ impl ContextSet {
 /// exact.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ContextSetDelta {
+    /// Needs newly visible after replacement.
     pub added_needs: Vec<ContextNeed>,
+    /// Needs removed by replacement.
     pub removed_needs: Vec<ContextNeed>,
+    /// Offers newly visible after replacement.
     pub added_offers: Vec<ContextOffer>,
+    /// Offers removed by replacement.
     pub removed_offers: Vec<ContextOffer>,
 }
 

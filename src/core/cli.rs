@@ -10,8 +10,8 @@
 //! The important invariant is locality. If a command's parser, help text, or
 //! formatting changes, that change should happen in the module that exported
 //! the command spec. This runner merely rejects duplicate names, reports
-//! unknown CLI commands with the registry's usage lines, and returns text lines for
-//! the binary to print.
+//! unknown CLI commands with the registry's usage lines, and returns text lines
+//! for the binary to print.
 
 use std::path::Path;
 
@@ -22,18 +22,22 @@ pub struct CliArgs<'a> {
 }
 
 impl<'a> CliArgs<'a> {
+    /// Wrap arguments after the command name.
     pub const fn new(values: &'a [String]) -> Self {
         Self { values }
     }
 
+    /// Return every positional argument.
     pub fn values(self) -> &'a [String] {
         self.values
     }
 
+    /// Return one positional argument as a string slice.
     pub fn get(self, index: usize) -> Option<&'a str> {
         self.values.get(index).map(String::as_str)
     }
 
+    /// Require an exact positional argument count.
     pub fn require_len(self, expected: usize, usage: &str) -> Result<(), String> {
         if self.values.len() == expected {
             Ok(())
@@ -42,6 +46,7 @@ impl<'a> CliArgs<'a> {
         }
     }
 
+    /// Parse a strictly positive `usize` argument or return the caller's usage.
     pub fn parse_positive_usize(self, index: usize, usage: &str) -> Result<usize, String> {
         let value = self.get(index).ok_or_else(|| usage.to_string())?;
         let parsed = value.parse::<usize>().map_err(|_| usage.to_string())?;
@@ -59,10 +64,12 @@ pub struct CliOutput {
 }
 
 impl CliOutput {
+    /// Build output from already formatted lines.
     pub fn lines(lines: Vec<String>) -> Self {
         Self { lines }
     }
 
+    /// Build output containing one line.
     pub fn line(line: impl Into<String>) -> Self {
         Self {
             lines: vec![line.into()],
@@ -73,9 +80,13 @@ impl CliOutput {
 /// One command exported by a protocol or module.
 #[derive(Clone, Copy)]
 pub struct CliCommand<C> {
+    /// Command name matched against `argv[0]`.
     pub name: &'static str,
+    /// Usage suffix printed by the registry.
     pub usage: &'static str,
+    /// Human help text owned by the exporting module.
     pub help: &'static str,
+    /// Command implementation called with the caller-owned context.
     pub run: for<'a> fn(&mut C, CliArgs<'a>) -> Result<CliOutput, String>,
 }
 
@@ -111,6 +122,7 @@ fn validate_command_names<C>(commands: &[CliCommand<C>]) -> Result<(), String> {
     Ok(())
 }
 
+/// Build usage text for a command registry.
 pub fn usage<C>(commands: &[CliCommand<C>], reason: &str) -> String {
     let mut lines = vec![reason.to_string(), "usage:".to_string()];
     for command in commands {
@@ -119,10 +131,12 @@ pub fn usage<C>(commands: &[CliCommand<C>], reason: &str) -> String {
     lines.join("\n")
 }
 
+/// Decode a 32-byte lowercase or uppercase hex id.
 pub fn decode_hex_32(value: &str) -> Result<[u8; 32], String> {
     decode_hex_32_named(value, "hex id")
 }
 
+/// Decode a named 32-byte hex value for command-specific error messages.
 pub fn decode_hex_32_named(value: &str, label: &str) -> Result<[u8; 32], String> {
     if value.len() != 64 {
         return Err(format!("{label} must be 64 hex characters"));
@@ -136,10 +150,12 @@ pub fn decode_hex_32_named(value: &str, label: &str) -> Result<[u8; 32], String>
     Ok(out)
 }
 
+/// Encode a 32-byte id as lowercase hex.
 pub fn encode_hex_32(id: &[u8; 32]) -> String {
     encode_hex(id)
 }
 
+/// Encode arbitrary bytes as lowercase hex.
 pub fn encode_hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -150,10 +166,12 @@ pub fn encode_hex(bytes: &[u8]) -> String {
     out
 }
 
+/// Read a file for a command that treats bytes as opaque payload data.
 pub fn read_file_bytes(path: &Path) -> Result<Vec<u8>, String> {
     std::fs::read(path).map_err(|err| format!("read file {}: {err}", path.display()))
 }
 
+/// Write opaque payload bytes for a command.
 pub fn write_file_bytes(path: impl AsRef<Path>, bytes: &[u8]) -> Result<(), String> {
     std::fs::write(path.as_ref(), bytes).map_err(|err| format!("write output file: {err}"))
 }

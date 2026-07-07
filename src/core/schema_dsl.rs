@@ -10,21 +10,38 @@
 //!   [unique] index name (column, ...);
 //! }
 //! ```
+//!
+//! The DSL is a boundary tool, not a migration language. It declares the table
+//! shapes a fresh store must have and the shapes an existing store must already
+//! match. Core applies those declarations in `store.rs`; protocol modules keep
+//! their own declarations beside the row encoders and query helpers that
+//! understand them.
+//!
+//! Extend this file when core needs another storage primitive every module can
+//! share. Do not add expressions, callbacks, or protocol validation here; those
+//! belong in the module that owns the data.
 
 use std::collections::BTreeSet;
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableDeclaration {
+    /// SQLite table name, optionally qualified with module-style dots.
     pub name: String,
+    /// Opaque row table or typed declared-column table.
     pub kind: TableKind,
+    /// Whether this table is durable or `TEMP`/connection-local.
     pub storage: TableStorage,
+    /// Declared columns in SQLite order.
     pub columns: Vec<ColumnDeclaration>,
+    /// Primary row key columns.
     pub row_key: RowKeyDeclaration,
+    /// Secondary indexes that must exist with the declared shape.
     pub indexes: Vec<IndexDeclaration>,
 }
 
 impl TableDeclaration {
+    /// Return one declared column by name.
     pub fn column(&self, name: &str) -> Option<&ColumnDeclaration> {
         self.columns.iter().find(|column| column.name == name)
     }
@@ -32,46 +49,68 @@ impl TableDeclaration {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TableKind {
+    /// Opaque `row_key`/`row_value` table.
     Row,
+    /// Declared-column table with a row key and optional indexes.
     Typed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TableStorage {
+    /// Stored in the database file.
     Durable,
+    /// SQLite `TEMP` table scoped to the current connection.
     Memory,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColumnDeclaration {
+    /// Column name as declared in p8sql.
     pub name: String,
+    /// Core-supported SQLite column type.
     pub ty: ColumnType,
 }
 
+/// Column types the store knows how to create and validate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColumnType {
+    /// Blob column, optionally documented with an expected byte length.
+    ///
+    /// SQLite does not enforce the length; code that writes the column must.
     Bytes { len: Option<usize> },
+    /// Unsigned 64-bit integer stored in SQLite's signed integer range.
     U64,
+    /// UTF-8 text.
     Text,
+    /// Boolean stored as SQLite integer `0` or `1`.
     Bool,
 }
 
+/// Declared primary row key for a typed table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RowKeyDeclaration {
     pub columns: Vec<String>,
 }
 
+/// Declared secondary index for a typed table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexDeclaration {
+    /// Suffix used to build the SQLite index name.
     pub name: String,
+    /// Whether the index enforces uniqueness.
     pub unique: bool,
+    /// Indexed columns in order.
     pub columns: Vec<String>,
 }
 
+/// Parse error with source position in a p8sql document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
+    /// One-based line number.
     pub line: usize,
+    /// One-based column number. The current parser reports whole-line errors.
     pub column: usize,
+    /// Human-readable parse failure.
     pub detail: String,
 }
 
@@ -93,6 +132,10 @@ impl fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
+/// Parse a p8sql schema document into table declarations.
+///
+/// The parser validates declaration shape, duplicate names, and column
+/// references. Store validation and protocol row semantics happen elsewhere.
 pub fn parse_schema(source: &str) -> Result<Vec<TableDeclaration>, ParseError> {
     let mut tables = Vec::new();
     let mut seen_tables = BTreeSet::new();
@@ -164,6 +207,10 @@ pub fn parse_schema(source: &str) -> Result<Vec<TableDeclaration>, ParseError> {
     Ok(tables)
 }
 
+/// Builder for one typed-table block.
+///
+/// It keeps duplicate tracking local to the table while the outer parser owns
+/// duplicate table names across the whole source.
 struct TableBuilder {
     name: String,
     storage: TableStorage,
@@ -316,12 +363,17 @@ fn row_table(name: String, storage: TableStorage) -> TableDeclaration {
     }
 }
 
+/// Strip the optional storage qualifier from a top-level declaration.
 fn strip_memory(line: &str) -> (TableStorage, &str) {
     line.strip_prefix("memory ")
         .map(|rest| (TableStorage::Memory, rest))
         .unwrap_or((TableStorage::Durable, line))
 }
 
+/// Remove p8sql comments.
+///
+/// Both `#` and `//` are accepted because schema snippets are often embedded
+/// near Rust code and markdown notes.
 fn strip_comment(line: &str) -> &str {
     let hash = line.find('#');
     let slash = line.find("//");

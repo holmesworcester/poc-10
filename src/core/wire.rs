@@ -24,13 +24,20 @@
 
 use std::fmt;
 
+/// Errors reported by mechanical wire codecs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WireError {
+    /// A fixed-width layout or complete reader saw the wrong byte count.
     WrongLength { expected: usize, actual: usize },
+    /// A bounded value did not fit in its declared slot or length prefix.
     ValueTooLarge { max: usize, actual: usize },
+    /// A one-byte boolean contained neither `0` nor `1`.
     InvalidBool { actual: u8 },
+    /// A tag or marker byte was not the expected value.
     UnexpectedU8 { expected: u8, actual: u8 },
+    /// A decoded string was not valid UTF-8.
     InvalidUtf8,
+    /// A bounded padded slot had non-zero bytes after its logical length.
     NonZeroPadding { index: usize },
 }
 
@@ -55,13 +62,18 @@ impl fmt::Display for WireError {
 
 impl std::error::Error for WireError {}
 
+/// Fixed-width encoding contract for layouts with a known byte length.
 pub trait FixedLayout: Sized {
+    /// Exact encoded byte length.
     const LEN: usize;
 
+    /// Encode into an exact-size output buffer.
     fn encode(&self, out: &mut [u8]) -> Result<(), WireError>;
+    /// Decode from an exact-size input buffer.
     fn decode(bytes: &[u8]) -> Result<Self, WireError>;
 }
 
+/// Fixed-size byte array used for ids, nonces, and tags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FixedBytes<const N: usize>(pub [u8; N]);
 
@@ -102,6 +114,7 @@ pub type Ciphertext<const N: usize> = FixedSlot<N>;
 impl<const N: usize> FixedSlot<N> {
     pub const DATA_LEN: usize = N;
 
+    /// Build a padded slot from logical bytes.
     pub fn new(bytes: &[u8]) -> Result<Self, WireError> {
         if bytes.len() > N {
             return Err(WireError::ValueTooLarge {
@@ -118,6 +131,7 @@ impl<const N: usize> FixedSlot<N> {
         })
     }
 
+    /// Build a slot from already padded bytes and validate the padding.
     pub fn from_padded(len: usize, bytes: [u8; N]) -> Result<Self, WireError> {
         if len > N {
             return Err(WireError::ValueTooLarge {
@@ -130,18 +144,22 @@ impl<const N: usize> FixedSlot<N> {
         Ok(Self { len, bytes })
     }
 
+    /// Return the logical byte length.
     pub fn len(&self) -> usize {
         self.len
     }
 
+    /// Return whether the logical payload is empty.
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
 
+    /// Return the logical payload bytes without padding.
     pub fn bytes(&self) -> &[u8] {
         &self.bytes[..self.len]
     }
 
+    /// Return the full fixed-width padded slot.
     pub fn padded_bytes(&self) -> &[u8; N] {
         &self.bytes
     }
@@ -193,10 +211,12 @@ impl<const N: usize> FixedLayout for FixedSlot<N> {
     }
 }
 
+/// Build a compile-time fixed tag from a byte array.
 pub const fn fixed_tag<const N: usize>(bytes: &[u8; N]) -> Tag<N> {
     FixedBytes(*bytes)
 }
 
+/// Require an exact byte length.
 pub fn expect_len(bytes: &[u8], expected: usize) -> Result<(), WireError> {
     if bytes.len() == expected {
         Ok(())
@@ -218,23 +238,27 @@ fn validate_zero_padding(bytes: &[u8], len: usize) -> Result<(), WireError> {
     }
 }
 
+/// Encode a single byte into an exact-width buffer.
 pub fn put_u8(value: u8, out: &mut [u8]) -> Result<(), WireError> {
     expect_len(out, U8_BYTES)?;
     out[0] = value;
     Ok(())
 }
 
+/// Decode a single byte from an exact-width buffer.
 pub fn take_u8(bytes: &[u8]) -> Result<u8, WireError> {
     expect_len(bytes, U8_BYTES)?;
     Ok(bytes[0])
 }
 
+/// Encode a big-endian `u16` into an exact-width buffer.
 pub fn put_u16be(value: u16, out: &mut [u8]) -> Result<(), WireError> {
     expect_len(out, U16_BYTES)?;
     out.copy_from_slice(&value.to_be_bytes());
     Ok(())
 }
 
+/// Decode a big-endian `u16` from an exact-width buffer.
 pub fn take_u16be(bytes: &[u8]) -> Result<u16, WireError> {
     expect_len(bytes, U16_BYTES)?;
     let mut out = [0; U16_BYTES];
@@ -242,12 +266,14 @@ pub fn take_u16be(bytes: &[u8]) -> Result<u16, WireError> {
     Ok(u16::from_be_bytes(out))
 }
 
+/// Encode a big-endian `u32` into an exact-width buffer.
 pub fn put_u32be(value: u32, out: &mut [u8]) -> Result<(), WireError> {
     expect_len(out, U32_BYTES)?;
     out.copy_from_slice(&value.to_be_bytes());
     Ok(())
 }
 
+/// Decode a big-endian `u32` from an exact-width buffer.
 pub fn take_u32be(bytes: &[u8]) -> Result<u32, WireError> {
     expect_len(bytes, U32_BYTES)?;
     let mut out = [0; U32_BYTES];
@@ -255,12 +281,14 @@ pub fn take_u32be(bytes: &[u8]) -> Result<u32, WireError> {
     Ok(u32::from_be_bytes(out))
 }
 
+/// Encode a big-endian `u64` into an exact-width buffer.
 pub fn put_u64be(value: u64, out: &mut [u8]) -> Result<(), WireError> {
     expect_len(out, U64_BYTES)?;
     out.copy_from_slice(&value.to_be_bytes());
     Ok(())
 }
 
+/// Decode a big-endian `u64` from an exact-width buffer.
 pub fn take_u64be(bytes: &[u8]) -> Result<u64, WireError> {
     expect_len(bytes, U64_BYTES)?;
     let mut out = [0; U64_BYTES];
@@ -268,10 +296,12 @@ pub fn take_u64be(bytes: &[u8]) -> Result<u64, WireError> {
     Ok(u64::from_be_bytes(out))
 }
 
+/// Encode a boolean as one byte: `0` or `1`.
 pub fn put_bool8(value: bool, out: &mut [u8]) -> Result<(), WireError> {
     put_u8(u8::from(value), out)
 }
 
+/// Decode a one-byte boolean and reject any value other than `0` or `1`.
 pub fn take_bool8(bytes: &[u8]) -> Result<bool, WireError> {
     match take_u8(bytes)? {
         0 => Ok(false),
@@ -280,46 +310,59 @@ pub fn take_bool8(bytes: &[u8]) -> Result<bool, WireError> {
     }
 }
 
+/// Sequential wire encoder.
+///
+/// `Writer` performs only mechanical length checks. Callers still own semantic
+/// validation before choosing what to write.
 #[derive(Debug, Clone)]
 pub struct Writer {
     bytes: Vec<u8>,
 }
 
 impl Writer {
+    /// Build an empty writer.
     pub fn new() -> Self {
         Self { bytes: Vec::new() }
     }
 
+    /// Build an empty writer with reserved capacity.
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             bytes: Vec::with_capacity(capacity),
         }
     }
 
+    /// Append one raw byte.
     pub fn u8(&mut self, value: u8) {
         self.bytes.push(value);
     }
 
+    /// Append one boolean byte.
     pub fn bool8(&mut self, value: bool) {
         self.u8(u8::from(value));
     }
 
+    /// Append a big-endian `u16`.
     pub fn u16be(&mut self, value: u16) {
         self.bytes.extend_from_slice(&value.to_be_bytes());
     }
 
+    /// Append a big-endian `u32`.
     pub fn u32be(&mut self, value: u32) {
         self.bytes.extend_from_slice(&value.to_be_bytes());
     }
 
+    /// Append a big-endian `u64`.
     pub fn u64be(&mut self, value: u64) {
         self.bytes.extend_from_slice(&value.to_be_bytes());
     }
 
+    /// Append raw bytes.
     pub fn bytes(&mut self, bytes: &[u8]) {
         self.bytes.extend_from_slice(bytes);
     }
 
+    /// Append a `u16` length prefix followed by bytes.
     pub fn bytes_u16be(&mut self, bytes: &[u8]) -> Result<(), WireError> {
         let len = u16::try_from(bytes.len()).map_err(|_| WireError::ValueTooLarge {
             max: u16::MAX as usize,
@@ -330,6 +373,7 @@ impl Writer {
         Ok(())
     }
 
+    /// Append a `u32` length prefix followed by bytes.
     pub fn bytes_u32be(&mut self, bytes: &[u8]) -> Result<(), WireError> {
         let len = u32::try_from(bytes.len()).map_err(|_| WireError::ValueTooLarge {
             max: u32::MAX as usize,
@@ -340,18 +384,22 @@ impl Writer {
         Ok(())
     }
 
+    /// Append a UTF-8 string with a `u16` length prefix.
     pub fn string_u16be(&mut self, value: &str) -> Result<(), WireError> {
         self.bytes_u16be(value.as_bytes())
     }
 
+    /// Append a UTF-8 string with a `u32` length prefix.
     pub fn string_u32be(&mut self, value: &str) -> Result<(), WireError> {
         self.bytes_u32be(value.as_bytes())
     }
 
+    /// Append a fixed-size byte array.
     pub fn fixed<const N: usize>(&mut self, bytes: &[u8; N]) {
         self.bytes.extend_from_slice(bytes);
     }
 
+    /// Append a bounded padded slot.
     pub fn fixed_slot<const N: usize>(&mut self, bytes: &[u8]) -> Result<(), WireError> {
         let slot = FixedSlot::<N>::new(bytes)?;
         let mut encoded = vec![0; FixedSlot::<N>::LEN];
@@ -360,10 +408,12 @@ impl Writer {
         Ok(())
     }
 
+    /// Return the encoded bytes without an exact-length check.
     pub fn finish(self) -> Vec<u8> {
         self.bytes
     }
 
+    /// Return the encoded bytes after checking the final length.
     pub fn finish_exact(self, expected: usize) -> Result<Vec<u8>, WireError> {
         expect_len(&self.bytes, expected)?;
         Ok(self.bytes)
@@ -376,6 +426,10 @@ impl Default for Writer {
     }
 }
 
+/// Sequential wire decoder.
+///
+/// `Reader` advances monotonically through a borrowed byte slice. Call
+/// `finish` when the layout expects complete consumption.
 #[derive(Debug, Clone, Copy)]
 pub struct Reader<'a> {
     bytes: &'a [u8],
@@ -383,22 +437,27 @@ pub struct Reader<'a> {
 }
 
 impl<'a> Reader<'a> {
+    /// Build a reader over borrowed bytes.
     pub fn new(bytes: &'a [u8]) -> Self {
         Self { bytes, offset: 0 }
     }
 
+    /// Require the whole input to have an exact length.
     pub fn expect_len(&self, expected: usize) -> Result<(), WireError> {
         expect_len(self.bytes, expected)
     }
 
+    /// Read one byte.
     pub fn u8(&mut self) -> Result<u8, WireError> {
         take_u8(self.take(U8_BYTES)?)
     }
 
+    /// Read a one-byte boolean.
     pub fn bool8(&mut self) -> Result<bool, WireError> {
         take_bool8(self.take(U8_BYTES)?)
     }
 
+    /// Read one byte and require it to match `expected`.
     pub fn expect_u8(&mut self, expected: u8) -> Result<(), WireError> {
         let actual = self.u8()?;
         if actual == expected {
@@ -408,52 +467,63 @@ impl<'a> Reader<'a> {
         }
     }
 
+    /// Read a big-endian `u16`.
     pub fn u16be(&mut self) -> Result<u16, WireError> {
         take_u16be(self.take(U16_BYTES)?)
     }
 
+    /// Read a big-endian `u32`.
     pub fn u32be(&mut self) -> Result<u32, WireError> {
         take_u32be(self.take(U32_BYTES)?)
     }
 
+    /// Read a big-endian `u64`.
     pub fn u64be(&mut self) -> Result<u64, WireError> {
         take_u64be(self.take(U64_BYTES)?)
     }
 
+    /// Read a fixed-size byte array.
     pub fn array<const N: usize>(&mut self) -> Result<[u8; N], WireError> {
         Ok(FixedBytes::<N>::decode(self.take(N)?)?.0)
     }
 
+    /// Read a bounded padded slot and return its logical bytes.
     pub fn fixed_slot<const N: usize>(&mut self) -> Result<Vec<u8>, WireError> {
         Ok(FixedSlot::<N>::decode(self.take(FixedSlot::<N>::LEN)?)?
             .bytes()
             .to_vec())
     }
 
+    /// Read `len` raw bytes.
     pub fn bytes(&mut self, len: usize) -> Result<&'a [u8], WireError> {
         self.take(len)
     }
 
+    /// Read bytes prefixed by a big-endian `u16` length.
     pub fn bytes_u16be(&mut self) -> Result<&'a [u8], WireError> {
         let len = self.u16be()? as usize;
         self.take(len)
     }
 
+    /// Read bytes prefixed by a big-endian `u32` length.
     pub fn bytes_u32be(&mut self) -> Result<&'a [u8], WireError> {
         let len = self.u32be()? as usize;
         self.take(len)
     }
 
+    /// Read a UTF-8 string prefixed by a big-endian `u16` length.
     pub fn string_u16be(&mut self) -> Result<String, WireError> {
         let bytes = self.bytes_u16be()?;
         String::from_utf8(bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)
     }
 
+    /// Read a UTF-8 string prefixed by a big-endian `u32` length.
     pub fn string_u32be(&mut self) -> Result<String, WireError> {
         let bytes = self.bytes_u32be()?;
         String::from_utf8(bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)
     }
 
+    /// Require that the reader consumed the whole input.
     pub fn finish(self) -> Result<(), WireError> {
         if self.offset == self.bytes.len() {
             Ok(())

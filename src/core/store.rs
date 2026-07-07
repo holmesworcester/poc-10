@@ -33,10 +33,12 @@ use std::time::Duration;
 pub struct TableName(&'static str);
 
 impl TableName {
+    /// Build a trusted static table name.
     pub const fn new(name: &'static str) -> Self {
         Self(name)
     }
 
+    /// Return the raw table name.
     pub fn as_str(self) -> &'static str {
         self.0
     }
@@ -47,6 +49,7 @@ pub(crate) fn quoted_table_name(table: TableName) -> rusqlite::Result<String> {
     quoted_table_name_str(table.as_str())
 }
 
+/// Quote a table name string after rejecting unsafe identifier bytes.
 pub(crate) fn quoted_table_name_str(name: &str) -> rusqlite::Result<String> {
     if !name
         .bytes()
@@ -59,6 +62,7 @@ pub(crate) fn quoted_table_name_str(name: &str) -> rusqlite::Result<String> {
     Ok(format!("\"{name}\""))
 }
 
+/// Quote one SQL identifier after rejecting unsafe identifier bytes.
 pub(crate) fn quoted_identifier(name: &str) -> rusqlite::Result<String> {
     if !name
         .bytes()
@@ -71,6 +75,7 @@ pub(crate) fn quoted_identifier(name: &str) -> rusqlite::Result<String> {
     Ok(format!("\"{name}\""))
 }
 
+/// Quote and comma-join SQL identifiers.
 pub(crate) fn quoted_identifier_list<I, S>(columns: I) -> rusqlite::Result<String>
 where
     I: IntoIterator<Item = S>,
@@ -86,8 +91,11 @@ where
 /// One opaque key/value row in one declared table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableRow {
+    /// Declared opaque row table.
     pub table: TableName,
+    /// Opaque row key.
     pub key: Vec<u8>,
+    /// Opaque row value.
     pub value: Vec<u8>,
 }
 

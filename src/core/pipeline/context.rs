@@ -1,4 +1,14 @@
 //! Standing context rows, projection context assembly, and context wake fanout.
+//!
+//! This module is where context becomes SQL. It stores each need or offer as a
+//! row owned by the projecting fact, reconstructs the standing context for a
+//! pending fact, loads matched offer payloads, and inserts newly woken owners
+//! into `pending_projection`.
+//!
+//! The invariant is replacement by owner. Projection output is the complete
+//! context set for one fact, and wake fanout considers only added rows from the
+//! replacement delta. If matching semantics change, keep exact-equality SQL
+//! here and put non-exact semantics behind a protocol `ContextMatcher`.
 
 use crate::core::context::{
     scope_key, ContextNeed, ContextOffer, ContextSet, ContextSetDelta, Role, Selector,
@@ -56,6 +66,7 @@ pub(super) fn insert_context_need_in_tx(
     )
 }
 
+/// Insert one standing offer row inside the projection transaction.
 pub(super) fn insert_context_offer_in_tx(
     store: &Store,
     offer: &ContextOffer,
@@ -90,6 +101,7 @@ pub(crate) fn insert_context_offer_for_test(
         .map_err(|err| format!("insert context offer: {err}"))
 }
 
+/// Load exact context offers for a single match key.
 pub(super) fn stored_offers_for_exact_match(
     store: &Store,
     role: &Role,
@@ -115,6 +127,7 @@ pub(super) fn stored_offers_for_exact_match(
     )
 }
 
+/// Load all needs owned by one fact.
 fn stored_needs_for_owner(store: &Store, owner: &FactId) -> Result<Vec<ContextNeed>, String> {
     select_context_needs(
         store,
@@ -129,6 +142,7 @@ fn stored_needs_for_owner(store: &Store, owner: &FactId) -> Result<Vec<ContextNe
     )
 }
 
+/// Load all offers owned by one fact.
 fn stored_offers_for_owner(store: &Store, owner: &FactId) -> Result<Vec<ContextOffer>, String> {
     select_context_offers(
         store,
@@ -205,6 +219,7 @@ fn insert_context_edge_in_tx(
         .map(|count| count > 0)
 }
 
+/// Decode one persisted need row back into the public context type.
 fn selected_context_need(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextNeed> {
     Ok(ContextNeed {
         owner: fact_id_column(row.get::<_, Vec<u8>>(0)?, "owner")?,
@@ -215,6 +230,7 @@ fn selected_context_need(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextNee
     })
 }
 
+/// Decode one persisted offer row back into the public context type.
 fn selected_context_offer(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextOffer> {
     Ok(ContextOffer {
         owner: fact_id_column(row.get::<_, Vec<u8>>(0)?, "owner")?,
@@ -261,6 +277,7 @@ fn decode_scope_key(bytes: &[u8]) -> Result<FactScope, String> {
     Ok(scope)
 }
 
+/// Decode the compact `scope_key` written by `context::scope_key`.
 fn decode_scope(reader: &mut Reader<'_>) -> Result<FactScope, String> {
     match reader.u8().row()? {
         0 => Ok(FactScope::Global),
@@ -362,6 +379,10 @@ fn stored_exact_offers_for_needs<'a>(
     Ok(out)
 }
 
+/// Add a matched pair and load the offer owner's payload fact.
+///
+/// A missing payload is a storage invariant failure: context offers are only
+/// useful because their owner fact is the payload exposed to projection.
 fn push_stored_matched_context(
     store: &Store,
     need: &ContextNeed,
@@ -382,6 +403,11 @@ fn push_stored_matched_context(
     Ok(())
 }
 
+/// Insert pending owners woken by newly added context rows.
+///
+/// Removals do not wake projection. A projector that stops needing context has
+/// already run; dependent facts wake only when a new need can now be satisfied
+/// or a new offer may satisfy existing needs.
 pub(super) fn wake_context_matches_in_tx(
     store: &Store,
     delta: &ContextSetDelta,

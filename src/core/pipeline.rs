@@ -19,15 +19,19 @@ mod project_pending_facts;
 /// and whether any handler asked to retry.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WorkStatus {
+    /// Whether a bounded pass committed or staged any work.
     pub progressed: bool,
+    /// Whether a handler asked to leave work queued for a later pass.
     pub retried: bool,
 }
 
 impl WorkStatus {
+    /// No progress and no retry.
     pub fn idle() -> Self {
         Self::default()
     }
 
+    /// Build status from a simple progressed flag.
     pub fn progressed(progressed: bool) -> Self {
         Self {
             progressed,
@@ -35,11 +39,13 @@ impl WorkStatus {
         }
     }
 
+    /// Accumulate status across pipeline stages.
     pub fn merge(&mut self, other: Self) {
         self.progressed |= other.progressed;
         self.retried |= other.retried;
     }
 
+    /// Return whether the pass did nothing and hit no retry.
     pub fn is_idle(self) -> bool {
         !self.progressed && !self.retried
     }
