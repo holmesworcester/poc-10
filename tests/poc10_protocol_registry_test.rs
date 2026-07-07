@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use topo::core::projectors::FactPipeline;
 use topo::protocol::app::{MATCH_PROTOCOL, MATCH_RUNTIME};
 
 fn rust_files(root: &Path) -> Vec<PathBuf> {
@@ -41,6 +42,36 @@ fn executable_protocol_tables_name_the_target_surfaces() {
         .handlers
         .iter()
         .any(|handler| handler.name == "receive_network_frame"));
+}
+
+#[test]
+fn model_content_message_route_declares_first_class_pipeline_stages() {
+    let route = MATCH_RUNTIME
+        .fact_routes
+        .iter()
+        .find(|route| route.tag == topo::protocol::content::message::TYPE_CONTENT_MESSAGE)
+        .expect("content message route");
+
+    let FactPipeline::Staged {
+        decode,
+        authenticate,
+        adapt,
+        project,
+    } = route.pipeline
+    else {
+        panic!("content message should be the staged model fact route");
+    };
+
+    assert_eq!(decode, "content::message::decode::Codec");
+    assert_eq!(
+        authenticate,
+        "content::message::authenticate::ContentMessageAuthenticator"
+    );
+    assert_eq!(adapt, "content::message::adapt::ContentMessageAdapter");
+    assert_eq!(
+        project,
+        "content::message::project::ContentMessageProjector"
+    );
 }
 
 #[test]
@@ -242,8 +273,8 @@ fn only_transport_and_negotiation_facts_are_not_replayed() {
     let expected: BTreeSet<u8> = [
         connection::bootstrap_request::layout::TYPE_BOOTSTRAP_REQUEST,
         connection::bootstrap_response::layout::TYPE_BOOTSTRAP_RESPONSE,
-        connection::connection_request::layout::TYPE_CONNECTION_REQUEST,
-        connection::connection_response::layout::TYPE_CONNECTION_RESPONSE,
+        connection::connection_request::encode::TYPE_CONNECTION_REQUEST,
+        connection::connection_response::encode::TYPE_CONNECTION_RESPONSE,
         sync::have_id::layout::TYPE_SYNC_HAVE_ID,
         sync::need_id::layout::TYPE_SYNC_NEED_ID,
     ]

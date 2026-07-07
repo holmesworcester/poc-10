@@ -54,10 +54,15 @@ mod tests {
     use crate::core::store::Store;
     use crate::protocol::connection::bootstrap_request::fact::BootstrapRequestFact;
     use crate::protocol::connection::bootstrap_request::rows::bootstrap_request_row;
-    use crate::protocol::connection::bootstrap_response::rows::{connection_row, ConnectionRowFields};
+    use crate::protocol::connection::bootstrap_response::rows::{
+        connection_row, ConnectionRowFields,
+    };
     use crate::protocol::registry::FACTS_SCHEMA_SOURCE;
 
-    fn request_fact(ephemeral_id: FactId, to_listen_addr: Option<SocketAddr>) -> BootstrapRequestFact {
+    fn request_fact(
+        ephemeral_id: FactId,
+        to_listen_addr: Option<SocketAddr>,
+    ) -> BootstrapRequestFact {
         BootstrapRequestFact {
             from_endpoint: [1; 32],
             to_endpoint: [2; 32],
@@ -104,7 +109,11 @@ mod tests {
             .expect("seed rows");
 
         let pending = pending_bootstrap_requests(&store).expect("pending");
-        assert_eq!(pending.len(), 1, "only the unanswered local outbound request");
+        assert_eq!(
+            pending.len(),
+            1,
+            "only the unanswered local outbound request"
+        );
         assert_eq!(pending[0].request_id, [0xA1; 32]);
         assert_eq!(pending[0].initiator_ephemeral_secret_id, [0xAE; 32]);
         assert_eq!(pending[0].addr, addr);

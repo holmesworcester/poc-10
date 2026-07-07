@@ -2,40 +2,35 @@
 //!
 //! A membership connection request is first contact with an endpoint that
 //! already knows us: it is authorized by `endpoint_shared` membership, not an
-//! invite. Local commands construct request facts, received network bytes can
-//! become durable request facts, and projection validates the endpoint
-//! signature against the initiator's membership signing key and a shared
-//! workspace before offering request context or scheduling response work.
+//! invite. The fact is a durable plaintext record like every other fact —
+//! `connection_response` joins against it by id. The family is split by pipeline
+//! stage: `encode`/`decode` (wire bytes ⟷ typed value plus the endpoint signing
+//! transcript), `author` (pure local construction) and `commands` (the runtime
+//! entry that authors), `authenticate` (decode + id + endpoint-signature park),
+//! `adapt` (identity), and `project` (admission + materialization).
 //!
-//! This family owns request payload bytes, the endpoint signing transcript, and
-//! request admission policy. It carries no invite material. Response creation,
-//! frame sending, and socket IO belong to the downstream connection modules.
+//! Sealing a request for the wire is the connection transport layer
+//! (`connection_handshake_wire`), not this family: a request fact is sealed onto the wire
+//! and opened on arrival exactly like an established frame, then admitted here as
+//! a durable plaintext fact. This family carries no invite material. Response
+//! creation, frame sending, and socket IO belong to the downstream connection
+//! modules.
 
+pub mod adapt;
 pub mod authenticate;
+pub mod author;
 pub mod commands;
-pub mod create;
+pub mod decode;
+pub mod encode;
 pub mod fact;
-pub mod layout;
 pub mod project;
 pub mod queries;
 pub mod rows;
-pub mod transit;
 
 pub use project::{
     connection_request_need, connection_request_offer, connection_response_for_request_need,
     connection_response_for_request_offer,
 };
 
-pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::ConnectionRequestFact, String> {
-    layout::decode_fact(bytes)
-}
-
-pub(crate) struct Codec;
-
-impl crate::core::projectors::FactCodec for Codec {
-    type Payload = fact::ConnectionRequestFact;
-
-    fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        decode_fact_payload(fact.body())
-    }
-}
+pub use decode::decode_fact_payload;
+pub(crate) use decode::Codec;

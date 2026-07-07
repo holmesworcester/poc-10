@@ -43,7 +43,9 @@ impl Projector for DeviceInviteProjector {
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::DeviceInviteAuthenticator> for DeviceInviteProjector {
+impl AuthenticatedProjector<super::authenticate::DeviceInviteAuthenticator>
+    for DeviceInviteProjector
+{
     fn project_authenticated(
         &self,
         authenticated: AuthenticatedFact<'_, DeviceInviteFact>,

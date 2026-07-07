@@ -6,8 +6,8 @@
 //! `opened_message_rows` is plaintext materialized only after local decryption.
 
 use crate::core::facts::FactId;
-use crate::core::intents::{TableDeleteWhere, TableInsert};
 use crate::core::intents::Value;
+use crate::core::intents::{TableDeleteWhere, TableInsert};
 use crate::core::store::TableName;
 use crate::protocol::registry::read_models;
 

@@ -15,8 +15,8 @@ use crate::core::crypto::{
 };
 use crate::core::facts::{Fact, FactScope};
 
+use super::encode;
 use super::fact::ConnectionResponseFact;
-use super::layout;
 use crate::protocol::auth::endpoint::fact::EndpointFact;
 use crate::protocol::connection::connection_request::fact::ConnectionRequestFact;
 use crate::protocol::connection::ephemeral_secret::fact::ConnectionEphemeralSecretFact;
@@ -84,7 +84,7 @@ pub fn build_responder_response(
         handshake_hash: material.handshake_hash,
         connection_secret: material.connection_secret,
     };
-    let bytes = layout::encode_fact(&response)?;
+    let bytes = encode::encode_fact(&response)?;
     let fact = Fact::new(FactScope::Local, created_at_ms, bytes);
     Ok(BuildResponderResult { fact, response })
 }
@@ -111,7 +111,10 @@ pub fn initiator_material(
         &initiator_ephemeral.ephemeral_private_key,
         responder_ephemeral_public_key,
     );
-    let es = x25519_diffie_hellman(&initiator_ephemeral.ephemeral_private_key, &request.to_endpoint);
+    let es = x25519_diffie_hellman(
+        &initiator_ephemeral.ephemeral_private_key,
+        &request.to_endpoint,
+    );
     Ok(material(
         request_id,
         request,

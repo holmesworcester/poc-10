@@ -451,22 +451,24 @@ fn target_projectors_authenticate_primary_through_core_before_projecting() {
             continue;
         }
 
-        // Primary decode + authentication belong to the family authenticator,
-        // which core runs before the projector. Every fact-module projector
-        // delegates `Projector::project` to
-        // `project_authenticated::<super::authenticate::_, _>()` and implements
-        // `AuthenticatedProjector<super::authenticate::_>`, so it starts from an
-        // already-authenticated fact and never parses its own primary bytes.
+        // Primary decode + authentication belong to the family authenticator.
         // Old families delegate to `project_authenticated::<Authenticator, _>`;
-        // migrated families delegate to `project_adapted::<Authenticator, Adapter, _>`
-        // (authenticate → identity adapt → project). Either is accepted.
+        // transitional families delegate to
+        // `project_adapted::<Authenticator, Adapter, _>`; staged families
+        // delegate to `project_staged::<Codec, Authenticator, Adapter, _>`.
         let delegates_authenticated =
             production.contains("project_authenticated::<super::authenticate::");
         let delegates_adapted = production.contains("project_adapted::<")
             && production.contains("super::authenticate::")
             && production.contains("super::adapt::");
-        let routes_authenticated = (delegates_authenticated || delegates_adapted)
-            && production.contains("impl AuthenticatedProjector<super::authenticate::");
+        let delegates_staged = production.contains("project_staged::<")
+            && production.contains("super::decode::")
+            && production.contains("super::authenticate::")
+            && production.contains("super::adapt::")
+            && production.contains("impl SemanticProjector<");
+        let routes_authenticated = delegates_staged
+            || ((delegates_authenticated || delegates_adapted)
+                && production.contains("impl AuthenticatedProjector<super::authenticate::"));
         if !routes_authenticated {
             missing_delegation.push(relative.clone());
         }
@@ -479,10 +481,9 @@ fn target_projectors_authenticate_primary_through_core_before_projecting() {
 
     assert!(
         missing_delegation.is_empty(),
-        "every fact-module projector must delegate Projector::project to \
-         project_authenticated::<super::authenticate::_, _>() and implement \
-         AuthenticatedProjector<super::authenticate::_>, so core authenticates the primary \
-         fact before projection and the projector never parses its own bytes:\n{}",
+        "every fact-module projector must delegate Projector::project to project_staged, \
+         project_adapted, or project_authenticated with its family authenticate.rs, so primary \
+         bytes are decoded/authenticated before projector policy runs:\n{}",
         missing_delegation.join("\n")
     );
     assert!(
@@ -659,7 +660,12 @@ fn target_decoders_do_not_check_id_or_signatures() {
     for path in fact_family_files_named(root, "decode.rs") {
         let text = source_text(&path);
         let production = production_text_before_unit_tests(&text);
-        for forbidden in ["verify_fact_id", "verify_signature", "ed25519_verify", "ed25519_sign"] {
+        for forbidden in [
+            "verify_fact_id",
+            "verify_signature",
+            "ed25519_verify",
+            "ed25519_sign",
+        ] {
             if production.contains(forbidden) {
                 offenders.push(format!(
                     "{} contains {forbidden:?}",
@@ -1245,7 +1251,8 @@ const STANDARD_FAMILY_FILES: [&str; 14] = [
 const FAMILY_FILE_RULE_EXCEPTIONS: [&str; 0] = [];
 
 /// Scope-local directories that are deliberately not fact families.
-const NON_FACT_SCOPE_DIR_EXCEPTIONS: [&str; 2] = ["content/purge", "connection/observed_endpoint_address"];
+const NON_FACT_SCOPE_DIR_EXCEPTIONS: [&str; 2] =
+    ["content/purge", "connection/observed_endpoint_address"];
 
 #[test]
 fn fact_family_directories_contain_only_standard_role_files() {
@@ -1803,9 +1810,7 @@ fn fact_like_family_directories_are_single_flat_fact_shapes() {
             let route_marker = format!("{scope}::{family}::project::");
             let route_count = registry.matches(&route_marker).count();
             if route_count != 1 {
-                offenders.push(format!(
-                    "{relative} has {route_count} projector routes"
-                ));
+                offenders.push(format!("{relative} has {route_count} projector routes"));
             }
         }
     }

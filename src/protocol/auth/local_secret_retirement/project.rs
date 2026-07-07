@@ -101,10 +101,7 @@ impl AuthenticatedProjector<super::authenticate::LocalSecretRetirementAuthentica
         // 3. Materialize.
         Ok(ProjectionOutput::new()
             .need(target_need)
-            .offer(secret_retired_offer(
-                fact.id,
-                retirement.target_secret_id,
-            )))
+            .offer(secret_retired_offer(fact.id, retirement.target_secret_id)))
     }
 }
 

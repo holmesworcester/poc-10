@@ -55,7 +55,9 @@ pub fn decode_connection_request_row(
     value: &[u8],
 ) -> Result<ConnectionRequestRow, String> {
     if key.len() != 32 {
-        return Err("membership connection request row key must be the request fact id".to_string());
+        return Err(
+            "membership connection request row key must be the request fact id".to_string(),
+        );
     }
     if value.len() != ROW_VALUE_BYTES {
         return Err("membership connection request row value is malformed".to_string());

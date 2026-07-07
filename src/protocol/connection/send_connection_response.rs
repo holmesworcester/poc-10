@@ -15,11 +15,13 @@ use std::net::SocketAddr;
 use crate::core::effects::PipelineEffects;
 use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};
 use crate::core::intents::{Intent, IntentKind};
-use crate::core::network::{self, NetworkTarget, OutboundFrame};
 use crate::protocol::connection::bootstrap_request::create as addr;
-use crate::protocol::connection::connection_response::layout as response_layout;
-use crate::protocol::connection::connection_response::transit as response_transit;
+use crate::protocol::connection::connection_response::decode as response_layout;
 use crate::protocol::connection::ephemeral_secret::layout as ephemeral_layout;
+use crate::protocol::connection::send_network_frame::{
+    send_network_frame_intent, SendNetworkFrame,
+};
+use crate::protocol::connection_frame::seal_handshake_response;
 
 pub const SEND_CONNECTION_RESPONSE: &str = "send_connection_response";
 
@@ -96,17 +98,22 @@ impl IntentHandler for SendConnectionResponseHandler {
         let ephemeral_fact = context.require_fact(&input.responder_ephemeral_secret_id)?;
         let ephemeral = ephemeral_layout::decode_fact(ephemeral_fact.body())?;
         if ephemeral.ephemeral_public_key != response.responder_ephemeral_public_key {
-            return Err("send_connection_response ephemeral public key does not match response".into());
+            return Err(
+                "send_connection_response ephemeral public key does not match response".into(),
+            );
         }
-        let sealed = response_transit::seal_connection_response(
-            response_fact.body(),
-            &ephemeral.ephemeral_private_key,
-        )?;
-        let target = NetworkTarget::new(input.addr);
-        if network::send(context.store()?, target, OutboundFrame { bytes: sealed }).is_err() {
-            return Ok(PipelineEffects::new());
-        }
-        Ok(PipelineEffects::new())
+        let sealed =
+            seal_handshake_response(response_fact.body(), &ephemeral.ephemeral_private_key)?;
+        // Egress is the connection frame boundary: seal here, then hand the bytes
+        // to `send_network_frame` keyed by the initiator endpoint so the socket
+        // write happens in exactly one place. The initiator's reachable address is
+        // resolved from its learned `observed_endpoint_address` row there.
+        Ok(
+            PipelineEffects::new().local_intent(send_network_frame_intent(SendNetworkFrame {
+                routing_key: response.to_endpoint,
+                frame: sealed,
+            })),
+        )
     }
 }
 

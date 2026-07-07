@@ -7,17 +7,21 @@ use topo::core::intents::{HandlerContext, IntentHandler};
 use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
 use topo::core::wire::{FixedBytes, FixedSlot};
 use topo::protocol::auth::endpoint::fact::EndpointFact;
+use topo::protocol::auth::endpoint::layout as endpoint_layout;
 use topo::protocol::auth::invite::fact::InviteSecretFact;
 use topo::protocol::auth::key_wrap::create as auth_create;
 use topo::protocol::auth::key_wrap::fact::{
     KeyWrapFact, WrappedSecretKind, KEY_WRAP_CIPHERTEXT_BYTES,
 };
 use topo::protocol::auth::key_wrap::layout as auth_layout;
-use topo::protocol::auth::endpoint::layout as endpoint_layout;
 use topo::protocol::connection;
-use topo::protocol::connection::fact_receipt::layout as fact_receipt_layout;
+use topo::protocol::connection::bootstrap_request::fact::BootstrapRequestFact;
+use topo::protocol::connection::bootstrap_request::layout as connection_request_layout;
 use topo::protocol::connection::bootstrap_request::transit as request_transit;
+use topo::protocol::connection::bootstrap_response::fact::BootstrapResponseFact;
+use topo::protocol::connection::bootstrap_response::layout as connection_response_layout;
 use topo::protocol::connection::bootstrap_response::transit as response_transit;
+use topo::protocol::connection::fact_receipt::layout as fact_receipt_layout;
 use topo::protocol::connection::frame_bundle::fact::ConnectionFrameBundleFact;
 use topo::protocol::connection::frame_bundle::layout as frame_bundle_layout;
 use topo::protocol::connection::frame_bundle::project::ConnectionFrameBundleProjector;
@@ -31,10 +35,6 @@ use topo::protocol::connection::receive_network_frame::{
     receive_network_frame_intent, ReceiveNetworkFrame, ReceiveNetworkFrameHandler,
     RECEIVE_NETWORK_FRAME,
 };
-use topo::protocol::connection::bootstrap_request::fact::BootstrapRequestFact;
-use topo::protocol::connection::bootstrap_request::layout as connection_request_layout;
-use topo::protocol::connection::bootstrap_response::fact::BootstrapResponseFact;
-use topo::protocol::connection::bootstrap_response::layout as connection_response_layout;
 use topo::protocol::connection_frame_wire::{
     self as connection_frame, ConnectionFrameFactBundle, SealConnectionFrame,
 };
@@ -353,8 +353,9 @@ fn sealed_request_frame_is_admitted_then_opened_by_its_projector() {
             .expect("request transcript"),
     );
     let request_bytes = connection_request_layout::encode_fact(&request).expect("request");
-    let frame = request_transit::seal_connection_request(&request_bytes, &initiator_ephemeral_private)
-        .expect("seal request");
+    let frame =
+        request_transit::seal_connection_request(&request_bytes, &initiator_ephemeral_private)
+            .expect("seal request");
 
     // The boundary admits the sealed bytes as an ephemeral fact plus an
     // observation; it does no unsealing itself (no store needed).
@@ -375,7 +376,11 @@ fn sealed_request_frame_is_admitted_then_opened_by_its_projector() {
     let opened = topo::protocol::connection_frame::SealedHandshakeFrameProjector::new()
         .project(&sealed_fact, &context)
         .expect("open sealed request");
-    assert!(opened.effects.facts.iter().any(|fact| fact.bytes == request_bytes));
+    assert!(opened
+        .effects
+        .facts
+        .iter()
+        .any(|fact| fact.bytes == request_bytes));
     let receipt_fact = opened
         .effects
         .facts
@@ -413,8 +418,9 @@ fn sealed_request_projector_parks_without_local_endpoint() {
             .expect("request transcript"),
     );
     let request_bytes = connection_request_layout::encode_fact(&request).expect("request");
-    let frame = request_transit::seal_connection_request(&request_bytes, &initiator_ephemeral_private)
-        .expect("seal request");
+    let frame =
+        request_transit::seal_connection_request(&request_bytes, &initiator_ephemeral_private)
+            .expect("seal request");
 
     let output = ReceiveNetworkFrameHandler::new()
         .handle(&receive_intent(frame), &HandlerContext::new())
@@ -519,7 +525,11 @@ fn receive_handler_opens_sealed_response_to_durable_response_and_receipt() {
     let opened = topo::protocol::connection_frame::SealedHandshakeFrameProjector::new()
         .project(&sealed_fact, &context)
         .expect("open sealed response");
-    assert!(opened.effects.facts.iter().any(|fact| fact.bytes == response_bytes));
+    assert!(opened
+        .effects
+        .facts
+        .iter()
+        .any(|fact| fact.bytes == response_bytes));
     let receipt_fact = opened
         .effects
         .facts

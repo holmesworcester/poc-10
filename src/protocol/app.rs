@@ -85,4 +85,3 @@ fn receive_network_frame_intent(input: InboundNetworkFrame) -> Result<Intent, St
 fn current_message_expiration_minute(store: &Store) -> Result<Option<u64>, String> {
     Ok(clock::logical_time(store)?.map(|now_ms| now_ms / 60_000))
 }
-

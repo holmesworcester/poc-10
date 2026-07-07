@@ -28,7 +28,7 @@
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::{RowMutation, TableDelete};
 use crate::core::projectors::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    project_adapted, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
     ProjectionOutput, Projector,
 };
 
@@ -61,11 +61,11 @@ impl Projector for ConnectionResponseProjector {
         fact: &Fact,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::ConnectionResponseAuthenticator, _>(
-            self,
-            fact,
-            projection_context,
-        )
+        project_adapted::<
+            super::authenticate::ConnectionResponseAuthenticator,
+            super::adapt::ConnectionResponseAdapter,
+            _,
+        >(self, fact, projection_context)
     }
 }
 
@@ -89,14 +89,17 @@ impl AuthenticatedProjector<super::authenticate::ConnectionResponseAuthenticator
         let close_need = close::connection_closed_need(fact.id, fact.id);
         if let Some(close_fact) = projection_context.payload_for(&close_need) {
             if close_fact.scope != FactScope::Local {
-                return Err("membership connection response close context must be local".to_string());
+                return Err(
+                    "membership connection response close context must be local".to_string()
+                );
             }
             let close = close::decode_fact_payload(close_fact.body()).map_err(|_| {
                 "membership connection response close context is not a connection close".to_string()
             })?;
             if close.connection_id != fact.id {
                 return Err(
-                    "membership connection response close context targets another connection".into(),
+                    "membership connection response close context targets another connection"
+                        .into(),
                 );
             }
             return closed_output(fact.id);
@@ -107,8 +110,10 @@ impl AuthenticatedProjector<super::authenticate::ConnectionResponseAuthenticator
         let Some(request_context) = projection_context.payload_for(&request_need) else {
             return Ok(waiting_output([request_need]));
         };
-        let request = request_family::decode_fact_payload(request_context.body())
-            .map_err(|_| "membership connection response context is not a request fact".to_string())?;
+        let request =
+            request_family::decode_fact_payload(request_context.body()).map_err(|_| {
+                "membership connection response context is not a request fact".to_string()
+            })?;
         if request_context.id != response.request_id {
             return Err(
                 "membership connection response request context id does not match response"
@@ -134,7 +139,8 @@ impl AuthenticatedProjector<super::authenticate::ConnectionResponseAuthenticator
             );
         }
 
-        let responder_ephemeral_need = ephemeral_need(fact.id, response.responder_ephemeral_secret_fact_id);
+        let responder_ephemeral_need =
+            ephemeral_need(fact.id, response.responder_ephemeral_secret_fact_id);
         let receive_need = crate::core::context::ContextNeed::range(
             fact.id,
             "connection_fact_receipt",
@@ -170,11 +176,13 @@ impl AuthenticatedProjector<super::authenticate::ConnectionResponseAuthenticator
                     receive_need,
                 ]));
             };
-            let initiator_secret =
-                ephemeral_secret::decode_fact_payload(initiator_ephemeral.body()).map_err(|_| {
-                    "membership connection response initiator dependency is not an ephemeral secret"
-                        .to_string()
-                })?;
+            let initiator_secret = ephemeral_secret::decode_fact_payload(
+                initiator_ephemeral.body(),
+            )
+            .map_err(|_| {
+                "membership connection response initiator dependency is not an ephemeral secret"
+                    .to_string()
+            })?;
             if initiator_ephemeral.id != response.initiator_ephemeral_secret_fact_id {
                 return Err(
                     "membership connection response initiator ephemeral context id does not match"
@@ -279,10 +287,14 @@ fn validate_request_response(
         return Err("membership connection response references another endpoint's request".into());
     }
     if request.to_endpoint != response.from_endpoint {
-        return Err("membership connection response sender does not match request recipient".into());
+        return Err(
+            "membership connection response sender does not match request recipient".into(),
+        );
     }
     if response.initiator_ephemeral_secret_fact_id != request.initiator_ephemeral_secret_fact_id {
-        return Err("membership connection response initiator ephemeral does not match request".into());
+        return Err(
+            "membership connection response initiator ephemeral does not match request".into(),
+        );
     }
     Ok(())
 }
@@ -309,7 +321,9 @@ fn validate_fact_receipt(
     }
     if let Some(connection_id) = received.connection_id {
         if connection_id != response_id {
-            return Err("membership connection response fact receipt names another connection".into());
+            return Err(
+                "membership connection response fact receipt names another connection".into(),
+            );
         }
     }
     Ok(())

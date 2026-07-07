@@ -22,7 +22,7 @@ use crate::core::projectors::{
 };
 use crate::protocol::auth::endpoint_shared;
 
-use super::create::validate_endpoint_signature;
+use super::encode::validate_endpoint_signature;
 use super::fact::ConnectionRequestFact;
 
 pub(crate) struct ConnectionRequestAuthenticator;
@@ -35,7 +35,7 @@ impl Authenticator for ConnectionRequestAuthenticator {
         context: &ProjectionContext,
     ) -> Authentication<'a, Self::Authenticated> {
         // 1. Layout.
-        let request = match super::Codec::decode_fact(fact) {
+        let request = match super::decode::Codec::decode_fact(fact) {
             Ok(request) => request,
             Err(error) => return Authentication::Invalid(error),
         };
@@ -60,7 +60,8 @@ impl Authenticator for ConnectionRequestAuthenticator {
             Ok(shared) => shared,
             Err(_) => {
                 return Authentication::Invalid(
-                    "membership connection request endpoint_shared context is malformed".to_string(),
+                    "membership connection request endpoint_shared context is malformed"
+                        .to_string(),
                 )
             }
         };
@@ -93,7 +94,8 @@ fn validate_request_fields(request: &ConnectionRequestFact) -> Result<(), String
     }
     if request.initiator_endpoint_shared_id == [0; 32] {
         return Err(
-            "membership connection request initiator_endpoint_shared_id cannot be empty".to_string(),
+            "membership connection request initiator_endpoint_shared_id cannot be empty"
+                .to_string(),
         );
     }
     if request.initiator_ephemeral_secret_fact_id == [0; 32] {
@@ -117,9 +119,8 @@ mod tests {
     use crate::core::facts::{Fact, FactScope};
     use crate::core::projectors::{Authentication, Authenticator, ProjectionContext};
     use crate::protocol::auth::endpoint::fact::EndpointFact;
-    use crate::protocol::connection::connection_request::create::sign_request;
+    use crate::protocol::connection::connection_request::encode::{self, sign_request};
     use crate::protocol::connection::connection_request::fact::ConnectionRequestFact;
-    use crate::protocol::connection::connection_request::layout;
 
     use super::ConnectionRequestAuthenticator;
 
@@ -145,7 +146,7 @@ mod tests {
             signing_secret: SIGNING_SECRET,
         };
         sign_request(&mut request, &endpoint).expect("sign membership connection request");
-        let bytes = layout::encode_fact(&request).expect("encode connection_request fact");
+        let bytes = encode::encode_fact(&request).expect("encode connection_request fact");
         Fact::new(FactScope::Global, 100, bytes)
     }
 
@@ -171,7 +172,11 @@ mod tests {
         let canonical = canonical_fact();
         let mut bytes = canonical.bytes.clone();
         bytes[0] ^= 0xff;
-        assert!(is_invalid(&Fact::new(canonical.scope, canonical.timestamp, bytes)));
+        assert!(is_invalid(&Fact::new(
+            canonical.scope,
+            canonical.timestamp,
+            bytes
+        )));
     }
 
     #[test]
@@ -179,7 +184,11 @@ mod tests {
         let canonical = canonical_fact();
         let mut bytes = canonical.bytes.clone();
         bytes.pop();
-        assert!(is_invalid(&Fact::new(canonical.scope, canonical.timestamp, bytes)));
+        assert!(is_invalid(&Fact::new(
+            canonical.scope,
+            canonical.timestamp,
+            bytes
+        )));
     }
 
     #[test]

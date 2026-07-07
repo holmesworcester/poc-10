@@ -42,7 +42,9 @@ impl Projector for RecipientKeyProjector {
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::RecipientKeyAuthenticator> for RecipientKeyProjector {
+impl AuthenticatedProjector<super::authenticate::RecipientKeyAuthenticator>
+    for RecipientKeyProjector
+{
     fn project_authenticated(
         &self,
         authenticated: AuthenticatedFact<'_, RecipientKeyFact>,

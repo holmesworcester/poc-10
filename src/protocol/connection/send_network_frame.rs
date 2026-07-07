@@ -86,6 +86,8 @@ use crate::core::intents::{
     retry_intent, HandlerContext, HandlerError, HandlerFactId, HandlerResult, IntentHandler,
 };
 use crate::core::network::{self, NetworkTarget, OutboundFrame};
+use crate::protocol::connection::bootstrap_response::fact::BootstrapResponseFact;
+use crate::protocol::connection::observed_endpoint_address::queries::observed_endpoint_address;
 use crate::protocol::{auth::endpoint, connection};
 
 pub const SEND_NETWORK_FRAME_MISSING_ROUTE: &str = "send_network_frame_missing_route";
@@ -108,10 +110,13 @@ impl IntentHandler for SendNetworkFrameHandler {
     fn handle(&self, intent: &Intent, context: &HandlerContext) -> HandlerResult {
         let input = decode_send_network_frame(intent)?;
         validate_frame(&input)?;
-        if context.fact(&input.routing_key).is_none() {
+        // The routing key is either an established/handshake connection fact id or,
+        // before any connection exists, the peer endpoint id. If it resolves to
+        // neither a live connection nor a learned peer address, the route is gone
+        // (e.g. a closed connection): drop the send silently rather than retry.
+        let Some(target) = resolve_target(&input.routing_key, context)? else {
             return Ok(PipelineEffects::new());
-        }
-        let target = resolve_target(&input.routing_key, context)?;
+        };
         network::send(
             context.store()?,
             target,
@@ -136,21 +141,54 @@ fn validate_frame(input: &SendNetworkFrame) -> Result<(), String> {
 }
 
 fn resolve_target(
-    connection_id: &RoutingKey,
+    routing_key: &RoutingKey,
+    context: &HandlerContext,
+) -> Result<Option<NetworkTarget>, HandlerError> {
+    // Established (and self-authored bootstrap response) frames route by a
+    // connection fact id: derive the return route from the answered request fact.
+    if let Some(connection) = load_connection(routing_key, context)? {
+        return resolve_established_target(&connection, context).map(Some);
+    }
+    // Before a connection exists, the routing key is the peer endpoint id itself:
+    // resolve its learned listen address directly.
+    if let Some(addr) = observed_endpoint_address(context.store()?, routing_key)? {
+        return Ok(Some(NetworkTarget::new(addr)));
+    }
+    // Neither a live connection nor a learned peer address: no route.
+    Ok(None)
+}
+
+/// Decode the connection named by `routing_key`, if the key is a connection id at
+/// all. A peer endpoint id (the pre-connection request route) is not a connection
+/// fact, so this returns `None` for it.
+fn load_connection(
+    routing_key: &RoutingKey,
+    context: &HandlerContext,
+) -> Result<Option<BootstrapResponseFact>, HandlerError> {
+    let decoded = match context.fact(routing_key) {
+        Some(fact) => connection::bootstrap_response::layout::decode_fact(fact.body()).ok(),
+        None => crate::core::fact_store::persisted_fact(context.store()?, routing_key)?
+            .and_then(|fact| connection::bootstrap_response::layout::decode_fact(fact.body()).ok()),
+    };
+    Ok(decoded)
+}
+
+fn resolve_established_target(
+    connection: &BootstrapResponseFact,
     context: &HandlerContext,
 ) -> Result<NetworkTarget, HandlerError> {
-    let connection_fact = context.require_fact(connection_id)?;
-    let connection = connection::bootstrap_response::layout::decode_fact(connection_fact.body())?;
-    let request_fact = match context.fact(&connection.request_id).cloned() {
-        Some(fact) => fact,
+    let request_bytes = match context.fact(&connection.request_id) {
+        Some(fact) => fact.body().to_vec(),
         None => crate::core::fact_store::persisted_fact(context.store()?, &connection.request_id)?
             .ok_or_else(|| {
                 retry_intent(
                     "send_network_frame route: send_network_frame missing connection request fact",
                 )
-            })?,
+            })?
+            .body()
+            .to_vec(),
     };
-    let request = connection::bootstrap_request::layout::decode_fact(request_fact.body())?;
+    let request = connection::bootstrap_request::layout::decode_fact(&request_bytes)?;
     let local_endpoint = endpoint::create::local_endpoint(context.store()?)?
         .ok_or_else(|| HandlerError::fatal("send_network_frame requires local endpoint state"))?;
     let addr = if local_endpoint.endpoint == connection.from_endpoint {

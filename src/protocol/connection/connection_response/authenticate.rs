@@ -34,7 +34,7 @@ impl Authenticator for ConnectionResponseAuthenticator {
 
 fn authenticate_connection_response(fact: &Fact) -> Result<ConnectionResponseFact, String> {
     // 1. Layout.
-    let response = super::Codec::decode_fact(fact)?;
+    let response = super::decode::Codec::decode_fact(fact)?;
     // 2. Id.
     verify_fact_id(fact)?;
     // Intrinsic fields.
@@ -89,8 +89,8 @@ fn validate_response_fields(response: &ConnectionResponseFact) -> Result<(), Str
 mod tests {
     use crate::core::facts::{Fact, FactScope};
     use crate::core::projectors::{Authentication, Authenticator, ProjectionContext};
+    use crate::protocol::connection::connection_response::encode as layout;
     use crate::protocol::connection::connection_response::fact::ConnectionResponseFact;
-    use crate::protocol::connection::connection_response::layout;
 
     use super::ConnectionResponseAuthenticator;
 
@@ -130,7 +130,11 @@ mod tests {
         let canonical = canonical_fact();
         let mut bytes = canonical.bytes.clone();
         bytes[0] ^= 0xff;
-        assert!(is_invalid(&Fact::new(canonical.scope, canonical.timestamp, bytes)));
+        assert!(is_invalid(&Fact::new(
+            canonical.scope,
+            canonical.timestamp,
+            bytes
+        )));
     }
 
     #[test]
@@ -138,7 +142,11 @@ mod tests {
         let canonical = canonical_fact();
         let mut bytes = canonical.bytes.clone();
         bytes.pop();
-        assert!(is_invalid(&Fact::new(canonical.scope, canonical.timestamp, bytes)));
+        assert!(is_invalid(&Fact::new(
+            canonical.scope,
+            canonical.timestamp,
+            bytes
+        )));
     }
 
     #[test]

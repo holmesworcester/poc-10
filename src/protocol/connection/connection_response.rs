@@ -7,24 +7,22 @@
 //! sync treat both connection kinds identically, and publishes the
 //! `connection_response` context other modules rely on. The secret is derived
 //! from Diffie-Hellman only; no invite material is involved.
+//!
+//! The family is split by pipeline stage: `encode`/`decode` (wire bytes ⟷ typed
+//! value), `create` (the Diffie-Hellman key schedule and canonical construction),
+//! `authenticate` (decode + id + intrinsic fields), `adapt` (identity), and
+//! `project` (admission + materialization). Sealing a response for the wire is the
+//! connection transport layer (`connection_handshake_wire`), not this family: the response
+//! is sealed onto the wire and opened on arrival exactly like an established
+//! frame, then admitted here as a durable plaintext fact.
 
+pub mod adapt;
 pub mod authenticate;
 pub mod create;
+pub mod decode;
+pub mod encode;
 pub mod fact;
-pub mod layout;
 pub mod project;
-pub mod transit;
 
-pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::ConnectionResponseFact, String> {
-    layout::decode_fact(bytes)
-}
-
-pub(crate) struct Codec;
-
-impl crate::core::projectors::FactCodec for Codec {
-    type Payload = fact::ConnectionResponseFact;
-
-    fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        decode_fact_payload(fact.body())
-    }
-}
+pub use decode::decode_fact_payload;
+pub(crate) use decode::Codec;

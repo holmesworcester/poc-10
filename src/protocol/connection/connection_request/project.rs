@@ -29,7 +29,7 @@
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::projectors::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    project_adapted, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
     ProjectionOutput, Projector,
 };
 
@@ -115,11 +115,11 @@ impl Projector for ConnectionRequestProjector {
         fact: &Fact,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::ConnectionRequestAuthenticator, _>(
-            self,
-            fact,
-            projection_context,
-        )
+        project_adapted::<
+            super::authenticate::ConnectionRequestAuthenticator,
+            super::adapt::ConnectionRequestAdapter,
+            _,
+        >(self, fact, projection_context)
     }
 }
 
@@ -162,7 +162,8 @@ impl AuthenticatedProjector<super::authenticate::ConnectionRequestAuthenticator>
             })?;
         if initiator_shared.endpoint_id != request.from_endpoint {
             return Err(
-                "membership connection request endpoint_shared does not bind the sender".to_string(),
+                "membership connection request endpoint_shared does not bind the sender"
+                    .to_string(),
             );
         }
         let workspace_id = initiator_shared.workspace_id;
@@ -179,8 +180,8 @@ impl AuthenticatedProjector<super::authenticate::ConnectionRequestAuthenticator>
             let Some(ephemeral) = projection_context.payload_for(&ephemeral_need) else {
                 return Ok(waiting_output([shared_need, ephemeral_need]));
             };
-            let ephemeral_secret =
-                ephemeral_secret::decode_fact_payload(&ephemeral.bytes).map_err(|_| {
+            let ephemeral_secret = ephemeral_secret::decode_fact_payload(&ephemeral.bytes)
+                .map_err(|_| {
                     "membership connection request dependency is not an ephemeral secret"
                         .to_string()
                 })?;
@@ -214,13 +215,14 @@ impl AuthenticatedProjector<super::authenticate::ConnectionRequestAuthenticator>
                         "membership connection request response context must be local".to_string(),
                     );
                 }
-                let response = crate::protocol::connection::connection_response::decode_fact_payload(
-                    response_fact.body(),
-                )
-                .map_err(|_| {
-                    "membership connection request response context is not a response fact"
-                        .to_string()
-                })?;
+                let response =
+                    crate::protocol::connection::connection_response::decode_fact_payload(
+                        response_fact.body(),
+                    )
+                    .map_err(|_| {
+                        "membership connection request response context is not a response fact"
+                            .to_string()
+                    })?;
                 if response.request_id != fact.id {
                     return Err(
                         "membership connection request response context targets another request"
@@ -324,7 +326,9 @@ impl AuthenticatedProjector<super::authenticate::ConnectionRequestAuthenticator>
             );
         }
         if received.local_endpoint_id != request.to_endpoint {
-            return Err("membership connection request addressed to a different endpoint".to_string());
+            return Err(
+                "membership connection request addressed to a different endpoint".to_string(),
+            );
         }
         if received.sender_endpoint_id != request.from_endpoint {
             return Err(
@@ -416,14 +420,13 @@ fn received_materialized_output(
     request: &ConnectionRequestFact,
     receive_id: [u8; 32],
 ) -> Result<ProjectionOutput, String> {
-    let mut output =
-        materialized_output(request_id).intent(create_connection_response_intent(
-            CreateConnectionResponse {
-                request_id,
-                initiator_endpoint_shared_id: request.initiator_endpoint_shared_id,
-                receive_id,
-            },
-        ));
+    let mut output = materialized_output(request_id).intent(create_connection_response_intent(
+        CreateConnectionResponse {
+            request_id,
+            initiator_endpoint_shared_id: request.initiator_endpoint_shared_id,
+            receive_id,
+        },
+    ));
     if let Some(addr) = request.from_listen_addr {
         output = output.row_mutation(RowMutation::PutRow(observed_endpoint_address_row(
             request.from_endpoint,

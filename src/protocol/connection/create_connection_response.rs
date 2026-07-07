@@ -134,8 +134,8 @@ use crate::core::intents::{
 };
 use crate::protocol::auth::endpoint::create as local_endpoint;
 use crate::protocol::auth::endpoint_shared;
-use crate::protocol::connection::connection_request::create as request_create;
-use crate::protocol::connection::connection_request::layout as request_layout;
+use crate::protocol::connection::connection_request::decode as request_layout;
+use crate::protocol::connection::connection_request::encode as request_create;
 use crate::protocol::connection::connection_response::create::{
     build_responder_response, BuildResponderResponse,
 };
@@ -170,25 +170,36 @@ impl IntentHandler for CreateConnectionResponseHandler {
         let receive_fact = context.require_fact(&input.receive_id)?;
 
         let request = request_layout::decode_fact(request_fact.body())?;
-        let initiator_shared = endpoint_shared::decode_fact_payload(shared_fact.body())
-            .map_err(|_| HandlerError::fatal("create_connection_response context is not endpoint_shared"))?;
+        let initiator_shared =
+            endpoint_shared::decode_fact_payload(shared_fact.body()).map_err(|_| {
+                HandlerError::fatal("create_connection_response context is not endpoint_shared")
+            })?;
         let received = fact_receipt::decode_fact_payload(receive_fact.body()).map_err(|_| {
-            HandlerError::fatal("create_connection_response receive context is not connection fact receipt")
+            HandlerError::fatal(
+                "create_connection_response receive context is not connection fact receipt",
+            )
         })?;
 
         if request.initiator_endpoint_shared_id != input.initiator_endpoint_shared_id {
-            return Err("create_connection_response endpoint_shared id does not match request".into());
+            return Err(
+                "create_connection_response endpoint_shared id does not match request".into(),
+            );
         }
         if shared_fact.scope != FactScope::Global {
             return Err("create_connection_response endpoint_shared context must be global".into());
         }
         if initiator_shared.endpoint_id != request.from_endpoint {
-            return Err("create_connection_response endpoint_shared does not bind the sender".into());
+            return Err(
+                "create_connection_response endpoint_shared does not bind the sender".into(),
+            );
         }
         if receive_fact.scope != FactScope::Local {
             return Err("create_connection_response receive context must be local".into());
         }
-        request_create::validate_endpoint_signature(&request, &initiator_shared.signing_public_key)?;
+        request_create::validate_endpoint_signature(
+            &request,
+            &initiator_shared.signing_public_key,
+        )?;
         validate_fact_receipt(input.request_id, &request, &received)?;
 
         let endpoint = local_endpoint::local_endpoint(context.store()?)?.ok_or_else(|| {

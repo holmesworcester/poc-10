@@ -29,6 +29,7 @@
 //! operations. Values are always bound parameters, and table names are accepted
 //! only from `TableName` after a conservative identifier check.
 
+use crate::core::row_schema::RowTableSchema;
 use rusqlite::{params, Connection as SqliteConnection, OptionalExtension};
 use std::path::Path;
 use std::time::Duration;
@@ -64,6 +65,10 @@ pub struct SchemaSource {
     pub ddl: &'static str,
     /// Opaque row tables this source makes available to row helpers.
     pub row_tables: &'static [TableName],
+    /// Schema-backed opaque row tables this source makes available to row
+    /// helpers. These are the migration target for handwritten `rows.rs`
+    /// modules; store still persists them through the same key/value boundary.
+    pub row_schemas: &'static [RowTableSchema],
 }
 
 /// Quote a declared table name after rejecting unsafe identifier bytes.
@@ -141,6 +146,7 @@ fn prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
 pub struct Store {
     conn: SqliteConnection,
     row_tables: Vec<TableName>,
+    row_schemas: Vec<RowTableSchema>,
 }
 
 impl Store {
@@ -176,9 +182,19 @@ impl Store {
     ) -> rusqlite::Result<Self> {
         let row_tables = sources
             .iter()
-            .flat_map(|source| source.row_tables.iter().copied())
+            .flat_map(|source| {
+                source
+                    .row_tables
+                    .iter()
+                    .copied()
+                    .chain(source.row_schemas.iter().map(|schema| schema.table))
+            })
             .collect();
-        let store = Self::from_connection_parts(conn, row_tables)?;
+        let row_schemas = sources
+            .iter()
+            .flat_map(|source| source.row_schemas.iter().copied())
+            .collect();
+        let store = Self::from_connection_parts(conn, row_tables, row_schemas)?;
         for source in sources {
             store.conn.execute_batch(source.ddl)?;
         }
@@ -188,13 +204,23 @@ impl Store {
     fn from_connection_parts(
         conn: SqliteConnection,
         row_tables: Vec<TableName>,
+        row_schemas: Vec<RowTableSchema>,
     ) -> rusqlite::Result<Self> {
         conn.busy_timeout(Duration::from_secs(5))?;
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;",
         )?;
-        Ok(Self { conn, row_tables })
+        Ok(Self {
+            conn,
+            row_tables,
+            row_schemas,
+        })
+    }
+
+    /// Schema-backed opaque row declarations registered for this store.
+    pub fn row_schemas(&self) -> &[RowTableSchema] {
+        &self.row_schemas
     }
 
     /// Write a standalone, consistent copy of this store to `path`.
@@ -414,6 +440,7 @@ CREATE TABLE IF NOT EXISTS "test.rows" (
 );
 "#,
         row_tables: &[TEST_ROWS],
+        row_schemas: &[],
     };
 
     const MEMORY_ROWS_SCHEMA: SchemaSource = SchemaSource {
@@ -424,6 +451,7 @@ CREATE TEMP TABLE IF NOT EXISTS "test.memory_rows" (
 );
 "#,
         row_tables: &[MEMORY_ROWS],
+        row_schemas: &[],
     };
 
     #[test]

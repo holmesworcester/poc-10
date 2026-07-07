@@ -58,6 +58,7 @@ CREATE TEMP TABLE IF NOT EXISTS network_in (
 );
 "#,
     row_tables: &[OUTBOUND_TABLE, INBOUND_TABLE],
+    row_schemas: &[],
 };
 
 /// Destination for opaque outbound frame bytes.

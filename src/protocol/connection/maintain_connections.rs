@@ -17,7 +17,9 @@
 //! `connection_peer_retry` time wake, which was not replayable.
 
 use crate::core::effects::PipelineEffects;
-use crate::core::intents::{HandlerContext, HandlerError, HandlerResult, Intent, IntentHandler, IntentKind};
+use crate::core::intents::{
+    HandlerContext, HandlerError, HandlerResult, Intent, IntentHandler, IntentKind,
+};
 use crate::core::store::Store;
 
 use crate::protocol::connection::bootstrap_request::queries::pending_bootstrap_requests;
@@ -82,11 +84,12 @@ impl IntentHandler for MaintainConnectionsHandler {
             )?);
         }
         for pending in pending_membership_requests(store)? {
-            effects = effects.local_intent(send_connection_request_intent(SendConnectionRequest {
-                request_id: pending.request_id,
-                initiator_ephemeral_secret_id: pending.initiator_ephemeral_secret_id,
-                addr: pending.addr,
-            })?);
+            effects =
+                effects.local_intent(send_connection_request_intent(SendConnectionRequest {
+                    request_id: pending.request_id,
+                    initiator_ephemeral_secret_id: pending.initiator_ephemeral_secret_id,
+                    addr: pending.addr,
+                })?);
         }
         Ok(effects)
     }

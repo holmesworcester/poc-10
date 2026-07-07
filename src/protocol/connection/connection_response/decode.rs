@@ -1,32 +1,16 @@
-//! Stable bytes for membership connection-response facts.
+//! Membership connection-response decoding: canonical wire bytes / `Fact` → typed
+//! value.
 //!
-//! Fixed width: tag byte followed by eight 32-byte fields for endpoints,
-//! request/dependency ids, responder ephemeral public key, handshake hash, and
-//! connection secret. There is no invite field on this path.
-//!
-//! Change this file for response wire compatibility only. Key-schedule
-//! construction belongs in `create.rs`, and context validation in `project.rs`.
+//! `decode_fact` checks tag, length, and field shape and produces the typed
+//! `ConnectionResponseFact`. The `FactCodec` lives here so the read pipeline and
+//! context provision decode a response owner through one entry. Byte order lives
+//! in `encode.rs`; admission belongs in `project.rs`.
 
+use crate::core::facts::Fact;
 use crate::core::wire;
 
+use super::encode::{FACT_BYTES, TYPE_CONNECTION_RESPONSE};
 use super::fact::ConnectionResponseFact;
-
-pub const TYPE_CONNECTION_RESPONSE: u8 = 49;
-pub const FACT_BYTES: usize = 1 + 32 * 8;
-
-pub fn encode_fact(fact: &ConnectionResponseFact) -> Result<Vec<u8>, String> {
-    let mut out = vec![0; FACT_BYTES];
-    wire::put_u8(TYPE_CONNECTION_RESPONSE, &mut out[0..1]).map_err(wire_err)?;
-    out[1..33].copy_from_slice(&fact.from_endpoint);
-    out[33..65].copy_from_slice(&fact.to_endpoint);
-    out[65..97].copy_from_slice(&fact.request_id);
-    out[97..129].copy_from_slice(&fact.initiator_ephemeral_secret_fact_id);
-    out[129..161].copy_from_slice(&fact.responder_ephemeral_secret_fact_id);
-    out[161..193].copy_from_slice(&fact.responder_ephemeral_public_key);
-    out[193..225].copy_from_slice(&fact.handshake_hash);
-    out[225..257].copy_from_slice(&fact.connection_secret);
-    Ok(out)
-}
 
 pub fn decode_fact(bytes: &[u8]) -> Result<ConnectionResponseFact, String> {
     wire::expect_len(bytes, FACT_BYTES).map_err(wire_err)?;
@@ -62,6 +46,20 @@ pub fn decode_fact(bytes: &[u8]) -> Result<ConnectionResponseFact, String> {
     })
 }
 
+pub fn decode_fact_payload(bytes: &[u8]) -> Result<ConnectionResponseFact, String> {
+    decode_fact(bytes)
+}
+
+pub(crate) struct Codec;
+
+impl crate::core::projectors::FactCodec for Codec {
+    type Payload = ConnectionResponseFact;
+
+    fn decode_fact(fact: &Fact) -> Result<Self::Payload, String> {
+        decode_fact_payload(fact.body())
+    }
+}
+
 fn wire_err(err: wire::WireError) -> String {
     format!("{err:?}")
 }
@@ -69,6 +67,7 @@ fn wire_err(err: wire::WireError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::connection::connection_response::encode::encode_fact;
 
     fn fact() -> ConnectionResponseFact {
         ConnectionResponseFact {

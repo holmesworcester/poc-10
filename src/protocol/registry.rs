@@ -24,7 +24,7 @@ use crate::core::facts::Fact;
 use crate::core::intents::TypedTableSchema;
 use crate::core::network;
 use crate::core::projectors::{
-    FactRoute, ProjectionContext, ProjectionOutput, Projector, RouterProjector,
+    FactPipeline, FactRoute, ProjectionContext, ProjectionOutput, Projector, RouterProjector,
 };
 use crate::core::runtime::{HandlerRoute, RecurringIntentSpec};
 use crate::core::store::{SchemaSource, TableName};
@@ -351,6 +351,7 @@ CREATE TABLE IF NOT EXISTS retention_policy_rows (row_key BLOB PRIMARY KEY NOT N
         sync::shared_fact::rows::NEGENTROPY_NODE_ROWS,
         content::retention_policy::rows::RETENTION_POLICY_ROWS,
     ],
+    row_schemas: &[],
 };
 
 // Every CLI command's host function must live in `protocol::cli`. This macro
@@ -615,12 +616,24 @@ macro_rules! projector_routes {
             $(FactRoute {
                 tag: $tag,
                 projector: $name,
+                pipeline: projector_routes!(@pipeline $($replay)?),
                 replayed: projector_routes!(@replayed $($replay)?),
             },)+
         ];
     };
+    (@pipeline) => { FactPipeline::ProjectorComposed };
+    (@pipeline not_replayed) => { FactPipeline::ProjectorComposed };
+    (@pipeline staged_content_message) => {
+        FactPipeline::Staged {
+            decode: "content::message::decode::Codec",
+            authenticate: "content::message::authenticate::ContentMessageAuthenticator",
+            adapt: "content::message::adapt::ContentMessageAdapter",
+            project: "content::message::project::ContentMessageProjector",
+        }
+    };
     (@replayed) => { true };
     (@replayed not_replayed) => { false };
+    (@replayed staged_content_message) => { true };
 }
 
 projector_routes! {
@@ -629,12 +642,12 @@ projector_routes! {
     project_connection_ephemeral_secret => connection::ephemeral_secret::layout::TYPE_CONNECTION_EPHEMERAL_SECRET, connection::ephemeral_secret::project::ConnectionEphemeralSecretProjector;
     project_bootstrap_request => connection::bootstrap_request::layout::TYPE_BOOTSTRAP_REQUEST, connection::bootstrap_request::project::BootstrapRequestProjector, not_replayed;
     project_bootstrap_response => connection::bootstrap_response::layout::TYPE_BOOTSTRAP_RESPONSE, connection::bootstrap_response::project::BootstrapResponseProjector, not_replayed;
-    project_connection_request => connection::connection_request::layout::TYPE_CONNECTION_REQUEST, connection::connection_request::project::ConnectionRequestProjector, not_replayed;
-    project_connection_response => connection::connection_response::layout::TYPE_CONNECTION_RESPONSE, connection::connection_response::project::ConnectionResponseProjector, not_replayed;
+    project_connection_request => connection::connection_request::encode::TYPE_CONNECTION_REQUEST, connection::connection_request::project::ConnectionRequestProjector, not_replayed;
+    project_connection_response => connection::connection_response::encode::TYPE_CONNECTION_RESPONSE, connection::connection_response::project::ConnectionResponseProjector, not_replayed;
     project_content_file => content::file::layout::TYPE_CONTENT_FILE, content::file::project::ContentFileProjector;
     project_content_file_deletion => content::file_deletion::layout::TYPE_CONTENT_FILE_DELETION, content::file_deletion::project::ContentFileDeletionProjector;
     project_content_file_slice => content::file_slice::layout::TYPE_CONTENT_FILE_SLICE, content::file_slice::project::ContentFileSliceProjector;
-    project_content_message => content::message::TYPE_CONTENT_MESSAGE, content::message::project::ContentMessageProjector;
+    project_content_message => content::message::TYPE_CONTENT_MESSAGE, content::message::project::ContentMessageProjector, staged_content_message;
     project_content_message_deletion => content::message_deletion::layout::TYPE_CONTENT_MESSAGE_DELETION, content::message_deletion::project::ContentMessageDeletionProjector;
     project_content_reaction => content::reaction::layout::TYPE_CONTENT_REACTION, content::reaction::project::ContentReactionProjector;
     project_auth_recipient_key => auth::recipient_key::layout::TYPE_RECIPIENT_KEY, auth::recipient_key::project::RecipientKeyProjector;
@@ -667,8 +680,8 @@ projector_routes! {
     project_connection_fact_receipt => connection::fact_receipt::layout::TYPE_CONNECTION_FACT_RECEIPT, connection::fact_receipt::project::ConnectionFactReceiptProjector;
     project_sealed_bootstrap_request => connection::bootstrap_request::transit::TYPE_SEALED_CONNECTION_REQUEST, crate::protocol::connection_frame::SealedHandshakeFrameProjector;
     project_sealed_bootstrap_response => connection::bootstrap_response::transit::TYPE_SEALED_CONNECTION_RESPONSE, crate::protocol::connection_frame::SealedHandshakeFrameProjector;
-    project_sealed_connection_request => connection::connection_request::transit::TYPE_SEALED_CONNECTION_REQUEST, crate::protocol::connection_frame::SealedHandshakeFrameProjector;
-    project_sealed_connection_response => connection::connection_response::transit::TYPE_SEALED_CONNECTION_RESPONSE, crate::protocol::connection_frame::SealedHandshakeFrameProjector;
+    project_sealed_connection_request => crate::protocol::connection_handshake_wire::TYPE_SEALED_CONNECTION_REQUEST, crate::protocol::connection_frame::SealedHandshakeFrameProjector;
+    project_sealed_connection_response => crate::protocol::connection_handshake_wire::TYPE_SEALED_CONNECTION_RESPONSE, crate::protocol::connection_frame::SealedHandshakeFrameProjector;
     project_user_invite => auth::user_invite::layout::TYPE_USER_INVITE, auth::user_invite::project::UserInviteProjector;
     project_user => auth::user::layout::TYPE_USER, auth::user::project::UserProjector;
 }

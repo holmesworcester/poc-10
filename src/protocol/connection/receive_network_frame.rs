@@ -106,8 +106,8 @@ fn payload_error(err: PayloadError) -> String {
 use crate::core::effects::PipelineEffects;
 use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};
 use crate::protocol::connection::{
-    bootstrap_request as request, bootstrap_response as response, connection_request,
-    connection_response, frame_bundle, frame_file_slice, frame_small,
+    bootstrap_request as request, bootstrap_response as response, frame_bundle, frame_file_slice,
+    frame_small,
 };
 use crate::protocol::connection_frame::{self, ConnectionFrameKind};
 
@@ -135,8 +135,8 @@ impl IntentHandler for ReceiveNetworkFrameHandler {
         // context — the boundary does no unsealing itself.
         if request::transit::is_sealed_request_frame(&input.frame)
             || response::transit::is_sealed_response_frame(&input.frame)
-            || connection_request::transit::is_sealed_request_frame(&input.frame)
-            || connection_response::transit::is_sealed_response_frame(&input.frame)
+            || connection_frame::is_sealed_handshake_request_frame(&input.frame)
+            || connection_frame::is_sealed_handshake_response_frame(&input.frame)
         {
             let frame_fact = connection_frame::sealed_handshake_frame_fact(
                 input.frame.clone(),
@@ -169,4 +169,3 @@ impl IntentHandler for ReceiveNetworkFrameHandler {
         })
     }
 }
-

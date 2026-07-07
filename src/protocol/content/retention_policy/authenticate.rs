@@ -107,7 +107,11 @@ mod tests {
         let canonical = canonical_fact();
         let mut bytes = canonical.bytes.clone();
         bytes[0] ^= 0xff;
-        assert!(is_invalid(&Fact::new(canonical.scope, canonical.timestamp, bytes)));
+        assert!(is_invalid(&Fact::new(
+            canonical.scope,
+            canonical.timestamp,
+            bytes
+        )));
     }
 
     #[test]
@@ -115,7 +119,11 @@ mod tests {
         let canonical = canonical_fact();
         let mut bytes = canonical.bytes.clone();
         bytes.pop();
-        assert!(is_invalid(&Fact::new(canonical.scope, canonical.timestamp, bytes)));
+        assert!(is_invalid(&Fact::new(
+            canonical.scope,
+            canonical.timestamp,
+            bytes
+        )));
     }
 
     #[test]
@@ -124,7 +132,11 @@ mod tests {
         let mut bytes = canonical.bytes.clone();
         let last = bytes.len() - 1;
         bytes[last] ^= 0x01;
-        assert!(is_invalid(&Fact::new(canonical.scope, canonical.timestamp, bytes)));
+        assert!(is_invalid(&Fact::new(
+            canonical.scope,
+            canonical.timestamp,
+            bytes
+        )));
     }
 
     #[test]

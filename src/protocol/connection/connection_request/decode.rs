@@ -1,55 +1,21 @@
-//! Stable bytes for membership connection-request facts.
+//! Membership connection-request decoding: canonical wire bytes / `Fact` → typed
+//! value.
 //!
-//! The request layout is fixed width: tag, endpoint ids, nonce, initiator
-//! endpoint_shared fact id, initiator ephemeral secret fact id, initiator
-//! ephemeral public key, an endpoint signature, and two fixed listen-address
-//! blocks. Address blocks reuse the bootstrap request encoding so absent and
-//! present addresses occupy identical widths.
-//!
-//! Change this file for membership-request wire compatibility only. Signature
-//! transcript construction lives in `create.rs`; context and membership
-//! validation belong in `project.rs`.
+//! `decode_fact` checks tag, length, and field shape and produces the typed
+//! `ConnectionRequestFact`. The `FactCodec` lives here so the read pipeline and
+//! context provision decode a request owner through one entry. Signature
+//! transcripts live in `encode.rs`; membership validation belongs in
+//! `project.rs`.
 
 use crate::core::crypto::ED25519_SIGNATURE_BYTES;
+use crate::core::facts::Fact;
 use crate::core::wire;
 use crate::protocol::connection::bootstrap_request::create::{
-    decode_optional_addr, encode_optional_addr, ADDR_BLOCK_BYTES,
+    decode_optional_addr, ADDR_BLOCK_BYTES,
 };
 
+use super::encode::{FACT_BYTES, TYPE_CONNECTION_REQUEST};
 use super::fact::ConnectionRequestFact;
-
-pub const TYPE_CONNECTION_REQUEST: u8 = 48;
-
-pub const FACT_BYTES: usize = 1
-    + 32 // from_endpoint
-    + 32 // to_endpoint
-    + 32 // nonce
-    + 32 // initiator_endpoint_shared_id
-    + 32 // initiator_ephemeral_secret_fact_id
-    + 32 // initiator_ephemeral_public_key
-    + ED25519_SIGNATURE_BYTES
-    + ADDR_BLOCK_BYTES
-    + ADDR_BLOCK_BYTES;
-
-pub fn encode_fact(fact: &ConnectionRequestFact) -> Result<Vec<u8>, String> {
-    let mut out = vec![0; FACT_BYTES];
-    wire::put_u8(TYPE_CONNECTION_REQUEST, &mut out[0..1]).map_err(wire_err)?;
-    out[1..33].copy_from_slice(&fact.from_endpoint);
-    out[33..65].copy_from_slice(&fact.to_endpoint);
-    out[65..97].copy_from_slice(&fact.nonce);
-    out[97..129].copy_from_slice(&fact.initiator_endpoint_shared_id);
-    out[129..161].copy_from_slice(&fact.initiator_ephemeral_secret_fact_id);
-    out[161..193].copy_from_slice(&fact.initiator_ephemeral_public_key);
-    let mut cursor = 193;
-    out[cursor..cursor + ED25519_SIGNATURE_BYTES].copy_from_slice(&fact.endpoint_signature);
-    cursor += ED25519_SIGNATURE_BYTES;
-    let addr_bytes = encode_optional_addr(fact.from_listen_addr)?;
-    out[cursor..cursor + ADDR_BLOCK_BYTES].copy_from_slice(&addr_bytes);
-    cursor += ADDR_BLOCK_BYTES;
-    let addr_bytes = encode_optional_addr(fact.to_listen_addr)?;
-    out[cursor..cursor + ADDR_BLOCK_BYTES].copy_from_slice(&addr_bytes);
-    Ok(out)
-}
 
 pub fn decode_fact(bytes: &[u8]) -> Result<ConnectionRequestFact, String> {
     wire::expect_len(bytes, FACT_BYTES).map_err(wire_err)?;
@@ -92,6 +58,20 @@ pub fn decode_fact(bytes: &[u8]) -> Result<ConnectionRequestFact, String> {
     })
 }
 
+pub fn decode_fact_payload(bytes: &[u8]) -> Result<ConnectionRequestFact, String> {
+    decode_fact(bytes)
+}
+
+pub(crate) struct Codec;
+
+impl crate::core::projectors::FactCodec for Codec {
+    type Payload = ConnectionRequestFact;
+
+    fn decode_fact(fact: &Fact) -> Result<Self::Payload, String> {
+        decode_fact_payload(fact.body())
+    }
+}
+
 fn wire_err(err: wire::WireError) -> String {
     format!("{err:?}")
 }
@@ -99,6 +79,7 @@ fn wire_err(err: wire::WireError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::connection::connection_request::encode::encode_fact;
 
     fn fact() -> ConnectionRequestFact {
         ConnectionRequestFact {

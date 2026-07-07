@@ -16,7 +16,8 @@
 
 use crate::core::facts::Fact;
 use crate::core::projectors::{
-    verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
+    verify_fact_id, Authentication, Authenticator, DecodedAuthenticator, FactCodec,
+    ProjectionContext,
 };
 
 use super::fact::ContentMessageFact;
@@ -34,10 +35,29 @@ impl Authenticator for ContentMessageAuthenticator {
     }
 }
 
+impl DecodedAuthenticator<super::decode::Codec> for ContentMessageAuthenticator {
+    type Authenticated = ContentMessageFact;
+
+    fn authenticate_decoded<'a>(
+        fact: &'a Fact,
+        message: ContentMessageFact,
+        _context: &ProjectionContext,
+    ) -> Authentication<'a, Self::Authenticated> {
+        Authentication::from_result(fact, prove_decoded_message(fact, message))
+    }
+}
+
 /// Prove a content-message fact authentic over its own bytes.
 fn authenticate_message(fact: &Fact) -> Result<ContentMessageFact, String> {
     // 1. Layout.
     let message = super::decode::Codec::decode_fact(fact)?;
+    prove_decoded_message(fact, message)
+}
+
+fn prove_decoded_message(
+    fact: &Fact,
+    message: ContentMessageFact,
+) -> Result<ContentMessageFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
     // 3. Signature over the canonical envelope (embedded verifier key).
@@ -119,7 +139,11 @@ mod tests {
         let canonical = canonical_fact();
         let mut bytes = canonical.bytes.clone();
         bytes[0] ^= 0xff;
-        assert!(is_invalid(&Fact::new(canonical.scope, canonical.timestamp, bytes)));
+        assert!(is_invalid(&Fact::new(
+            canonical.scope,
+            canonical.timestamp,
+            bytes
+        )));
     }
 
     #[test]
@@ -127,7 +151,11 @@ mod tests {
         let canonical = canonical_fact();
         let mut bytes = canonical.bytes.clone();
         bytes.pop();
-        assert!(is_invalid(&Fact::new(canonical.scope, canonical.timestamp, bytes)));
+        assert!(is_invalid(&Fact::new(
+            canonical.scope,
+            canonical.timestamp,
+            bytes
+        )));
     }
 
     #[test]
@@ -136,7 +164,11 @@ mod tests {
         let mut bytes = canonical.bytes.clone();
         let last = bytes.len() - 1;
         bytes[last] ^= 0x01;
-        assert!(is_invalid(&Fact::new(canonical.scope, canonical.timestamp, bytes)));
+        assert!(is_invalid(&Fact::new(
+            canonical.scope,
+            canonical.timestamp,
+            bytes
+        )));
     }
 
     #[test]

@@ -224,8 +224,8 @@ mod projector_tests {
         layout as endpoint_shared_layout,
     };
     use topo::protocol::content::message::{
-        fact::{ContentMessageFact, MessageCiphertext},
         encode as message_encode,
+        fact::{ContentMessageFact, MessageCiphertext},
     };
     use topo::protocol::content::message_deletion::fact::ContentMessageDeletionFact;
     use topo::protocol::content::message_deletion::{layout, project, rows};

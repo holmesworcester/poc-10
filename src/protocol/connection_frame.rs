@@ -26,7 +26,17 @@ pub(crate) use crate::protocol::connection_frame_wire::{
     seal_connection_send_frame, ConnectionFrameFactBundle, CONNECTION_FRAME_BUNDLE_FACT_SLOTS,
     CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES, CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES,
 };
-use crate::protocol::{auth, connection, content, sync};
+// Handshake transport facade. Handshake send/receive handlers seal and classify
+// first-contact frames through this connection-frame facade, exactly as
+// established-frame handlers seal through `seal_connection_send_frame` above, so
+// no handler reaches into a `*_wire` transport module directly.
+pub(crate) use crate::protocol::connection_handshake_wire::{
+    is_sealed_request_frame as is_sealed_handshake_request_frame,
+    is_sealed_response_frame as is_sealed_handshake_response_frame,
+    seal_connection_request as seal_handshake_request,
+    seal_connection_response as seal_handshake_response,
+};
+use crate::protocol::{auth, connection, connection_handshake_wire, content, sync};
 
 /// Return the bytes that may be packaged into a connection::frame frame.
 ///
@@ -65,10 +75,10 @@ pub fn is_private_local_fact_tag(tag: u8) -> bool {
             | connection::ephemeral_secret::layout::TYPE_CONNECTION_EPHEMERAL_SECRET
             | connection::bootstrap_request::layout::TYPE_BOOTSTRAP_REQUEST
             | connection::bootstrap_response::layout::TYPE_BOOTSTRAP_RESPONSE
-            | connection::connection_request::transit::TYPE_SEALED_CONNECTION_REQUEST
-            | connection::connection_response::transit::TYPE_SEALED_CONNECTION_RESPONSE
-            | connection::connection_request::layout::TYPE_CONNECTION_REQUEST
-            | connection::connection_response::layout::TYPE_CONNECTION_RESPONSE
+            | connection_handshake_wire::TYPE_SEALED_CONNECTION_REQUEST
+            | connection_handshake_wire::TYPE_SEALED_CONNECTION_RESPONSE
+            | connection::connection_request::encode::TYPE_CONNECTION_REQUEST
+            | connection::connection_response::encode::TYPE_CONNECTION_RESPONSE
             | auth::endpoint::layout::TYPE_LOCAL_ENDPOINT
             | auth::invite::layout::TYPE_INVITE_SECRET
             | auth::local_signer_secret::layout::TYPE_LOCAL_SIGNER_SECRET
@@ -118,7 +128,9 @@ pub fn received_connection_request_fact_effect(
     received_at_local_ms: u64,
     frame_hash: [u8; 32],
 ) -> Result<PipelineEffects, String> {
-    let Ok(request) = typed_payload_from_bytes::<connection::bootstrap_request::Codec>(request_bytes) else {
+    let Ok(request) =
+        typed_payload_from_bytes::<connection::bootstrap_request::Codec>(request_bytes)
+    else {
         return Ok(PipelineEffects::new());
     };
     let request_fact = Fact::new(
@@ -146,7 +158,8 @@ pub fn received_connection_response_fact_effect(
     received_at_local_ms: u64,
     frame_hash: [u8; 32],
 ) -> Result<PipelineEffects, String> {
-    let Ok(response) = typed_payload_from_bytes::<connection::bootstrap_response::Codec>(response_bytes)
+    let Ok(response) =
+        typed_payload_from_bytes::<connection::bootstrap_response::Codec>(response_bytes)
     else {
         return Ok(PipelineEffects::new());
     };
@@ -180,7 +193,11 @@ pub fn received_membership_connection_request_fact_effect(
     else {
         return Ok(PipelineEffects::new());
     };
-    let request_fact = Fact::new(FactScope::Global, received_at_local_ms, request_bytes.to_vec());
+    let request_fact = Fact::new(
+        FactScope::Global,
+        received_at_local_ms,
+        request_bytes.to_vec(),
+    );
     let receipt = connection_fact_receipt_for_path(ConnectionFactReceiptInput {
         received_fact_id: request_fact.id,
         origin_addr,
@@ -206,7 +223,11 @@ pub fn received_membership_connection_response_fact_effect(
     else {
         return Ok(PipelineEffects::new());
     };
-    let response_fact = Fact::new(FactScope::Local, received_at_local_ms, response_bytes.to_vec());
+    let response_fact = Fact::new(
+        FactScope::Local,
+        received_at_local_ms,
+        response_bytes.to_vec(),
+    );
     let receipt = connection_fact_receipt_for_path(ConnectionFactReceiptInput {
         received_fact_id: response_fact.id,
         origin_addr,
@@ -414,8 +435,9 @@ impl Projector for SealedHandshakeFrameProjector {
         if endpoint_fact.scope != FactScope::Local {
             return Err("sealed handshake frame endpoint context must be local".to_string());
         }
-        let endpoint = auth::endpoint::decode_fact_payload(endpoint_fact.body())
-            .map_err(|_| "sealed handshake frame endpoint context is not a local endpoint".to_string())?;
+        let endpoint = auth::endpoint::decode_fact_payload(endpoint_fact.body()).map_err(|_| {
+            "sealed handshake frame endpoint context is not a local endpoint".to_string()
+        })?;
 
         let origin = observation.origin_addr.bytes();
         let received_at_local_ms = observation.received_at_local_ms;
@@ -429,7 +451,12 @@ impl Projector for SealedHandshakeFrameProjector {
                 ) else {
                     return Ok(ProjectionOutput::new());
                 };
-                received_connection_request_fact_effect(&bytes, origin, received_at_local_ms, frame_hash)?
+                received_connection_request_fact_effect(
+                    &bytes,
+                    origin,
+                    received_at_local_ms,
+                    frame_hash,
+                )?
             }
             connection::bootstrap_response::transit::TYPE_SEALED_CONNECTION_RESPONSE => {
                 let Ok(bytes) = connection::bootstrap_response::transit::open_connection_response(
@@ -438,13 +465,17 @@ impl Projector for SealedHandshakeFrameProjector {
                 ) else {
                     return Ok(ProjectionOutput::new());
                 };
-                received_connection_response_fact_effect(&bytes, origin, received_at_local_ms, frame_hash)?
+                received_connection_response_fact_effect(
+                    &bytes,
+                    origin,
+                    received_at_local_ms,
+                    frame_hash,
+                )?
             }
-            connection::connection_request::transit::TYPE_SEALED_CONNECTION_REQUEST => {
-                let Ok(bytes) = connection::connection_request::transit::open_connection_request(
-                    fact.body(),
-                    &endpoint,
-                ) else {
+            connection_handshake_wire::TYPE_SEALED_CONNECTION_REQUEST => {
+                let Ok(bytes) =
+                    connection_handshake_wire::open_connection_request(fact.body(), &endpoint)
+                else {
                     return Ok(ProjectionOutput::new());
                 };
                 received_membership_connection_request_fact_effect(
@@ -454,11 +485,10 @@ impl Projector for SealedHandshakeFrameProjector {
                     frame_hash,
                 )?
             }
-            connection::connection_response::transit::TYPE_SEALED_CONNECTION_RESPONSE => {
-                let Ok(bytes) = connection::connection_response::transit::open_connection_response(
-                    fact.body(),
-                    &endpoint,
-                ) else {
+            connection_handshake_wire::TYPE_SEALED_CONNECTION_RESPONSE => {
+                let Ok(bytes) =
+                    connection_handshake_wire::open_connection_response(fact.body(), &endpoint)
+                else {
                     return Ok(ProjectionOutput::new());
                 };
                 received_membership_connection_response_fact_effect(

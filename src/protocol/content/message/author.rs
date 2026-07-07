@@ -7,7 +7,9 @@
 //! fact, and self-authenticates it (the write pipeline's exit gate).
 //! `commands.rs` gathers the snapshot and calls in here.
 
-use crate::core::command_context::{LocalEncryptionCapability, LocalSigningCapability, WorkspaceId};
+use crate::core::command_context::{
+    LocalEncryptionCapability, LocalSigningCapability, WorkspaceId,
+};
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId, FactScope, ScopeKind};
 use crate::core::projectors::authenticate_authored;
@@ -15,7 +17,9 @@ use crate::protocol::content::retention_policy;
 
 use super::authenticate::ContentMessageAuthenticator;
 use super::encode;
-use super::fact::{ContentMessageFact, MessageCiphertext, CIPHERTEXT_BYTES, MAX_TEXT_BYTES, UNIX_MINUTE_MS};
+use super::fact::{
+    ContentMessageFact, MessageCiphertext, CIPHERTEXT_BYTES, MAX_TEXT_BYTES, UNIX_MINUTE_MS,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendReceipt {
@@ -104,8 +108,10 @@ impl MessageAuthoringSnapshot {
                 .map_err(|err| format!("content message ciphertext: {err}"))?,
             signature: [0; crypto::ED25519_SIGNATURE_BYTES],
         };
-        let (_, signature) =
-            crypto::ed25519_sign_canonical(&self.signing.private_key, &encode::signing_bytes(&message)?);
+        let (_, signature) = crypto::ed25519_sign_canonical(
+            &self.signing.private_key,
+            &encode::signing_bytes(&message)?,
+        );
         message.signature = signature;
 
         let fact = Fact::new(

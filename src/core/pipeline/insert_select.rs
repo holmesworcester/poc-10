@@ -195,6 +195,7 @@ CREATE TABLE IF NOT EXISTS target_values (
 );
 "#,
         row_tables: &[],
+        row_schemas: &[],
     };
 
     fn open_store() -> Store {

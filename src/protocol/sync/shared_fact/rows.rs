@@ -1154,7 +1154,10 @@ fn bootstrap_response_row(
         )
         .map_err(|err| format!("load connection row for shareable sync: {err}"))?
         .map(|value| {
-            connection::bootstrap_response::rows::decode_bootstrap_response_row(&connection_id, &value)
+            connection::bootstrap_response::rows::decode_bootstrap_response_row(
+                &connection_id,
+                &value,
+            )
         })
         .transpose()
 }
@@ -1211,8 +1214,11 @@ fn connection_invite_secret_id(
         )
         .map_err(|err| format!("load connection request row for shareable sync: {err}"))?
         .map(|value| {
-            connection::bootstrap_request::rows::decode_bootstrap_request_row(&connection.request_id, &value)
-                .map(|row| row.invite_secret_fact_id)
+            connection::bootstrap_request::rows::decode_bootstrap_request_row(
+                &connection.request_id,
+                &value,
+            )
+            .map(|row| row.invite_secret_fact_id)
         })
         .transpose()
 }

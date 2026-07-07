@@ -33,12 +33,12 @@ use crate::core::projectors::{
 };
 
 use crate::protocol::auth::{endpoint, invite};
-use crate::protocol::connection::observed_endpoint_address::rows::observed_endpoint_address_row;
 use crate::protocol::connection::create_bootstrap_response::{
     create_bootstrap_response_intent, CreateBootstrapResponse,
 };
 use crate::protocol::connection::ephemeral_secret;
 use crate::protocol::connection::fact_receipt;
+use crate::protocol::connection::observed_endpoint_address::rows::observed_endpoint_address_row;
 
 use super::create::encode_optional_addr;
 use super::fact::BootstrapRequestFact;
@@ -170,12 +170,13 @@ impl AuthenticatedProjector<super::authenticate::BootstrapRequestAuthenticator>
                 if response_fact.scope != FactScope::Local {
                     return Err("connection request response context must be local".to_string());
                 }
-                let response = crate::protocol::connection::bootstrap_response::decode_fact_payload(
-                    response_fact.body(),
-                )
-                .map_err(|_| {
-                    "connection request response context is not a response fact".to_string()
-                })?;
+                let response =
+                    crate::protocol::connection::bootstrap_response::decode_fact_payload(
+                        response_fact.body(),
+                    )
+                    .map_err(|_| {
+                        "connection request response context is not a response fact".to_string()
+                    })?;
                 if response.request_id != fact.id {
                     return Err(
                         "connection request response context targets another request".to_string(),
@@ -401,6 +402,13 @@ mod projector_tests {
     use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
     use topo::protocol::auth::endpoint::{fact::EndpointFact, layout as endpoint_layout};
     use topo::protocol::auth::invite::{fact::InviteSecretFact, layout as invite_layout};
+    use topo::protocol::connection::bootstrap_request::create::encode_optional_addr;
+    use topo::protocol::connection::bootstrap_request::{
+        fact::BootstrapRequestFact, layout, project, rows,
+    };
+    use topo::protocol::connection::bootstrap_response::{
+        fact::BootstrapResponseFact, layout as response_layout,
+    };
     use topo::protocol::connection::create_bootstrap_response::{
         decode_create_bootstrap_response_intent, CREATE_BOOTSTRAP_RESPONSE,
     };
@@ -410,11 +418,6 @@ mod projector_tests {
     use topo::protocol::connection::fact_receipt::{
         fact::{ConnectionFactReceipt, RECEIVE_PATH_CONNECTION_REQUEST},
         layout as received_layout,
-    };
-    use topo::protocol::connection::bootstrap_request::create::encode_optional_addr;
-    use topo::protocol::connection::bootstrap_request::{fact::BootstrapRequestFact, layout, project, rows};
-    use topo::protocol::connection::bootstrap_response::{
-        fact::BootstrapResponseFact, layout as response_layout,
     };
 
     fn invite_fact() -> (InviteSecretFact, Fact) {
@@ -607,14 +610,16 @@ mod projector_tests {
             15,
             response_layout::encode_fact(&response).expect("encode response"),
         );
-        let need = topo::protocol::connection::bootstrap_request::connection_response_for_request_need(
-            owner, request_id,
-        );
+        let need =
+            topo::protocol::connection::bootstrap_request::connection_response_for_request_need(
+                owner, request_id,
+            );
         MatchedContext {
             need,
-            offer: topo::protocol::connection::bootstrap_request::connection_response_for_request_offer(
-                fact.id, request_id,
-            ),
+            offer:
+                topo::protocol::connection::bootstrap_request::connection_response_for_request_offer(
+                    fact.id, request_id,
+                ),
             payload: fact,
         }
     }
@@ -681,7 +686,10 @@ mod projector_tests {
             .any(|need| need.role == "connection_response_for_request"));
         // request row + learned-address put for the peer's listen addr.
         assert_eq!(output.effects.row_mutations.len(), 2);
-        assert!(learns_observed_endpoint_address(&output, request.to_endpoint));
+        assert!(learns_observed_endpoint_address(
+            &output,
+            request.to_endpoint
+        ));
         assert_eq!(output.offers.len(), 1);
         assert_eq!(output.offers[0].role.as_str(), "connection_request");
         let RowMutation::PutRow(row) = &output.effects.row_mutations[0] else {
@@ -780,7 +788,10 @@ mod projector_tests {
         assert!(output.time_wakes.is_empty());
         // request row + learned-address put for the initiator's addr.
         assert_eq!(output.effects.row_mutations.len(), 2);
-        assert!(learns_observed_endpoint_address(&output, request.from_endpoint));
+        assert!(learns_observed_endpoint_address(
+            &output,
+            request.from_endpoint
+        ));
         assert_eq!(output.offers[0].role.as_str(), "connection_request");
         let response_intent = output
             .effects

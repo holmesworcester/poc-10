@@ -152,13 +152,15 @@ Non-trivial projectors should make their proof shape obvious to a reviewer:
 1. Authenticate in `authenticate.rs`: a reviewable policy (decode, fact id,
    signature, intrinsic field rules) that returns an `AuthenticatedFact`. Keep
    its shape uniform; it owns no context, authority, or rows.
-2. Until the staged fact-route runner owns this composition, implement
-   `Projector::project()` as a small call through
-   `core::projectors::project_authenticated::<ModuleAuthenticator, _>()` or
-   `core::projectors::project_adapted::<ModuleAuthenticator, ModuleAdapter, _>()`.
-   Once the staged runner lands, route registration owns that
-   `authenticate -> adapt -> project` call and projector files keep only the
-   typed projector body.
+2. Converted families implement `Projector::project()` as a small call through
+   `core::projectors::project_staged::<ModuleCodec, ModuleAuthenticator, ModuleAdapter, _>()`
+   and set the route's `FactPipeline::Staged` metadata. Transitional families
+   may still call
+   `core::projectors::project_adapted::<ModuleAuthenticator, ModuleAdapter, _>()`
+   or
+   `core::projectors::project_authenticated::<ModuleAuthenticator, _>()`. The
+   staged runner owns `decode -> authenticate -> adapt -> project`; projector
+   files keep only the typed projector body.
 3. Put the real proof in
    `AuthenticatedProjector<ModuleAuthenticator>::project_authenticated()`,
    binding `let (fact, payload) = authenticated.into_parts();`. Body comments

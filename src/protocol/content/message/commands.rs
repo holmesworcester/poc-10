@@ -8,8 +8,8 @@
 //! capabilities for callers that drive a command directly.
 
 use crate::core::command_context::{
-    CommandContext, CommandOutput, IdentityVault, LocalEncryptionCapability, LocalSigningCapability,
-    WorkspaceId,
+    CommandContext, CommandOutput, IdentityVault, LocalEncryptionCapability,
+    LocalSigningCapability, WorkspaceId,
 };
 use crate::core::crypto;
 use crate::core::facts::FactId;

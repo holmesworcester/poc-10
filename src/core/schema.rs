@@ -121,6 +121,7 @@ CREATE TABLE IF NOT EXISTS clock (
 );
 "#,
     row_tables: &[],
+    row_schemas: &[],
 };
 
 /// Local admission metadata table for content-addressed fact bytes.

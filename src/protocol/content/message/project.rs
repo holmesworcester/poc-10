@@ -26,8 +26,8 @@ use crate::core::crypto;
 use crate::core::facts::{Fact, FactId};
 use crate::core::intents::RowMutation;
 use crate::core::projectors::{
-    project_adapted, AuthenticatedFact, AuthenticatedProjector, ProjectionContext, ProjectionOutput,
-    Projector, TimeWake,
+    project_staged, AuthenticatedFact, AuthenticatedProjector, ProjectionContext, ProjectionOutput,
+    Projector, SemanticProjector, TimeWake,
 };
 use crate::protocol::auth;
 use crate::protocol::auth::local_history_node_secret::project as coverage;
@@ -95,11 +95,23 @@ impl Projector for ContentMessageProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_adapted::<
+        project_staged::<
+            super::decode::Codec,
             super::authenticate::ContentMessageAuthenticator,
             super::adapt::ContentMessageAdapter,
             _,
         >(self, fact, context)
+    }
+}
+
+impl SemanticProjector<super::fact::ContentMessageFact> for ContentMessageProjector {
+    fn project_semantic(
+        &self,
+        fact: &Fact,
+        message: super::fact::ContentMessageFact,
+        context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
+        self.project_authenticated(AuthenticatedFact::new(fact, message), context)
     }
 }
 

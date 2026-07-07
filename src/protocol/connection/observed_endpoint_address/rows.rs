@@ -27,7 +27,10 @@ pub fn observed_endpoint_address_key(endpoint_id: &FactId) -> Vec<u8> {
     endpoint_id.to_vec()
 }
 
-pub fn observed_endpoint_address_row(endpoint_id: FactId, address: SocketAddr) -> Result<TableRow, String> {
+pub fn observed_endpoint_address_row(
+    endpoint_id: FactId,
+    address: SocketAddr,
+) -> Result<TableRow, String> {
     Ok(TableRow {
         table: CONNECTION_OBSERVED_ENDPOINT_ADDRESS_ROWS,
         key: observed_endpoint_address_key(&endpoint_id),
@@ -35,7 +38,10 @@ pub fn observed_endpoint_address_row(endpoint_id: FactId, address: SocketAddr) -
     })
 }
 
-pub fn decode_observed_endpoint_address_row(key: &[u8], value: &[u8]) -> Result<(FactId, SocketAddr), String> {
+pub fn decode_observed_endpoint_address_row(
+    key: &[u8],
+    value: &[u8],
+) -> Result<(FactId, SocketAddr), String> {
     let endpoint_id: FactId = key
         .try_into()
         .map_err(|_| "peer address row key is not a 32-byte endpoint id".to_string())?;
@@ -55,7 +61,8 @@ mod tests {
     fn observed_endpoint_address_row_roundtrips() {
         let addr: SocketAddr = "127.0.0.1:41001".parse().unwrap();
         let row = observed_endpoint_address_row([7; 32], addr).expect("encode");
-        let (endpoint, decoded) = decode_observed_endpoint_address_row(&row.key, &row.value).expect("decode");
+        let (endpoint, decoded) =
+            decode_observed_endpoint_address_row(&row.key, &row.value).expect("decode");
         assert_eq!(endpoint, [7; 32]);
         assert_eq!(decoded, addr);
     }

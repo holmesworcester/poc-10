@@ -18,8 +18,19 @@ pub const TYPE_CONTENT_MESSAGE: u8 = 50;
 
 /// Total fixed wire width of an encoded content-message fact.
 pub const CONTENT_MESSAGE_BYTES: usize = 1
-    + 32 + 8 + 32 + 32 + 32 + 32 + 32 + 8 + 32 + 8
-    + NONCE_BYTES + 4 + CIPHERTEXT_BYTES
+    + 32
+    + 8
+    + 32
+    + 32
+    + 32
+    + 32
+    + 32
+    + 8
+    + 32
+    + 8
+    + NONCE_BYTES
+    + 4
+    + CIPHERTEXT_BYTES
     + crate::core::crypto::ED25519_SIGNATURE_BYTES;
 
 /// Offset of the trailing signature field; the signing transcript zeroes it.

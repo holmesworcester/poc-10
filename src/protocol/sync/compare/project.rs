@@ -40,7 +40,9 @@ impl Projector for SyncCompareProjector {
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::SyncCompareAuthenticator> for SyncCompareProjector {
+impl AuthenticatedProjector<super::authenticate::SyncCompareAuthenticator>
+    for SyncCompareProjector
+{
     fn project_authenticated(
         &self,
         authenticated: AuthenticatedFact<'_, super::fact::SyncCompareFact>,

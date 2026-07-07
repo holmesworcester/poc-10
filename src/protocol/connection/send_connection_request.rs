@@ -1,22 +1,26 @@
 //! Membership connection-request network-send intent.
 //!
 //! Before a membership connection exists, the only outbound network operation is
-//! sending a sealed `connection_request` fact to the endpoint's learned listen
-//! address. The live `maintain_connections` recurring loop emits this local
-//! intent for each unanswered local outbound membership request; the handler
-//! loads exactly that request fact plus its initiator ephemeral secret, seals
-//! the canonical bytes, and attempts one bounded write. Retry timing is the
-//! maintenance cadence: a dropped send is re-queued on the next tick.
+//! sending a `connection_request` fact to the endpoint's learned listen address.
+//! The live `maintain_connections` recurring loop emits this local intent for
+//! each unanswered local outbound membership request; the handler loads exactly
+//! that request fact plus its initiator ephemeral secret, seals the canonical
+//! bytes through the connection transport, and emits a `send_network_frame`
+//! intent keyed by the peer endpoint — the single outgoing socket boundary,
+//! identical to established-frame egress. Retry timing is the maintenance
+//! cadence: a dropped send is re-queued on the next tick.
 
 use std::net::SocketAddr;
 
 use crate::core::effects::PipelineEffects;
 use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};
 use crate::core::intents::{Intent, IntentKind};
-use crate::core::network::{self, NetworkTarget, OutboundFrame};
 use crate::protocol::connection::bootstrap_request::create as addr;
-use crate::protocol::connection::connection_request::layout;
-use crate::protocol::connection::connection_request::transit;
+use crate::protocol::connection::connection_request::decode as layout;
+use crate::protocol::connection::send_network_frame::{
+    send_network_frame_intent, SendNetworkFrame,
+};
+use crate::protocol::connection_frame::seal_handshake_request;
 
 pub const SEND_CONNECTION_REQUEST: &str = "send_connection_request";
 
@@ -98,17 +102,21 @@ impl IntentHandler for SendConnectionRequestHandler {
             return Err("send_connection_request ephemeral owner does not match request".into());
         }
         if ephemeral.ephemeral_public_key != request.initiator_ephemeral_public_key {
-            return Err("send_connection_request ephemeral public key does not match request".into());
+            return Err(
+                "send_connection_request ephemeral public key does not match request".into(),
+            );
         }
-        let sealed = transit::seal_connection_request(
-            request_fact.body(),
-            &ephemeral.ephemeral_private_key,
-        )?;
-        let target = NetworkTarget::new(input.addr);
-        if network::send(context.store()?, target, OutboundFrame { bytes: sealed }).is_err() {
-            return Ok(PipelineEffects::new());
-        }
-        Ok(PipelineEffects::new())
+        let sealed = seal_handshake_request(request_fact.body(), &ephemeral.ephemeral_private_key)?;
+        // Egress is the connection frame boundary: seal here, then hand the bytes
+        // to `send_network_frame` keyed by the peer endpoint so the socket write
+        // happens in exactly one place. The peer's reachable address is resolved
+        // from its learned `observed_endpoint_address` row there.
+        Ok(
+            PipelineEffects::new().local_intent(send_network_frame_intent(SendNetworkFrame {
+                routing_key: request.to_endpoint,
+                frame: sealed,
+            })),
+        )
     }
 }
 

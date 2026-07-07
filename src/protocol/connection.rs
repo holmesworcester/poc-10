@@ -21,9 +21,9 @@
 
 pub mod bootstrap_request;
 pub mod bootstrap_response;
+pub mod close;
 pub mod connection_request;
 pub mod connection_response;
-pub mod close;
 pub mod ephemeral_secret;
 pub mod fact_receipt;
 pub mod frame_bundle;

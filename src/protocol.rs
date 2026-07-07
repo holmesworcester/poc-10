@@ -29,6 +29,7 @@ pub mod app;
 pub(crate) mod cli;
 pub mod connection_frame;
 pub mod connection_frame_wire;
+pub mod connection_handshake_wire;
 pub mod payload;
 pub mod registry;
 
