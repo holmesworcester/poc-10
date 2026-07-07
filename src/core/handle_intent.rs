@@ -45,6 +45,267 @@ use crate::core::project_fact::route::FactAdmissionFn;
 use rusqlite::{params, params_from_iter, OptionalExtension};
 use std::net::SocketAddr;
 
+struct QueuedIntent {
+    /// Queue from which this row was claimed.
+    queue: IntentQueue,
+    intent: Intent,
+}
+
+struct IntentInput<'a> {
+    queued: QueuedIntent,
+    handler: &'a dyn IntentHandler,
+    context: HandlerContext<'a>,
+}
+
+enum IntentOutcome {
+    Retried(QueuedIntent),
+    Handled {
+        queued: QueuedIntent,
+        effects: RuntimeEffects,
+    },
+}
+
+// =============================================================================
+// Runtime Entry Point
+// =============================================================================
+
+/// Dispatch one queued intent from the selected queue.
+///
+/// The caller owns queue order and batching. This wrapper delegates to the
+/// central procedure below so one intent row has one readable lifecycle.
+pub(crate) fn dispatch_one_intent(
+    store: &Db,
+    handlers: &HandlerSet,
+    queue: IntentQueue,
+    allowed_tables: &[TableName],
+    fact_admission: Option<FactAdmissionFn>,
+    handler_mode: HandlerMode,
+) -> Result<WorkStatus, String> {
+    dispatch_one_intent_from_queue(
+        store,
+        handlers,
+        queue,
+        allowed_tables,
+        fact_admission,
+        handler_mode,
+    )
+}
+
+// =============================================================================
+// Central Procedure
+// =============================================================================
+
+/// Dispatch one intent row.
+///
+/// This is the whole intent worker in miniature:
+///
+/// 1. Load one queued intent, registered handler, and declared fact context.
+/// 2. Run the handler and validate its uncommitted output.
+/// 3. Commit the terminal queue outcome.
+///
+/// Handlers are allowed to observe runtime state and request retries, so this is
+/// not a pure-evaluation boundary like projection. The queue lifecycle is still
+/// centralized: only the commit stage deletes handled rows, removes durable
+/// shadowed local rows, rotates local retries, and publishes effects.
+fn dispatch_one_intent_from_queue(
+    store: &Db,
+    handlers: &HandlerSet,
+    queue: IntentQueue,
+    allowed_tables: &[TableName],
+    fact_admission: Option<FactAdmissionFn>,
+    handler_mode: HandlerMode,
+) -> Result<WorkStatus, String> {
+    let input = match load_one_intent_input(store, handlers, queue, handler_mode)? {
+        None => return Ok(WorkStatus::idle()),
+        Some(input) => input,
+    };
+    let outcome = run_loaded_intent(input, allowed_tables, fact_admission)?;
+    commit_intent_outcome(store, outcome, allowed_tables, fact_admission)
+}
+
+// =============================================================================
+// Stages
+// =============================================================================
+
+/// Stage 1: load one queued intent and the facts its handler declared.
+///
+/// Durable queue rows are ordered by stable identity for deterministic tests
+/// and replay. Local rows use insertion order so inbound network frames and
+/// other ephemeral work preserve arrival order within one process.
+fn load_one_intent_input<'a>(
+    store: &'a Db,
+    handlers: &'a HandlerSet,
+    queue: IntentQueue,
+    mode: HandlerMode,
+) -> Result<Option<IntentInput<'a>>, String> {
+    let Some(queued) = next_queued_intent_in_queue(store, queue, handlers.intent_kinds())? else {
+        return Ok(None);
+    };
+    let handler = handlers.handler_for_intent(&queued.intent)?;
+    let context = load_handler_context(store, handler, &queued.intent, mode)?;
+    Ok(Some(IntentInput {
+        queued,
+        handler,
+        context,
+    }))
+}
+
+/// Stage 2: run the handler and normalize its uncommitted output.
+///
+/// Run one claimed intent through its handler, but keep queue mutation outside
+/// this stage.
+///
+/// A retry remains queued and may rotate local queue order during commit.
+/// Successful output is validated before any queue row or runtime effect is
+/// mutated.
+fn run_loaded_intent(
+    input: IntentInput<'_>,
+    allowed_tables: &[TableName],
+    fact_admission: Option<FactAdmissionFn>,
+) -> Result<IntentOutcome, String> {
+    let IntentInput {
+        queued,
+        handler,
+        context,
+    } = input;
+    match handler.handle(&queued.intent, &context) {
+        Ok(effects) => {
+            validate_runtime_effects_for_admission(&effects, allowed_tables, fact_admission)?;
+            Ok(IntentOutcome::Handled { queued, effects })
+        }
+        Err(HandlerError::Retry(_)) => Ok(IntentOutcome::Retried(queued)),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+/// Stage 3: commit the terminal outcome for one queued intent.
+///
+/// Handled output deletes the selected row and commits effects in the same
+/// transaction. Durable success also deletes the shadowed local duplicate.
+/// Local retry rotation is a queue-only commit outcome; durable retry leaves the
+/// durable row in place unchanged.
+fn commit_intent_outcome(
+    store: &Db,
+    outcome: IntentOutcome,
+    allowed_tables: &[TableName],
+    fact_admission: Option<FactAdmissionFn>,
+) -> Result<WorkStatus, String> {
+    match outcome {
+        IntentOutcome::Retried(queued) => {
+            if queued.queue == IntentQueue::Local {
+                rotate_local_retry_to_tail(store, &queued.intent)?;
+            }
+            Ok(WorkStatus::retried())
+        }
+        IntentOutcome::Handled { queued, effects } => {
+            let progressed =
+                commit_handler_output(store, &queued, &effects, allowed_tables, fact_admission)?;
+            Ok(WorkStatus::progressed(progressed))
+        }
+    }
+}
+
+// =============================================================================
+// Load Stage Helpers
+// =============================================================================
+
+/// Return the first queued intent matching a declared handler route.
+fn next_queued_intent_in_queue(
+    store: &Db,
+    queue: IntentQueue,
+    allowed_kinds: &[&str],
+) -> Result<Option<QueuedIntent>, String> {
+    next_intent_work_row(store, queue.table(), allowed_kinds, queue.order_by_sql())
+        .map_err(|err| format!("load queued intent: {err}"))?
+        .map(|row| Intent::from_work_row(row).map(|intent| QueuedIntent { queue, intent }))
+        .transpose()
+}
+
+/// Build the fact/database view a stored-intent handler requested.
+fn load_handler_context<'a>(
+    store: &'a Db,
+    handler: &(impl IntentHandler + ?Sized),
+    intent: &Intent,
+    mode: HandlerMode,
+) -> Result<HandlerContext<'a>, String> {
+    let mut facts = Vec::new();
+    for id in handler.input_fact_ids(intent)? {
+        if let Some(fact) = retained_fact(store, &id)? {
+            facts.push(fact);
+        }
+    }
+    let context = HandlerContext::with_facts(facts).with_mode(mode);
+    Ok(context.with_db(store))
+}
+
+fn retained_fact(store: &Db, id: &FactId) -> Result<Option<Fact>, String> {
+    store
+        .conn()
+        .query_row(
+            "SELECT f.id, m.scope, m.scope_kind, m.scope_id, m.received_at, f.bytes
+             FROM facts f
+             JOIN local_fact_admissions m ON m.fact_id = f.id
+             WHERE f.id = ?1
+             LIMIT 1",
+            params![id.as_slice()],
+            fact_from_storage_row,
+        )
+        .optional()
+        .map_err(|err| format!("load handler fact: {err}"))
+}
+
+// =============================================================================
+// Commit Stage Helpers
+// =============================================================================
+
+/// Commit the complete output of one handled intent in a single transaction.
+///
+/// This is the boundary for intent dispatch, not a second implementation of
+/// effect commits. Dispatch owns deleting the handled queued intent and
+/// removing any shadowed ephemeral duplicate; `commit_effects` owns purging
+/// facts, admitting emitted facts, applying row mutations, and recording
+/// follow-up intents. Keeping those steps in one transaction means a handler
+/// output is visible exactly when its input queue row is consumed.
+///
+/// If the handled row is already gone, nothing commits and the returned value
+/// is `false`.
+fn commit_handler_output(
+    store: &Db,
+    queued: &QueuedIntent,
+    effects: &RuntimeEffects,
+    allowed_tables: &[TableName],
+    fact_admission: Option<FactAdmissionFn>,
+) -> Result<bool, String> {
+    store
+        .write_transaction(|tx| {
+            let kind = queued.intent.kind.as_str();
+            let idempotence_key = queued.intent.key.as_slice();
+            if delete_intent_work_row_in_tx(tx, queued.queue.table(), kind, idempotence_key)? == 0 {
+                return Ok(false);
+            }
+            if queued.queue == IntentQueue::Durable {
+                delete_intent_work_row_in_tx(tx, LOCAL_INTENTS, kind, idempotence_key)?;
+            }
+
+            commit_runtime_effects_in_tx(tx, effects, allowed_tables, fact_admission)?;
+            Ok(true)
+        })
+        .map_err(|err| format!("commit handler output: {err}"))
+}
+
+fn rotate_local_retry_to_tail(store: &Db, intent: &Intent) -> Result<(), String> {
+    store
+        .write_transaction(|tx| {
+            rotate_intent_work_row_to_tail_in_tx(tx, LOCAL_INTENTS, &intent.work_row())
+        })
+        .map(|_| ())
+        .map_err(|err| format!("rotate local retry intent: {err}"))
+}
+
+// =============================================================================
+// Registry and Runtime Types
+// =============================================================================
+
 /// Factory for one protocol intent handler.
 pub type HandlerFactory = fn() -> Box<dyn IntentHandler>;
 
@@ -124,6 +385,14 @@ impl WorkStatus {
         }
     }
 
+    /// A handler asked to keep the row queued for a later pass.
+    pub fn retried() -> Self {
+        Self {
+            progressed: false,
+            retried: true,
+        }
+    }
+
     /// Accumulate status across runtime stages.
     pub fn merge(&mut self, other: Self) {
         self.progressed |= other.progressed;
@@ -142,6 +411,7 @@ impl WorkStatus {
 /// without rebuilding them for every queued row.
 pub(crate) struct HandlerSet {
     entries: Vec<HandlerEntry>,
+    intent_kinds: Vec<&'static str>,
 }
 
 struct HandlerEntry {
@@ -160,11 +430,18 @@ impl HandlerSet {
                     handler: (route.factory)(),
                 })
                 .collect(),
+            intent_kinds: routes.iter().map(|route| route.intent_kind).collect(),
         }
     }
 
-    pub(crate) fn intent_kinds(&self) -> Vec<&'static str> {
-        self.entries.iter().map(|entry| entry.intent_kind).collect()
+    fn intent_kinds(&self) -> &[&'static str] {
+        &self.intent_kinds
+    }
+
+    fn handler_for_intent(&self, intent: &Intent) -> Result<&dyn IntentHandler, String> {
+        let kind = intent.kind.as_str();
+        self.handler_for_kind(kind)
+            .ok_or_else(|| format!("no handler registered for intent kind {kind}"))
     }
 
     fn handler_for_kind(&self, kind: &str) -> Option<&dyn IntentHandler> {
@@ -196,6 +473,10 @@ impl IntentQueue {
         }
     }
 }
+
+// =============================================================================
+// Queue SQL Helpers
+// =============================================================================
 
 fn intent_queue_error(message: impl Into<String>) -> rusqlite::Error {
     rusqlite::Error::InvalidParameterName(message.into())
@@ -350,15 +631,8 @@ pub(crate) fn submit_intent_to_table(
 }
 
 /// Load the next queued row for any registered handler kind.
-///
-/// Durable queue rows are ordered by stable identity for deterministic tests
-/// and replay. Local rows use insertion order so inbound network frames and
-/// other ephemeral work preserve arrival order within one process.
 #[cfg(test)]
-pub(crate) fn next_queued_intent(
-    store: &Db,
-    allowed_kinds: &[&str],
-) -> Result<Option<QueuedIntent>, String> {
+fn next_queued_intent(store: &Db, allowed_kinds: &[&str]) -> Result<Option<QueuedIntent>, String> {
     if allowed_kinds.is_empty() {
         return Ok(None);
     }
@@ -366,188 +640,6 @@ pub(crate) fn next_queued_intent(
         Some(intent) => Ok(Some(intent)),
         None => next_queued_intent_in_queue(store, IntentQueue::Local, allowed_kinds),
     }
-}
-
-struct IntentWork<'a> {
-    queued: QueuedIntent,
-    handler: &'a dyn IntentHandler,
-}
-
-/// Run one claimed intent through its handler.
-///
-/// On success, the handled row and all effects admitted by the intent policy
-/// commit together. On retry, no SQL changes are made and the returned status
-/// records that dispatch should stop this bounded pass.
-fn handle_intent_with_policy(
-    work: IntentWork<'_>,
-    store: &Db,
-    allowed_tables: &[TableName],
-    fact_admission: Option<FactAdmissionFn>,
-    handler_mode: HandlerMode,
-) -> Result<WorkStatus, String> {
-    let IntentWork { queued, handler } = work;
-    let mut status = WorkStatus::idle();
-    let context = load_handler_context(store, handler, &queued.intent, handler_mode)?;
-    let Some(output) = run_handler(handler, &queued.intent, &context, &mut status)? else {
-        if status.retried && queued.queue == IntentQueue::Local {
-            rotate_local_retry_to_tail(store, &queued.intent)?;
-        }
-        return Ok(status);
-    };
-    validate_runtime_effects_for_admission(&output, allowed_tables, fact_admission)?;
-    status.progressed =
-        commit_handler_output(store, &queued, &output, allowed_tables, fact_admission)?;
-    Ok(status)
-}
-
-/// Dispatch one queued intent from the selected queue.
-///
-/// The caller owns queue order and batching. This function owns one intent row:
-/// load the selected handler's declared inputs, run the handler, and commit
-/// handler output atomically with queue deletion.
-pub(crate) fn dispatch_one_intent(
-    store: &Db,
-    handlers: &HandlerSet,
-    queue: IntentQueue,
-    allowed_tables: &[TableName],
-    fact_admission: Option<FactAdmissionFn>,
-    handler_mode: HandlerMode,
-) -> Result<WorkStatus, String> {
-    let kinds = handlers.intent_kinds();
-    let Some(work) = next_intent_work_in_queue(store, handlers, queue, &kinds)? else {
-        return Ok(WorkStatus::idle());
-    };
-    handle_intent_with_policy(work, store, allowed_tables, fact_admission, handler_mode)
-}
-
-fn next_intent_work_in_queue<'a>(
-    store: &Db,
-    handlers: &'a HandlerSet,
-    queue: IntentQueue,
-    kinds: &[&str],
-) -> Result<Option<IntentWork<'a>>, String> {
-    let Some(queued) = next_queued_intent_in_queue(store, queue, kinds)? else {
-        return Ok(None);
-    };
-    let kind = queued.intent.kind.as_str();
-    let handler = handlers
-        .handler_for_kind(kind)
-        .ok_or_else(|| format!("no handler registered for intent kind {kind}"))?;
-    Ok(Some(IntentWork { queued, handler }))
-}
-
-/// Return the first queued intent matching a declared handler route.
-fn next_queued_intent_in_queue(
-    store: &Db,
-    queue: IntentQueue,
-    allowed_kinds: &[&str],
-) -> Result<Option<QueuedIntent>, String> {
-    next_intent_work_row(store, queue.table(), allowed_kinds, queue.order_by_sql())
-        .map_err(|err| format!("load queued intent: {err}"))?
-        .map(|row| Intent::from_work_row(row).map(|intent| QueuedIntent { queue, intent }))
-        .transpose()
-}
-
-/// Build the fact/database view a stored-intent handler requested.
-fn load_handler_context<'a>(
-    store: &'a Db,
-    handler: &(impl IntentHandler + ?Sized),
-    intent: &Intent,
-    mode: HandlerMode,
-) -> Result<HandlerContext<'a>, String> {
-    let mut facts = Vec::new();
-    for id in handler.input_fact_ids(intent)? {
-        if let Some(fact) = retained_fact(store, &id)? {
-            facts.push(fact);
-        }
-    }
-    let context = HandlerContext::with_facts(facts).with_mode(mode);
-    Ok(context.with_db(store))
-}
-
-fn retained_fact(store: &Db, id: &FactId) -> Result<Option<Fact>, String> {
-    store
-        .conn()
-        .query_row(
-            "SELECT f.id, m.scope, m.scope_kind, m.scope_id, m.received_at, f.bytes
-             FROM facts f
-             JOIN local_fact_admissions m ON m.fact_id = f.id
-             WHERE f.id = ?1
-             LIMIT 1",
-            params![id.as_slice()],
-            fact_from_storage_row,
-        )
-        .optional()
-        .map_err(|err| format!("load handler fact: {err}"))
-}
-
-/// Run a handler and convert retry markers into report state.
-fn run_handler(
-    handler: &(impl IntentHandler + ?Sized),
-    intent: &Intent,
-    context: &HandlerContext<'_>,
-    status: &mut WorkStatus,
-) -> Result<Option<RuntimeEffects>, String> {
-    match handler.handle(intent, context) {
-        Ok(output) => Ok(Some(output)),
-        Err(err) => {
-            if matches!(err, HandlerError::Retry(_)) {
-                status.retried = true;
-                Ok(None)
-            } else {
-                Err(err.to_string())
-            }
-        }
-    }
-}
-
-/// Commit the complete output of one handled intent in a single transaction.
-///
-/// This is the boundary for intent dispatch, not a second implementation of
-/// effect commits. Dispatch owns deleting the handled queued intent and
-/// removing any shadowed ephemeral duplicate; `commit_effects` owns purging
-/// facts, admitting emitted facts, applying row mutations, and recording
-/// follow-up intents. Keeping those steps in one transaction means a handler
-/// output is visible exactly when its input queue row is consumed.
-///
-/// If the handled row is already gone, nothing commits and the returned value
-/// is `false`.
-fn commit_handler_output(
-    store: &Db,
-    queued: &QueuedIntent,
-    effects: &RuntimeEffects,
-    allowed_tables: &[TableName],
-    fact_admission: Option<FactAdmissionFn>,
-) -> Result<bool, String> {
-    store
-        .write_transaction(|tx| {
-            let kind = queued.intent.kind.as_str();
-            let idempotence_key = queued.intent.key.as_slice();
-            if delete_intent_work_row_in_tx(tx, queued.queue.table(), kind, idempotence_key)? == 0 {
-                return Ok(false);
-            }
-            if queued.queue == IntentQueue::Durable {
-                delete_intent_work_row_in_tx(tx, LOCAL_INTENTS, kind, idempotence_key)?;
-            }
-
-            commit_runtime_effects_in_tx(tx, effects, allowed_tables, fact_admission)?;
-            Ok(true)
-        })
-        .map_err(|err| format!("commit handler output: {err}"))
-}
-
-fn rotate_local_retry_to_tail(store: &Db, intent: &Intent) -> Result<bool, String> {
-    store
-        .write_transaction(|tx| {
-            rotate_intent_work_row_to_tail_in_tx(tx, LOCAL_INTENTS, &intent.work_row())
-        })
-        .map_err(|err| format!("rotate local retry intent: {err}"))
-}
-
-pub(crate) struct QueuedIntent {
-    /// Queue from which this row was claimed.
-    queue: IntentQueue,
-    pub(crate) intent: Intent,
 }
 
 #[cfg(test)]
