@@ -224,7 +224,7 @@ mod tests {
     use crate::core::store::Store;
     use crate::protocol::auth::endpoint::{fact::EndpointFact, rows as endpoint_rows};
     use crate::protocol::auth::endpoint_shared::{
-        fact::{EndpointRole, EndpointSharedFact},
+        fact::{EndpointDeviceName, EndpointRole, EndpointSharedFact},
         rows as endpoint_shared_rows,
     };
     use crate::protocol::connection;
@@ -265,7 +265,10 @@ mod tests {
                     endpoint_id: remote_endpoint,
                     signing_public_key: [7; 32],
                     endpoint_role: EndpointRole::Device,
-                    device_name: "remote".to_string(),
+                    device_name: EndpointDeviceName::new("remote").expect("device name"),
+                    signer_id: [6; 32],
+                    signer_public_key: [17; 32],
+                    signature: [0; crypto::ED25519_SIGNATURE_BYTES],
                 },
             )
             .expect("endpoint shared row"),
@@ -293,7 +296,8 @@ mod tests {
             [15; 32],
             &connection::fact_receipt::fact::ConnectionFactReceipt {
                 received_fact_id: owner.id,
-                origin_addr: b"127.0.0.1:1".to_vec(),
+                origin_addr: connection::fact_receipt::fact::OriginAddr::new(b"127.0.0.1:1")
+                    .expect("origin addr"),
                 local_endpoint_id: local_endpoint,
                 sender_endpoint_id: remote_endpoint,
                 receive_path: connection::fact_receipt::fact::RECEIVE_PATH_CONNECTION_FRAME,
