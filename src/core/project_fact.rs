@@ -56,7 +56,6 @@ use crate::core::effects::RuntimeEffects;
 use crate::core::facts::{
     fact_from_storage_row as validate_fact_query_result, fact_id, Fact, FactId,
 };
-use crate::core::handle_intent::WorkStatus;
 use crate::core::perf_profile as perf;
 use crate::core::schema::{
     CONTEXT_EDGES, FACTS, INCOMING_FACTS, LOCAL_FACT_ADMISSIONS, PENDING_PROJECTION,
@@ -143,9 +142,9 @@ pub(crate) fn project_one(
     mode: ProjectionMode,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
-) -> Result<WorkStatus, String> {
+) -> Result<bool, String> {
     let load = match load_one_projection_input(store, source, mode)? {
-        None => return Ok(WorkStatus::idle()),
+        None => return Ok(false),
         Some(load) => load,
     };
 
@@ -162,7 +161,7 @@ pub(crate) fn project_one(
     };
 
     commit_projection_outcome(store, &outcome, allowed_tables, fact_admission)?;
-    Ok(WorkStatus::progressed(true))
+    Ok(true)
 }
 
 // =============================================================================
@@ -508,7 +507,7 @@ fn commit_stale_projection_input_in_tx(
 
 /// Retire selected work rejected by pure projector evaluation.
 ///
-/// Durable bytes stay retained as evidence; only retry markers are cleared.
+/// Durable bytes stay retained as evidence; only pending work markers are cleared.
 /// Incoming rows are volatile and are dropped on rejection.
 fn commit_rejected_projection_input_in_tx(
     tx: &Db,
@@ -2829,7 +2828,7 @@ mod contract_tests {
         let progress = drain_projection(&projector, &store, &[], None, 1)
             .expect("drain projection without re-emitting old offer");
 
-        assert!(progress.status.progressed);
+        assert!(progress);
         let context = stored_context_for_owner(&store, &fact.id).expect("stored context");
         assert!(context.needs.is_empty());
         assert_eq!(context.offers, vec![offer]);
@@ -2867,7 +2866,7 @@ mod contract_tests {
         let progress =
             drain_projection(&projector, &store, &[], None, 2).expect("drain projection");
 
-        assert!(progress.status.progressed);
+        assert!(progress);
         assert_eq!(
             intent_payload_for(&store, "ready", &target.id),
             offered.id.to_vec()
@@ -2909,7 +2908,7 @@ mod contract_tests {
         let progress =
             drain_projection(&projector, &store, &[], None, 2).expect("drain projection");
 
-        assert!(progress.status.progressed);
+        assert!(progress);
         assert_eq!(
             intent_payload_for(&store, "ready", &target.id),
             offered.id.to_vec()
@@ -2969,7 +2968,7 @@ mod contract_tests {
         let progress =
             drain_projection(&projector, &store, &[], None, 2).expect("re-added need wakes");
 
-        assert!(progress.status.progressed);
+        assert!(progress);
         assert_eq!(
             intent_payload_for(&store, "readded_ready", &target.id),
             offered.id.to_vec()
@@ -2996,7 +2995,7 @@ mod contract_tests {
         let first = drain_projection(&projector, &store, &[], None, 1)
             .expect("dependent parks on missing offer");
 
-        assert!(first.status.progressed);
+        assert!(first);
         assert_eq!(pending_projection_count(&store, dependent.id), 0);
         let parked_context = stored_context_for_owner(&store, &dependent.id).expect("parked");
         assert_eq!(parked_context.needs.len(), 1);
@@ -3005,7 +3004,7 @@ mod contract_tests {
         let progress =
             drain_projection(&projector, &store, &[], None, 3).expect("drain queued dependency");
 
-        assert!(progress.status.progressed);
+        assert!(progress);
         let payload = intent_payload_for(&store, "queue_ready", &dependent.id);
         assert_eq!(payload, offered.id.to_vec());
         let dependent_context =
@@ -3061,7 +3060,7 @@ mod contract_tests {
         let progress =
             drain_projection(&projector, &store, &[], None, 1).expect("drain projection");
 
-        assert!(progress.status.progressed);
+        assert!(progress);
         assert_eq!(
             intent_payload_for(&store, "queued_context_ready", &target.id),
             offered.id.to_vec()
@@ -3090,14 +3089,14 @@ mod contract_tests {
         let first =
             drain_projection(&projector, &store, &[], None, 1).expect("target parks on first");
 
-        assert!(first.status.progressed);
+        assert!(first);
         assert_eq!(pending_projection_count(&store, target.id), 0);
 
         submit_fact_to_db(&store, first_offer.clone()).expect("submit first offer");
         let second =
             drain_projection(&projector, &store, &[], None, 2).expect("first offer wakes target");
 
-        assert!(second.status.progressed);
+        assert!(second);
         assert!(intent_payload_for_maybe(&store, "multi_stage_ready", &target.id).is_none());
         let staged_context = stored_context_for_owner(&store, &target.id).expect("target context");
         assert_eq!(staged_context.needs.len(), 2);
@@ -3106,7 +3105,7 @@ mod contract_tests {
         let third = drain_projection(&projector, &store, &[], None, 3)
             .expect("second offer wakes target with complete context");
 
-        assert!(third.status.progressed);
+        assert!(third);
         let mut expected = first_offer.id.to_vec();
         expected.extend_from_slice(&second_offer.id);
         assert_eq!(
@@ -3147,11 +3146,12 @@ mod contract_tests {
         .expect("a failed fact must not undo earlier projected items");
 
         // The healthy fact committed — its neighbor's failure did not roll it back.
-        assert!(progress.status.progressed);
+        assert!(progress);
         assert_eq!(pending_projection_count(&store, offered.id), 0);
         assert!(context_edge_count(&store, offered.id) > 0);
 
-        // Projector errors are not retried, but core keeps durable bytes. A
+        // Projector errors do not consume durable bytes. Core keeps the fact as
+        // retained evidence and only clears this pending work marker.
         // projector-owned delete must be emitted as `purge_self`.
         assert_eq!(pending_projection_count(&store, failing.id), 0);
         assert!(retained_fact(&store, &failing.id)
@@ -3185,11 +3185,11 @@ mod contract_tests {
         )
         .expect("a context-inconsistent fact must not undo earlier projected items");
 
-        assert!(progress.status.progressed);
+        assert!(progress);
         assert_eq!(pending_projection_count(&store, offered.id), 0);
 
         // Projector errors do not let core infer a purge decision. The durable
-        // bytes are retained and only the pending retry marker is cleared.
+        // bytes are retained and only the pending work marker is cleared.
         assert_eq!(pending_projection_count(&store, failing.id), 0);
         assert!(retained_fact(&store, &failing.id)
             .expect("load failing fact")
@@ -3228,7 +3228,7 @@ mod contract_tests {
         let progress =
             drain_projection(&projector, &store, &[], None, 2).expect("drain projection");
 
-        assert!(progress.status.progressed);
+        assert!(progress);
         assert_eq!(
             intent_payload_for(&store, "observed", &target.id),
             b"watched".to_vec()
@@ -3261,7 +3261,7 @@ mod contract_tests {
         )
         .expect("drain projection");
 
-        assert!(progress.status.progressed);
+        assert!(progress);
         assert!(incoming_fact_by_id(&store, &parent.id)
             .expect("load ephemeral")
             .is_none());
@@ -3291,7 +3291,7 @@ mod contract_tests {
         let progress =
             drain_projection(&projector, &store, &[], None, 10).expect("incoming parks on needs");
 
-        assert!(progress.status.progressed);
+        assert!(progress);
         assert!(incoming_fact_by_id(&store, &parent.id)
             .expect("load incoming")
             .is_none());
@@ -3337,7 +3337,7 @@ mod contract_tests {
         let progress =
             drain_projection(&projector, &store, &[], None, 10).expect("drain projection");
 
-        assert!(progress.status.progressed);
+        assert!(progress);
         assert!(incoming_fact_by_id(&store, &parent.id)
             .expect("load incoming")
             .is_none());
@@ -3434,7 +3434,7 @@ mod contract_tests {
         )
         .expect("drain projection");
 
-        assert!(progress.status.progressed);
+        assert!(progress);
         assert!(incoming_fact_by_id(&store, &parent.id)
             .expect("load ephemeral")
             .is_none());
@@ -3469,7 +3469,7 @@ mod contract_tests {
         )
         .expect("child projection rejection is isolated");
 
-        assert!(progress.status.progressed);
+        assert!(progress);
         assert!(incoming_fact_by_id(&store, &parent.id)
             .expect("load ephemeral")
             .is_none());
@@ -3485,8 +3485,8 @@ mod contract_tests {
         allowed_tables: &[TableName],
         fact_admission: Option<FactAdmissionFn>,
         limit: usize,
-    ) -> Result<TestProjectionDrain, String> {
-        let mut progress = TestProjectionDrain::default();
+    ) -> Result<bool, String> {
+        let mut progressed = false;
         for _ in 0..limit {
             let mut step = crate::core::project_fact::project_one(
                 store,
@@ -3496,7 +3496,7 @@ mod contract_tests {
                 allowed_tables,
                 fact_admission,
             )?;
-            if step.is_idle() {
+            if !step {
                 step = crate::core::project_fact::project_one(
                     store,
                     projector,
@@ -3506,21 +3506,16 @@ mod contract_tests {
                     fact_admission,
                 )?;
             }
-            if step.is_idle() {
+            if !step {
                 break;
             }
-            progress.status.merge(step);
+            progressed = true;
         }
-        Ok(progress)
+        Ok(progressed)
     }
 
     fn incoming_fact_by_id(store: &Db, id: &FactId) -> Result<Option<Fact>, String> {
         incoming_fact_by_id_in_tx(store, id).map_err(|err| format!("load incoming fact: {err}"))
-    }
-
-    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-    struct TestProjectionDrain {
-        status: WorkStatus,
     }
 
     fn intent_payload_for(store: &Db, kind: &str, key: &FactId) -> Vec<u8> {

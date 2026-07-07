@@ -3,15 +3,14 @@
 //! This local intent is the route-resolving outgoing boundary for
 //! already-packaged connection-frame bytes produced by projection. The handler
 //! resolves the connection route from local connection rows and stages the
-//! opaque frame in core networking. If route context is
-//! unavailable, it asks the intent runtime to retry instead of making network
-//! delivery durable protocol truth. TCP reachability belongs to the core
-//! outgoing pump, not to this protocol handler.
+//! opaque frame in core networking. If route context is unavailable, the local
+//! send attempt is stale and commits no effects. TCP reachability belongs to the
+//! core outgoing pump, not to this protocol handler.
 //!
 //! The payload is only `(routing_key, frame bytes)`, and the idempotence key is
-//! deterministic over both fields. Change this file for route lookup, retry
-//! behavior, or outgoing network queue interaction. Change the concrete
-//! connection frame fact families for frame byte semantics.
+//! deterministic over both fields. Change this file for route lookup, stale
+//! local-send behavior, or outgoing network queue interaction. Change the
+//! concrete connection frame fact families for frame byte semantics.
 
 use crate::core::effects::RuntimeEffects;
 use crate::core::intents::{Intent, IntentKind};
@@ -87,12 +86,10 @@ fn payload_error(err: PayloadError) -> String {
 }
 
 use crate::core::intents::{
-    retry_intent, HandlerContext, HandlerError, HandlerFactId, HandlerResult, IntentHandler,
+    HandlerContext, HandlerError, HandlerFactId, HandlerResult, IntentHandler,
 };
 use crate::core::network::{self, NetworkTarget, OutgoingFrame};
 use crate::protocol::{auth::endpoint, connection};
-
-pub const QUEUE_OUTGOING_FRAME_MISSING_ROUTE: &str = "queue_outgoing_frame_missing_route";
 
 #[derive(Debug, Clone, Default)]
 pub struct QueueOutgoingFrameHandler;
@@ -115,9 +112,12 @@ impl IntentHandler for QueueOutgoingFrameHandler {
         if context.is_replay() {
             return Ok(RuntimeEffects::new());
         }
-        let target = resolve_target(&input.routing_key, context)?;
-        network::queue_outgoing(context.db()?, target, OutgoingFrame { bytes: input.frame })
-            .map_err(|err| HandlerError::fatal(format!("queue_outgoing_frame enqueue: {err}")))?;
+        if let Some(target) = resolve_target(&input.routing_key, context)? {
+            network::queue_outgoing(context.db()?, target, OutgoingFrame { bytes: input.frame })
+                .map_err(|err| {
+                    HandlerError::fatal(format!("queue_outgoing_frame enqueue: {err}"))
+                })?;
+        }
         Ok(RuntimeEffects::new())
     }
 }
@@ -138,22 +138,20 @@ fn validate_frame(input: &QueueOutgoingFrame) -> Result<(), String> {
 fn resolve_target(
     connection_id: &RoutingKey,
     context: &HandlerContext,
-) -> Result<NetworkTarget, HandlerError> {
+) -> Result<Option<NetworkTarget>, HandlerError> {
     resolve_connection_row_target(connection_id, context)
 }
 
 fn resolve_connection_row_target(
     connection_id: &RoutingKey,
     context: &HandlerContext,
-) -> Result<NetworkTarget, HandlerError> {
+) -> Result<Option<NetworkTarget>, HandlerError> {
     let Some(connection) =
         connection::connection::queries::connection_by_id(context.db()?, connection_id).map_err(
             |err| HandlerError::fatal(format!("queue_outgoing_frame route row read: {err}")),
         )?
     else {
-        return Err(retry_intent(
-            "queue_outgoing_frame route: queue_outgoing_frame missing connection row",
-        ));
+        return Ok(None);
     };
     let local_endpoint = endpoint::author::local_endpoint(context.db()?)?
         .ok_or_else(|| HandlerError::fatal("queue_outgoing_frame requires local endpoint state"))?;
@@ -165,9 +163,7 @@ fn resolve_connection_row_target(
         return Err("queue_outgoing_frame local endpoint is not part of connection".into());
     };
     let Some(addr) = addr else {
-        return Err(retry_intent(format!(
-            "queue_outgoing_frame route: {QUEUE_OUTGOING_FRAME_MISSING_ROUTE}"
-        )));
+        return Ok(None);
     };
-    Ok(NetworkTarget::new(addr))
+    Ok(Some(NetworkTarget::new(addr)))
 }

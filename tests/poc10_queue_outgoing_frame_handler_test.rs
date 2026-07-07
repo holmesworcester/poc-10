@@ -7,7 +7,7 @@ use std::net::TcpListener;
 use topo::core::crypto;
 use topo::core::db::Db;
 use topo::core::facts::{Fact, FactScope};
-use topo::core::intents::{retry_intent_reason, HandlerContext, IntentHandler};
+use topo::core::intents::{HandlerContext, IntentHandler};
 use topo::core::network;
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::protocol::auth::endpoint as endpoint_rows;
@@ -108,7 +108,7 @@ fn resolved_route_queues_without_opening_tcp_peer() {
 }
 
 #[test]
-fn missing_route_requests_retry_without_consuming_intent() {
+fn missing_route_commits_empty_output_without_queuing_frame() {
     let store = test_store();
     let local_endpoint = local_endpoint();
     store
@@ -121,15 +121,21 @@ fn missing_route_requests_retry_without_consuming_intent() {
         frame: b"opaque-connection::frame-frame-bytes".to_vec(),
     });
 
-    let err = QueueOutgoingFrameHandler::new()
+    let output = QueueOutgoingFrameHandler::new()
         .handle(
             &intent,
             &HandlerContext::with_facts([connection_fact]).with_db(&store),
         )
-        .expect_err("missing route should request retry");
+        .expect("missing route should drop stale local send");
 
-    assert!(retry_intent_reason(&err).is_some(), "{err}");
-    assert!(err.contains("queue_outgoing_frame route"), "{err}");
+    assert!(output.is_empty());
+    assert!(network::claim_outgoing_for_target(
+        &store,
+        network::NetworkTarget::new("127.0.0.1:41000".parse().expect("addr")),
+        16
+    )
+    .expect("claim queued outgoing frame")
+    .is_empty());
 }
 
 fn local_endpoint() -> EndpointFact {

@@ -1037,17 +1037,15 @@ fn cutover_runtime_step_commits_projection_context_rows_and_intents_atomically()
                 .to_string(),
         );
     }
-    if core_daemon.contains("network::delete_inbound(runtime.db(), inbound)?;")
-        && !core_daemon.contains("if !retried")
-    {
+    if core_daemon.contains("network::delete_inbound(runtime.db(), inbound)?;") {
         offenders.push(
             "src/core/daemon.rs deletes inbound network bytes before the protocol receive effect is proven durable"
                 .to_string(),
         );
     }
-    if core_daemon.contains("network::delete_inbound") && !core_daemon.contains("!retried") {
+    if core_daemon.contains("network::delete_inbound") {
         offenders.push(
-            "src/core/daemon.rs deletes ephemeral inbound rows even when receive dispatch asked to retry"
+            "src/core/daemon.rs should not own an inbound row queue separate from direct network intake"
                 .to_string(),
         );
     }

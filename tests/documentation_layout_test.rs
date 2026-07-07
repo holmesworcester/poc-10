@@ -519,7 +519,7 @@ fn core_readmes_document_runtime_boundaries() {
         "That commit replaces the fact's owned needs and time wakes",
         "append-only offer evidence",
         "Intents are core's bounded stateful work step",
-        "Retry leaves the row queued; success deletes the row with its effects",
+        "Errors leave the row queued without committing output",
         "The daemon runs the same mechanics without a user command on the stack",
         "Core's job is therefore coordination, persistence, and mechanical validation",
         "## Invariants",

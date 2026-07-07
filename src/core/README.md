@@ -45,11 +45,10 @@ payload proves.
 Intents are core's bounded stateful work step. A projector or explicit runtime
 operation emits an intent when the next action should not happen inside
 deterministic projection: sending bytes, building a response fact, creating a key
-wrap, seeding sync, or performing any other retryable action. Core claims one
-durable or local intent, loads only the fact inputs declared by that handler,
-calls the registered handler, and commits the handler's output atomically with
-queue consumption. Retry leaves the row queued; success deletes the row with its
-effects.
+wrap, seeding sync, or performing any other bounded stateful action. Core claims
+one durable or local intent, loads only the fact inputs declared by that handler,
+calls the registered handler, and commits successful handler output atomically
+with queue consumption. Errors leave the row queued without committing output.
 
 The daemon runs the same mechanics without a user command on the stack. Each
 tick fires due recurring intents, accepts network frames, lets the protocol
@@ -62,10 +61,11 @@ facts into the same database.
 
 Core's job is therefore coordination, persistence, and mechanical validation.
 It owns the serialized turn shape, SQLite transaction boundaries, queue
-fairness, idempotent fact and intent admission, protocol-blind context matching,
-network byte pumping, and schema/row allowlist checks. It leaves protocol
-meaning in the protocol scopes: fact layouts, authority checks, sync policy,
-connection-frame opening, read-model rows, commands, and queries.
+ordering, bounded drain status, idempotent fact and intent admission,
+protocol-blind context matching, network byte pumping, and schema/row allowlist
+checks. It leaves protocol meaning in the protocol scopes: fact layouts,
+authority checks, sync policy, connection-frame opening, read-model rows,
+commands, and queries.
 
 ## Interface To Protocol
 
@@ -151,7 +151,7 @@ the owning projector decide whether that time proves anything.
 - Intent queue identity is `(kind, idempotence_key)`. Re-emitting the same
   payload is idempotent; conflicting payloads for the same identity reject.
 - Handler output commits atomically with deletion of the handled queue row.
-  Retry errors leave the row queued.
+  Handler and validation errors leave the row queued without committing output.
 - Projection mode is sticky toward replay. If an owner is already queued in
   replay mode, later normal wakes do not downgrade it.
 - Needs are replacement subscriptions. The committed `ProjectionOutput` is the
@@ -228,7 +228,7 @@ use core syntax and contracts, but core must not import their semantic rules.
   not interpret fact tags, signatures, messages, keys, or sync payloads.
 - `intents.rs`: queued work and handler contract types. It defines durable and
   local intent identity, opaque payloads, row mutation values, handler input
-  declarations, retry/fatal handler errors, and the rule that handlers return
+  declarations, handler errors, and the rule that handlers return
   `RuntimeEffects` instead of mutating runtime state directly.
 - `network.rs`: opaque network IO boundary. It owns listener setup, inbound
   length-prefixed frame reading, direct delivery to the daemon intake callback,
@@ -238,9 +238,9 @@ use core syntax and contracts, but core must not import their semantic rules.
   sync facts, or content facts.
 - `handle_intent.rs`: one queued intent transaction. It claims one durable or
   local intent, loads only handler-declared fact inputs, calls the registered
-  handler, handles retry/fatal outcomes, and commits handler output atomically
-  with queue-row deletion. It also owns handler route metadata, handler sets,
-  recurring intent schedules, work status, and replay-mode dispatch context.
+  handler, and commits successful handler output atomically with queue-row
+  deletion. It also owns handler route metadata, handler sets, recurring intent
+  schedules, and replay-mode dispatch context.
 - `perf_profile.rs`: env-gated performance instrumentation. It records coarse
   phase timings in thread-local state only when explicitly enabled, preserving
   normal CLI output by default. It is for runtime profiling, not protocol
@@ -259,6 +259,10 @@ use core syntax and contracts, but core must not import their semantic rules.
   opens databases, applies declared schemas, submits authored facts, exposes
   bounded projection and intent queue drains, admits due time wakes, and
   composes `project_fact.rs` and `handle_intent.rs` into bounded runtime turns.
+- `work_status.rs`: shared status for one bounded runtime pass. It records
+  whether a worker made progress and whether it yielded with selected work still
+  queued, so runtime, daemon, replay, projection, and intent dispatch share one
+  drain contract.
 - `schema.rs`: core-owned SQL table inventory. It declares facts, local
   admissions, context edges, time wakes, pending projection, incoming facts,
   pending projection matches, the `pending_time_ranges` work table, intent
@@ -307,8 +311,8 @@ mode.
   offers overlap.
 - `handle_intent.rs`: intent queue worker. It claims one durable or local
   intent, loads only the handler-declared fact inputs, calls the registered
-  handler, handles retry/fatal outcomes, and commits handler output atomically
-  with queue-row deletion.
+  handler, and commits successful handler output atomically with queue-row
+  deletion.
 - `project_fact.rs`: one queued fact projection item. It loads matched context
   and due time ranges, runs the routed projector, replaces the owner's
   needs/time wakes, appends offers, and commits emitted effects.
@@ -352,8 +356,8 @@ Missing context is normal projection output, not a separate core stage. The
 projector emits standing needs; core records those replacement needs and parks
 the fact. When a later offer matches a parked need, core records that offer in
 `pending_projection_matches` for the parked owner and queues the owner again.
-The pending item already carries the context that woke it, so the retried
-projector reads the matched payload through `ProjectionContext` instead of
+The pending item already carries the context that woke it, so the reprojected
+fact reads the matched payload through `ProjectionContext` instead of
 doing a database search.
 
 Detached signature evidence, key material, deletion markers, receipts, and
@@ -399,9 +403,10 @@ record durable follow-up intents
 record local follow-up intents
 ```
 
-If any step fails, SQLite rolls back the whole unit. This is what makes handler
-replay and process restart safe. Retry errors leave the intent row in place;
-fatal errors consume the row only when the fatal outcome itself commits.
+Only validated successful handler output reaches this transaction. If any
+commit step fails, SQLite rolls back the whole unit. This is what makes handler
+replay and process restart safe. Handler errors and validation errors leave the
+intent row in place.
 
 ### Replay And Time Wakes
 

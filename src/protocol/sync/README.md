@@ -29,9 +29,9 @@ Data leaves sync as:
 - intents to send compare responses, request missing ids, answer requested ids,
   seed a connection, and batch facts onto a connection.
 
-Core owns queueing, fact identity, handler retry, context range matching, and
-transaction boundaries. Sync owns shareability, connection-specific visibility,
-range summary planning, and exact-id request/response mechanics. Sync never
+Core owns queueing, fact identity, context range matching, and transaction
+boundaries. Sync owns shareability, connection-specific visibility, range
+summary planning, and exact-id request/response mechanics. Sync never
 parses content, auth, or connection payload semantics beyond checking fact
 scope and tag sendability through the owning helpers.
 

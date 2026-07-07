@@ -39,7 +39,7 @@ use crate::core::schema::{CORE_SCHEMA_SOURCE, INTENTS, LOCAL_INTENTS};
 use std::path::Path;
 
 pub use crate::core::handle_intent::{
-    HandlerRoute, RecurringIntentBuilder, RecurringIntentContext, RecurringIntentSpec, WorkStatus,
+    HandlerRoute, RecurringIntentBuilder, RecurringIntentContext, RecurringIntentSpec,
 };
 
 /// Factory for the protocol's projector implementation.
@@ -229,7 +229,7 @@ impl Runtime {
     /// Runtime owns the bounded loop; `project_fact` owns the one-item
     /// projection transaction. This keeps daemon scheduling visible without
     /// spreading projection commit details outside the projection worker.
-    pub fn drain_durable_projection(&mut self, limit: usize) -> Result<WorkStatus, String> {
+    pub fn drain_durable_projection(&mut self, limit: usize) -> Result<bool, String> {
         self.drain_projection_source(ProjectionSource::Durable, limit)
     }
 
@@ -238,7 +238,7 @@ impl Runtime {
     /// Incoming facts are process-local intake. The daemon schedules this queue
     /// explicitly after durable projection so readers do not have to inspect
     /// `project_fact` to learn the live projection order.
-    pub fn drain_incoming_projection(&mut self, limit: usize) -> Result<WorkStatus, String> {
+    pub fn drain_incoming_projection(&mut self, limit: usize) -> Result<bool, String> {
         self.drain_projection_source(ProjectionSource::Incoming, limit)
     }
 
@@ -246,7 +246,7 @@ impl Runtime {
         &mut self,
         source: ProjectionSource,
         limit: usize,
-    ) -> Result<WorkStatus, String> {
+    ) -> Result<bool, String> {
         drain_bounded_work(limit, || {
             project_fact::project_one(
                 &self.db,
@@ -261,26 +261,20 @@ impl Runtime {
 
     /// Drain at most `limit` durable intents using the live handler set.
     ///
-    /// Runtime owns the bounded loop and yield policy. `handle_intent` owns the
-    /// one-row handler transaction.
-    pub fn drain_durable_intents(&mut self, limit: usize) -> Result<WorkStatus, String> {
+    /// Runtime owns the bounded loop. `handle_intent` owns the one-row handler
+    /// transaction.
+    pub fn drain_durable_intents(&mut self, limit: usize) -> Result<bool, String> {
         self.drain_intent_queue(IntentQueue::Durable, limit)
     }
 
     /// Drain at most `limit` local intents using the live handler set.
     ///
-    /// Local retries are rotated to the tail by `handle_intent`. A retry stops
-    /// this queue's current bounded pass; the next daemon tick can try the next
-    /// local row.
-    pub fn drain_local_intents(&mut self, limit: usize) -> Result<WorkStatus, String> {
+    /// Only a successful handler-output commit consumes the row.
+    pub fn drain_local_intents(&mut self, limit: usize) -> Result<bool, String> {
         self.drain_intent_queue(IntentQueue::Local, limit)
     }
 
-    fn drain_intent_queue(
-        &mut self,
-        queue: IntentQueue,
-        limit: usize,
-    ) -> Result<WorkStatus, String> {
+    fn drain_intent_queue(&mut self, queue: IntentQueue, limit: usize) -> Result<bool, String> {
         drain_bounded_work(limit, || {
             dispatch_one_intent(
                 &self.db,
@@ -404,23 +398,16 @@ fn runtime_schema_sources(description: &RuntimeDescription) -> Vec<SchemaSource>
 
 fn drain_bounded_work(
     limit: usize,
-    mut step: impl FnMut() -> Result<WorkStatus, String>,
-) -> Result<WorkStatus, String> {
-    // Each runtime drain is a bounded loop over a one-item worker. Idle means the
-    // selected queue is empty; retry means a local handler deliberately yielded.
-    let mut status = WorkStatus::idle();
+    mut step: impl FnMut() -> Result<bool, String>,
+) -> Result<bool, String> {
+    let mut progressed = false;
     for _ in 0..limit {
-        let step_status = step()?;
-        if step_status.is_idle() {
+        if !step()? {
             break;
         }
-
-        status.merge(step_status);
-        if step_status.retried {
-            break;
-        }
+        progressed = true;
     }
-    Ok(status)
+    Ok(progressed)
 }
 
 #[cfg(test)]
@@ -665,7 +652,7 @@ mod tests {
             .drain_durable_intents(8)
             .expect("drain durable intent batch");
 
-        assert!(first.progressed);
+        assert!(first);
         assert_eq!(
             runtime.pending_intent_count(),
             0,
@@ -681,7 +668,7 @@ mod tests {
             .drain_durable_projection(8)
             .expect("drain later durable projection batch");
 
-        assert!(second.progressed);
+        assert!(second);
         assert_eq!(
             runtime.pending_projection_count(),
             0,
