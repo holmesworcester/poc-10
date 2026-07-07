@@ -178,6 +178,65 @@ impl WakeLoop {
         self.save_inner(store, allowed_tables)
     }
 
+    pub fn rebase_dirty_onto(&self, mut base: WakeLoop) -> Result<WakeLoop, String> {
+        for id in &self.deleted_facts {
+            base.purge_fact(*id);
+        }
+        for id in &self.dirty_facts {
+            if let Some(fact) = self.facts.get(id).cloned() {
+                base.submit_fact(fact);
+            }
+        }
+        for owner in &self.dirty_context_owners {
+            base.replace_context(
+                *owner,
+                self.context_by_owner
+                    .get(owner)
+                    .cloned()
+                    .unwrap_or_default(),
+            );
+            if base.facts.contains_key(owner) {
+                base.wake(*owner);
+            }
+        }
+        for owner in &self.dirty_time_wake_owners {
+            if let Some(wakes) = self.time_wakes_by_owner.get(owner).cloned() {
+                base.replace_time_wakes(*owner, wakes);
+            } else {
+                base.replace_time_wakes(*owner, Vec::new());
+            }
+        }
+        for owner in &self.dirty_pending_owners {
+            if self.pending_owners.contains(owner) {
+                base.wake(*owner);
+            } else {
+                base.remove_pending(owner);
+            }
+        }
+        for key in &self.deleted_intent_keys {
+            base.remove_intent_key(key)?;
+        }
+        for intent in self
+            .intents
+            .iter()
+            .filter(|intent| self.dirty_intent_keys.contains(&intent_row_key(intent)))
+            .cloned()
+        {
+            base.record_intent(intent)?;
+        }
+        for intent in self
+            .intents
+            .iter()
+            .filter(|intent| intent.execution == IntentExecution::Ephemeral)
+            .cloned()
+        {
+            base.record_intent(intent)?;
+        }
+        base.pending_atomic_row_intents
+            .extend(self.pending_atomic_row_intents.iter().cloned());
+        Ok(base)
+    }
+
     fn save_inner(&mut self, store: &Store, allowed_tables: &[TableName]) -> Result<(), String> {
         let fact_rows = self.dirty_fact_rows();
         let deleted_fact_keys = self
@@ -632,6 +691,12 @@ impl WakeLoop {
         }
     }
 
+    fn remove_pending(&mut self, owner: &FactId) {
+        self.pending_owners.remove(owner);
+        self.pending_projection.retain(|pending| pending != owner);
+        self.dirty_pending_owners.insert(*owner);
+    }
+
     fn replace_context(&mut self, owner: FactId, context: ContextSet) {
         if let Some(previous) = self.context_by_owner.get(&owner).cloned() {
             self.remove_context_from_indexes(&previous);
@@ -782,6 +847,15 @@ impl WakeLoop {
             }
         }
         Ok(())
+    }
+
+    fn remove_intent_key(&mut self, key: &[u8]) -> Result<(), String> {
+        let Some(index) = self.intent_keys.get(key).copied() else {
+            return Ok(());
+        };
+        let intent = self.intents.remove(index);
+        self.deleted_intent_keys.insert(intent_row_key(&intent));
+        self.rebuild_intent_keys()
     }
 
     fn wake_context_matches(

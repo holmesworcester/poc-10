@@ -28,6 +28,7 @@ use crate::core::network_queues::{
 use crate::core::store::Store;
 
 const MAX_FRAME_BYTES: usize = 128 * 1024 * 1024;
+const READ_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 const WRITE_FRAME_BUDGET: Duration = Duration::from_millis(100);
 
 /// Counts observed while pumping one TCP stream.
@@ -89,6 +90,9 @@ impl Listener {
             stream
                 .set_nodelay(true)
                 .map_err(|err| format!("set stream nodelay: {err}"))?;
+            stream
+                .set_read_timeout(Some(READ_FRAME_TIMEOUT))
+                .map_err(|err| format!("set stream read timeout: {err}"))?;
             let report = read_inbound_frames(store, &mut stream, NetworkSource::new(source_addr))?;
             accepted_connections += 1;
             value.sent_frames += report.sent_frames;
@@ -167,6 +171,9 @@ pub fn serve_inbound(
         stream
             .set_nodelay(true)
             .map_err(|err| format!("set stream nodelay: {err}"))?;
+        stream
+            .set_read_timeout(Some(READ_FRAME_TIMEOUT))
+            .map_err(|err| format!("set stream read timeout: {err}"))?;
         let report = read_inbound_frames(store, &mut stream, NetworkSource::new(source_addr))?;
         value.sent_frames += report.sent_frames;
         value.received_frames += report.received_frames;
@@ -338,6 +345,8 @@ fn is_stream_closed(err: &std::io::Error) -> bool {
         std::io::ErrorKind::UnexpectedEof
             | std::io::ErrorKind::ConnectionReset
             | std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::TimedOut
+            | std::io::ErrorKind::WouldBlock
     )
 }
 

@@ -1145,8 +1145,9 @@ multi-step and retryable through intents.
 
 ## Removed Mechanisms
 
-These removed names must not reappear in target code paths except in tests or
-documentation that explicitly describes the old mechanism being deleted:
+These names are legacy/removal vocabulary only. They must not reappear in
+target code paths except in tests or documentation that explicitly describes
+the old mechanism being deleted:
 
 ```text
 ready event queues

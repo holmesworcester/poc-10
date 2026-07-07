@@ -194,7 +194,9 @@ impl<P: RuntimeProtocol> Runtime<P> {
         if current == self.wake_loop_store_version {
             return Ok(false);
         }
-        self.reload_wake_loop()?;
+        let loaded = WakeLoop::load(&self.store)?;
+        self.wake_loop = self.wake_loop.rebase_dirty_onto(loaded)?;
+        self.wake_loop_store_version = current;
         Ok(true)
     }
 
@@ -287,8 +289,25 @@ impl<P: RuntimeProtocol> Runtime<P> {
     }
 
     pub fn save(&mut self) -> Result<(), String> {
+        if self.store_has_external_change()? {
+            let current = WakeLoop::load(&self.store)?;
+            self.wake_loop = self.wake_loop.rebase_dirty_onto(current)?;
+        }
         self.wake_loop
-            .save_applying_atomic_rows(&self.store, P::atomic_row_tables())
+            .save_applying_atomic_rows(&self.store, P::atomic_row_tables())?;
+        self.wake_loop_store_version = self
+            .store
+            .data_version()
+            .map_err(|err| format!("read store data version: {err}"))?;
+        Ok(())
+    }
+
+    fn store_has_external_change(&self) -> Result<bool, String> {
+        let current = self
+            .store
+            .data_version()
+            .map_err(|err| format!("read store data version: {err}"))?;
+        Ok(current != self.wake_loop_store_version)
     }
 }
 
